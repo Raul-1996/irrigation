@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WB-Irrigation — Зоны</title>
+  <script src="https://unpkg.com/htmx.org@1.9.2"></script>
+  <style>
+    body{font-family:sans-serif;margin:0;background:#f4f6f8;color:#333}
+    header,footer{background:#263238;color:#fff;padding:1rem;text-align:center}
+    nav{background:#37474f;display:flex;justify-content:center;padding:.5rem 0}
+    nav a{color:#fff;text-decoration:none;margin:0 1rem;font-weight:700;font-size:.95rem}
+    nav a.active{border-bottom:2px solid #fff}
+    nav a:hover{text-decoration:underline}
+    main{padding:2rem;max-width:1200px;margin:auto;position:relative}
+    .float-add{display:block;margin:0 auto 1rem;background:#2196f3;color:#fff;border:none;padding:.6rem 1rem;border-radius:5px;cursor:pointer;box-shadow:0 2px 4px rgba(0,0,0,.2);font-size:1rem}
+    .zones-table{width:100%;border-collapse:collapse;background:#fff;margin-top:1rem}
+    th,td{border:1px solid #ccc;padding:.5rem;text-align:center;font-size:.9rem}
+    th{background:#e0e0e0}
+    .indicator{width:12px;height:12px;border-radius:50%;display:inline-block}
+    .on{background:green}.off{background:red}
+    input[type="text"], input[type="number"], select{width:100%;padding:.3rem;border:1px solid #ccc;border-radius:4px;font-size:.9rem}
+    button.save-btn, button.del-btn, button.start-btn{padding:.3rem .6rem;border:2px solid #fff;border-radius:4px;cursor:pointer;font-size:.85rem}
+    .save-btn{background:#4caf50;color:#fff;border-color:#fff}
+    .save-btn:disabled{opacity:.5;cursor:default}
+    .del-btn{background:#f44336;color:#fff;border-color:#fff}
+    .start-btn{background:#2196f3;color:#fff;border-color:#fff}
+    .bulk-actions{background:#fff;padding:1rem;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-top:1rem;}
+    .bulk-actions h3{margin-top:0;font-size:1rem}
+    .bulk-actions .controls{display:flex;gap:1rem;flex-wrap:wrap;align-items:center}
+    .bulk-actions label{display:flex;align-items:center;gap:.5rem;font-size:.9rem}
+    .bulk-actions select,input[type="number"]{width:auto;flex:1;min-width:120px}
+    .bulk-actions button{padding:.5rem 1rem;border:none;border-radius:4px;cursor:pointer;background:#4caf50;color:#fff;font-size:.9rem;}
+    .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}
+    .modal-content{background:#fff;padding:1.5rem;border-radius:6px;max-width:400px;width:90%}
+    .modal-content h3{margin-top:0}
+    .modal-content .field{margin-bottom:1rem;text-align:left}
+    .modal-content label{display:block;margin-bottom:.3rem;font-size:.9rem}
+    .modal-content input, .modal-content select{width:100%;padding:.3rem;border:1px solid #ccc;border-radius:4px}
+    .modal-content button{margin-right:.5rem;padding:.4rem .8rem;border:none;border-radius:4px;cursor:pointer;font-size:.9rem}
+    .modal-content .create-btn{background:#4caf50;color:#fff}
+    .modal-content .cancel-btn{background:#ccc;color:#333}
+  </style>
+</head>
+<body>
+  <header><h1>WB-Irrigation — Зоны</h1></header>
+  <nav>
+    <a href="status.html">Статус</a>
+    <a href="zones.html" class="active">Зоны</a>
+    <a href="programs.html">Программы</a>
+    <a href="logs.html">Логи</a>
+    <a href="water.html">Расход</a>
+  </nav>
+  <main>
+    <button class="float-add" onclick="openModal()">➕ Зона</button>
+    <table class="zones-table">
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="select-all" onclick="toggleAll(this)"/></th>
+          <th>Ст.</th>
+          <th>№</th>
+          <th>Действие</th>
+          <th>Название</th>
+          <th>Иконка</th>
+          <th>Длит.</th>
+          <th>Группа</th>
+          <th>MQTT-топик</th>
+          <th>Сохранить</th>
+          <th>Удалить</th>
+        </tr>
+      </thead>
+      <tbody id="zones-body"></tbody>
+    </table>
+    <div class="bulk-actions">
+      <h3>Массовые изменения для выбранных зон</h3>
+      <div class="controls">
+        <label>Иконка <select id="bulkIcon"><option value="">—</option><option>🌿</option><option>🌳</option><option>🌺</option><option>🧱</option></select></label>
+        <label>Длит. <input type="number" id="bulkDur" min="1" placeholder="—"/></label>
+        <label>Группа <select id="bulkGroup"><option value="">—</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+        <button onclick="applyBulk()">Применить</button>
+      </div>
+    </div>
+  </main>
+  <footer>Статус системы актуален на 01.05.2025 00:00</footer>
+  <script>
+    const zones = [];
+    for(let i=1;i<=48;i++){ zones.push({id:i,state:i===15?'on':'off',name:`Зона ${i}`,icon:['🌿','🌳','🌺','🧱'][i%4],duration:10,group:Math.floor((i-1)/12)+1,topic:`/devices/wb-mr6c_${100 + Math.floor((i-1)/6)}/controls/K${(i-1)%6 + 1}`}); }
+    const tbody = document.getElementById('zones-body');
+    zones.forEach(z => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type='checkbox' class='row-select'/></td>
+        <td><span class="indicator ${z.state}"></span></td>
+        <td>${z.id}</td>
+        <td><button class="start-btn" onclick="startZone(${z.id})">▶</button></td>
+        <td><input type="text" value="${z.name}" onchange="markChanged(this)" /></td>
+        <td><select onchange="markChanged(this)"><option${z.icon==='🌿'?' selected':''}>🌿</option><option${z.icon==='🌳'?' selected':''}>🌳</option><option${z.icon==='🌺'?' selected':''}>🌺</option><option${z.icon==='🧱'?' selected':''}>🧱</option></select></td>
+        <td><input type="number" value="${z.duration}" onchange="markChanged(this)" min="1"/></td>
+        <td><select onchange="markChanged(this)"><option${z.group===1?' selected':''}>1</option><option${z.group===2?' selected':''}>2</option><option${z.group===3?' selected':''}>3</option><option${z.group===4?' selected':''}>4</option></select></td>
+        <td><input type="text" value="${z.topic}" onchange="markChanged(this)" /></td>
+        <td><button class="save-btn" disabled onclick="saveRow(this,${z.id})">💾</button></td>
+        <td><button class="del-btn" onclick="deleteRow(${z.id})">🗑️</button></td>
+      `;
+      tbody.appendChild(tr);
+    });
+    function markChanged(el){el.closest('tr').querySelector('.save-btn').disabled=false;}
+    function saveRow(btn,id){btn.disabled=true;}
+    function deleteRow(id){if(confirm('Удалить зону №'+id+'?'))event.target.closest('tr').remove();}
+    function startZone(id){alert('Запущена зона '+id);}
+    function toggleAll(cb){document.querySelectorAll('.row-select').forEach(ch=>ch.checked=cb.checked);}
+    function applyBulk(){const icon=document.getElementById('bulkIcon').value;const dur=document.getElementById('bulkDur').value;const grp=document.getElementById('bulkGroup').value;document.querySelectorAll('.row-select:checked').forEach(ch=>{const row=ch.closest('tr');if(icon!==''){row.querySelectorAll('select')[1].value=icon;}if(dur!==''){row.querySelectorAll('input[type=number]')[0].value=dur;}if(grp!==''){row.querySelectorAll('select')[2].value=grp;}row.querySelector('.save-btn').disabled=false;});}
+  </script>
+</body>
+</html>
