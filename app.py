@@ -14,11 +14,24 @@ from werkzeug.security import check_password_hash
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+try:
+    from logging.handlers import RotatingFileHandler
+    log_dir = os.path.join(os.getcwd(), 'backups')
+    os.makedirs(log_dir, exist_ok=True)
+    fh = RotatingFileHandler(os.path.join(log_dir, 'app.log'), maxBytes=1_000_000, backupCount=3)
+    fh.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+except Exception:
+    pass
 
 app = Flask(__name__)
 app.db = db  # Добавляем атрибут db для тестов
 app.config['EMERGENCY_STOP'] = False
 app.secret_key = os.environ.get('SECRET_KEY', 'wb-irrigation-secret')
+if os.environ.get('TESTING'):
+    app.config['TESTING'] = True
 
 # Настройки хранения медиафайлов
 MEDIA_ROOT = 'static/media'
@@ -156,6 +169,11 @@ def api_login():
     except Exception as e:
         logger.error(f"Ошибка входа: {e}")
         return jsonify({'success': False, 'message': 'Ошибка входа'}), 500
+
+
+@app.route('/api/auth/status')
+def api_auth_status():
+    return jsonify({'authenticated': bool(session.get('logged_in')) or bool(app.config.get('TESTING'))})
 
 
 @app.route('/logout', methods=['GET'])
@@ -418,12 +436,25 @@ def api_program(prog_id):
         program = db.update_program(prog_id, data)
         if program:
             db.add_log('prog_edit', json.dumps({"prog": prog_id, "changes": data}))
+            # Перепланировать программу
+            try:
+                scheduler = get_scheduler()
+                if scheduler:
+                    scheduler.schedule_program(program['id'], program)
+            except Exception as e:
+                logger.error(f"Ошибка перепланирования программы {prog_id}: {e}")
             return jsonify(program)
         return ('Program not found', 404)
     
     elif request.method == 'DELETE':
         if db.delete_program(prog_id):
             db.add_log('prog_delete', json.dumps({"prog": prog_id}))
+            try:
+                scheduler = get_scheduler()
+                if scheduler:
+                    scheduler.cancel_program(prog_id)
+            except Exception as e:
+                logger.error(f"Ошибка отмены программы {prog_id} в планировщике: {e}")
             return ('', 204)
         return jsonify({'success': False, 'message': 'Program not found'}), 404
 
@@ -433,6 +464,12 @@ def api_create_program():
     program = db.create_program(data)
     if program:
         db.add_log('prog_create', json.dumps({"prog": program['id'], "name": program['name']}))
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                scheduler.schedule_program(program['id'], program)
+        except Exception as e:
+            logger.error(f"Ошибка планирования новой программы {program['id']}: {e}")
         return jsonify(program), 201
     return ('Error creating program', 400)
 
