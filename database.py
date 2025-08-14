@@ -1,0 +1,866 @@
+import sqlite3
+import json
+import os
+import shutil
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class IrrigationDB:
+    def __init__(self, db_path: str = 'irrigation.db'):
+        self.db_path = db_path
+        self.backup_dir = 'backups'
+        self.init_database()
+    
+    def init_database(self):
+        """Инициализация базы данных"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Создание таблиц
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS zones (
+                        id INTEGER PRIMARY KEY,
+                        state TEXT DEFAULT 'off',
+                        name TEXT NOT NULL,
+                        icon TEXT DEFAULT '🌿',
+                        duration INTEGER DEFAULT 10,
+                        group_id INTEGER DEFAULT 1,
+                        topic TEXT,
+                        postpone_until TEXT,
+                        photo_path TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS groups (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS programs (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        time TEXT NOT NULL,
+                        days TEXT NOT NULL,
+                        zones TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        type TEXT NOT NULL,
+                        details TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS water_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        zone_id INTEGER,
+                        liters REAL,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Создание индексов
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_zones_group ON zones(group_id)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_logs_type ON logs(type)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_water_zone ON water_usage(zone_id)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_water_timestamp ON water_usage(timestamp)')
+                
+                conn.commit()
+                
+                # Вставка начальных данных
+                self._insert_initial_data(conn)
+                
+                logger.info("База данных инициализирована успешно")
+                
+        except Exception as e:
+            logger.error(f"Ошибка инициализации базы данных: {e}")
+            raise
+    
+    def _insert_initial_data(self, conn):
+        """Вставить начальные данные"""
+        try:
+                # Проверяем, есть ли уже данные
+                cursor = conn.execute('SELECT COUNT(*) FROM zones')
+                if cursor.fetchone()[0] > 0:
+                    return  # Данные уже есть
+                
+                # Создаем группы
+                groups = [
+                    (1, 'Газон'),
+                    (2, 'Огород'),
+                    (3, 'Живая изгородь'),
+                    (4, 'Техзона'),
+                    (999, 'БЕЗ ПОЛИВА')  # Специальная группа для исключенных зон
+                ]
+                
+                for group_id, name in groups:
+                    conn.execute('INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)', (group_id, name))
+                
+                # Создаем зоны
+                zones = [
+                    (1, 'off', 'Зона 1', '🌿', 10, 1, 'zone/1'),
+                    (2, 'off', 'Зона 2', '🌿', 15, 1, 'zone/2'),
+                    (3, 'off', 'Зона 3', '🌿', 12, 1, 'zone/3'),
+                    (4, 'off', 'Зона 4', '🌿', 8, 1, 'zone/4'),
+                    (5, 'off', 'Зона 5', '🌿', 20, 1, 'zone/5'),
+                    (6, 'off', 'Зона 6', '🌿', 10, 1, 'zone/6'),
+                    (7, 'off', 'Зона 7', '🌿', 15, 1, 'zone/7'),
+                    (8, 'off', 'Зона 8', '🌿', 12, 1, 'zone/8'),
+                    (9, 'off', 'Зона 9', '🌿', 8, 1, 'zone/9'),
+                    (10, 'off', 'Зона 10', '🌿', 20, 1, 'zone/10'),
+                    (11, 'off', 'Зона 11', '🌿', 10, 1, 'zone/11'),
+                    (12, 'off', 'Зона 12', '🌿', 15, 1, 'zone/12'),
+                    (13, 'off', 'Зона 13', '🌿', 12, 1, 'zone/13'),
+                    (14, 'off', 'Зона 14', '🌿', 8, 1, 'zone/14'),
+                    (15, 'on', 'Зона 15', '🌿', 20, 2, 'zone/15', '2025-08-15 23:59'),  # Активная зона с отложенным поливом
+                    (16, 'off', 'Зона 16', '🌿', 10, 2, 'zone/16'),
+                    (17, 'off', 'Зона 17', '🌿', 15, 2, 'zone/17'),
+                    (18, 'off', 'Зона 18', '🌿', 12, 2, 'zone/18'),
+                    (19, 'off', 'Зона 19', '🌿', 8, 2, 'zone/19'),
+                    (20, 'off', 'Зона 20', '🌿', 20, 2, 'zone/20'),
+                    (21, 'off', 'Зона 21', '🌿', 10, 3, 'zone/21'),
+                    (22, 'off', 'Зона 22', '🌿', 15, 3, 'zone/22'),
+                    (23, 'off', 'Зона 23', '🌿', 12, 3, 'zone/23'),
+                    (24, 'off', 'Зона 24', '🌿', 8, 3, 'zone/24'),
+                    (25, 'off', 'Зона 25', '🌿', 20, 4, 'zone/25'),
+                    (26, 'off', 'Зона 26', '🌿', 10, 4, 'zone/26'),
+                    (27, 'off', 'Зона 27', '🌿', 15, 4, 'zone/27'),
+                    (28, 'off', 'Зона 28', '🌿', 12, 4, 'zone/28'),
+                    (29, 'off', 'Зона 29', '🌿', 8, 4, 'zone/29'),
+                    (30, 'off', 'Зона 30', '🌿', 20, 4, 'zone/30')
+                ]
+                
+                for zone_data in zones:
+                    if len(zone_data) == 7:
+                        zone_id, state, name, icon, duration, group_id, topic = zone_data
+                        postpone_until = None
+                    else:
+                        zone_id, state, name, icon, duration, group_id, topic, postpone_until = zone_data
+                    
+                    conn.execute('''
+                        INSERT INTO zones (id, state, name, icon, duration, group_id, topic, postpone_until)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (zone_id, state, name, icon, duration, group_id, topic, postpone_until))
+                
+                # Создаем программы
+                programs = [
+                    (1, 'Утренний полив', '06:00', json.dumps([1,2,3,4,5]), json.dumps([1,2,3,4,5])),
+                    (2, 'Вечерний полив', '20:00', json.dumps([1,2,3,4,5]), json.dumps([6,7,8,9,10])),
+                    (3, 'Полив огорода', '07:00', json.dumps([1,2,3,4,5]), json.dumps([15,16,17,18,19,20]))
+                ]
+                
+                for prog_id, name, time, days, zones in programs:
+                    conn.execute('''
+                        INSERT INTO programs (id, name, time, days, zones)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (prog_id, name, time, days, zones))
+                
+                # Создаем логи
+                logs = [
+                    ('zone_start', json.dumps({"zone": 15, "duration": 20}), '2025-08-14 10:30:00'),
+                    ('zone_stop', json.dumps({"zone": 15, "reason": "manual"}), '2025-08-14 10:50:00'),
+                    ('prog_start', json.dumps({"program": 1, "zones": [1,2,3,4,5]}), '2025-08-14 06:00:00'),
+                    ('prog_stop', json.dumps({"program": 1, "reason": "completed"}), '2025-08-14 06:30:00'),
+                    ('postpone_set', json.dumps({"group": 2, "days": 1, "until": "2025-08-15 23:59"}), '2025-08-14 11:00:00'),
+                    ('system_start', json.dumps({"version": "1.0"}), '2025-08-14 00:00:00'),
+                    ('zone_error', json.dumps({"zone": 5, "error": "pressure_low"}), '2025-08-14 09:15:00')
+                ]
+                
+                for log_type, details, timestamp in logs:
+                    conn.execute('''
+                        INSERT INTO logs (type, details, timestamp)
+                        VALUES (?, ?, ?)
+                    ''', (log_type, details, timestamp))
+                
+                conn.commit()
+                logger.info("Начальные данные вставлены")
+                
+        except Exception as e:
+            logger.error(f"Ошибка вставки начальных данных: {e}")
+    
+    def get_zones(self) -> List[Dict[str, Any]]:
+        """Получить все зоны"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('''
+                    SELECT z.*, g.name as group_name 
+                    FROM zones z 
+                    LEFT JOIN groups g ON z.group_id = g.id 
+                    ORDER BY z.id
+                ''')
+                zones = []
+                for row in cursor.fetchall():
+                    zone = dict(row)
+                    zone['group'] = zone['group_id']  # Для совместимости с фронтендом
+                    zones.append(zone)
+                return zones
+        except Exception as e:
+            logger.error(f"Ошибка получения зон: {e}")
+            return []
+    
+    def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
+        """Получить зону по ID"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('''
+                    SELECT z.*, g.name as group_name 
+                    FROM zones z 
+                    LEFT JOIN groups g ON z.group_id = g.id 
+                    WHERE z.id = ?
+                ''', (zone_id,))
+                row = cursor.fetchone()
+                if row:
+                    zone = dict(row)
+                    zone['group'] = zone['group_id']
+                    return zone
+                return None
+        except Exception as e:
+            logger.error(f"Ошибка получения зоны {zone_id}: {e}")
+            return None
+    
+    def create_zone(self, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Создать новую зону"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('''
+                    INSERT INTO zones (name, icon, duration, group_id, topic)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    zone_data['name'],
+                    zone_data['icon'],
+                    zone_data['duration'],
+                    zone_data.get('group_id', zone_data.get('group', 1)),
+                    zone_data.get('topic', '')
+                ))
+                zone_id = cursor.lastrowid
+                conn.commit()
+                return self.get_zone(zone_id)
+        except Exception as e:
+            logger.error(f"Ошибка создания зоны: {e}")
+            return None
+    
+    def update_zone(self, zone_id: int, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Обновить зону"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Получаем текущие данные зоны
+                current_zone = self.get_zone(zone_id)
+                if not current_zone:
+                    return None
+                
+                # Объединяем текущие данные с новыми
+                updated_data = current_zone.copy()
+                updated_data.update(zone_data)
+                
+                # Подготавливаем SQL запрос с учетом всех полей
+                sql_fields = []
+                params = []
+                
+                if 'name' in updated_data:
+                    sql_fields.append('name = ?')
+                    params.append(updated_data['name'])
+                
+                if 'icon' in updated_data:
+                    sql_fields.append('icon = ?')
+                    params.append(updated_data['icon'])
+                
+                if 'duration' in updated_data:
+                    sql_fields.append('duration = ?')
+                    params.append(updated_data['duration'])
+                
+                if 'group_id' in updated_data or 'group' in updated_data:
+                    sql_fields.append('group_id = ?')
+                    params.append(updated_data.get('group_id', updated_data.get('group', 1)))
+                
+                if 'topic' in updated_data:
+                    sql_fields.append('topic = ?')
+                    params.append(updated_data.get('topic', ''))
+                
+                if 'state' in updated_data:
+                    sql_fields.append('state = ?')
+                    params.append(updated_data['state'])
+                
+                if 'postpone_until' in updated_data:
+                    sql_fields.append('postpone_until = ?')
+                    params.append(updated_data['postpone_until'])
+                
+                if 'photo_path' in updated_data:
+                    sql_fields.append('photo_path = ?')
+                    params.append(updated_data['photo_path'])
+                
+                # Добавляем updated_at
+                sql_fields.append('updated_at = CURRENT_TIMESTAMP')
+                
+                # Добавляем ID зоны
+                params.append(zone_id)
+                
+                # Выполняем обновление
+                sql = f'''
+                    UPDATE zones 
+                    SET {', '.join(sql_fields)}
+                    WHERE id = ?
+                '''
+                
+                conn.execute(sql, params)
+
+                # Если зону переводят в группу 999 (БЕЗ ПОЛИВА) — исключаем её из всех программ
+                target_group_id = updated_data.get('group_id', updated_data.get('group'))
+                if target_group_id == 999:
+                    cursor = conn.execute('SELECT id, zones FROM programs')
+                    for row in cursor.fetchall():
+                        try:
+                            zones_list = json.loads(row[1])
+                        except Exception:
+                            continue
+                        if zone_id in zones_list:
+                            zones_list = [z for z in zones_list if z != zone_id]
+                            conn.execute('UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (json.dumps(zones_list), row[0]))
+
+                conn.commit()
+                return self.get_zone(zone_id)
+        except Exception as e:
+            logger.error(f"Ошибка обновления зоны {zone_id}: {e}")
+            return None
+    
+    def delete_zone(self, zone_id: int) -> bool:
+        """Удалить зону"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('DELETE FROM zones WHERE id = ?', (zone_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления зоны {zone_id}: {e}")
+            return False
+    
+    def get_groups(self) -> List[Dict[str, Any]]:
+        """Получить все группы"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('''
+                    SELECT g.*, COUNT(z.id) as zone_count
+                    FROM groups g
+                    LEFT JOIN zones z ON g.id = z.group_id
+                    GROUP BY g.id
+                    ORDER BY g.id
+                ''')
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Ошибка получения групп: {e}")
+            return []
+
+    def create_group(self, name: str) -> Optional[Dict[str, Any]]:
+        """Создать новую группу"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('INSERT INTO groups (name) VALUES (?)', (name,))
+                new_id = cursor.lastrowid
+                conn.commit()
+                return {'id': new_id, 'name': name, 'zone_count': 0}
+        except Exception as e:
+            logger.error(f"Ошибка создания группы '{name}': {e}")
+            return None
+
+    def delete_group(self, group_id: int) -> bool:
+        """Удалить группу. Запрещено, если в группе есть зоны.
+
+        Политика: безопаснее явно запретить удаление непустых групп. Пользователь 
+        должен сам перенести зоны в другие группы или 999 (БЕЗ ПОЛИВА), а затем удалить.
+        """
+        try:
+            if group_id == 999:
+                return False
+            with sqlite3.connect(self.db_path) as conn:
+                # Проверяем, есть ли зоны в группе
+                cursor = conn.execute('SELECT COUNT(*) FROM zones WHERE group_id = ?', (group_id,))
+                cnt = cursor.fetchone()[0]
+                if cnt > 0:
+                    return False
+                # Удаляем группу
+                conn.execute('DELETE FROM groups WHERE id = ?', (group_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления группы {group_id}: {e}")
+            return False
+
+    def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
+        """Получить зоны по группе"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('''
+                    SELECT z.*, g.name as group_name 
+                    FROM zones z 
+                    LEFT JOIN groups g ON z.group_id = g.id 
+                    WHERE z.group_id = ?
+                    ORDER BY z.id
+                ''', (group_id,))
+                zones = []
+                for row in cursor.fetchall():
+                    zone = dict(row)
+                    zone['group'] = zone['group_id']  # Для совместимости с фронтендом
+                    zones.append(zone)
+                return zones
+        except Exception as e:
+            logger.error(f"Ошибка получения зон группы {group_id}: {e}")
+            return []
+    
+    def update_group(self, group_id: int, name: str) -> bool:
+        """Обновить название группы"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE groups 
+                    SET name = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (name, group_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления группы {group_id}: {e}")
+            return False
+    
+    def get_programs(self) -> List[Dict[str, Any]]:
+        """Получить все программы"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('SELECT * FROM programs ORDER BY id')
+                programs = []
+                for row in cursor.fetchall():
+                    program = dict(row)
+                    program['days'] = json.loads(program['days'])
+                    program['zones'] = json.loads(program['zones'])
+                    programs.append(program)
+                return programs
+        except Exception as e:
+            logger.error(f"Ошибка получения программ: {e}")
+            return []
+    
+    def get_logs(self, event_type: str = None, from_date: str = None, to_date: str = None) -> List[Dict[str, Any]]:
+        """Получить логи с фильтрацией"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                query = 'SELECT * FROM logs WHERE 1=1'
+                params = []
+                
+                if event_type:
+                    query += ' AND type = ?'
+                    params.append(event_type)
+                
+                if from_date:
+                    query += ' AND timestamp >= ?'
+                    params.append(from_date)
+                
+                if to_date:
+                    query += ' AND timestamp <= ?'
+                    params.append(f"{to_date} 23:59:59")
+                
+                query += ' ORDER BY timestamp DESC LIMIT 1000'
+                
+                cursor = conn.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Ошибка получения логов: {e}")
+            return []
+    
+    def add_log(self, log_type: str, details: str = None) -> Optional[int]:
+        """Добавить запись в лог"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('''
+                    INSERT INTO logs (type, details)
+                    VALUES (?, ?)
+                ''', (log_type, details))
+                log_id = cursor.lastrowid
+                conn.commit()
+                return log_id
+        except Exception as e:
+            logger.error(f"Ошибка добавления лога: {e}")
+            return None
+    
+    def update_zone_postpone(self, zone_id: int, postpone_until: str = None) -> bool:
+        """Обновить отложенный полив зоны"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE zones 
+                    SET postpone_until = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (postpone_until, zone_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления отложенного полива зоны {zone_id}: {e}")
+            return False
+    
+    def create_backup(self) -> str:
+        """Создать резервную копию базы данных"""
+        try:
+            if not os.path.exists(self.backup_dir):
+                os.makedirs(self.backup_dir)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = os.path.join(self.backup_dir, f'irrigation_backup_{timestamp}.db')
+            
+            shutil.copy2(self.db_path, backup_path)
+            
+            # Удаляем старые резервные копии (оставляем последние 7)
+            self._cleanup_old_backups()
+            
+            logger.info(f"Резервная копия создана: {backup_path}")
+            return backup_path
+        except Exception as e:
+            logger.error(f"Ошибка создания резервной копии: {e}")
+            return None
+    
+    def _cleanup_old_backups(self, keep_count: int = 7):
+        """Удалить старые резервные копии"""
+        try:
+            backup_files = []
+            for file in os.listdir(self.backup_dir):
+                if file.startswith('irrigation_backup_') and file.endswith('.db'):
+                    file_path = os.path.join(self.backup_dir, file)
+                    backup_files.append((file_path, os.path.getmtime(file_path)))
+            
+            # Сортируем по времени создания (новые в конце)
+            backup_files.sort(key=lambda x: x[1])
+            
+            # Удаляем старые файлы
+            for file_path, _ in backup_files[:-keep_count]:
+                os.remove(file_path)
+                logger.info(f"Удалена старая резервная копия: {file_path}")
+        except Exception as e:
+            logger.error(f"Ошибка очистки старых резервных копий: {e}")
+
+    def create_program(self, program_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Создать новую программу"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('''
+                    INSERT INTO programs (name, time, days, zones)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    program_data['name'],
+                    program_data['time'],
+                    json.dumps(program_data['days']),
+                    json.dumps(program_data['zones'])
+                ))
+                program_id = cursor.lastrowid
+                conn.commit()
+                return self.get_program(program_id)
+        except Exception as e:
+            logger.error(f"Ошибка создания программы: {e}")
+            return None
+    
+    def get_program(self, program_id: int) -> Optional[Dict[str, Any]]:
+        """Получить программу по ID"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('SELECT * FROM programs WHERE id = ?', (program_id,))
+                row = cursor.fetchone()
+                if row:
+                    program = dict(row)
+                    program['days'] = json.loads(program['days'])
+                    program['zones'] = json.loads(program['zones'])
+                    return program
+                return None
+        except Exception as e:
+            logger.error(f"Ошибка получения программы {program_id}: {e}")
+            return None
+    
+    def update_program(self, program_id: int, program_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Обновить программу"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE programs 
+                    SET name = ?, time = ?, days = ?, zones = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (
+                    program_data['name'],
+                    program_data['time'],
+                    json.dumps(program_data['days']),
+                    json.dumps(program_data['zones']),
+                    program_id
+                ))
+                conn.commit()
+                return self.get_program(program_id)
+        except Exception as e:
+            logger.error(f"Ошибка обновления программы {program_id}: {e}")
+            return None
+    
+    def delete_program(self, program_id: int) -> bool:
+        """Удалить программу"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('DELETE FROM programs WHERE id = ?', (program_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления программы {program_id}: {e}")
+            return False
+
+    def update_zone_photo(self, zone_id: int, photo_path: Optional[str]) -> bool:
+        """Обновить фотографию зоны"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE zones 
+                    SET photo_path = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (photo_path, zone_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления фото зоны {zone_id}: {e}")
+            return False
+
+    def check_program_conflicts(self, program_id: int = None, time: str = None, zones: List[int] = None, days: List[str] = None) -> List[Dict[str, Any]]:
+        """Проверка пересечения программ полива"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                
+                # Получаем все программы
+                query = '''
+                    SELECT id, name, time, days, zones 
+                    FROM programs
+                '''
+                
+                if program_id:
+                    query += ' WHERE id != ?'
+                    cursor = conn.execute(query, (program_id,))
+                else:
+                    cursor = conn.execute(query)
+                
+                programs = cursor.fetchall()
+                conflicts = []
+                
+                if not time or not zones or not days:
+                    return conflicts
+                
+                # Парсим время программы
+                try:
+                    program_hour, program_minute = map(int, time.split(':'))
+                    program_minutes = program_hour * 60 + program_minute
+                except:
+                    return conflicts
+                
+                # Получаем суммарную продолжительность полива для выбранных зон
+                # Зоны поливаются последовательно, поэтому суммируем их длительности
+                total_duration = 0
+                for zone_id in zones:
+                    duration = self.get_zone_duration(zone_id)
+                    total_duration += duration
+                
+                # Время окончания программы
+                program_end_minutes = program_minutes + total_duration
+                
+                for program in programs:
+                    program_data = dict(program)
+                    program_data['days'] = json.loads(program_data['days'])
+                    program_data['zones'] = json.loads(program_data['zones'])
+                    
+                    # Проверяем пересечение дней
+                    common_days = set(days) & set(program_data['days'])
+                    if not common_days:
+                        continue
+                    
+                    # Проверяем пересечение зон
+                    common_zones = set(zones) & set(program_data['zones'])
+                    
+                    # Проверяем пересечение групп
+                    zones_groups = set()
+                    existing_zones_groups = set()
+                    
+                    # Получаем группы для зон новой программы
+                    for zone_id in zones:
+                        zone = self.get_zone(zone_id)
+                        if zone:
+                            zones_groups.add(zone['group_id'])
+                    
+                    # Получаем группы для зон существующей программы
+                    for zone_id in program_data['zones']:
+                        zone = self.get_zone(zone_id)
+                        if zone:
+                            existing_zones_groups.add(zone['group_id'])
+                    
+                    # Проверяем пересечение групп
+                    common_groups = zones_groups & existing_zones_groups
+                    
+                    # Конфликт есть, если есть пересечение по зонам ИЛИ по группам
+                    if not common_zones and not common_groups:
+                        continue
+                    
+                    # Парсим время существующей программы
+                    try:
+                        existing_hour, existing_minute = map(int, program_data['time'].split(':'))
+                        existing_minutes = existing_hour * 60 + existing_minute
+                    except:
+                        continue
+                    
+                    # Получаем суммарную продолжительность существующей программы
+                    # Зоны поливаются последовательно, поэтому суммируем их длительности
+                    existing_total_duration = 0
+                    for zone_id in program_data['zones']:
+                        duration = self.get_zone_duration(zone_id)
+                        existing_total_duration += duration
+                    
+                    # Время окончания существующей программы
+                    existing_end_minutes = existing_minutes + existing_total_duration
+                    
+                    # Проверяем пересечение по времени
+                    # Программы пересекаются, если:
+                    # 1. Новая программа начинается во время работы существующей
+                    # 2. Существующая программа начинается во время работы новой
+                    # 3. Программы начинаются одновременно
+                    
+                    if (program_minutes < existing_end_minutes and program_end_minutes > existing_minutes):
+                        conflicts.append({
+                            'program_id': program_data['id'],
+                            'program_name': program_data['name'],
+                            'program_time': program_data['time'],
+                            'program_duration': existing_total_duration,
+                            'common_zones': list(common_zones),
+                            'common_groups': list(common_groups),
+                            'common_days': list(common_days),
+                            'overlap_start': max(program_minutes, existing_minutes),
+                            'overlap_end': min(program_end_minutes, existing_end_minutes)
+                        })
+                
+                return conflicts
+                
+        except Exception as e:
+            logger.error(f"Ошибка проверки пересечения программ: {e}")
+            return []
+
+    def get_zone_duration(self, zone_id: int) -> int:
+        """Получить продолжительность полива зоны"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('SELECT duration FROM zones WHERE id = ?', (zone_id,))
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Ошибка получения продолжительности зоны {zone_id}: {e}")
+            return 0
+
+    def get_water_usage(self, days: int = 7, zone_id: int = None) -> List[Dict[str, Any]]:
+        """Получить данные расхода воды"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                
+                if zone_id:
+                    cursor = conn.execute('''
+                        SELECT w.*, z.name as zone_name
+                        FROM water_usage w
+                        LEFT JOIN zones z ON w.zone_id = z.id
+                        WHERE w.zone_id = ? AND w.timestamp >= datetime('now', '-{} days')
+                        ORDER BY w.timestamp DESC
+                    '''.format(days), (zone_id,))
+                else:
+                    cursor = conn.execute('''
+                        SELECT w.*, z.name as zone_name
+                        FROM water_usage w
+                        LEFT JOIN zones z ON w.zone_id = z.id
+                        WHERE w.timestamp >= datetime('now', '-{} days')
+                        ORDER BY w.timestamp DESC
+                    '''.format(days))
+                
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Ошибка получения данных расхода воды: {e}")
+            return []
+
+    def add_water_usage(self, zone_id: int, liters: float) -> bool:
+        """Добавить запись о расходе воды"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT INTO water_usage (zone_id, liters)
+                    VALUES (?, ?)
+                ''', (zone_id, liters))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления записи расхода воды: {e}")
+            return False
+
+    def get_water_statistics(self, days: int = 30) -> Dict[str, Any]:
+        """Получить статистику расхода воды"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # Общий расход за период
+                cursor = conn.execute('''
+                    SELECT SUM(liters) as total_liters
+                    FROM water_usage
+                    WHERE timestamp >= datetime('now', '-{} days')
+                '''.format(days))
+                total_liters = cursor.fetchone()[0] or 0
+                
+                # Расход по зонам
+                cursor = conn.execute('''
+                    SELECT z.name, SUM(w.liters) as liters
+                    FROM water_usage w
+                    LEFT JOIN zones z ON w.zone_id = z.id
+                    WHERE w.timestamp >= datetime('now', '-{} days')
+                    GROUP BY w.zone_id, z.name
+                    ORDER BY liters DESC
+                '''.format(days))
+                zone_usage = [dict(row) for row in cursor.fetchall()]
+                
+                # Средний расход в день
+                cursor = conn.execute('''
+                    SELECT AVG(daily_liters) as avg_daily
+                    FROM (
+                        SELECT DATE(timestamp) as date, SUM(liters) as daily_liters
+                        FROM water_usage
+                        WHERE timestamp >= datetime('now', '-{} days')
+                        GROUP BY DATE(timestamp)
+                    )
+                '''.format(days))
+                avg_daily = cursor.fetchone()[0] or 0
+                
+                return {
+                    'total_liters': round(total_liters, 2),
+                    'avg_daily': round(avg_daily, 2),
+                    'zone_usage': zone_usage,
+                    'period_days': days
+                }
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики воды: {e}")
+            return {
+                'total_liters': 0,
+                'avg_daily': 0,
+                'zone_usage': [],
+                'period_days': days
+            }
+
+# Глобальный экземпляр базы данных
+db = IrrigationDB()

@@ -113,20 +113,48 @@
       <h2>Зоны (48)</h2>
       <table>
         <thead><tr><th>Ст.</th><th>№</th><th>Действие</th><th>Название</th><th>Иконка</th><th>Длит.</th><th>Группа</th><th class="hide-mobile">Последний</th><th>Следующий</th></tr></thead>
-        <tbody><script>
-          for(let i=1;i<=48;i++){let next=(i+6)%24;document.write(`<tr><td><span class="indicator ${i===15?'on':'off'}"></span></td><td>${i}</td><td><button class="start">▶</button></td><td>Зона ${i}</td><td>${['🌿','🌳','🌺','🧱'][i%4]}</td><td>10 мин</td><td>${Math.floor((i-1)/12)+1}</td><td class="hide-mobile">30.04 ${String(i%24).padStart(2,'0')}:00</td><td>01.05 ${String(next).padStart(2,'0')}:00</td></tr>`)}
-        </script></tbody>
+        <tbody id="zones-table-body"></tbody>
       </table>
     </section>
   </main>
   <footer>Статус системы актуален на 01.05.2025 00:00</footer>
   <script>
+    // Демо-логика статуса: часы, таблица зон и обработчики кнопок
     function updateTime(){
       const now=new Date(),pad=n=>String(n).padStart(2,'0');
       document.getElementById('datetime').innerText=`${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
     }
     setInterval(updateTime,1000);
     updateTime();
+
+    // Рендер таблицы зон (без document.write)
+    const statusZonesBody=document.getElementById('zones-table-body');
+    function renderStatusZones(){
+      statusZonesBody.innerHTML='';
+      for(let i=1;i<=48;i++){
+        const next=(i+6)%24;
+        const tr=document.createElement('tr');
+        tr.innerHTML=`<td><span class="indicator ${i===15?'on':'off'}"></span></td><td>${i}</td><td><button class="start">▶</button></td><td>Зона ${i}</td><td>${['🌿','🌳','🌺','🧱'][i%4]}</td><td>10 мин</td><td>${Math.floor((i-1)/12)+1}</td><td class="hide-mobile">30.04 ${String(i%24).padStart(2,'0')}:00</td><td>01.05 ${String(next).padStart(2,'0')}:00</td>`;
+        statusZonesBody.appendChild(tr);
+      }
+    }
+    renderStatusZones();
+
+    // Обработчики кнопок для демо-стенда
+    document.addEventListener('click', (ev)=>{
+      const btn=ev.target.closest('button');
+      if(!btn) return;
+      if(btn.classList.contains('delay')){
+        alert('Полив группы отложен на выбранный период (демо).');
+      }else if(btn.classList.contains('start')){
+        alert('Запуск выполнен (демо).');
+      }else if(btn.classList.contains('stop-group')){
+        if(confirm('Остановить полив группы?')) alert('Остановлено (демо).');
+      }
+    });
+    document.querySelector('.emergency').addEventListener('click', ()=>{
+      if(confirm('Аварийная остановка всех зон?')) alert('Все зоны остановлены (демо).');
+    });
   </script>
 </body>
 </html>

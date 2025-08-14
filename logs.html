@@ -55,6 +55,7 @@
   </main>
   <footer>Статус системы актуален на 01.05.2025 00:00</footer>
   <script>
+    // Демо-страница логов: генерация записей, безопасный рендер и экспорт
     const logs = [];
     for(let i=0;i<50;i++){
       const t=new Date(Date.now()-i*60000).toISOString().replace('T',' ').split('.')[0];
@@ -63,12 +64,26 @@
       const details= type==='mqtt_error'? 'lost connection': type==='zone_on'?`{"zone":${(i%48)+1},"user":"ui"}`: type==='zone_off'?`{"zone":${(i%48)+1},"reason":"timer"}`:`{"prog":${(i%5)+1},"field":"start","old":"06:00","new":"05:30"}`;
       logs.push({time:t,type,details});
     }
+    // Безопасный рендер: исключаем XSS, используем textContent для деталей
     function renderLogs(list){
       const tbody=document.getElementById('log-body');
       tbody.innerHTML='';
       list.forEach(l=>{
         const tr=document.createElement('tr');
-        tr.innerHTML=`<td class="nowrap">${l.time}</td><td>${l.type}</td><td><pre style="margin:0;font-family:monospace">${l.details}</pre></td>`;
+        const tdTime=document.createElement('td');
+        tdTime.className='nowrap';
+        tdTime.textContent=l.time;
+        const tdType=document.createElement('td');
+        tdType.textContent=l.type;
+        const tdDetails=document.createElement('td');
+        const pre=document.createElement('pre');
+        pre.style.margin='0';
+        pre.style.fontFamily='monospace';
+        pre.textContent=String(l.details);
+        tdDetails.appendChild(pre);
+        tr.appendChild(tdTime);
+        tr.appendChild(tdType);
+        tr.appendChild(tdDetails);
         tbody.appendChild(tr);
       });
     }
@@ -83,8 +98,14 @@
       if(type) filtered=filtered.filter(l=>l.type===type);
       renderLogs(filtered);
     }
+    // Экспорт CSV с защитой от формульной инъекции (Excel/Sheets)
     function exportCSV(){
-      const rows=[['time','type','details'],...logs.map(l=>[l.time,l.type,`"${l.details.replace(/"/g,'""')}"`])];
+      const sanitize=(value)=>{
+        let s=String(value).replace(/"/g,'""');
+        if(/^[=+\-@]/.test(s)) s="'"+s; // префикс предотвращает выполнение формул
+        return s;
+      };
+      const rows=[["time","type","details"],...logs.map(l=>[l.time,l.type,`"${sanitize(l.details)}"`])];
       const csv=rows.map(r=>r.join(',')).join('\n');
       const blob=new Blob([csv],{type:'text/csv'}),url=URL.createObjectURL(blob),a=document.createElement('a');
       a.href=url;a.download='logs.csv';a.click();URL.revokeObjectURL(url);

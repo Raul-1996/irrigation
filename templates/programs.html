@@ -1,0 +1,724 @@
+{% extends "base.html" %}
+
+{% block title %}Программы{% endblock %}
+{% block page_title %}Программы{% endblock %}
+
+{% block extra_css %}
+<style>
+    .float-add {
+        display: block;
+        margin: 0 auto 1rem;
+        background: #2196f3;
+        color: #fff;
+        border: none;
+        padding: 0.6rem 1rem;
+        border-radius: 5px;
+        cursor: pointer;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        font-size: 1rem;
+        transition: all 0.2s;
+    }
+    .float-add:hover {
+        background: #1976d2;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    
+    .prog-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: #fff;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .prog-table th, .prog-table td {
+        border: 1px solid #ccc;
+        padding: 0.6rem;
+        text-align: center;
+        font-size: 0.9rem;
+        color: #333;
+    }
+    .prog-table th {
+        background: #e0e0e0;
+        font-weight: bold;
+        color: #333;
+    }
+    .prog-table tr:hover {
+        background-color: #f5f5f5;
+    }
+    
+    .edit-btn, .del-btn {
+        padding: 0.4rem 0.8rem;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: all 0.2s;
+    }
+    .edit-btn {
+        background: #ffc107;
+        color: #000;
+        margin-right: 0.4rem;
+    }
+    .edit-btn:hover {
+        background: #ffb300;
+    }
+    .del-btn {
+        background: #f44336;
+        color: #fff;
+    }
+    .del-btn:hover {
+        background: #d32f2f;
+    }
+    
+    .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+    }
+    .modal-content {
+        background: #fff;
+        padding: 2rem;
+        border-radius: 6px;
+        max-width: 600px;
+        width: 90%;
+        max-height: 90%;
+        overflow: auto;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .modal-content h3 {
+        margin-top: 0;
+        color: #333;
+    }
+    
+    .wizard-step {
+        display: none;
+    }
+    .wizard-step.active {
+        display: block;
+    }
+    
+    .wizard-nav {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #eee;
+    }
+    .wizard-nav button {
+        background: #4caf50;
+        color: #fff;
+        padding: 0.6rem 1rem;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+    .wizard-nav button:hover {
+        background: #45a049;
+    }
+    .wizard-nav .cancel {
+        background: #ccc;
+        color: #333;
+    }
+    .wizard-nav .cancel:hover {
+        background: #bbb;
+    }
+    .wizard-nav button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    
+    .field {
+        margin-bottom: 1rem;
+        text-align: left;
+    }
+    .field label {
+        display: block;
+        margin-bottom: 0.3rem;
+        font-weight: bold;
+        color: #555;
+    }
+    .field input[type=text], 
+    .field input[type=time], 
+    .field select {
+        width: 100%;
+        padding: 0.5rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 0.9rem;
+        box-sizing: border-box;
+    }
+    .field input:focus, .field select:focus {
+        outline: none;
+        border-color: #2196f3;
+        box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
+    }
+    
+    .select-days {
+        margin-bottom: 0.5rem;
+        padding: 0.4rem 0.8rem;
+        background: #f0f0f0;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background-color 0.2s;
+    }
+    .select-days:hover {
+        background: #e0e0e0;
+    }
+    
+    .zone-selector {
+        border: 1px solid #ccc;
+        padding: 1rem;
+        border-radius: 4px;
+        max-height: 300px;
+        overflow: auto;
+        margin-bottom: 1rem;
+        background: #f9f9f9;
+    }
+    
+    .group-block {
+        margin-bottom: 0.75rem;
+        padding: 0.5rem;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        background: white;
+    }
+    .group-block > label {
+        font-weight: bold;
+        display: block;
+        margin-bottom: 0.5rem;
+        cursor: pointer;
+        color: #333;
+    }
+    
+    .zone-item {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        grid-gap: 0.5rem;
+        padding-left: 1.5rem;
+    }
+    .zone-item label {
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+        cursor: pointer;
+        font-size: 0.9rem;
+        color: #333 !important;
+    }
+    .zone-item input[type="checkbox"] {
+        margin: 0;
+    }
+    
+    .select-all {
+        display: block;
+        margin-bottom: 1rem;
+        font-weight: bold;
+        cursor: pointer;
+        padding: 0.5rem;
+        background: #e3f2fd;
+        border-radius: 4px;
+        color: #1976d2;
+    }
+    .select-all:hover {
+        background: #bbdefb;
+    }
+    
+    /* Стили для программ полива */
+    .prog-table th, .prog-table td {
+        border: 1px solid #ccc;
+        padding: 0.6rem;
+        text-align: center;
+        font-size: 0.9rem;
+        color: #333;
+    }
+    .prog-table th {
+        background: #e0e0e0;
+        font-weight: bold;
+        color: #333;
+    }
+    
+    /* Стили для модального окна выбора зон */
+    .zone-selection {
+        max-height: 300px;
+        overflow-y: auto;
+        border: 1px solid #ddd;
+        padding: 1rem;
+        background: white;
+        color: #333;
+    }
+    
+    .zone-selection label {
+        display: block;
+        margin: 0.5rem 0;
+        color: #333 !important;
+        font-weight: normal;
+    }
+    
+    .zone-selection input[type="checkbox"] {
+        margin-right: 0.5rem;
+    }
+    
+    .zone-selection .zone-item {
+        padding: 0.3rem;
+        border-bottom: 1px solid #eee;
+        color: #333 !important;
+    }
+    
+    .zone-selection .zone-item:hover {
+        background: #f5f5f5;
+    }
+    
+    @media(max-width:768px) {
+        .prog-table {
+            font-size: 0.8rem;
+        }
+        .prog-table th, .prog-table td {
+            padding: 0.4rem;
+        }
+        .zone-item {
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<button class="float-add" onclick="openWizard()">➕ Новая программа</button>
+
+<div style="overflow-x: auto;">
+    <table class="prog-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Название</th>
+                <th>Время старта</th>
+                <th>Дни недели</th>
+                <th>Зоны</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody id="prog-body">
+            <!-- Программы будут загружены через JavaScript -->
+        </tbody>
+    </table>
+</div>
+
+<!-- Модальное окно мастера программ -->
+<div class="modal" id="wizardModal">
+    <div class="modal-content">
+        <div class="wizard-step" id="step1">
+            <h3>Шаг 1: Имя, время и дни</h3>
+            <div class="field">
+                <label>Название программы *</label>
+                <input id="progName" type="text" required placeholder="Введите название программы"/>
+            </div>
+            <div class="field">
+                <label>Время старта * (мин. шаг 5)</label>
+                <input id="progTime" type="time" step="300" required/>
+            </div>
+            <div class="field">
+                <label>Дни недели *</label>
+                <button type="button" class="select-days" onclick="selectAllDays()">Выбрать все дни</button>
+                <select id="progDays" multiple required size="7">
+                    <option value="Пн">Понедельник</option>
+                    <option value="Вт">Вторник</option>
+                    <option value="Ср">Среда</option>
+                    <option value="Чт">Четверг</option>
+                    <option value="Пт">Пятница</option>
+                    <option value="Сб">Суббота</option>
+                    <option value="Вс">Воскресенье</option>
+                </select>
+            </div>
+        </div>
+        
+        <div class="wizard-step" id="step2">
+            <h3>Шаг 2: Выбор зон или групп</h3>
+            <label class="select-all">
+                <input type="checkbox" id="selectAllZones" onclick="toggleAllZones(this)"> 
+                Выбрать все группы и зоны
+            </label>
+            <div class="zone-selector" id="zoneSelector">
+                <!-- Зоны будут загружены через JavaScript -->
+            </div>
+        </div>
+        
+        <div class="wizard-nav">
+            <button id="prevBtn" onclick="prevStep()" disabled>Назад</button>
+            <button id="nextBtn" onclick="nextStep()">Далее</button>
+            <button id="saveBtn" onclick="saveProg()" style="display:none;">Сохранить</button>
+            <button class="cancel" onclick="closeWizard()">Отмена</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    let programsData = [];
+    let zonesData = [];
+    let currentStep = 1;
+    let editId = null;
+    
+    // Загрузка данных
+    async function loadData() {
+        try {
+            [programsData, zonesData] = await Promise.all([
+                api.get('/api/programs'),
+                api.get('/api/zones')
+            ]);
+            renderProgramsList();
+        } catch (error) {
+            console.error('Ошибка загрузки данных:', error);
+            showNotification('Ошибка загрузки данных', 'error');
+        }
+    }
+    
+    // Форматирование списка зон
+    function formatZonesList(zones) {
+        if (!zones || zones.length === 0) {
+            return '—';
+        }
+        
+        // Сортируем зоны по ID
+        const sortedZones = [...zones].sort((a, b) => a - b);
+        
+        // Если зон мало, просто перечисляем их
+        if (sortedZones.length <= 5) {
+            return sortedZones.join(', ');
+        }
+        
+        // Ищем последовательные диапазоны
+        const ranges = [];
+        let start = sortedZones[0];
+        let end = sortedZones[0];
+        
+        for (let i = 1; i < sortedZones.length; i++) {
+            if (sortedZones[i] === end + 1) {
+                end = sortedZones[i];
+            } else {
+                // Добавляем текущий диапазон
+                if (start === end) {
+                    ranges.push(start.toString());
+                } else {
+                    ranges.push(`${start}-${end}`);
+                }
+                start = end = sortedZones[i];
+            }
+        }
+        
+        // Добавляем последний диапазон
+        if (start === end) {
+            ranges.push(start.toString());
+        } else {
+            ranges.push(`${start}-${end}`);
+        }
+        
+        return ranges.join(', ');
+    }
+    
+    // Рендер списка программ
+    function renderProgramsList() {
+        const tbody = document.getElementById('prog-body');
+        tbody.innerHTML = '';
+        
+        programsData.forEach(program => {
+            const tr = document.createElement('tr');
+            
+            // Форматируем список зон
+            const zonesText = formatZonesList(program.zones);
+            
+            tr.innerHTML = `
+                <td>${program.id}</td>
+                <td>${program.name}</td>
+                <td>${program.time}</td>
+                <td>${program.days.join(', ')}</td>
+                <td>${zonesText}</td>
+                <td>
+                    <button class="edit-btn" onclick="editProg(${program.id})">✏</button>
+                    <button class="del-btn" onclick="deleteProg(${program.id})">🗑️</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+    
+    // Мастер создания/редактирования
+    async function openWizard() {
+        closeWizard();
+        document.getElementById('wizardModal').style.display = 'flex';
+        showStep(1);
+        await loadZoneSelector();
+        clearFields();
+    }
+    
+    async function editProg(id) {
+        const program = programsData.find(x => x.id === id);
+        if (!program) return;
+        
+        editId = id;
+        document.getElementById('wizardModal').style.display = 'flex';
+        showStep(1);
+        await loadZoneSelector();
+        
+        // Заполняем поля
+        document.getElementById('progName').value = program.name;
+        document.getElementById('progTime').value = program.time;
+        
+        // Выбираем дни
+        Array.from(document.getElementById('progDays').options).forEach(option => {
+            option.selected = program.days.includes(option.value);
+        });
+        
+        // Выбираем зоны
+        setTimeout(() => {
+            document.querySelectorAll('.zone-check').forEach(checkbox => {
+                checkbox.checked = program.zones.includes(parseInt(checkbox.value));
+            });
+        }, 100);
+    }
+    
+    async function deleteProg(id) {
+        const program = programsData.find(x => x.id === id);
+        if (!program) return;
+        
+        if (!confirm(`Удалить программу "${program.name}"?`)) return;
+        
+        try {
+            await api.delete(`/api/programs/${id}`);
+            programsData = programsData.filter(x => x.id !== id);
+            renderProgramsList();
+            showNotification('Программа удалена', 'success');
+        } catch (error) {
+            console.error('Ошибка удаления программы:', error);
+            showNotification('Ошибка удаления программы', 'error');
+        }
+    }
+    
+    function clearFields() {
+        document.getElementById('progName').value = '';
+        document.getElementById('progTime').value = '';
+        Array.from(document.getElementById('progDays').options).forEach(option => {
+            option.selected = false;
+        });
+        document.querySelectorAll('.zone-check, .group-check').forEach(checkbox => {
+            checkbox.checked = false;
+        });
+        editId = null;
+    }
+    
+    function closeWizard() {
+        document.getElementById('wizardModal').style.display = 'none';
+        clearFields();
+    }
+    
+    function showStep(n) {
+        [1, 2].forEach(i => {
+            document.getElementById('step' + i).classList.toggle('active', i === n);
+        });
+        
+        document.getElementById('prevBtn').disabled = n === 1;
+        document.getElementById('nextBtn').style.display = n < 2 ? 'inline-block' : 'none';
+        document.getElementById('saveBtn').style.display = n === 2 ? 'inline-block' : 'none';
+        currentStep = n;
+    }
+    
+    function nextStep() {
+        if (currentStep < 2) showStep(currentStep + 1);
+    }
+    
+    function prevStep() {
+        if (currentStep > 1) showStep(currentStep - 1);
+    }
+    
+    function selectAllDays() {
+        Array.from(document.getElementById('progDays').options).forEach(option => {
+            option.selected = true;
+        });
+    }
+    
+    async function loadZoneSelector() {
+        const container = document.getElementById('zoneSelector');
+        container.innerHTML = '';
+        
+        try {
+            // Загружаем группы и зоны из API
+            const groups = await api.get('/api/groups');
+            const zones = await api.get('/api/zones');
+            
+            // Группируем зоны по группам
+            const zonesByGroup = {};
+            zones.forEach(zone => {
+                if (!zonesByGroup[zone.group_id]) {
+                    zonesByGroup[zone.group_id] = [];
+                }
+                zonesByGroup[zone.group_id].push(zone);
+            });
+            
+            // Создаем блоки для каждой группы
+            groups.forEach(group => {
+                // Пропускаем специальные группы (например, "БЕЗ ПОЛИВА")
+                if (group.id >= 999) return;
+                
+                const groupZones = zonesByGroup[group.id] || [];
+                if (groupZones.length === 0) return; // Пропускаем пустые группы
+                
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'group-block';
+                
+                const groupLabel = document.createElement('label');
+                groupLabel.innerHTML = `<input type='checkbox' class='group-check' data-group='${group.id}' onclick='toggleGroup(${group.id}, this)'> ${group.name}`;
+                groupDiv.appendChild(groupLabel);
+                
+                const zonesDiv = document.createElement('div');
+                zonesDiv.className = 'zone-item';
+                
+                // Сортируем зоны по ID
+                groupZones.sort((a, b) => a.id - b.id);
+                
+                groupZones.forEach(zone => {
+                    const zoneLabel = document.createElement('label');
+                    zoneLabel.innerHTML = `<input type='checkbox' class='zone-check' data-group='${group.id}' value='${zone.id}'> ${zone.icon} Зона ${zone.id} (${zone.name})`;
+                    zonesDiv.appendChild(zoneLabel);
+                });
+                
+                groupDiv.appendChild(zonesDiv);
+                container.appendChild(groupDiv);
+            });
+            
+        } catch (error) {
+            console.error('Ошибка загрузки зон:', error);
+            showNotification('Ошибка загрузки зон', 'error');
+        }
+    }
+    
+    function toggleAllZones(checkbox) {
+        const isChecked = checkbox.checked;
+        document.querySelectorAll('.group-check, .zone-check').forEach(ch => {
+            ch.checked = isChecked;
+        });
+    }
+    
+    function toggleGroup(group, checkbox) {
+        document.querySelectorAll(`.zone-check[data-group='${group}']`).forEach(ch => {
+            ch.checked = checkbox.checked;
+        });
+    }
+    
+    async function checkConflicts() {
+        const time = document.getElementById('progTime').value;
+        const days = Array.from(document.getElementById('progDays').selectedOptions).map(option => option.value);
+        const zones = Array.from(document.querySelectorAll('.zone-check:checked')).map(checkbox => parseInt(checkbox.value));
+        
+        if (!time || !days.length || !zones.length) {
+            return { has_conflicts: false, conflicts: [] };
+        }
+        
+        try {
+            const response = await api.post('/api/programs/check-conflicts', {
+                program_id: editId,
+                time: time,
+                days: days,
+                zones: zones
+            });
+            
+            return response;
+        } catch (error) {
+            console.error('Ошибка проверки конфликтов:', error);
+            return { has_conflicts: false, conflicts: [] };
+        }
+    }
+    
+    function formatConflictMessage(conflict) {
+        const startTime = Math.floor(conflict.overlap_start / 60).toString().padStart(2, '0') + ':' + 
+                         (conflict.overlap_start % 60).toString().padStart(2, '0');
+        const endTime = Math.floor(conflict.overlap_end / 60).toString().padStart(2, '0') + ':' + 
+                       (conflict.overlap_end % 60).toString().padStart(2, '0');
+        
+        let message = `Программа "${conflict.program_name}" (${conflict.program_time}, ${conflict.program_duration} мин) - пересечение с ${startTime} до ${endTime}`;
+        
+        // Добавляем информацию о пересечении зон
+        if (conflict.common_zones && conflict.common_zones.length > 0) {
+            message += `\nПересекающиеся зоны: ${conflict.common_zones.join(', ')}`;
+        }
+        
+        // Добавляем информацию о пересечении групп
+        if (conflict.common_groups && conflict.common_groups.length > 0) {
+            message += `\nПересекающиеся группы: ${conflict.common_groups.join(', ')}`;
+        }
+        
+        return message;
+    }
+    
+    async function saveProg() {
+        const name = document.getElementById('progName').value.trim();
+        const time = document.getElementById('progTime').value;
+        const days = Array.from(document.getElementById('progDays').selectedOptions).map(option => option.value);
+        const zones = Array.from(document.querySelectorAll('.zone-check:checked')).map(checkbox => parseInt(checkbox.value));
+        
+        if (!name || !time || !days.length || !zones.length) {
+            showNotification('Заполните все поля и выберите зоны', 'warning');
+            return;
+        }
+        
+        // Проверяем конфликты перед сохранением
+        const conflictCheck = await checkConflicts();
+        if (conflictCheck.has_conflicts) {
+            let message = '⚠️ Обнаружены конфликты с существующими программами:\n\n';
+            conflictCheck.conflicts.forEach(conflict => {
+                message += `• ${formatConflictMessage(conflict)}\n`;
+            });
+            message += '\nПожалуйста, измените время начала полива или выберите другие зоны.';
+            
+            showNotification(message, 'warning');
+            return;
+        }
+        
+        try {
+            if (editId) {
+                // Редактирование
+                const program = programsData.find(x => x.id === editId);
+                if (!program) throw new Error('Программа не найдена');
+                
+                const updatedProgram = { ...program, name, time, days, zones };
+                await api.put(`/api/programs/${editId}`, updatedProgram);
+                Object.assign(program, updatedProgram);
+                showNotification('Программа обновлена', 'success');
+            } else {
+                // Создание
+                const newProgram = await api.post('/api/programs', { name, time, days, zones });
+                programsData.push(newProgram);
+                showNotification('Программа создана', 'success');
+            }
+            
+            renderProgramsList();
+            closeWizard();
+        } catch (error) {
+            console.error('Ошибка сохранения программы:', error);
+            showNotification('Ошибка сохранения программы', 'error');
+        }
+    }
+    
+    // Инициализация
+    document.addEventListener('DOMContentLoaded', () => {
+        loadData();
+        
+        // Закрытие модального окна при клике вне его
+        document.getElementById('wizardModal').addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal')) {
+                closeWizard();
+            }
+        });
+    });
+</script>
+{% endblock %}

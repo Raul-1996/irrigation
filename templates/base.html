@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}WB-Irrigation{% endblock %}</title>
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+    
+    <!-- Preload critical fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    
+    <style>
+        /* CSS Variables for theming */
+        :root {
+            --primary-color: #2196f3;
+            --secondary-color: #4caf50;
+            --danger-color: #f44336;
+            --warning-color: #ff9800;
+            --success-color: #4caf50;
+            --info-color: #2196f3;
+            --background-color: #f5f5f5;
+            --card-background: #ffffff;
+            --text-color: #333333;
+            --border-color: #e0e0e0;
+            --shadow: 0 2px 4px rgba(0,0,0,0.1);
+            --transition: all 0.3s ease;
+        }
+        
+        /* Dark theme support */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --background-color: #1a1a1a;
+                --card-background: #2d2d2d;
+                --text-color: #ffffff;
+                --border-color: #404040;
+                --shadow: 0 2px 4px rgba(0,0,0,0.3);
+            }
+        }
+        
+        /* Smooth scrolling */
+        html {
+            scroll-behavior: smooth;
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            transition: var(--transition);
+        }
+        
+        /* Header */
+        header {
+            background: linear-gradient(135deg, var(--primary-color), #1976d2);
+            color: white;
+            padding: 1rem 0;
+            box-shadow: var(--shadow);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: white;
+        }
+        
+        .logo-link {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-decoration: none;
+            color: inherit;
+            transition: var(--transition);
+        }
+        
+        .logo-link:hover {
+            transform: scale(1.05);
+            color: var(--primary-dark);
+        }
+        
+        .logo-icon {
+            font-size: 2rem;
+        }
+        
+        .logo-text {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        
+        /* Navigation */
+        nav {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        nav a {
+            color: white;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            transition: var(--transition);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        nav a:hover {
+            background: rgba(255,255,255,0.2);
+            transform: translateY(-2px);
+        }
+        
+        nav a.active {
+            background: rgba(255,255,255,0.3);
+            font-weight: bold;
+        }
+        
+        nav a::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+            transition: left 0.5s;
+        }
+        
+        nav a:hover::before {
+            left: 100%;
+        }
+        
+        /* Main content */
+        main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+            min-height: calc(100vh - 200px);
+        }
+        
+        main h1 {
+            color: white;
+            margin-bottom: 1.5rem;
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        
+        /* Footer */
+        footer {
+            background: var(--card-background);
+            color: var(--text-color);
+            text-align: center;
+            padding: 1rem;
+            border-top: 1px solid var(--border-color);
+            margin-top: auto;
+        }
+        
+        .footer-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1rem;
+        }
+        
+        .footer-time {
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+        
+        /* Enhanced notifications */
+        .notification-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            max-width: 400px;
+        }
+        
+        .notification {
+            background: var(--card-background);
+            color: var(--text-color);
+            padding: 1rem;
+            margin-bottom: 0.5rem;
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+            border-left: 4px solid var(--info-color);
+            transform: translateX(100%);
+            opacity: 0;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .notification.show {
+            transform: translateX(0);
+            opacity: 1;
+        }
+        
+        .notification.success {
+            border-left-color: var(--success-color);
+        }
+        
+        .notification.error {
+            border-left-color: var(--danger-color);
+        }
+        
+        .notification.warning {
+            border-left-color: var(--warning-color);
+        }
+        
+        .notification.info {
+            border-left-color: var(--info-color);
+        }
+        
+        .notification-icon {
+            font-size: 1.2rem;
+        }
+        
+        .notification-close {
+            margin-left: auto;
+            background: none;
+            border: none;
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 1.2rem;
+            opacity: 0.7;
+            transition: var(--transition);
+        }
+        
+        .notification-close:hover {
+            opacity: 1;
+        }
+        
+        /* Loading spinner */
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Responsive design */
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                gap: 1rem;
+            }
+            
+            nav {
+                justify-content: center;
+            }
+            
+            .footer-content {
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+            
+            .notification-container {
+                left: 10px;
+                right: 10px;
+                max-width: none;
+            }
+        }
+        
+        /* Accessibility */
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+        
+        /* Focus styles for accessibility */
+        a:focus, button:focus, input:focus, select:focus, textarea:focus {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 2px;
+        }
+        
+        /* Print styles */
+        @media print {
+            header, footer, nav {
+                display: none;
+            }
+            
+            main {
+                padding: 0;
+            }
+        }
+    </style>
+    
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <a href="/" class="logo-link">
+                    <span class="logo-icon">💧</span>
+                    <span class="logo-text">WB-Irrigation</span>
+                </a>
+            </div>
+            <nav>
+                <a href="/" class="{% if request.endpoint == 'index' or request.endpoint == 'status' %}active{% endif %}">Статус</a>
+                <a href="/zones" class="{% if request.endpoint == 'zones_page' %}active{% endif %}">Зоны и группы</a>
+                <a href="/programs" class="{% if request.endpoint == 'programs_page' %}active{% endif %}">Программы</a>
+                <a href="/logs" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">Логи</a>
+                <a href="/water" class="{% if request.endpoint == 'water_page' %}active{% endif %}">Расход воды</a>
+                <a href="/map" class="{% if request.endpoint == 'map_page' %}active{% endif %}">Карта зон</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <h1>{% block page_title %}{% endblock %}</h1>
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <div class="footer-content">
+            <div>WB-Irrigation System v1.0</div>
+            <div class="footer-time" id="footer-time">Загрузка...</div>
+        </div>
+    </footer>
+
+    <!-- Notification container -->
+    <div class="notification-container" id="notification-container"></div>
+
+    <script>
+        // Update footer time
+        function updateFooterTime() {
+            const now = new Date();
+            const timeString = now.toLocaleString('ru-RU', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            document.getElementById('footer-time').textContent = timeString;
+        }
+        
+        // Update time every second
+        updateFooterTime();
+        setInterval(updateFooterTime, 1000);
+        
+        // API utility functions
+        const api = {
+            async request(url, options = {}) {
+                const defaultOptions = {
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                };
+                
+                const config = { ...defaultOptions, ...options };
+                
+                try {
+                    const response = await fetch(url, config);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    
+                    // Check if response is JSON
+                    const contentType = response.headers.get('content-type');
+                    if (contentType && contentType.includes('application/json')) {
+                        return await response.json();
+                    }
+                    
+                    return await response.text();
+                } catch (error) {
+                    console.error('API request failed:', error);
+                    throw error;
+                }
+            },
+            
+            async get(url) {
+                return this.request(url);
+            },
+            
+            async post(url, data) {
+                return this.request(url, {
+                    method: 'POST',
+                    body: JSON.stringify(data),
+                });
+            },
+            
+            async put(url, data) {
+                return this.request(url, {
+                    method: 'PUT',
+                    body: JSON.stringify(data),
+                });
+            },
+            
+            async delete(url) {
+                return this.request(url, {
+                    method: 'DELETE',
+                });
+            },
+        };
+        
+        // Enhanced notification system
+        function showNotification(message, type = 'info', duration = 5000) {
+            const container = document.getElementById('notification-container');
+            const notification = document.createElement('div');
+            notification.className = `notification ${type}`;
+            
+            const icons = {
+                success: '✅',
+                error: '❌',
+                warning: '⚠️',
+                info: 'ℹ️'
+            };
+            
+            notification.innerHTML = `
+                <span class="notification-icon">${icons[type] || icons.info}</span>
+                <span>${message}</span>
+                <button class="notification-close" onclick="this.parentElement.remove()">×</button>
+            `;
+            
+            container.appendChild(notification);
+            
+            // Trigger animation
+            setTimeout(() => notification.classList.add('show'), 10);
+            
+            // Auto remove
+            if (duration > 0) {
+                setTimeout(() => {
+                    notification.classList.remove('show');
+                    setTimeout(() => notification.remove(), 300);
+                }, duration);
+            }
+            
+            // Add to notification history
+            addToNotificationHistory(message, type);
+        }
+        
+        // Notification history for debugging
+        const notificationHistory = [];
+        function addToNotificationHistory(message, type) {
+            notificationHistory.push({
+                message,
+                type,
+                timestamp: new Date().toISOString()
+            });
+            
+            // Keep only last 50 notifications
+            if (notificationHistory.length > 50) {
+                notificationHistory.shift();
+            }
+        }
+        
+        // Global error handler
+        window.addEventListener('error', (event) => {
+            console.error('Global error:', event.error);
+            showNotification('Произошла ошибка в приложении', 'error');
+        });
+        
+        // Service Worker registration for offline support
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                // Проверяем, существует ли файл sw.js перед регистрацией
+                fetch('/sw.js', { method: 'HEAD' })
+                    .then(response => {
+                        if (response.ok) {
+                            return navigator.serviceWorker.register('/sw.js');
+                        } else {
+                            console.log('SW file not found, skipping registration');
+                        }
+                    })
+                    .then(registration => {
+                        if (registration) {
+                            console.log('SW registered: ', registration);
+                        }
+                    })
+                    .catch(registrationError => {
+                        console.log('SW registration failed: ', registrationError);
+                    });
+            });
+        }
+        
+        // Performance monitoring
+        window.addEventListener('load', () => {
+            if ('performance' in window) {
+                const loadTime = performance.timing.loadEventEnd - performance.timing.navigationStart;
+                console.log(`Page load time: ${loadTime}ms`);
+                
+                if (loadTime > 3000) {
+                    showNotification('Страница загружается медленно', 'warning');
+                }
+            }
+        });
+    </script>
+    
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

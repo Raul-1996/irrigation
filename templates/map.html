@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Карта зон{% endblock %}
+{% block page_title %}Карта зон{% endblock %}
+
+{% block extra_css %}
+<style>
+  .map-card {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  }
+  .map-image {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+  }
+  .upload-area {
+    margin-top: 1rem;
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+  }
+  .upload-area input[type=file] { display: none; }
+  .btn { padding: .5rem 1rem; border: none; border-radius: 5px; cursor: pointer; }
+  .btn-primary { background: var(--primary-color); color: white; }
+  .hint { color: #666; font-size: .9rem; }
+  .placeholder { text-align: center; color: #666; padding: 2rem 1rem; border: 2px dashed #ccc; border-radius: 8px; }
+  .placeholder strong { display:block; margin-bottom:.5rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="map-card">
+  <div id="map-container"></div>
+  <div class="upload-area">
+    <label for="mapFile" class="btn btn-primary">Загрузить карту</label>
+    <input id="mapFile" type="file" accept="image/*" />
+    <span class="hint">Поддерживаются изображения JPG, PNG, GIF, WEBP.</span>
+  </div>
+  <div id="uploadStatus" class="hint"></div>
+ </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadMap() {
+  try {
+    const res = await api.get('/api/map');
+    const container = document.getElementById('map-container');
+    container.innerHTML = '';
+    if (res && res.path) {
+      const img = document.createElement('img');
+      img.src = '/static/' + res.path; // путь относительно static/
+      img.alt = 'Карта зон';
+      img.className = 'map-image';
+      container.appendChild(img);
+    } else {
+      container.innerHTML = '<div class="placeholder"><strong>Карта не загружена</strong><span>Загрузите изображение с визуализацией зон.</span></div>';
+    }
+  } catch (e) {
+    showNotification('Ошибка загрузки карты', 'error');
+  }
+}
+
+document.getElementById('mapFile').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch('/api/map', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data && data.success) {
+      showNotification('Карта загружена', 'success');
+      loadMap();
+    } else {
+      showNotification(data.message || 'Ошибка загрузки карты', 'error');
+    }
+  } catch (e) {
+    showNotification('Ошибка загрузки карты', 'error');
+  } finally {
+    e.target.value = '';
+  }
+});
+
+document.addEventListener('DOMContentLoaded', loadMap);
+</script>
+{% endblock %}
+
+

@@ -47,6 +47,9 @@
   </main>
   <footer>Статус системы актуален на 01.05.2025 00:00</footer>
   <script>
+    // Демо-страница расхода воды: генерация данных, график и лог
+    // Ссылка на выбор периода для корректной работы updateChart
+    const periodSelect=document.getElementById('periodSelect');
     const zoneSelect=document.getElementById('zoneSelect');
     for(let i=1;i<=48;i++){const opt=document.createElement('option');opt.value=i;opt.textContent='Зона '+i;zoneSelect.appendChild(opt);}
     function generateData(days, zone){

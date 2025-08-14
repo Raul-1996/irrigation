@@ -1,0 +1,410 @@
+{% extends "base.html" %}
+
+{% block title %}Логи{% endblock %}
+{% block page_title %}Логи{% endblock %}
+
+{% block extra_css %}
+<style>
+    .filter-bar {
+        background: #fff;
+        padding: 1rem;
+        border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .filter-bar label {
+        font-size: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .filter-bar input[type=date], 
+    .filter-bar select {
+        padding: 0.4rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+    .filter-bar input:focus,
+    .filter-bar select:focus {
+        outline: none;
+        border-color: #2196f3;
+        box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
+    }
+    .filter-bar button {
+        padding: 0.5rem 1rem;
+        background: #2196f3;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background-color 0.2s;
+    }
+    .filter-bar button:hover {
+        background: #1976d2;
+    }
+    .export-btn {
+        background: #4caf50;
+        color: #fff;
+        margin-left: auto;
+    }
+    .export-btn:hover {
+        background: #45a049;
+    }
+    
+    .logs-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: #fff;
+        font-size: 0.9rem;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .logs-table th, 
+    .logs-table td {
+        border: 1px solid #ccc;
+        padding: 0.5rem;
+        text-align: left;
+        color: #333;
+    }
+    .logs-table th {
+        background: #e0e0e0;
+        font-weight: bold;
+        color: #333;
+    }
+    .logs-table tr:hover {
+        background-color: #f5f5f5;
+    }
+    .nowrap {
+        white-space: nowrap;
+    }
+    
+    .log-details {
+        font-family: 'Courier New', monospace;
+        font-size: 0.85rem;
+        background: #f8f9fa;
+        padding: 0.5rem;
+        border-radius: 3px;
+        border: 1px solid #e9ecef;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-width: 400px;
+    }
+    
+    .log-type {
+        padding: 0.2rem 0.5rem;
+        border-radius: 3px;
+        font-size: 0.8rem;
+        font-weight: bold;
+        text-transform: uppercase;
+    }
+    .log-type.zone_on {
+        background: #d4edda;
+        color: #155724;
+    }
+    .log-type.zone_off {
+        background: #f8d7da;
+        color: #721c24;
+    }
+    .log-type.prog_edit {
+        background: #d1ecf1;
+        color: #0c5460;
+    }
+    .log-type.mqtt_error {
+        background: #fff3cd;
+        color: #856404;
+    }
+    
+    .loading {
+        text-align: center;
+        padding: 2rem;
+        color: #666;
+    }
+    
+    .no-data {
+        text-align: center;
+        padding: 2rem;
+        color: #666;
+        font-style: italic;
+    }
+    
+    @media(max-width:768px) {
+        .filter-bar {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .filter-bar label {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .filter-bar input[type=date], 
+        .filter-bar select {
+            width: 100%;
+        }
+        .export-btn {
+            margin-left: 0;
+        }
+        .logs-table {
+            font-size: 0.8rem;
+        }
+        .logs-table th, 
+        .logs-table td {
+            padding: 0.3rem;
+        }
+        .log-details {
+            max-width: 200px;
+            font-size: 0.75rem;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <label>
+        С: 
+        <input type="date" id="fromDate">
+    </label>
+    <label>
+        По: 
+        <input type="date" id="toDate">
+    </label>
+    <label>
+        Тип события: 
+        <select id="eventType">
+            <option value="">Все</option>
+            <!-- Опции будут загружены динамически -->
+        </select>
+    </label>
+    <button onclick="applyFilter()">Фильтровать</button>
+    <button class="export-btn" onclick="exportCSV()">Экспорт CSV</button>
+</div>
+
+<div style="overflow-x: auto;">
+    <table class="logs-table">
+        <thead>
+            <tr>
+                <th class="nowrap">Время</th>
+                <th>Тип</th>
+                <th>Детали</th>
+            </tr>
+        </thead>
+        <tbody id="log-body">
+            <tr>
+                <td colspan="3" class="loading">Загрузка логов...</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    let logsData = [];
+    let filteredLogs = [];
+    
+    // Загрузка логов
+    async function loadLogs() {
+        try {
+            logsData = await api.get('/api/logs');
+            filteredLogs = [...logsData];
+            updateEventTypeOptions();
+            renderLogs();
+        } catch (error) {
+            console.error('Ошибка загрузки логов:', error);
+            showNotification('Ошибка загрузки логов', 'error');
+            document.getElementById('log-body').innerHTML = `
+                <tr>
+                    <td colspan="3" class="no-data">Ошибка загрузки данных</td>
+                </tr>
+            `;
+        }
+    }
+    
+    // Обновление опций типов событий
+    function updateEventTypeOptions() {
+        const eventTypeSelect = document.getElementById('eventType');
+        const currentValue = eventTypeSelect.value;
+        
+        // Получаем уникальные типы событий
+        const eventTypes = [...new Set(logsData.map(log => log.type))].sort();
+        
+        // Сохраняем опцию "Все"
+        eventTypeSelect.innerHTML = '<option value="">Все</option>';
+        
+        // Добавляем найденные типы событий
+        eventTypes.forEach(type => {
+            const option = document.createElement('option');
+            option.value = type;
+            option.textContent = type;
+            eventTypeSelect.appendChild(option);
+        });
+        
+        // Восстанавливаем выбранное значение
+        if (currentValue && eventTypes.includes(currentValue)) {
+            eventTypeSelect.value = currentValue;
+        }
+    }
+    
+    // Рендер логов
+    function renderLogs() {
+        const tbody = document.getElementById('log-body');
+        
+        if (filteredLogs.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="3" class="no-data">Нет данных для отображения</td>
+                </tr>
+            `;
+            return;
+        }
+        
+        tbody.innerHTML = '';
+        
+        filteredLogs.forEach(log => {
+            const tr = document.createElement('tr');
+            
+            const tdTime = document.createElement('td');
+            tdTime.className = 'nowrap';
+            tdTime.textContent = log.timestamp || log.time;
+            
+            const tdType = document.createElement('td');
+            const typeSpan = document.createElement('span');
+            typeSpan.className = `log-type ${log.type}`;
+            typeSpan.textContent = log.type;
+            tdType.appendChild(typeSpan);
+            
+            const tdDetails = document.createElement('td');
+            const detailsPre = document.createElement('pre');
+            detailsPre.className = 'log-details';
+            detailsPre.textContent = log.details;
+            tdDetails.appendChild(detailsPre);
+            
+            tr.appendChild(tdTime);
+            tr.appendChild(tdType);
+            tr.appendChild(tdDetails);
+            tbody.appendChild(tr);
+        });
+    }
+    
+    // Применение фильтров
+    async function applyFilter() {
+        const fromDate = document.getElementById('fromDate').value;
+        const toDate = document.getElementById('toDate').value;
+        const eventType = document.getElementById('eventType').value;
+        
+        try {
+            const params = new URLSearchParams();
+            
+            if (fromDate) params.append('from', fromDate);
+            if (toDate) params.append('to', toDate);
+            if (eventType) params.append('type', eventType);
+            
+            const response = await fetch(`/api/logs?${params.toString()}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            filteredLogs = await response.json();
+            renderLogs();
+            
+            if (filteredLogs.length === 0) {
+                showNotification('По заданным критериям ничего не найдено', 'info');
+            }
+        } catch (error) {
+            console.error('Ошибка фильтрации логов:', error);
+            showNotification('Ошибка фильтрации логов', 'error');
+        }
+    }
+    
+    // Экспорт CSV с защитой от формульной инъекции
+    function exportCSV() {
+        if (filteredLogs.length === 0) {
+            showNotification('Нет данных для экспорта', 'warning');
+            return;
+        }
+        
+        const sanitize = (value) => {
+            let s = String(value).replace(/"/g, '""');
+            if (/^[=+\-@]/.test(s)) s = "'" + s; // префикс предотвращает выполнение формул
+            return s;
+        };
+        
+        const rows = [
+            ['time', 'type', 'details'],
+            ...filteredLogs.map(log => [
+                log.time,
+                log.type,
+                `"${sanitize(log.details)}"`
+            ])
+        ];
+        
+        const csv = rows.map(row => row.join(',')).join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        
+        const now = new Date().toISOString().slice(0, 10);
+        link.href = url;
+        link.download = `logs_${now}.csv`;
+        link.style.display = 'none';
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        showNotification(`Экспортировано ${filteredLogs.length} записей`, 'success');
+    }
+    
+    // Сброс фильтров
+    function resetFilters() {
+        document.getElementById('fromDate').value = '';
+        document.getElementById('toDate').value = '';
+        document.getElementById('eventType').value = '';
+        filteredLogs = [...logsData];
+        renderLogs();
+    }
+    
+    // Инициализация
+    document.addEventListener('DOMContentLoaded', () => {
+        loadLogs();
+        
+        // Автоматическое применение фильтров при изменении
+        document.getElementById('fromDate').addEventListener('change', applyFilter);
+        document.getElementById('toDate').addEventListener('change', applyFilter);
+        document.getElementById('eventType').addEventListener('change', applyFilter);
+        
+        // Добавляем кнопку сброса фильтров
+        const filterBar = document.querySelector('.filter-bar');
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = 'Сброс';
+        resetBtn.style.cssText = `
+            padding: 0.5rem 1rem;
+            background: #6c757d;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background-color 0.2s;
+        `;
+        resetBtn.addEventListener('click', resetFilters);
+        resetBtn.addEventListener('mouseenter', () => {
+            resetBtn.style.background = '#5a6268';
+        });
+        resetBtn.addEventListener('mouseleave', () => {
+            resetBtn.style.background = '#6c757d';
+        });
+        
+        filterBar.insertBefore(resetBtn, filterBar.lastElementChild);
+    });
+</script>
+{% endblock %}

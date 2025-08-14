@@ -1,0 +1,785 @@
+{% extends "base.html" %}
+
+{% block title %}Статус{% endblock %}
+{% block page_title %}Статус{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Общие стили для контрастности */
+    body {
+        color: #333;
+    }
+    
+    .connection-status {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        background: #f44336;
+        color: white;
+        text-align: center;
+        padding: 0.5rem;
+        font-weight: bold;
+        z-index: 1000;
+        display: none;
+    }
+    
+    .connection-status.show {
+        display: block;
+    }
+    
+    .legend {
+        background: white;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .legend h4 {
+        margin: 0 0 0.5rem 0;
+        color: #333;
+        font-weight: bold;
+    }
+    
+    .legend-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 0.5rem;
+    }
+    
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.9rem;
+        color: #333;
+    }
+    
+    .legend-color {
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+    }
+    
+    .top-bar { 
+        display: flex; 
+        justify-content: space-between; 
+        align-items: center; 
+        flex-wrap: wrap; 
+        gap: 0.5rem; 
+        margin-bottom: 1rem; 
+    }
+    .info-box { 
+        background: white; 
+        padding: 0.4rem 0.8rem; 
+        border-radius: 5px; 
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1); 
+        font-size: 0.9rem; 
+        text-align: center; 
+        flex: 1 1 160px; 
+        color: #333;
+    }
+    .info-box strong {
+        color: #333;
+    }
+    .status-grid { 
+        display: grid; 
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+        gap: 1rem; 
+        margin-bottom: 1rem; 
+    }
+    .card { 
+        border-radius: 8px; 
+        padding: 0.8rem; 
+        color: white; 
+        display: flex; 
+        flex-direction: column; 
+        align-items: center; 
+        text-align: center; 
+        font-size: 0.9rem; 
+        min-height: 200px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .card.waiting { 
+        background: linear-gradient(135deg, #4caf50, #45a049); 
+        color: white;
+    }
+    .card.watering { 
+        background: linear-gradient(135deg, #2196f3, #1976d2); 
+        color: white;
+    }
+    /* Имитация активности расхода воды: пульсация */
+    .card.watering.flow-active { 
+        animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(33,150,243,0.6); }
+        70% { box-shadow: 0 0 0 12px rgba(33,150,243,0); }
+        100% { box-shadow: 0 0 0 0 rgba(33,150,243,0); }
+    }
+    .card.error { 
+        background: linear-gradient(135deg, #f44336, #d32f2f); 
+        color: white;
+    }
+    .card.postponed { 
+        background: linear-gradient(135deg, #9e9e9e, #757575); 
+        color: white;
+    }
+    .group-header { 
+        font-size: 1rem; 
+        margin-bottom: 0.2rem; 
+        font-weight: bold;
+        color: white;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+    }
+    .postpone-until { 
+        margin: 0.5rem 0; 
+        font-style: italic; 
+        font-size: 0.85rem; 
+        background: rgba(255,255,255,0.2);
+        padding: 0.3rem 0.6rem;
+        border-radius: 4px;
+        color: white;
+        backdrop-filter: blur(5px);
+    }
+    .btn-group { 
+        display: flex; 
+        flex-wrap: wrap; 
+        gap: 0.5rem; 
+        justify-content: center; 
+        margin: 0.2rem 0; 
+        width: 100%; 
+    }
+    .btn-group button { 
+        flex: 1 1 130px; 
+        padding: 0.3rem 0.4rem; 
+        border-radius: 5px; 
+        cursor: pointer; 
+        font-size: 0.9rem; 
+        text-align: center; 
+        min-width: 130px; 
+        border: 2px solid #fff; 
+        transition: all 0.2s;
+    }
+    .btn-group button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .delay { background: #ffc107; color: #000; border-color: transparent; }
+    .cancel-postpone { background: #ff9800; color: #fff; border-color: transparent; }
+    .start { background: #4caf50; color: #fff; }
+    .stop-group { background: #b71c1c; color: #fff; }
+    .emergency { 
+        background: #d32f2f; 
+        color: #fff; 
+        padding: 0.6rem 1.2rem; 
+        border: none; 
+        border-radius: 5px; 
+        cursor: pointer; 
+        font-size: 0.95rem; 
+        margin: 1rem auto; 
+        display: block; 
+        transition: all 0.2s;
+    }
+    .emergency:hover {
+        background: #b71c1c;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    
+    .zones-section {
+        background: white;
+        border-radius: 8px;
+        padding: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-top: 1rem;
+    }
+    .zones-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .zones-header h3 {
+        color: #333;
+        margin: 0;
+    }
+    .zones-count {
+        background: #2196f3;
+        color: white;
+        padding: 0.3rem 0.8rem;
+        border-radius: 15px;
+        font-size: 0.9rem;
+    }
+    .zones-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+        color: #333;
+    }
+    .zones-table th,
+    .zones-table td {
+        padding: 0.4rem;
+        text-align: left;
+        border-bottom: 1px solid #eee;
+    }
+    .zones-table th {
+        background: #f5f5f5;
+        font-weight: 600;
+        color: #333;
+        border-bottom: 2px solid #ddd;
+    }
+    .zones-table td {
+        color: #333;
+        background: white;
+    }
+    .zones-table tr:hover td {
+        background: #f9f9f9;
+    }
+    .indicator {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+    .indicator.on { background: #4caf50; }
+    .indicator.off { background: #ccc; }
+    .zone-start-btn {
+        background: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        padding: 0.2rem 0.4rem;
+        cursor: pointer;
+        font-size: 0.8rem;
+    }
+    .zone-start-btn:hover {
+        background: #45a049;
+    }
+    .zone-photo {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 5px;
+        overflow: hidden;
+        background-color: #f0f0f0;
+        cursor: pointer;
+    }
+    .zone-photo img {
+        display: block;
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+    }
+    .zone-photo .no-photo {
+        font-size: 1.5rem;
+        color: #888;
+    }
+    @media (max-width: 768px) {
+        .hide-mobile { display: none; }
+        .btn-group button { min-width: 100px; font-size: 0.8rem; }
+    }
+
+    /* Модальное окно для просмотра фотографий */
+    .photo-modal {
+        display: none; /* показ включаем через JS как flex */
+        position: fixed;
+        z-index: 1001;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.9);
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+    }
+
+    .photo-modal-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        max-width: 90%;
+        max-height: 90%;
+    }
+
+    .photo-modal-actions {
+        display: flex;
+        justify-content: center;
+        margin-top: 0;
+    }
+
+    .photo-modal-actions .btn {
+        padding: 8px 16px;
+        font-size: 1rem;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+
+    .photo-modal-actions .btn:hover {
+        background-color: #f0f0f0;
+    }
+
+    .photo-modal-actions .btn:focus {
+        outline: none;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Индикатор связи с сервером -->
+<div id="connection-status" class="connection-status">
+    ⚠️ Нет связи с сервером. Проверьте подключение.
+</div>
+
+<!-- Легенда цветов -->
+<div class="legend">
+    <h4>📋 Легенда статусов групп</h4>
+    <div class="legend-grid">
+        <div class="legend-item">
+            <div class="legend-color" style="background: #4caf50;"></div>
+            <span>Ожидание - группа готова к поливу</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #2196f3;"></div>
+            <span>Полив - группа активно поливается</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #9e9e9e;"></div>
+            <span>Отложено - полив отложен на указанное время</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #f44336;"></div>
+            <span>Ошибка - проблема с системой полива</span>
+        </div>
+    </div>
+</div>
+
+<div class="top-bar">
+    <div class="info-box">
+        <strong>Время:</strong> <span id="datetime">—</span>
+    </div>
+    <div class="info-box">
+        <strong>Температура:</strong> <span id="temp-value">—</span>°C
+    </div>
+    <div class="info-box">
+        <strong>Влажность:</strong> <span id="hum-value">—</span>%
+    </div>
+    <div class="info-box">
+        <strong>Датчик дождя:</strong> <span id="rain-value">—</span>
+        <div style="margin-top:.3rem; display:flex; gap:.3rem; justify-content:center;">
+            <button class="btn-secondary" onclick="setRain(false)">Нет дождя</button>
+            <button class="btn-secondary" onclick="setRain(true)">Дождь</button>
+            <button class="btn-secondary" onclick="setRain(null)">Авто</button>
+        </div>
+    </div>
+</div>
+
+<div class="status-grid" id="groups-container">
+    <!-- Группы будут загружены динамически -->
+</div>
+
+<div style="display:flex; gap:.5rem; justify-content:center; margin-bottom:.5rem;">
+    <button id="emergency-btn" class="emergency">Аварийная остановка</button>
+    <button id="resume-btn" class="emergency" style="background:#4caf50; display:none;">Продолжить полив</button>
+ </div>
+
+<div class="zones-section">
+    <div class="zones-header">
+        <h3>Все зоны (<span id="zones-count">0</span>)</h3>
+    </div>
+    <table class="zones-table">
+        <thead>
+            <tr>
+                <th>Статус</th>
+                <th>№</th>
+                <th>Действие</th>
+                <th>Название</th>
+                <th>Тип</th>
+                <th>Время</th>
+                <th>Группа</th>
+                <th class="hide-mobile">Последний полив</th>
+                <th class="hide-mobile">Следующий полив</th>
+                <th class="hide-mobile">Фото</th>
+            </tr>
+        </thead>
+        <tbody id="zones-table-body">
+            <!-- Зоны будут загружены динамически -->
+        </tbody>
+    </table>
+</div>
+
+<!-- Модальное окно для просмотра фотографий -->
+<div id="photoModal" class="photo-modal">
+    <div class="photo-modal-content">
+        <img id="photoModalImg" src="" alt="Фото зоны">
+        <div class="photo-modal-actions">
+            <button class="btn btn-primary" onclick="closePhotoModal()">Закрыть</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Загрузка и обновление данных статуса
+    let statusData = null;
+    let zonesData = [];
+    let connectionError = false;
+    
+    async function loadStatusData() {
+        try {
+            statusData = await api.get('/api/status');
+            updateStatusDisplay();
+            hideConnectionError();
+        } catch (error) {
+            console.error('Ошибка загрузки статуса:', error);
+            showConnectionError();
+        }
+    }
+    
+    async function loadZonesData() {
+        try {
+            zonesData = await api.get('/api/zones');
+            await updateZonesTable();
+            hideConnectionError();
+        } catch (error) {
+            console.error('Ошибка загрузки зон:', error);
+            showConnectionError();
+        }
+    }
+    
+    function showConnectionError() {
+        if (!connectionError) {
+            connectionError = true;
+            document.getElementById('connection-status').classList.add('show');
+        }
+    }
+    
+    function hideConnectionError() {
+        if (connectionError) {
+            connectionError = false;
+            document.getElementById('connection-status').classList.remove('show');
+        }
+    }
+    
+    function updateStatusDisplay() {
+        if (!statusData) return;
+        
+        // Обновляем время и датчики
+        document.getElementById('datetime').textContent = statusData.datetime;
+        document.getElementById('temp-value').textContent = statusData.temperature;
+        document.getElementById('hum-value').textContent = statusData.humidity;
+        document.getElementById('rain-value').textContent = statusData.rain_sensor;
+        
+        // Обновляем группы
+        const container = document.getElementById('groups-container');
+        container.innerHTML = '';
+        
+        // Отображаем кнопку возобновления при аварийной остановке
+        const resumeBtn = document.getElementById('resume-btn');
+        if (statusData.emergency_stop) {
+            resumeBtn.style.display = 'inline-block';
+        } else {
+            resumeBtn.style.display = 'none';
+        }
+
+        statusData.groups.forEach(group => {
+            const card = document.createElement('div');
+            // Тестовая имитация расхода воды: если статус watering, включаем анимацию flow-active
+            const flowActive = group.status === 'watering' && Math.random() > 0.3; // 70% шанса
+            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
+            
+            const statusText = getStatusText(group);
+            const postponeText = group.status === 'postponed' && group.postpone_until ? `Не будет поливаться до: ${group.postpone_until}` : '—';
+            
+            // Всегда показываем кнопки отложенного полива
+            const postponeButtons = `
+                <div class="btn-group">
+                    <button class="delay" onclick="delayGroup(${group.id}, 1)">+1 день</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 2)">+2 дня</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 3)">+3 дня</button>
+                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">Продолжить по расписанию</button>` : ''}
+                </div>
+            `;
+            
+            card.innerHTML = `
+                <div class="group-header">${group.name}</div>
+                <div>${statusText}</div>
+                <div class="postpone-until">${postponeText}</div>
+                ${postponeButtons}
+                <div class="btn-group">
+                    <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
+                </div>
+            `;
+            
+            container.appendChild(card);
+        });
+    }
+
+    async function setRain(on) {
+        try {
+            const res = await fetch('/api/rain-toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ on })
+            });
+            const data = await res.json();
+            if (data && data.success) {
+                showNotification('Статус дождя обновлен', 'success');
+                await loadStatusData();
+            } else {
+                showNotification('Ошибка обновления статуса дождя', 'error');
+            }
+        } catch (e) {
+            showNotification('Ошибка сети при обновлении статуса дождя', 'error');
+        }
+    }
+    
+    function getStatusText(group) {
+        switch (group.status) {
+            case 'waiting': return 'Ожидание начала полива';
+            case 'watering': return `Полив — Зона ${group.current_zone}`;
+            case 'error': return 'Авария — Ошибка счётчика';
+            case 'postponed': return 'Полив отложен из-за дождя';
+            default: return 'Неизвестный статус';
+        }
+    }
+    
+    async function updateZonesTable() {
+        const tbody = document.getElementById('zones-table-body');
+        const countSpan = document.getElementById('zones-count');
+        
+        tbody.innerHTML = '';
+        
+        // Фильтруем зоны, исключая группу 999 (БЕЗ ПОЛИВА)
+        const filteredZones = zonesData.filter(zone => zone.group_id !== 999);
+        
+        countSpan.textContent = filteredZones.length;
+        
+        // Получаем имена групп для отображения вместо чисел
+        const groups = await api.get('/api/groups');
+        const groupNameById = {};
+        groups.forEach(g => { groupNameById[g.id] = g.name; });
+
+        // Загружаем время следующего полива для всех зон
+        const nextWateringPromises = filteredZones.map(async (zone) => {
+            try {
+                const response = await fetch(`/api/zones/${zone.id}/next-watering`);
+                const data = await response.json();
+                return { zone_id: zone.id, next_watering: data.next_watering, next_datetime: data.next_datetime };
+            } catch (error) {
+                console.error(`Ошибка получения времени полива для зоны ${zone.id}:`, error);
+                return { zone_id: zone.id, next_watering: 'Ошибка' };
+            }
+        });
+        
+        const nextWateringData = await Promise.all(nextWateringPromises);
+        const nextWateringMap = {};
+        nextWateringData.forEach(item => {
+            nextWateringMap[item.zone_id] = item.next_watering;
+        });
+        
+        filteredZones.forEach(zone => {
+            let nextWatering = nextWateringMap[zone.id] || 'Ошибка';
+            // Подмена на даты/сообщения
+            if (statusData.emergency_stop) {
+                nextWatering = 'До отмены аварии';
+            } else if (zone.postpone_until) {
+                // если есть отложка на зоне
+                nextWatering = zone.postpone_until.replace(' ', ' ');
+            } else {
+                const nextDT = (nextWateringData.find(x => x.zone_id === zone.id) || {}).next_datetime;
+                if (nextDT) {
+                    // Пишем дату и время
+                    nextWatering = nextDT.replace('T',' ').slice(0,16);
+                }
+            }
+            const tr = document.createElement('tr');
+            
+            tr.innerHTML = `
+                <td><span class="indicator ${zone.state}"></span></td>
+                <td>${zone.id}</td>
+                <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
+                <td>${zone.name}</td>
+                <td>${zone.icon}</td>
+                <td>${zone.duration} мин</td>
+                <td>${groupNameById[zone.group_id] || zone.group_id}</td>
+                <td class="hide-mobile">30.04 ${String(zone.id % 24).padStart(2, '0')}:00</td>
+                <td>${nextWatering}</td>
+                <td>
+                    <div class="zone-photo">
+                        ${zone.photo_path ? 
+                            `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
+                            `<div class="no-photo" title="Нет фото">📷</div>`
+                        }
+                    </div>
+                </td>
+            `;
+            
+            tbody.appendChild(tr);
+        });
+    }
+    
+    // Обработчики действий
+    async function delayGroup(groupId, days) {
+        try {
+            const response = await api.post('/api/postpone', {
+                group_id: groupId,
+                days: days,
+                action: 'postpone'
+            });
+            
+            if (response.success) {
+                showNotification(response.message, 'success');
+                loadStatusData(); // Обновляем данные
+            } else {
+                showNotification(response.message, 'error');
+            }
+        } catch (error) {
+            console.error('Ошибка при отложке полива:', error);
+            showNotification('Ошибка при отложке полива', 'error');
+        }
+    }
+    
+    async function cancelPostpone(groupId) {
+        try {
+            const response = await api.post('/api/postpone', {
+                group_id: groupId,
+                action: 'cancel'
+            });
+            
+            if (response.success) {
+                showNotification(response.message, 'success');
+                loadStatusData(); // Обновляем данные
+            } else {
+                showNotification(response.message, 'error');
+            }
+        } catch (error) {
+            console.error('Ошибка при отмене отложенного полива:', error);
+            showNotification('Ошибка при отмене отложенного полива', 'error');
+        }
+    }
+    
+    async function startGroup(groupId) {
+        try {
+            showNotification(`Запуск группы ${groupId}`, 'success');
+            // TODO: API вызов для запуска группы
+        } catch (error) {
+            showNotification('Ошибка при запуске группы', 'error');
+        }
+    }
+    
+    async function stopGroup(groupId) {
+        if (!confirm(`Остановить полив группы ${groupId}?`)) return;
+        
+        try {
+            const res = await fetch(`/api/groups/${groupId}/stop`, { method: 'POST' });
+            const data = await res.json();
+            if (data && data.success) {
+                showNotification(data.message, 'success');
+                await loadStatusData();
+                await loadZonesData();
+            } else {
+                showNotification(data.message || 'Ошибка остановки группы', 'error');
+            }
+        } catch (error) {
+            showNotification('Ошибка при остановке группы', 'error');
+        }
+    }
+    
+    async function startOrStopZone(zoneId, currentState) {
+        try {
+            // Находим группу зоны
+            const zone = zonesData.find(z => z.id === zoneId);
+            if (!zone) return;
+            const url = currentState === 'on' ? `/api/zones/${zoneId}/stop` : `/api/groups/${zone.group_id}/start-zone/${zoneId}`;
+            const res = await fetch(url, { method: 'POST' });
+            const data = await res.json();
+            if (data && data.success) {
+                showNotification(data.message, 'success');
+                await loadStatusData();
+                await loadZonesData();
+            } else {
+                showNotification(data.message || 'Ошибка запуска зоны', 'error');
+            }
+        } catch (error) {
+            showNotification('Ошибка управления зоной', 'error');
+        }
+    }
+    
+    async function emergencyStop() {
+        if (!confirm('Аварийная остановка всех зон?')) return;
+        
+        try {
+            const res = await fetch('/api/emergency-stop', { method: 'POST' });
+            const data = await res.json();
+            if (data && data.success) {
+                showNotification(data.message, 'warning');
+                await loadStatusData();
+                await loadZonesData();
+                // Показать кнопку возобновления явно
+                document.getElementById('resume-btn').style.display = 'inline-block';
+            } else {
+                showNotification(data.message || 'Ошибка аварийной остановки', 'error');
+            }
+        } catch (error) {
+            showNotification('Ошибка при аварийной остановке', 'error');
+        }
+    }
+
+    async function resumeSchedule() {
+        try {
+            const res = await fetch('/api/emergency-resume', { method: 'POST' });
+            const data = await res.json();
+            if (data && data.success) {
+                showNotification(data.message, 'success');
+                await loadStatusData();
+                await loadZonesData();
+                // Скрыть кнопку возобновления
+                document.getElementById('resume-btn').style.display = 'none';
+            } else {
+                showNotification(data.message || 'Ошибка возобновления полива', 'error');
+            }
+        } catch (error) {
+            showNotification('Ошибка возобновления полива', 'error');
+        }
+    }
+
+    // Модальное окно для просмотра фотографий
+    function showPhotoModal(photoUrl) {
+        const img = document.getElementById('photoModalImg');
+        img.src = photoUrl;
+        const modal = document.getElementById('photoModal');
+        modal.style.display = 'flex'; // чтобы сработало центрирование по flex
+    }
+
+    function closePhotoModal() {
+        document.getElementById('photoModal').style.display = 'none';
+    }
+    
+    // Инициализация
+    document.addEventListener('DOMContentLoaded', () => {
+        loadStatusData();
+        loadZonesData();
+        
+        // Обновление данных каждые 30 секунд
+        setInterval(() => {
+            loadStatusData();
+            loadZonesData();
+        }, 30000);
+        
+        // Обработчик аварийной остановки
+        document.getElementById('emergency-btn').addEventListener('click', emergencyStop);
+        document.getElementById('resume-btn').addEventListener('click', resumeSchedule);
+    });
+</script>
+{% endblock %}

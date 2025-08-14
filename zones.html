@@ -80,35 +80,86 @@
         <button onclick="applyBulk()">Применить</button>
       </div>
     </div>
+    <div class="modal" id="zoneModal">
+      <div class="modal-content">
+        <h3>Создать зону</h3>
+        <form id="zoneForm" onsubmit="event.preventDefault(); createZone();">
+          <div class="field"><label>Название</label><input type="text" id="zoneName" required /></div>
+          <div class="field"><label>Иконка</label><select id="zoneIcon"><option>🌿</option><option>🌳</option><option>🌺</option><option>🧱</option></select></div>
+          <div class="field"><label>Длительность (мин)</label><input type="number" id="zoneDur" min="1" required value="10" /></div>
+          <div class="field"><label>Группа</label><select id="zoneGroup"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+          <div class="field"><label>MQTT-топик</label><input type="text" id="zoneTopic" placeholder="/devices/.../controls/K1" required /></div>
+          <button type="submit" class="create-btn">Создать</button>
+          <button type="button" class="cancel-btn" onclick="closeModal()">Отмена</button>
+        </form>
+      </div>
+    </div>
   </main>
   <footer>Статус системы актуален на 01.05.2025 00:00</footer>
   <script>
+    // Демо-страница зон: генерация 48 зон, редактирование, массовые действия и ручной запуск
     const zones = [];
     for(let i=1;i<=48;i++){ zones.push({id:i,state:i===15?'on':'off',name:`Зона ${i}`,icon:['🌿','🌳','🌺','🧱'][i%4],duration:10,group:Math.floor((i-1)/12)+1,topic:`/devices/wb-mr6c_${100 + Math.floor((i-1)/6)}/controls/K${(i-1)%6 + 1}`}); }
     const tbody = document.getElementById('zones-body');
-    zones.forEach(z => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><input type='checkbox' class='row-select'/></td>
-        <td><span class="indicator ${z.state}"></span></td>
-        <td>${z.id}</td>
-        <td><button class="start-btn" onclick="startZone(${z.id})">▶</button></td>
-        <td><input type="text" value="${z.name}" onchange="markChanged(this)" /></td>
-        <td><select onchange="markChanged(this)"><option${z.icon==='🌿'?' selected':''}>🌿</option><option${z.icon==='🌳'?' selected':''}>🌳</option><option${z.icon==='🌺'?' selected':''}>🌺</option><option${z.icon==='🧱'?' selected':''}>🧱</option></select></td>
-        <td><input type="number" value="${z.duration}" onchange="markChanged(this)" min="1"/></td>
-        <td><select onchange="markChanged(this)"><option${z.group===1?' selected':''}>1</option><option${z.group===2?' selected':''}>2</option><option${z.group===3?' selected':''}>3</option><option${z.group===4?' selected':''}>4</option></select></td>
-        <td><input type="text" value="${z.topic}" onchange="markChanged(this)" /></td>
-        <td><button class="save-btn" disabled onclick="saveRow(this,${z.id})">💾</button></td>
-        <td><button class="del-btn" onclick="deleteRow(${z.id})">🗑️</button></td>
-      `;
-      tbody.appendChild(tr);
-    });
+    function renderZonesTable(){
+      tbody.innerHTML='';
+      zones.forEach(z => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><input type='checkbox' class='row-select'/></td>
+          <td><span class="indicator ${z.state}"></span></td>
+          <td>${z.id}</td>
+          <td><button class="start-btn" onclick="startZone(${z.id})">▶</button></td>
+          <td><input type="text" value="${z.name}" onchange="markChanged(this)" /></td>
+          <td><select onchange="markChanged(this)"><option${z.icon==='🌿'?' selected':''}>🌿</option><option${z.icon==='🌳'?' selected':''}>🌳</option><option${z.icon==='🌺'?' selected':''}>🌺</option><option${z.icon==='🧱'?' selected':''}>🧱</option></select></td>
+          <td><input type="number" value="${z.duration}" onchange="markChanged(this)" min="1"/></td>
+          <td><select onchange="markChanged(this)"><option${z.group===1?' selected':''}>1</option><option${z.group===2?' selected':''}>2</option><option${z.group===3?' selected':''}>3</option><option${z.group===4?' selected':''}>4</option></select></td>
+          <td><input type="text" value="${z.topic}" onchange="markChanged(this)" /></td>
+          <td><button class="save-btn" disabled onclick="saveRow(this,${z.id})">💾</button></td>
+          <td><button class="del-btn" onclick="deleteRow(this,${z.id})">🗑️</button></td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+    renderZonesTable();
     function markChanged(el){el.closest('tr').querySelector('.save-btn').disabled=false;}
     function saveRow(btn,id){btn.disabled=true;}
-    function deleteRow(id){if(confirm('Удалить зону №'+id+'?'))event.target.closest('tr').remove();}
+    // Безопасное удаление строки: не используем глобальный event, передаем кнопку-источник
+    function deleteRow(btn,id){if(confirm('Удалить зону №'+id+'?'))btn.closest('tr').remove();}
     function startZone(id){alert('Запущена зона '+id);}
     function toggleAll(cb){document.querySelectorAll('.row-select').forEach(ch=>ch.checked=cb.checked);}
-    function applyBulk(){const icon=document.getElementById('bulkIcon').value;const dur=document.getElementById('bulkDur').value;const grp=document.getElementById('bulkGroup').value;document.querySelectorAll('.row-select:checked').forEach(ch=>{const row=ch.closest('tr');if(icon!==''){row.querySelectorAll('select')[1].value=icon;}if(dur!==''){row.querySelectorAll('input[type=number]')[0].value=dur;}if(grp!==''){row.querySelectorAll('select')[2].value=grp;}row.querySelector('.save-btn').disabled=false;});}
+    // Массовое применение: корректно выбираем селекты (0 — иконка, 1 — группа)
+    function applyBulk(){
+      const icon=document.getElementById('bulkIcon').value;
+      const dur=document.getElementById('bulkDur').value;
+      const grp=document.getElementById('bulkGroup').value;
+      document.querySelectorAll('.row-select:checked').forEach(ch=>{
+        const row=ch.closest('tr');
+        const selects=row.querySelectorAll('select');
+        const iconSelect=selects[0];
+        const groupSelect=selects[1];
+        if(icon!==''){iconSelect.value=icon;}
+        if(dur!==''){row.querySelector('input[type=number]').value=dur;}
+        if(grp!==''){groupSelect.value=grp;}
+        row.querySelector('.save-btn').disabled=false;
+      });
+    }
+
+    // Модалка добавления зоны
+    function openModal(){document.getElementById('zoneModal').style.display='flex';}
+    function closeModal(){document.getElementById('zoneModal').style.display='none';document.getElementById('zoneForm').reset();}
+    function createZone(){
+      const name=document.getElementById('zoneName').value.trim();
+      const icon=document.getElementById('zoneIcon').value;
+      const duration=+document.getElementById('zoneDur').value;
+      const group=+document.getElementById('zoneGroup').value;
+      const topic=document.getElementById('zoneTopic').value.trim();
+      if(!name||!duration||!group||!topic){alert('Заполните все поля');return;}
+      const id=zones.length?Math.max(...zones.map(z=>z.id))+1:1;
+      zones.push({id,state:'off',name,icon,duration,group,topic});
+      renderZonesTable();
+      closeModal();
+    }
   </script>
 </body>
 </html>
