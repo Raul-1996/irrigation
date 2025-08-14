@@ -111,7 +111,7 @@ def api_map():
         if request.method == 'GET':
             files = [f for f in os.listdir(MAP_FOLDER) if os.path.isfile(os.path.join(MAP_FOLDER, f))]
             if files:
-                return jsonify({'success': True, 'path': f"maps/{files[0]}"})
+                return jsonify({'success': True, 'path': f"media/maps/{files[0]}"})
             return jsonify({'success': True, 'path': None})
         else:
             if 'file' not in request.files:
@@ -131,7 +131,7 @@ def api_map():
             filename = f"zones_map{ext}"
             save_path = os.path.join(MAP_FOLDER, filename)
             file.save(save_path)
-            return jsonify({'success': True, 'message': 'Карта загружена', 'path': f"maps/{filename}"})
+            return jsonify({'success': True, 'message': 'Карта загружена', 'path': f"media/maps/{filename}"})
     except Exception as e:
         logger.error(f"Ошибка работы с картой зон: {e}")
         return jsonify({'success': False, 'message': 'Ошибка работы с картой'}), 500
