@@ -23,11 +23,12 @@ if __name__ == '__main__':
     print("-" * 50)
     
     try:
+        testing = os.environ.get('TESTING') == '1'
         app.run(
-            debug=True,
+            debug=not testing,
             host='0.0.0.0',
             port=8080,
-            use_reloader=True
+            use_reloader=False if testing else True
         )
     except KeyboardInterrupt:
         print("\n👋 Приложение остановлено")

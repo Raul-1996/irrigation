@@ -11,6 +11,12 @@ import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
 from flask_wtf.csrf import CSRFProtect
 from config import Config
+from routes.status import status_bp
+from routes.files import files_bp
+from routes.zones import zones_bp
+from routes.programs import programs_bp
+from routes.groups import groups_bp
+from routes.auth import auth_bp
 from werkzeug.security import check_password_hash
 
 # Настройка логирования
@@ -90,9 +96,16 @@ def generate_water_data(days, zone):
 
 def login_required(view):
     def wrapper(*args, **kwargs):
+        # Deprecated: use role-based decorators below
+        return view(*args, **kwargs)
+    wrapper.__name__ = view.__name__
+    return wrapper
+
+def admin_required(view):
+    def wrapper(*args, **kwargs):
         if app.config.get('TESTING'):
             return view(*args, **kwargs)
-        if not session.get('logged_in'):
+        if session.get('role') != 'admin':
             return redirect(url_for('login'))
         return view(*args, **kwargs)
     wrapper.__name__ = view.__name__
@@ -104,6 +117,9 @@ _SCHEDULER_INIT_DONE = False
 @app.before_request
 def _init_scheduler_before_request():
     global _SCHEDULER_INIT_DONE
+    # Default role is "user" (no password)
+    if 'role' not in session:
+        session['role'] = 'user'
     if not _SCHEDULER_INIT_DONE and not app.config.get('TESTING'):
         try:
             init_scheduler(db)
@@ -112,48 +128,15 @@ def _init_scheduler_before_request():
             logger.error(f"Ошибка инициализации планировщика: {e}")
 
 
-@app.route('/login', methods=['GET'])
-def login():
-    return render_template('login.html')
+app.register_blueprint(status_bp)
+app.register_blueprint(files_bp)
+app.register_blueprint(zones_bp)
+app.register_blueprint(programs_bp)
+app.register_blueprint(groups_bp)
+app.register_blueprint(auth_bp)
 
 
-@app.route('/')
-@login_required
-def index():
-    return render_template('status.html')
-
-@app.route('/status')
-@login_required
-def status():
-    return render_template('status.html')
-
-@app.route('/zones')
-@login_required
-def zones_page():
-    return render_template('zones.html')
-
-@app.route('/programs')
-@login_required
-def programs_page():
-    return render_template('programs.html')
-
-@app.route('/logs')
-@login_required
-def logs_page():
-    return render_template('logs.html')
-
-@app.route('/water')
-@login_required
-def water_page():
-    return render_template('water.html')
-
-# Карта зон
 MAP_FOLDER = MAP_DIR  # использовать новый каталог media/maps
-
-@app.route('/map')
-@login_required
-def map_page():
-    return render_template('map.html')
 
 
 @csrf.exempt
@@ -165,6 +148,7 @@ def api_login():
         stored_hash = db.get_password_hash()
         if stored_hash and check_password_hash(stored_hash, password):
             session['logged_in'] = True
+            session['role'] = 'admin'
             return jsonify({'success': True})
         return jsonify({'success': False, 'message': 'Неверный пароль'}), 401
     except Exception as e:
@@ -179,7 +163,9 @@ def api_auth_status():
 
 @app.route('/logout', methods=['GET'])
 def api_logout():
-    session.clear()
+    # Возвращаем роль в user
+    session['logged_in'] = False
+    session['role'] = 'user'
     return redirect(url_for('login'))
 
 

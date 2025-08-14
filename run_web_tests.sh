@@ -3,24 +3,20 @@
 echo "🧪 Запуск веб-тестов WB-Irrigation..."
 echo "=================================================="
 
-# Проверяем, что виртуальная среда активирована
+# Автоактивация venv при необходимости
 if [[ "$VIRTUAL_ENV" == "" ]]; then
-    echo "❌ Виртуальная среда не активирована"
-    echo "Запустите: source venv/bin/activate"
-    exit 1
+    if [[ -f "venv/bin/activate" ]]; then
+        source venv/bin/activate
+    fi
 fi
 
 # Устанавливаем зависимости для веб-тестирования
 echo "📦 Установка зависимостей для веб-тестирования..."
 pip install selenium==4.15.2 webdriver-manager==4.0.1 pytest==7.4.3 pytest-selenium==4.0.1
 
-# Проверяем, что Chrome установлен
-if ! command -v google-chrome &> /dev/null && ! command -v chromium-browser &> /dev/null; then
-    echo "⚠️  Chrome не найден. Установите Chrome для запуска веб-тестов."
-    echo "На macOS: brew install --cask google-chrome"
-    echo "На Ubuntu: sudo apt install chromium-browser"
-    exit 1
-fi
+# Настраиваем docker selenium по умолчанию, если есть переменная
+export BROWSER=${BROWSER:-chrome}
+export SELENIUM_REMOTE_URL=${SELENIUM_REMOTE_URL:-http://localhost:4444/wd/hub}
 
 # Останавливаем все запущенные процессы Flask
 echo "🛑 Остановка существующих процессов Flask..."

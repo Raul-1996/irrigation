@@ -336,11 +336,13 @@
             </div>
             <nav>
                 <a href="/" class="{% if request.endpoint == 'index' or request.endpoint == 'status' %}active{% endif %}">Статус</a>
-                <a href="/zones" class="{% if request.endpoint == 'zones_page' %}active{% endif %}">Зоны и группы</a>
-                <a href="/programs" class="{% if request.endpoint == 'programs_page' %}active{% endif %}">Программы</a>
-                <a href="/logs" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">Логи</a>
                 <a href="/water" class="{% if request.endpoint == 'water_page' %}active{% endif %}">Расход воды</a>
                 <a href="/map" class="{% if request.endpoint == 'map_page' %}active{% endif %}">Карта зон</a>
+                {% if session.get('role') == 'admin' %}
+                    <a href="/zones" class="{% if request.endpoint == 'zones_page' %}active{% endif %}">Зоны и группы</a>
+                    <a href="/programs" class="{% if request.endpoint == 'programs_page' %}active{% endif %}">Программы</a>
+                    <a href="/logs" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">Логи</a>
+                {% endif %}
                 <a href="/logout">Выйти</a>
             </nav>
         </div>

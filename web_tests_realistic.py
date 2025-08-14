@@ -26,6 +26,8 @@ from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.keys import Keys
 import random
 
+BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
+BASE_URL_BROWSER = os.environ.get('TEST_BASE_URL_BROWSER', os.environ.get('TEST_BASE_URL', BASE_URL_HOST)).rstrip('/')
 class RealisticWebInterfaceTest(unittest.TestCase):
     """Реалистичные тесты веб-интерфейса WB-Irrigation"""
     
@@ -47,15 +49,18 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         chrome_options.add_argument("--disable-web-security")
         chrome_options.add_argument("--allow-running-insecure-content")
         
-        # Попытка запуска Chrome с автоматической установкой драйвера
+        # Пытаемся подключиться к удаленному Selenium (Docker)
         try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-            cls.driver = webdriver.Chrome(service=service, options=chrome_options)
+            remote_url = os.environ.get('SELENIUM_REMOTE_URL')
+            if remote_url:
+                from selenium.webdriver import Remote
+                cls.driver = Remote(command_executor=remote_url, options=chrome_options)
+            else:
+                cls.driver = webdriver.Chrome(options=chrome_options)
             cls.driver.implicitly_wait(10)
-            print("✅ Chrome WebDriver успешно инициализирован с автоматической установкой драйвера")
+            print("✅ WebDriver инициализирован")
         except Exception as e:
-            print(f"⚠️  Не удалось инициализировать Chrome WebDriver: {e}")
+            print(f"⚠️  Не удалось инициализировать WebDriver: {e}")
             print("🔄 Переключаемся на режим без браузера")
             cls.driver = None
         
@@ -109,7 +114,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         max_attempts = 30
         for attempt in range(max_attempts):
             try:
-                response = requests.get('http://localhost:8080/api/status', timeout=1)
+                response = requests.get(f"{BASE_URL_HOST}/api/status", timeout=1)
                 if response.status_code == 200:
                     print(f"✅ Приложение запущено на попытке {attempt + 1}")
                     return
@@ -154,7 +159,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Открываем главную страницу
-        self.driver.get('http://localhost:8080/')
+        self.driver.get(f'{BASE_URL_BROWSER}/')
         self.simulate_human_delay()
         
         # Проверяем заголовок страницы
@@ -188,7 +193,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Переходим на страницу зон
-        self.driver.get('http://localhost:8080/zones')
+        self.driver.get(f'{BASE_URL_BROWSER}/zones')
         self.simulate_human_delay()
         
         # Ждем загрузки зон
@@ -232,7 +237,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Переходим на страницу программ
-        self.driver.get('http://localhost:8080/programs')
+        self.driver.get(f'{BASE_URL_BROWSER}/programs')
         self.simulate_human_delay()
         
         # Ищем кнопку создания новой программы
@@ -291,7 +296,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Переходим на страницу зон
-        self.driver.get('http://localhost:8080/zones')
+        self.driver.get(f'{BASE_URL_BROWSER}/zones')
         self.simulate_human_delay()
         
         # Находим первую зону
@@ -338,7 +343,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Переходим на страницу логов
-        self.driver.get('http://localhost:8080/logs')
+        self.driver.get(f'{BASE_URL_BROWSER}/logs')
         self.simulate_human_delay()
         
         # Ждем загрузки логов
@@ -369,7 +374,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Переходим на страницу расхода воды
-        self.driver.get('http://localhost:8080/water')
+        self.driver.get(f'{BASE_URL_BROWSER}/water')
         self.simulate_human_delay()
         
         # Проверяем наличие графиков
@@ -401,7 +406,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Переходим на главную страницу
-        self.driver.get('http://localhost:8080/')
+        self.driver.get(f'{BASE_URL_BROWSER}/')
         self.simulate_human_delay()
         
         # Ищем кнопки отложенного полива
@@ -454,7 +459,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             self.simulate_human_delay()
             
             # Переходим на главную страницу
-            self.driver.get('http://localhost:8080/')
+            self.driver.get(f'{BASE_URL_BROWSER}/')
             self.simulate_human_delay()
             
             # Проверяем, что страница загрузилась
@@ -479,7 +484,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             return
         
         # Пытаемся перейти на несуществующую страницу
-        self.driver.get('http://localhost:8080/nonexistent')
+        self.driver.get(f'{BASE_URL_BROWSER}/nonexistent')
         self.simulate_human_delay()
         
         # Проверяем, что отображается страница 404
@@ -488,7 +493,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         print("✅ Страница 404 отображается корректно")
         
         # Возвращаемся на главную страницу
-        self.driver.get('http://localhost:8080/')
+        self.driver.get(f'{BASE_URL_BROWSER}/')
         self.simulate_human_delay()
         
         print("✅ Обработка ошибок работает корректно")
@@ -506,7 +511,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         
         for page in pages:
             start_time = time.time()
-            self.driver.get(f'http://localhost:8080{page}')
+            self.driver.get(f'{BASE_URL_BROWSER}{page}')
             
             # Ждем полной загрузки страницы
             WebDriverWait(self.driver, 10).until(

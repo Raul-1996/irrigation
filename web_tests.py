@@ -23,6 +23,10 @@ import subprocess
 import requests
 import json
 
+# Адрес для внутренних запросов (host) и адрес, который будет открывать браузер внутри Docker
+BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
+BASE_URL_BROWSER = os.environ.get('TEST_BASE_URL_BROWSER', os.environ.get('TEST_BASE_URL', BASE_URL_HOST)).rstrip('/')
+
 class WebInterfaceTest(unittest.TestCase):
     """Тесты веб-интерфейса WB-Irrigation"""
     
@@ -42,9 +46,13 @@ class WebInterfaceTest(unittest.TestCase):
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
         
-        # Инициализация драйвера
-        service = Service(ChromeDriverManager().install())
-        cls.driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Инициализация драйвера: если задан SELENIUM_REMOTE_URL — идем в удаленный Selenium
+        remote_url = os.environ.get('SELENIUM_REMOTE_URL')
+        if remote_url:
+            from selenium.webdriver import Remote
+            cls.driver = Remote(command_executor=remote_url, options=chrome_options)
+        else:
+            cls.driver = webdriver.Chrome(options=chrome_options)
         cls.driver.implicitly_wait(10)
         
         # Запуск Flask приложения в отдельном потоке
@@ -97,7 +105,7 @@ class WebInterfaceTest(unittest.TestCase):
         max_attempts = 30
         for attempt in range(max_attempts):
             try:
-                response = requests.get('http://localhost:8080/api/status', timeout=1)
+                response = requests.get(f"{BASE_URL_HOST}/api/status", timeout=1)
                 if response.status_code == 200:
                     print("✅ Flask приложение запущено")
                     return
@@ -122,8 +130,16 @@ class WebInterfaceTest(unittest.TestCase):
     
     def setUp(self):
         """Настройка перед каждым тестом"""
-        self.driver.get("http://localhost:8080")
-        time.sleep(2)
+        self.driver.get(BASE_URL_BROWSER)
+        time.sleep(0.5)
+        # Логинимся как админ для доступа к защищенным страницам
+        try:
+            self.driver.execute_script(
+                "return fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'1234'})}).then(()=>true).catch(()=>false)"
+            )
+            time.sleep(0.5)
+        except Exception:
+            pass
     
     def wait_for_element(self, by, value, timeout=10):
         """Ожидание появления элемента"""
