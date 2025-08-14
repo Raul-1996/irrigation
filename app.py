@@ -86,12 +86,17 @@ def login_required(view):
     return wrapper
 
 
-@app.before_first_request
-def _init_scheduler_once():
-    try:
-        init_scheduler(db)
-    except Exception as e:
-        logger.error(f"Ошибка инициализации планировщика: {e}")
+_SCHEDULER_INIT_DONE = False
+
+@app.before_request
+def _init_scheduler_before_request():
+    global _SCHEDULER_INIT_DONE
+    if not _SCHEDULER_INIT_DONE and not app.config.get('TESTING'):
+        try:
+            init_scheduler(db)
+            _SCHEDULER_INIT_DONE = True
+        except Exception as e:
+            logger.error(f"Ошибка инициализации планировщика: {e}")
 
 
 @app.route('/login', methods=['GET'])
@@ -1022,21 +1027,20 @@ def get_zone_photo(zone_id):
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         
-        if not zone.get('photo_path'):
-            return jsonify({'success': False, 'message': 'Фотография не найдена'}), 404
-        
         # Проверяем, запрашивает ли клиент изображение или информацию
         accept_header = request.headers.get('Accept', '')
         
         if 'image' in accept_header or request.args.get('image') == 'true':
             # Возвращаем само изображение
-            filepath = os.path.join('static', zone['photo_path'])
+            photo_path = zone.get('photo_path')
+            if not photo_path:
+                return jsonify({'success': False, 'message': 'Фотография не найдена'}), 404
+            filepath = os.path.join('static', photo_path)
             if not os.path.exists(filepath):
                 return jsonify({'success': False, 'message': 'Файл не найден'}), 404
-            
             return send_file(filepath, mimetype='image/jpeg')
         else:
-            # Возвращаем информацию о фотографии
+            # Возвращаем информацию о фотографии (всегда 200)
             has_photo = bool(zone.get('photo_path'))
             return jsonify({
                 'success': True,

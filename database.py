@@ -121,7 +121,7 @@ class IrrigationDB:
                     cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
                     if cur.fetchone() is None:
                         conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
-                            'password_hash', generate_password_hash('1234')
+                            'password_hash', generate_password_hash('1234', method='pbkdf2:sha256')
                         ))
                         conn.commit()
                     return  # Данные уже есть
@@ -218,13 +218,42 @@ class IrrigationDB:
                 conn.commit()
                 # Пароль по умолчанию 1234
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
-                    'password_hash', generate_password_hash('1234')
+                    'password_hash', generate_password_hash('1234', method='pbkdf2:sha256')
                 ))
                 conn.commit()
                 logger.info("Начальные данные вставлены")
                 
         except Exception as e:
             logger.error(f"Ошибка вставки начальных данных: {e}")
+
+    def _migrate_days_format(self, conn):
+        """Миграция формата дней программ к 0-6 (0=Пн)"""
+        try:
+            cursor = conn.execute('SELECT id, days FROM programs')
+            rows = cursor.fetchall()
+            for pid, days_json in rows:
+                try:
+                    days = json.loads(days_json)
+                    if isinstance(days, list) and days:
+                        # Если значения вне диапазона 0-6 — попробуем сместить из 1-7
+                        if any(d < 0 or d > 6 for d in days):
+                            migrated = []
+                            for d in days:
+                                try:
+                                    nd = int(d) - 1
+                                except Exception:
+                                    continue
+                                if nd < 0:
+                                    nd = 0
+                                if nd > 6:
+                                    nd = 6
+                                migrated.append(nd)
+                            conn.execute('UPDATE programs SET days = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (json.dumps(sorted(set(migrated))), pid))
+                except Exception:
+                    continue
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка миграции формата дней: {e}")
     
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
@@ -819,7 +848,7 @@ class IrrigationDB:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
-                    'password_hash', generate_password_hash(new_password)
+                    'password_hash', generate_password_hash(new_password, method='pbkdf2:sha256')
                 ))
                 conn.commit()
                 return True
