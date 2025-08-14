@@ -5,6 +5,7 @@ import shutil
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import logging
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +21,12 @@ class IrrigationDB:
         """Инициализация базы данных"""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # PRAGMA
+                try:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('PRAGMA foreign_keys=ON')
+                except Exception:
+                    pass
                 # Создание таблиц
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS zones (
@@ -34,6 +41,13 @@ class IrrigationDB:
                         photo_path TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
                     )
                 ''')
                 
@@ -88,6 +102,9 @@ class IrrigationDB:
                 # Вставка начальных данных
                 self._insert_initial_data(conn)
                 
+                # Миграции
+                self._migrate_days_format(conn)
+                
                 logger.info("База данных инициализирована успешно")
                 
         except Exception as e:
@@ -100,6 +117,13 @@ class IrrigationDB:
                 # Проверяем, есть ли уже данные
                 cursor = conn.execute('SELECT COUNT(*) FROM zones')
                 if cursor.fetchone()[0] > 0:
+                    # Убедимся, что задан пароль по умолчанию
+                    cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
+                    if cur.fetchone() is None:
+                        conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
+                            'password_hash', generate_password_hash('1234')
+                        ))
+                        conn.commit()
                     return  # Данные уже есть
                 
                 # Создаем группы
@@ -162,9 +186,10 @@ class IrrigationDB:
                 
                 # Создаем программы
                 programs = [
-                    (1, 'Утренний полив', '06:00', json.dumps([1,2,3,4,5]), json.dumps([1,2,3,4,5])),
-                    (2, 'Вечерний полив', '20:00', json.dumps([1,2,3,4,5]), json.dumps([6,7,8,9,10])),
-                    (3, 'Полив огорода', '07:00', json.dumps([1,2,3,4,5]), json.dumps([15,16,17,18,19,20]))
+                    # Дни недели в формате 0-6 (0=Понедельник)
+                    (1, 'Утренний полив', '06:00', json.dumps([0,1,2,3,4]), json.dumps([1,2,3,4,5])),
+                    (2, 'Вечерний полив', '20:00', json.dumps([0,1,2,3,4]), json.dumps([6,7,8,9,10])),
+                    (3, 'Полив огорода', '07:00', json.dumps([0,1,2,3,4]), json.dumps([15,16,17,18,19,20]))
                 ]
                 
                 for prog_id, name, time, days, zones in programs:
@@ -190,6 +215,11 @@ class IrrigationDB:
                         VALUES (?, ?, ?)
                     ''', (log_type, details, timestamp))
                 
+                conn.commit()
+                # Пароль по умолчанию 1234
+                conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
+                    'password_hash', generate_password_hash('1234')
+                ))
                 conn.commit()
                 logger.info("Начальные данные вставлены")
                 
@@ -451,7 +481,7 @@ class IrrigationDB:
                 programs = []
                 for row in cursor.fetchall():
                     program = dict(row)
-                    program['days'] = json.loads(program['days'])
+                    program['days'] = [int(d) for d in json.loads(program['days'])]
                     program['zones'] = json.loads(program['zones'])
                     programs.append(program)
                 return programs
@@ -560,13 +590,21 @@ class IrrigationDB:
         """Создать новую программу"""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # Нормализуем дни (0-6)
+                try:
+                    norm_days = [int(d) for d in program_data['days']]
+                except Exception:
+                    norm_days = []
+                # Если формат 1..7, смещаем в 0..6
+                if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
+                    norm_days = [max(0, min(6, d - 1)) for d in norm_days]
                 cursor = conn.execute('''
                     INSERT INTO programs (name, time, days, zones)
                     VALUES (?, ?, ?, ?)
                 ''', (
                     program_data['name'],
                     program_data['time'],
-                    json.dumps(program_data['days']),
+                    json.dumps(norm_days),
                     json.dumps(program_data['zones'])
                 ))
                 program_id = cursor.lastrowid
@@ -585,7 +623,7 @@ class IrrigationDB:
                 row = cursor.fetchone()
                 if row:
                     program = dict(row)
-                    program['days'] = json.loads(program['days'])
+                    program['days'] = [int(d) for d in json.loads(program['days'])]
                     program['zones'] = json.loads(program['zones'])
                     return program
                 return None
@@ -597,6 +635,13 @@ class IrrigationDB:
         """Обновить программу"""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # Нормализуем дни (0-6)
+                try:
+                    norm_days = [int(d) for d in program_data['days']]
+                except Exception:
+                    norm_days = []
+                if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
+                    norm_days = [max(0, min(6, d - 1)) for d in norm_days]
                 conn.execute('''
                     UPDATE programs 
                     SET name = ?, time = ?, days = ?, zones = ?, updated_at = CURRENT_TIMESTAMP
@@ -604,7 +649,7 @@ class IrrigationDB:
                 ''', (
                     program_data['name'],
                     program_data['time'],
-                    json.dumps(program_data['days']),
+                    json.dumps(norm_days),
                     json.dumps(program_data['zones']),
                     program_id
                 ))
@@ -758,6 +803,29 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка проверки пересечения программ: {e}")
             return []
+
+    # Настройки/пароль
+    def get_password_hash(self) -> Optional[str]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
+                row = cur.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Ошибка чтения пароля: {e}")
+            return None
+
+    def set_password(self, new_password: str) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
+                    'password_hash', generate_password_hash(new_password)
+                ))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления пароля: {e}")
+            return False
 
     def get_zone_duration(self, zone_id: int) -> int:
         """Получить продолжительность полива зоны"""

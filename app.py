@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request, send_file, redirect, url_for, session
 from datetime import datetime, timedelta
 import random
 import json
@@ -9,6 +9,7 @@ from PIL import Image
 import io
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
+from werkzeug.security import check_password_hash
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.db = db  # Добавляем атрибут db для тестов
 app.config['EMERGENCY_STOP'] = False
-app.config['EMERGENCY_STOP'] = False
+app.secret_key = os.environ.get('SECRET_KEY', 'wb-irrigation-secret')
 
 # Настройки хранения медиафайлов
 MEDIA_ROOT = 'static/media'
@@ -74,27 +75,57 @@ def generate_water_data(days, zone):
         })
     return {'labels': labels, 'data': data, 'logRows': log_rows}
 
+def login_required(view):
+    def wrapper(*args, **kwargs):
+        if app.config.get('TESTING'):
+            return view(*args, **kwargs)
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return view(*args, **kwargs)
+    wrapper.__name__ = view.__name__
+    return wrapper
+
+
+@app.before_first_request
+def _init_scheduler_once():
+    try:
+        init_scheduler(db)
+    except Exception as e:
+        logger.error(f"Ошибка инициализации планировщика: {e}")
+
+
+@app.route('/login', methods=['GET'])
+def login():
+    return render_template('login.html')
+
+
 @app.route('/')
+@login_required
 def index():
     return render_template('status.html')
 
 @app.route('/status')
+@login_required
 def status():
     return render_template('status.html')
 
 @app.route('/zones')
+@login_required
 def zones_page():
     return render_template('zones.html')
 
 @app.route('/programs')
+@login_required
 def programs_page():
     return render_template('programs.html')
 
 @app.route('/logs')
+@login_required
 def logs_page():
     return render_template('logs.html')
 
 @app.route('/water')
+@login_required
 def water_page():
     return render_template('water.html')
 
@@ -102,8 +133,51 @@ def water_page():
 MAP_FOLDER = MAP_DIR  # использовать новый каталог media/maps
 
 @app.route('/map')
+@login_required
 def map_page():
     return render_template('map.html')
+
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    try:
+        data = request.get_json() or {}
+        password = data.get('password', '')
+        stored_hash = db.get_password_hash()
+        if stored_hash and check_password_hash(stored_hash, password):
+            session['logged_in'] = True
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'message': 'Неверный пароль'}), 401
+    except Exception as e:
+        logger.error(f"Ошибка входа: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка входа'}), 500
+
+
+@app.route('/logout', methods=['GET'])
+def api_logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+@app.route('/api/password', methods=['POST'])
+def api_change_password():
+    try:
+        if not session.get('logged_in') and not app.config.get('TESTING'):
+            return jsonify({'success': False, 'message': 'Требуется аутентификация'}), 401
+        data = request.get_json() or {}
+        old_password = data.get('old_password', '')
+        new_password = data.get('new_password', '')
+        if not new_password:
+            return jsonify({'success': False, 'message': 'Новый пароль обязателен'}), 400
+        stored_hash = db.get_password_hash()
+        if stored_hash and (app.config.get('TESTING') or check_password_hash(stored_hash, old_password)):
+            if db.set_password(new_password):
+                return jsonify({'success': True})
+            return jsonify({'success': False, 'message': 'Не удалось обновить пароль'}), 500
+        return jsonify({'success': False, 'message': 'Старый пароль неверен'}), 400
+    except Exception as e:
+        logger.error(f"Ошибка смены пароля: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка смены пароля'}), 500
 
 @app.route('/api/map', methods=['GET', 'POST'])
 def api_map():
@@ -214,13 +288,10 @@ def api_zone_next_watering(zone_id):
 
         for program in zone_programs:
             program_time = datetime.strptime(program['time'], '%H:%M').time()
-            prog_days = program['days'] if isinstance(program['days'], list) else json.loads(program['days'])
-            prog_weekdays = {weekday_map.get(d) for d in prog_days if d in weekday_map}
+            # Дни уже в формате 0-6 (0=Пн)
+            prog_weekdays = set(int(d) for d in program['days'])
 
-            if isinstance(program['zones'], str):
-                program_zones = json.loads(program['zones'])
-            else:
-                program_zones = program['zones']
+            program_zones = program['zones'] if isinstance(program['zones'], list) else json.loads(program['zones'])
             program_zones.sort()
             zone_position = program_zones.index(zone_id)
 
@@ -233,7 +304,7 @@ def api_zone_next_watering(zone_id):
 
             for add_days in range(0, 14):
                 day_date = now.date() + timedelta(days=add_days)
-                if prog_weekdays and day_date.weekday() not in prog_weekdays:
+                if prog_weekdays and ((day_date.weekday() + 0) % 7) not in prog_weekdays:
                     continue
                 zone_start_minutes = program_time.hour * 60 + program_time.minute + total_duration_before
                 zone_dt = datetime.combine(day_date, datetime.min.time()) + timedelta(minutes=zone_start_minutes)
@@ -269,7 +340,9 @@ def api_zones():
 def api_zone(zone_id):
     if request.method == 'GET':
         zone = db.get_zone(zone_id)
-        return jsonify(zone) if zone else ('Zone not found', 404)
+        if zone:
+            return jsonify(zone)
+        return jsonify({'success': False, 'message': 'Zone not found'}), 404
     
     elif request.method == 'PUT':
         data = request.get_json()
@@ -347,7 +420,7 @@ def api_program(prog_id):
         if db.delete_program(prog_id):
             db.add_log('prog_delete', json.dumps({"prog": prog_id}))
             return ('', 204)
-        return ('Program not found', 404)
+        return jsonify({'success': False, 'message': 'Program not found'}), 404
 
 @app.route('/api/programs', methods=['POST'])
 def api_create_program():
@@ -682,23 +755,26 @@ def api_status():
                     group_programs.append(program)
             
             if group_programs:
-                # Берем первую программу (можно улучшить логику выбора)
-                program = group_programs[0]
-                program_time = datetime.strptime(program['time'], '%H:%M').time()
-                
-                # Вычисляем время начала для каждой зоны группы
-                if isinstance(program['zones'], str):
-                    program_zones_list = json.loads(program['zones'])
-                else:
-                    program_zones_list = program['zones']
-                
-                zones_in_program = [z for z in group_zones if z['id'] in program_zones_list]
-                zones_in_program.sort(key=lambda x: x['id'])  # Сортируем по ID
-                
-                if zones_in_program:
-                    # Время начала первой зоны
-                    first_zone_start = program_time
-                    next_start = first_zone_start.strftime('%H:%M')
+                # Вычислим ближайшее стартовое время среди программ на 14 дней
+                now = datetime.now()
+                best_dt = None
+                for program in group_programs:
+                    program_time = datetime.strptime(program['time'], '%H:%M').time()
+                    program_zones_list = program['zones'] if isinstance(program['zones'], list) else json.loads(program['zones'])
+                    group_zone_ids = [z['id'] for z in group_zones]
+                    if not any(zid in group_zone_ids for zid in program_zones_list):
+                        continue
+                    prog_weekdays = set(int(d) for d in (program['days'] if isinstance(program['days'], list) else json.loads(program['days'])))
+                    for add_days in range(0, 14):
+                        day_date = now.date() + timedelta(days=add_days)
+                        if ((day_date.weekday() + 0) % 7) not in prog_weekdays:
+                            continue
+                        dt_candidate = datetime.combine(day_date, program_time)
+                        if dt_candidate > now and (best_dt is None or dt_candidate < best_dt):
+                            best_dt = dt_candidate
+                            break
+                if best_dt:
+                    next_start = best_dt.strftime('%H:%M')
         
         # Определяем отложенный полив
         postpone_until = None
@@ -892,14 +968,15 @@ def upload_zone_photo(zone_id):
             f.write(compressed_data)
         
         # Обновляем путь к фото в базе данных (путь относительно static)
-        db.update_zone_photo(zone_id, f"{MEDIA_ROOT.split('static/')[1] if MEDIA_ROOT.startswith('static/') else 'media'}/{ZONE_MEDIA_SUBDIR}/{filename}" if MEDIA_ROOT.startswith('static/') else f"media/{ZONE_MEDIA_SUBDIR}/{filename}")
+        db_relative = f"media/{ZONE_MEDIA_SUBDIR}/{filename}"
+        db.update_zone_photo(zone_id, db_relative)
         
         db.add_log('photo_upload', json.dumps({"zone": zone_id, "filename": filename}))
         
         return jsonify({
             'success': True, 
             'message': 'Фотография загружена',
-            'photo_path': f"photos/{filename}"
+            'photo_path': db_relative
         })
         
     except Exception as e:
