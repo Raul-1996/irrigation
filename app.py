@@ -9,6 +9,8 @@ from PIL import Image
 import io
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
+from flask_wtf.csrf import CSRFProtect
+from config import Config
 from werkzeug.security import check_password_hash
 
 # Настройка логирования
@@ -27,11 +29,9 @@ except Exception:
     pass
 
 app = Flask(__name__)
+app.config.from_object(Config)
 app.db = db  # Добавляем атрибут db для тестов
-app.config['EMERGENCY_STOP'] = False
-app.secret_key = os.environ.get('SECRET_KEY', 'wb-irrigation-secret')
-if os.environ.get('TESTING'):
-    app.config['TESTING'] = True
+csrf = CSRFProtect(app)
 
 # Настройки хранения медиафайлов
 MEDIA_ROOT = 'static/media'
@@ -156,6 +156,7 @@ def map_page():
     return render_template('map.html')
 
 
+@csrf.exempt
 @app.route('/api/login', methods=['POST'])
 def api_login():
     try:
@@ -182,6 +183,7 @@ def api_logout():
     return redirect(url_for('login'))
 
 
+@csrf.exempt
 @app.route('/api/password', methods=['POST'])
 def api_change_password():
     try:
@@ -863,6 +865,7 @@ def api_status():
         'emergency_stop': app.config.get('EMERGENCY_STOP', False)
     })
 
+@csrf.exempt
 @app.route('/api/postpone', methods=['POST'])
 def api_postpone():
     """API для отложенного полива"""
@@ -907,6 +910,7 @@ def api_postpone():
     
     return jsonify({"success": False, "message": "Неверное действие"}), 400
 
+@csrf.exempt
 @app.route('/api/groups/<int:group_id>/stop', methods=['POST'])
 def api_stop_group(group_id):
     """Остановить все зоны в группе"""
@@ -921,6 +925,7 @@ def api_stop_group(group_id):
         logger.error(f"Ошибка остановки группы {group_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка остановки группы"}), 500
 
+@csrf.exempt
 @app.route('/api/groups/<int:group_id>/start-zone/<int:zone_id>', methods=['POST'])
 def api_start_zone_exclusive(group_id, zone_id):
     """Запустить зону, остановив остальные зоны этой группы"""
@@ -938,6 +943,7 @@ def api_start_zone_exclusive(group_id, zone_id):
         logger.error(f"Ошибка эксклюзивного запуска зоны {zone_id} в группе {group_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка запуска зоны"}), 500
 
+@csrf.exempt
 @app.route('/api/emergency-stop', methods=['POST'])
 def api_emergency_stop():
     """Аварийная остановка всех зон. До отмены полив не возобновляется."""
@@ -952,6 +958,7 @@ def api_emergency_stop():
         logger.error(f"Ошибка аварийной остановки: {e}")
         return jsonify({"success": False, "message": "Ошибка аварийной остановки"}), 500
 
+@csrf.exempt
 @app.route('/api/emergency-resume', methods=['POST'])
 def api_emergency_resume():
     """Снять режим аварийной остановки"""
@@ -963,6 +970,7 @@ def api_emergency_resume():
         logger.error(f"Ошибка возобновления после аварийной остановки: {e}")
         return jsonify({"success": False, "message": "Ошибка возобновления"}), 500
 
+@csrf.exempt
 @app.route('/api/backup', methods=['POST'])
 def api_backup():
     """API для создания резервной копии"""
@@ -979,6 +987,7 @@ def api_backup():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
+@csrf.exempt
 @app.route('/api/zones/<int:zone_id>/photo', methods=['POST'])
 def upload_zone_photo(zone_id):
     """Загрузка фотографии для зоны"""
@@ -1025,6 +1034,7 @@ def upload_zone_photo(zone_id):
         logger.error(f"Ошибка загрузки фото: {e}")
         return jsonify({'success': False, 'message': 'Ошибка загрузки'}), 500
 
+@csrf.exempt
 @app.route('/api/zones/<int:zone_id>/photo', methods=['DELETE'])
 def delete_zone_photo(zone_id):
     """Удаление фотографии зоны"""
@@ -1089,6 +1099,7 @@ def get_zone_photo(zone_id):
         logger.error(f"Ошибка получения фото зоны {zone_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка получения фото'}), 500
 
+@csrf.exempt
 @app.route('/api/zones/<int:zone_id>/start', methods=['POST'])
 def start_zone(zone_id):
     """Запуск зоны полива"""
@@ -1117,6 +1128,7 @@ def start_zone(zone_id):
         logger.error(f"Ошибка запуска зоны {zone_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка запуска зоны'}), 500
 
+@csrf.exempt
 @app.route('/api/zones/<int:zone_id>/stop', methods=['POST'])
 def stop_zone(zone_id):
     """Остановка зоны полива"""
