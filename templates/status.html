@@ -31,36 +31,39 @@
     .legend {
         background: white;
         border-radius: 8px;
-        padding: 1rem;
+        padding: 0.8rem;
         margin-bottom: 1rem;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        font-size: 0.85rem;
     }
     
     .legend h4 {
         margin: 0 0 0.5rem 0;
         color: #333;
         font-weight: bold;
+        font-size: 0.9rem;
     }
     
     .legend-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 0.5rem;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.4rem;
     }
     
     .legend-item {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        font-size: 0.9rem;
+        gap: 0.4rem;
+        font-size: 0.8rem;
         color: #333;
     }
     
     .legend-color {
-        width: 20px;
-        height: 20px;
-        border-radius: 4px;
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
         border: 1px solid #ccc;
+        flex-shrink: 0;
     }
     
     .top-bar { 
@@ -86,7 +89,7 @@
     }
     .status-grid { 
         display: grid; 
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); 
         gap: 1rem; 
         margin-bottom: 1rem; 
     }
@@ -99,7 +102,7 @@
         align-items: center; 
         text-align: center; 
         font-size: 0.9rem; 
-        min-height: 200px;
+        min-height: 180px;
         box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
     .card.waiting { 
@@ -153,13 +156,13 @@
         width: 100%; 
     }
     .btn-group button { 
-        flex: 1 1 130px; 
+        flex: 1 1 120px; 
         padding: 0.3rem 0.4rem; 
         border-radius: 5px; 
         cursor: pointer; 
-        font-size: 0.9rem; 
+        font-size: 0.85rem; 
         text-align: center; 
-        min-width: 130px; 
+        min-width: 120px; 
         border: 2px solid #fff; 
         transition: all 0.2s;
     }
@@ -171,6 +174,7 @@
     .cancel-postpone { background: #ff9800; color: #fff; border-color: transparent; }
     .start { background: #4caf50; color: #fff; }
     .stop-group { background: #b71c1c; color: #fff; }
+    .continue-group { background: #4caf50; color: #fff; }
     .emergency { 
         background: #d32f2f; 
         color: #fff; 
@@ -281,9 +285,46 @@
         font-size: 1.5rem;
         color: #888;
     }
+    
+    /* Мобильная верстка */
     @media (max-width: 768px) {
         .hide-mobile { display: none; }
-        .btn-group button { min-width: 100px; font-size: 0.8rem; }
+        .btn-group button { 
+            min-width: 100px; 
+            font-size: 0.8rem; 
+            padding: 0.4rem 0.3rem;
+        }
+        .status-grid {
+            grid-template-columns: 1fr;
+            gap: 0.8rem;
+        }
+        .card {
+            min-height: 160px;
+            padding: 0.6rem;
+        }
+        .top-bar {
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .info-box {
+            flex: 1 1 auto;
+            width: 100%;
+        }
+        .legend-grid {
+            grid-template-columns: 1fr;
+            gap: 0.3rem;
+        }
+        .zones-table {
+            font-size: 0.75rem;
+        }
+        .zones-table th,
+        .zones-table td {
+            padding: 0.3rem 0.2rem;
+        }
+        .emergency {
+            width: 100%;
+            margin: 0.5rem 0;
+        }
     }
 
     /* Модальное окно для просмотра фотографий */
@@ -340,29 +381,6 @@
     ⚠️ Нет связи с сервером. Проверьте подключение.
 </div>
 
-<!-- Легенда цветов -->
-<div class="legend">
-    <h4>📋 Легенда статусов групп</h4>
-    <div class="legend-grid">
-        <div class="legend-item">
-            <div class="legend-color" style="background: #4caf50;"></div>
-            <span>Ожидание - группа готова к поливу</span>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #2196f3;"></div>
-            <span>Полив - группа активно поливается</span>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #9e9e9e;"></div>
-            <span>Отложено - полив отложен на указанное время</span>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #f44336;"></div>
-            <span>Ошибка - проблема с системой полива</span>
-        </div>
-    </div>
-</div>
-
 <div class="top-bar">
     <div class="info-box">
         <strong>Время:</strong> <span id="datetime">—</span>
@@ -385,6 +403,29 @@
 
 <div class="status-grid" id="groups-container">
     <!-- Группы будут загружены динамически -->
+</div>
+
+<!-- Легенда цветов (компактная, под группами) -->
+<div class="legend">
+    <h4>📋 Легенда статусов</h4>
+    <div class="legend-grid">
+        <div class="legend-item">
+            <div class="legend-color" style="background: #4caf50;"></div>
+            <span>Ожидание - готов к поливу</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #2196f3;"></div>
+            <span>Полив - активно поливается</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #9e9e9e;"></div>
+            <span>Отложено - полив отложен</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #f44336;"></div>
+            <span>Ошибка - проблема с системой</span>
+        </div>
+    </div>
 </div>
 
 <div style="display:flex; gap:.5rem; justify-content:center; margin-bottom:.5rem;">
@@ -435,6 +476,14 @@
     let zonesData = [];
     let connectionError = false;
     
+    // Функция обновления времени
+    function updateDateTime() {
+        const now = new Date();
+        const dateStr = now.toLocaleDateString('ru-RU');
+        const timeStr = now.toLocaleTimeString('ru-RU');
+        document.getElementById('datetime').textContent = `${dateStr} ${timeStr}`;
+    }
+    
     async function loadStatusData() {
         try {
             statusData = await api.get('/api/status');
@@ -471,57 +520,100 @@
         }
     }
     
-    function updateStatusDisplay() {
+    function formatSeconds(total) {
+        const sec = Math.max(0, Math.floor(total));
+        const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+        const ss = String(sec % 60).padStart(2, '0');
+        return `${mm}:${ss}`;
+    }
+
+    function getStatusText(group) {
+        if (group.status === 'watering' && group.current_zone) {
+            return `Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+        }
+        switch (group.status) {
+            case 'waiting': return 'Ожидание начала полива';
+            case 'error': return 'Авария — Ошибка счётчика';
+            case 'postponed':
+                if (group.postpone_reason === 'emergency') return 'Полив отложен из-за аварийной остановки';
+                if (group.postpone_reason === 'manual') return 'Полив отложен вручную пользователем';
+                return 'Полив отложен из-за дождя';
+            default: return 'Неизвестный статус';
+        }
+    }
+
+    async function initGroupTimer(group) {
+        const span = document.getElementById(`group-timer-${group.id}`);
+        if (!span) return;
+        try {
+            const res = await fetch(`/api/zones/${group.current_zone}/watering-time`);
+            const data = await res.json();
+            if (data && data.success && data.is_watering) {
+                span.dataset.remainingSeconds = String(data.remaining_seconds ?? (data.remaining_time * 60));
+                span.textContent = formatSeconds(Number(span.dataset.remainingSeconds));
+            } else {
+                span.dataset.remainingSeconds = '';
+                span.textContent = '--:--';
+            }
+        } catch (e) {
+            span.textContent = '--:--';
+        }
+    }
+    
+    async function updateStatusDisplay() {
         if (!statusData) return;
-        
-        // Обновляем время и датчики
-        document.getElementById('datetime').textContent = statusData.datetime;
+        updateDateTime();
         document.getElementById('temp-value').textContent = statusData.temperature;
         document.getElementById('hum-value').textContent = statusData.humidity;
         document.getElementById('rain-value').textContent = statusData.rain_sensor;
-        
-        // Обновляем группы
         const container = document.getElementById('groups-container');
         container.innerHTML = '';
-        
-        // Отображаем кнопку возобновления при аварийной остановке
         const resumeBtn = document.getElementById('resume-btn');
-        if (statusData.emergency_stop) {
-            resumeBtn.style.display = 'inline-block';
-        } else {
-            resumeBtn.style.display = 'none';
-        }
-
-        statusData.groups.forEach(group => {
+        if (statusData.emergency_stop) { resumeBtn.style.display = 'inline-block'; } else { resumeBtn.style.display = 'none'; }
+        for (const group of statusData.groups) {
             const card = document.createElement('div');
-            // Тестовая имитация расхода воды: если статус watering, включаем анимацию flow-active
-            const flowActive = group.status === 'watering' && Math.random() > 0.3; // 70% шанса
+            const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
-            
             const statusText = getStatusText(group);
             const postponeText = group.status === 'postponed' && group.postpone_until ? `Не будет поливаться до: ${group.postpone_until}` : '—';
-            
-            // Всегда показываем кнопки отложенного полива
-            const postponeButtons = `
+            const groupButtons = `
                 <div class="btn-group">
-                    <button class="delay" onclick="delayGroup(${group.id}, 1)">+1 день</button>
-                    <button class="delay" onclick="delayGroup(${group.id}, 2)">+2 дня</button>
-                    <button class="delay" onclick="delayGroup(${group.id}, 3)">+3 дня</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 2)">Остановить полив на 2 дня</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 3)">Остановить полив на 3 дня</button>
                     ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">Продолжить по расписанию</button>` : ''}
                 </div>
-            `;
-            
+                <div class="btn-group">
+                    <button class="continue-group" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>
+                    <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
+                </div>`;
             card.innerHTML = `
                 <div class="group-header">${group.name}</div>
                 <div>${statusText}</div>
                 <div class="postpone-until">${postponeText}</div>
-                ${postponeButtons}
-                <div class="btn-group">
-                    <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
-                </div>
+                ${groupButtons}
             `;
-            
             container.appendChild(card);
+            if (group.status === 'watering' && group.current_zone) {
+                initGroupTimer(group);
+            }
+        }
+    }
+
+    function tickCountdowns() {
+        const spans = document.querySelectorAll('.group-timer');
+        spans.forEach(span => {
+            const val = span.dataset.remainingSeconds;
+            if (!val) return;
+            let sec = Number(val);
+            if (Number.isNaN(sec) || sec <= 0) {
+                span.textContent = '00:00';
+                span.dataset.remainingSeconds = '';
+                return;
+            }
+            sec = sec - 1;
+            span.dataset.remainingSeconds = String(sec);
+            span.textContent = formatSeconds(sec);
         });
     }
 
@@ -541,16 +633,6 @@
             }
         } catch (e) {
             showNotification('Ошибка сети при обновлении статуса дождя', 'error');
-        }
-    }
-    
-    function getStatusText(group) {
-        switch (group.status) {
-            case 'waiting': return 'Ожидание начала полива';
-            case 'watering': return `Полив — Зона ${group.current_zone}`;
-            case 'error': return 'Авария — Ошибка счётчика';
-            case 'postponed': return 'Полив отложен из-за дождя';
-            default: return 'Неизвестный статус';
         }
     }
     
@@ -669,12 +751,19 @@
         }
     }
     
-    async function startGroup(groupId) {
+    async function startGroupFromFirst(groupId) {
         try {
-            showNotification(`Запуск группы ${groupId}`, 'success');
-            // TODO: API вызов для запуска группы
+            const res = await fetch(`/api/groups/${groupId}/start-from-first`, { method: 'POST' });
+            const data = await res.json();
+            if (data && data.success) {
+                showNotification(data.message, 'success');
+                await loadStatusData();
+                await loadZonesData();
+            } else {
+                showNotification(data.message || 'Ошибка запуска полива группы', 'error');
+            }
         } catch (error) {
-            showNotification('Ошибка при запуске группы', 'error');
+            showNotification('Ошибка при запуске полива группы', 'error');
         }
     }
     
@@ -768,14 +857,21 @@
     
     // Инициализация
     document.addEventListener('DOMContentLoaded', () => {
+        // Обновляем время сразу
+        updateDateTime();
+        
         loadStatusData();
         loadZonesData();
+        
+        // Обновление времени каждую секунду
+        setInterval(updateDateTime, 1000);
         
         // Обновление данных каждые 30 секунд
         setInterval(() => {
             loadStatusData();
             loadZonesData();
         }, 30000);
+        setInterval(tickCountdowns, 1000);
         
         // Обработчик аварийной остановки
         document.getElementById('emergency-btn').addEventListener('click', emergencyStop);

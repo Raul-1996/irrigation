@@ -38,6 +38,7 @@ class IrrigationDB:
                         group_id INTEGER DEFAULT 1,
                         topic TEXT,
                         postpone_until TEXT,
+                        postpone_reason TEXT,
                         photo_path TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -104,6 +105,8 @@ class IrrigationDB:
                 
                 # Миграции
                 self._migrate_days_format(conn)
+                self._migrate_add_postpone_reason(conn)
+                self._migrate_add_watering_start_time(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -255,6 +258,34 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка миграции формата дней: {e}")
     
+    def _migrate_add_postpone_reason(self, conn):
+        """Миграция: добавление поля postpone_reason"""
+        try:
+            # Проверяем, есть ли уже поле postpone_reason
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'postpone_reason' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN postpone_reason TEXT')
+                conn.commit()
+                logger.info("Добавлено поле postpone_reason в таблицу zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции postpone_reason: {e}")
+    
+    def _migrate_add_watering_start_time(self, conn):
+        """Миграция: добавление поля watering_start_time"""
+        try:
+            # Проверяем, есть ли уже поле watering_start_time
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'watering_start_time' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN watering_start_time TEXT')
+                conn.commit()
+                logger.info("Добавлено поле watering_start_time в таблицу zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции watering_start_time: {e}")
+
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
@@ -366,6 +397,11 @@ class IrrigationDB:
                 if 'photo_path' in updated_data:
                     sql_fields.append('photo_path = ?')
                     params.append(updated_data['photo_path'])
+                
+                # Поддержка времени начала полива
+                if 'watering_start_time' in updated_data:
+                    sql_fields.append('watering_start_time = ?')
+                    params.append(updated_data['watering_start_time'])
                 
                 # Добавляем updated_at
                 sql_fields.append('updated_at = CURRENT_TIMESTAMP')
@@ -561,15 +597,15 @@ class IrrigationDB:
             logger.error(f"Ошибка добавления лога: {e}")
             return None
     
-    def update_zone_postpone(self, zone_id: int, postpone_until: str = None) -> bool:
-        """Обновить отложенный полив зоны"""
+    def update_zone_postpone(self, zone_id: int, postpone_until: str = None, reason: str = None) -> bool:
+        """Обновить отложенный полив зоны с указанием причины"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('''
                     UPDATE zones 
-                    SET postpone_until = ?, updated_at = CURRENT_TIMESTAMP
+                    SET postpone_until = ?, postpone_reason = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (postpone_until, zone_id))
+                ''', (postpone_until, reason, zone_id))
                 conn.commit()
                 return True
         except Exception as e:

@@ -253,13 +253,25 @@ class WebInterfaceTest(unittest.TestCase):
     def test_13_pages_accessibility(self):
         """Тест доступности всех страниц"""
         print("🧪 Тест доступности всех страниц...")
-        pages = ['/zones', '/programs', '/logs', '/water']
+        pages = ['/', '/login', '/zones', '/programs', '/logs', '/water']
         
         for page in pages:
             response = requests.get(f'http://localhost:8080{page}')
             self.assertEqual(response.status_code, 200)
             self.assertIn('WB-Irrigation', response.text)
             print(f"✅ Страница {page} доступна")
+
+    def test_13b_login_logout(self):
+        """Тест логина и логаута"""
+        # login page GET
+        resp = requests.get('http://localhost:8080/login')
+        self.assertEqual(resp.status_code, 200)
+        # API login
+        resp = requests.post('http://localhost:8080/api/login', json={'password': '1234'})
+        self.assertIn(resp.status_code, (200, 401))
+        # logout redirect
+        resp = requests.get('http://localhost:8080/logout', allow_redirects=False)
+        self.assertIn(resp.status_code, (302, 303))
     
     def test_14_error_handling(self):
         """Тест обработки ошибок"""

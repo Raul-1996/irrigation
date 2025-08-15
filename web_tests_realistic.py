@@ -104,8 +104,8 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         cls.app_process = subprocess.Popen(
             ['python', 'run.py'],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT
         )
     
     @classmethod

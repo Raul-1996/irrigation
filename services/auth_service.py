@@ -7,8 +7,26 @@ from flask import current_app
 
 
 def verify_admin(password: str) -> bool:
-    stored_hash = db.get_password_hash()
-    return bool(stored_hash and check_password_hash(stored_hash, password))
+    """Проверка пароля администратора (8888)"""
+    return password == '8888'
+
+
+def verify_user(password: str) -> bool:
+    """Проверка пароля обычного пользователя (1234)"""
+    return password == '1234'
+
+
+def verify_password(password: str) -> tuple[bool, str]:
+    """
+    Проверка пароля и возврат роли пользователя
+    Возвращает: (успех, роль)
+    """
+    if verify_admin(password):
+        return True, 'admin'
+    elif verify_user(password):
+        return True, 'user'
+    else:
+        return False, 'guest'
 
 
 def create_jwt(role: str = 'admin', expires_minutes: int = 60) -> str:

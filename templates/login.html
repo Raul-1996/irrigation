@@ -10,11 +10,15 @@
         h1 { margin: 0 0 16px; font-size: 20px; text-align: center; }
         .subtitle { color: #666; font-size: 14px; text-align: center; margin-bottom: 24px; }
         label { display: block; font-size: 14px; color: #333; margin: 12px 0 6px; }
-        input { width: 100%; padding: 12px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
+        input { width: calc(100% - 28px); padding: 12px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
         button { width: 100%; margin-top: 16px; padding: 12px 14px; background: #2196f3; border: none; color: #fff; border-radius: 8px; font-size: 15px; cursor: pointer; }
         button:hover { background: #1976d2; }
         .error { color: #f44336; font-size: 13px; margin-top: 10px; text-align: center; }
-        .hint { color: #888; font-size: 12px; margin-top: 12px; text-align: center; }
+        .hint { color: #888; font-size: 12px; margin-top: 12px; text-align: center; line-height: 1.4; }
+        .password-hints { margin-top: 16px; padding: 12px; background: #f8f9fa; border-radius: 6px; border-left: 4px solid #2196f3; }
+        .password-hints h4 { margin: 0 0 8px 0; font-size: 13px; color: #333; }
+        .password-hints ul { margin: 0; padding-left: 16px; font-size: 12px; color: #666; }
+        .password-hints li { margin-bottom: 4px; }
     </style>
     <script>
         async function onSubmit(event) {
@@ -48,8 +52,15 @@
             <label for="password">Пароль</label>
             <input id="password" type="password" placeholder="Введите пароль" autocomplete="current-password" required>
             <button type="submit">Войти</button>
+            <button type="button" style="background:#4caf50;margin-top:8px;" onclick="window.location.href='/?guest=1'">Продолжить без пароля</button>
             <div id="error" class="error"></div>
-            <div class="hint">Пароль по умолчанию: 1234</div>
+            <div class="password-hints">
+                <h4>Доступные пароли:</h4>
+                <ul>
+                    <li><strong>1234</strong> — обычный пользователь (статус, расход воды, карта зон)</li>
+                    <li><strong>8888</strong> — администратор (полный доступ)</li>
+                </ul>
+            </div>
         </form>
     </div>
 </body>

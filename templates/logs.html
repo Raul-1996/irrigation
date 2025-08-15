@@ -135,32 +135,104 @@
         font-style: italic;
     }
     
+    /* Мобильная верстка */
     @media(max-width:768px) {
         .filter-bar {
             flex-direction: column;
             align-items: stretch;
+            gap: 0.8rem;
+            padding: 0.8rem;
         }
-        .filter-bar label {
+        
+        .filter-row {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .filter-row label {
+            flex: 1 1 calc(50% - 0.25rem);
+            min-width: 120px;
             flex-direction: column;
             align-items: stretch;
+            gap: 0.3rem;
         }
+        
+        .filter-row label span {
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
         .filter-bar input[type=date], 
         .filter-bar select {
             width: 100%;
+            padding: 0.5rem;
+            font-size: 0.85rem;
         }
+        
+        .filter-buttons {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .filter-buttons button {
+            flex: 1 1 auto;
+            min-width: 80px;
+            padding: 0.6rem 0.8rem;
+            font-size: 0.85rem;
+        }
+        
         .export-btn {
             margin-left: 0;
         }
+        
         .logs-table {
-            font-size: 0.8rem;
+            font-size: 0.75rem;
         }
+        
         .logs-table th, 
         .logs-table td {
+            padding: 0.4rem 0.3rem;
+        }
+        
+        .log-details {
+            max-width: 150px;
+            font-size: 0.7rem;
             padding: 0.3rem;
         }
+        
+        .log-type {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.4rem;
+        }
+        
+        .nowrap {
+            white-space: normal;
+            word-break: break-word;
+        }
+    }
+    
+    @media(max-width:480px) {
+        .filter-row label {
+            flex: 1 1 100%;
+        }
+        
+        .filter-buttons {
+            flex-direction: column;
+        }
+        
+        .filter-buttons button {
+            width: 100%;
+        }
+        
+        .logs-table {
+            font-size: 0.7rem;
+        }
+        
         .log-details {
-            max-width: 200px;
-            font-size: 0.75rem;
+            max-width: 120px;
+            font-size: 0.65rem;
         }
     }
 </style>
@@ -168,23 +240,29 @@
 
 {% block content %}
 <div class="filter-bar">
-    <label>
-        С: 
-        <input type="date" id="fromDate">
-    </label>
-    <label>
-        По: 
-        <input type="date" id="toDate">
-    </label>
-    <label>
-        Тип события: 
-        <select id="eventType">
-            <option value="">Все</option>
-            <!-- Опции будут загружены динамически -->
-        </select>
-    </label>
-    <button onclick="applyFilter()">Фильтровать</button>
-    <button class="export-btn" onclick="exportCSV()">Экспорт CSV</button>
+    <div class="filter-row">
+        <label>
+            <span>С:</span>
+            <input type="date" id="fromDate">
+        </label>
+        <label>
+            <span>По:</span>
+            <input type="date" id="toDate">
+        </label>
+    </div>
+    <div class="filter-row">
+        <label>
+            <span>Тип события:</span>
+            <select id="eventType">
+                <option value="">Все</option>
+                <!-- Опции будут загружены динамически -->
+            </select>
+        </label>
+    </div>
+    <div class="filter-buttons">
+        <button onclick="applyFilter()">Фильтровать</button>
+        <button class="export-btn" onclick="exportCSV()">Экспорт CSV</button>
+    </div>
 </div>
 
 <div style="overflow-x: auto;">
@@ -383,17 +461,17 @@
         document.getElementById('eventType').addEventListener('change', applyFilter);
         
         // Добавляем кнопку сброса фильтров
-        const filterBar = document.querySelector('.filter-bar');
+        const filterButtons = document.querySelector('.filter-buttons');
         const resetBtn = document.createElement('button');
         resetBtn.textContent = 'Сброс';
         resetBtn.style.cssText = `
-            padding: 0.5rem 1rem;
+            padding: 0.6rem 0.8rem;
             background: #6c757d;
             color: #fff;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             transition: background-color 0.2s;
         `;
         resetBtn.addEventListener('click', resetFilters);
@@ -404,7 +482,7 @@
             resetBtn.style.background = '#6c757d';
         });
         
-        filterBar.insertBefore(resetBtn, filterBar.lastElementChild);
+        filterButtons.insertBefore(resetBtn, filterButtons.firstChild);
     });
 </script>
 {% endblock %}

@@ -135,6 +135,14 @@ app.register_blueprint(programs_bp)
 app.register_blueprint(groups_bp)
 app.register_blueprint(auth_bp)
 
+# 404 красивая страница
+@app.errorhandler(404)
+def _not_found(e):
+    try:
+        return render_template('404.html'), 404
+    except Exception:
+        return jsonify({'error': 'Not found'}), 404
+
 
 MAP_FOLDER = MAP_DIR  # использовать новый каталог media/maps
 
@@ -166,7 +174,7 @@ def api_logout():
     # Возвращаем роль в user
     session['logged_in'] = False
     session['role'] = 'user'
-    return redirect(url_for('login'))
+    return redirect(url_for('auth_bp.login_page'))
 
 
 @csrf.exempt
@@ -912,6 +920,34 @@ def api_stop_group(group_id):
         return jsonify({"success": False, "message": "Ошибка остановки группы"}), 500
 
 @csrf.exempt
+@app.route('/api/groups/<int:group_id>/start-from-first', methods=['POST'])
+def api_start_group_from_first(group_id):
+    """Остановить все зоны группы и запустить полив с самой первой зоны (по id)"""
+    try:
+        zones = db.get_zones()
+        group_zones = sorted([z for z in zones if z['group_id'] == group_id], key=lambda x: x['id'])
+        if not group_zones:
+            return jsonify({"success": False, "message": "В группе нет зон"}), 400
+        # Останавливаем все
+        for z in group_zones:
+            db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+        # Запускаем первую
+        first = group_zones[0]
+        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        db.update_zone(first['id'], {'state': 'on', 'watering_start_time': start_ts})
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                scheduler.schedule_zone_stop(first['id'], int(first['duration']))
+        except Exception:
+            pass
+        db.add_log('group_start_from_first', json.dumps({"group": group_id, "zone": first['id']}))
+        return jsonify({"success": True, "message": f"Группа {group_id}: запущена зона {first['id']}"})
+    except Exception as e:
+        logger.error(f"Ошибка запуска группы {group_id} с первой зоны: {e}")
+        return jsonify({"success": False, "message": "Ошибка запуска группы"}), 500
+
+@csrf.exempt
 @app.route('/api/groups/<int:group_id>/start-zone/<int:zone_id>', methods=['POST'])
 def api_start_zone_exclusive(group_id, zone_id):
     """Запустить зону, остановив остальные зоны этой группы"""
@@ -920,9 +956,18 @@ def api_start_zone_exclusive(group_id, zone_id):
             return jsonify({"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}), 400
         zones = db.get_zones()
         group_zones = [z for z in zones if z['group_id'] == group_id]
+        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         for z in group_zones:
-            new_state = 'on' if z['id'] == zone_id else 'off'
-            db.update_zone(z['id'], {'state': new_state})
+            if z['id'] == zone_id:
+                db.update_zone(z['id'], {'state': 'on', 'watering_start_time': start_ts})
+                try:
+                    scheduler = get_scheduler()
+                    if scheduler:
+                        scheduler.schedule_zone_stop(z['id'], int(z['duration']))
+                except Exception:
+                    pass
+            else:
+                db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
         db.add_log('zone_start_exclusive', json.dumps({"group": group_id, "zone": zone_id}))
         return jsonify({"success": True, "message": f"Зона {zone_id} запущена, остальные остановлены"})
     except Exception as e:
@@ -1096,7 +1141,15 @@ def start_zone(zone_id):
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         
-        db.update_zone(zone_id, {'state': 'on'})
+        # Устанавливаем время начала полива для зоны
+        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                scheduler.active_zones[zone_id] = datetime.now() + timedelta(minutes=int(zone['duration']))
+        except Exception:
+            pass
         db.add_log('zone_start', json.dumps({
             "zone": zone_id,
             "name": zone['name'],
@@ -1123,7 +1176,8 @@ def stop_zone(zone_id):
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         
-        db.update_zone(zone_id, {'state': 'off'})
+        # Очищаем время начала полива
+        db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
         db.add_log('zone_stop', json.dumps({
             "zone": zone_id,
             "name": zone['name']
@@ -1139,6 +1193,82 @@ def stop_zone(zone_id):
     except Exception as e:
         logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка остановки зоны'}), 500
+
+@app.route('/api/zones/<int:zone_id>/watering-time')
+def api_zone_watering_time(zone_id):
+    """Возвращает оставшееся и прошедшее время полива зоны на основе watering_start_time"""
+    try:
+        zone = db.get_zone(zone_id)
+        if not zone:
+            return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
+        
+        total_duration = int(zone.get('duration') or 0)
+        start_str = zone.get('watering_start_time')
+        if zone.get('state') != 'on' or not start_str:
+            return jsonify({
+                'success': True,
+                'zone_id': zone_id,
+                'is_watering': False,
+                'elapsed_time': 0,
+                'remaining_time': 0,
+                'total_duration': total_duration,
+                'elapsed_seconds': 0,
+                'remaining_seconds': 0,
+                'total_seconds': total_duration * 60
+            })
+        
+        try:
+            start_dt = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            # Если форматбитый — очищаем и возвращаем нули
+            db.update_zone(zone_id, {'watering_start_time': None})
+            return jsonify({
+                'success': True,
+                'zone_id': zone_id,
+                'is_watering': False,
+                'elapsed_time': 0,
+                'remaining_time': 0,
+                'total_duration': total_duration,
+                'elapsed_seconds': 0,
+                'remaining_seconds': 0,
+                'total_seconds': total_duration * 60
+            })
+        
+        now = datetime.now()
+        elapsed_seconds = max(0, int((now - start_dt).total_seconds()))
+        total_seconds = int(total_duration * 60)
+        if elapsed_seconds >= total_seconds:
+            # Автостоп
+            db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
+            return jsonify({
+                'success': True,
+                'zone_id': zone_id,
+                'is_watering': False,
+                'elapsed_time': total_duration,
+                'remaining_time': 0,
+                'total_duration': total_duration,
+                'elapsed_seconds': total_seconds,
+                'remaining_seconds': 0,
+                'total_seconds': total_seconds
+            })
+        remaining_seconds = max(0, total_seconds - elapsed_seconds)
+        # Для обратной совместимости оставляем минутные поля (целые минуты)
+        elapsed_min = int(elapsed_seconds // 60)
+        remaining_min = int(remaining_seconds // 60)
+        return jsonify({
+            'success': True,
+            'zone_id': zone_id,
+            'is_watering': True,
+            'elapsed_time': elapsed_min,
+            'remaining_time': remaining_min,
+            'total_duration': total_duration,
+            'elapsed_seconds': elapsed_seconds,
+            'remaining_seconds': remaining_seconds,
+            'total_seconds': total_seconds
+        })
+    except Exception as e:
+        logger.error(f"Ошибка получения времени полива зоны {zone_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка получения времени полива'}), 500
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива

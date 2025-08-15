@@ -12,6 +12,7 @@ from database import IrrigationDB
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -44,7 +45,7 @@ class IrrigationScheduler:
 
     def _stop_zone(self, zone_id: int):
         try:
-            self.db.update_zone(zone_id, {'state': 'off'})
+            self.db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
             zone = self.db.get_zone(zone_id)
             if zone:
                 self.db.add_log('zone_auto_stop', f'Зона {zone_id} ({zone["name"]}) автоматически остановлена')
@@ -151,6 +152,25 @@ class IrrigationScheduler:
             logger.info(f"Программа {program_id} отменена")
         except Exception as e:
             logger.error(f"Ошибка отмены программы {program_id}: {e}")
+
+    def schedule_zone_stop(self, zone_id: int, duration_minutes: int):
+        """Запланировать автоматическую остановку зоны через duration_minutes минут (для ручных запусков)."""
+        try:
+            if duration_minutes is None:
+                return
+            run_at = datetime.now() + timedelta(minutes=int(duration_minutes))
+            self.scheduler.add_job(
+                self._stop_zone,
+                DateTrigger(run_date=run_at),
+                args=[zone_id],
+                id=f"zone_stop_{zone_id}_{int(run_at.timestamp())}",
+                replace_existing=False,
+                misfire_grace_time=120,
+            )
+            self.active_zones[zone_id] = run_at
+            logger.info(f"Автоостановка зоны {zone_id} запланирована на {run_at}")
+        except Exception as e:
+            logger.error(f"Ошибка планирования автоостановки зоны {zone_id}: {e}")
 
     def get_active_programs(self) -> Dict[int, Dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids

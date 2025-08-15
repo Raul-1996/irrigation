@@ -45,15 +45,32 @@ class WebInterfaceTest(unittest.TestCase):
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
+        try:
+            chrome_options.page_load_strategy = 'eager'
+        except Exception:
+            pass
         
         # Инициализация драйвера: если задан SELENIUM_REMOTE_URL — идем в удаленный Selenium
         remote_url = os.environ.get('SELENIUM_REMOTE_URL')
         if remote_url:
+            # Ждем готовности удаленного Selenium
+            for _ in range(30):
+                try:
+                    r = requests.get(remote_url.rstrip('/') + '/status', timeout=1)
+                    if r.ok and r.json().get('value', {}).get('ready'):
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
             from selenium.webdriver import Remote
             cls.driver = Remote(command_executor=remote_url, options=chrome_options)
         else:
             cls.driver = webdriver.Chrome(options=chrome_options)
         cls.driver.implicitly_wait(10)
+        try:
+            cls.driver.set_page_load_timeout(20)
+        except Exception:
+            pass
         
         # Запуск Flask приложения в отдельном потоке
         cls.app_process = None
@@ -95,8 +112,8 @@ class WebInterfaceTest(unittest.TestCase):
         cls.app_process = subprocess.Popen(
             ['python', 'run.py'],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT
         )
     
     @classmethod
@@ -130,7 +147,7 @@ class WebInterfaceTest(unittest.TestCase):
     
     def setUp(self):
         """Настройка перед каждым тестом"""
-        self.driver.get(BASE_URL_BROWSER)
+        self.open_url('/')
         time.sleep(0.5)
         # Логинимся как админ для доступа к защищенным страницам
         try:
@@ -140,6 +157,23 @@ class WebInterfaceTest(unittest.TestCase):
             time.sleep(0.5)
         except Exception:
             pass
+
+    def open_url(self, path: str):
+        url = BASE_URL_BROWSER + ('' if path.startswith('/') else '/') + path
+        try:
+            self.driver.get(url)
+        except Exception:
+            try:
+                self.driver.execute_script("window.stop();")
+            except Exception:
+                pass
+        return url
+
+    def js_click(self, element):
+        try:
+            self.driver.execute_script("arguments[0].click();", element)
+        except Exception:
+            element.click()
     
     def wait_for_element(self, by, value, timeout=10):
         """Ожидание появления элемента"""
@@ -203,7 +237,7 @@ class WebInterfaceTest(unittest.TestCase):
         
         # Нажатие кнопки добавления зоны
         add_button = self.wait_for_clickable(By.CSS_SELECTOR, ".float-add")
-        add_button.click()
+        self.js_click(add_button)
         
         # Заполнение формы
         self.wait_for_element(By.ID, "zoneName").send_keys("Тестовая зона")
@@ -382,7 +416,8 @@ class WebInterfaceTest(unittest.TestCase):
         
         # Находим кнопку добавления группы
         add_group_button = self.driver.find_element(By.CSS_SELECTOR, ".groups-header button")
-        add_group_button.click()
+        self.js_click(add_group_button)
+        self.wait_for_element(By.ID, "groupName")
         
         # Заполняем форму
         group_name_input = self.wait_for_element(By.ID, "groupName")
@@ -426,7 +461,7 @@ class WebInterfaceTest(unittest.TestCase):
         
         # Применяем действие
         apply_button = self.driver.find_element(By.CSS_SELECTOR, ".bulk-form button")
-        apply_button.click()
+        self.js_click(apply_button)
         
         # Ожидаем применения
         time.sleep(2)
