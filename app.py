@@ -922,27 +922,18 @@ def api_stop_group(group_id):
 @csrf.exempt
 @app.route('/api/groups/<int:group_id>/start-from-first', methods=['POST'])
 def api_start_group_from_first(group_id):
-    """Остановить все зоны группы и запустить полив с самой первой зоны (по id)"""
+    """Запустить последовательный полив всей группы с первой зоны (по id)."""
     try:
-        zones = db.get_zones()
-        group_zones = sorted([z for z in zones if z['group_id'] == group_id], key=lambda x: x['id'])
-        if not group_zones:
-            return jsonify({"success": False, "message": "В группе нет зон"}), 400
-        # Останавливаем все
-        for z in group_zones:
-            db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
-        # Запускаем первую
-        first = group_zones[0]
-        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        db.update_zone(first['id'], {'state': 'on', 'watering_start_time': start_ts})
-        try:
-            scheduler = get_scheduler()
-            if scheduler:
-                scheduler.schedule_zone_stop(first['id'], int(first['duration']))
-        except Exception:
-            pass
-        db.add_log('group_start_from_first', json.dumps({"group": group_id, "zone": first['id']}))
-        return jsonify({"success": True, "message": f"Группа {group_id}: запущена зона {first['id']}"})
+        scheduler = get_scheduler()
+        if not scheduler:
+            return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
+
+        ok = scheduler.start_group_sequence(group_id)
+        if not ok:
+            return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
+
+        db.add_log('group_start_from_first', json.dumps({"group": group_id}))
+        return jsonify({"success": True, "message": f"Группа {group_id}: запущен последовательный полив"})
     except Exception as e:
         logger.error(f"Ошибка запуска группы {group_id} с первой зоны: {e}")
         return jsonify({"success": False, "message": "Ошибка запуска группы"}), 500

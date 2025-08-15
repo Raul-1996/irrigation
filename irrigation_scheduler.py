@@ -172,6 +172,78 @@ class IrrigationScheduler:
         except Exception as e:
             logger.error(f"Ошибка планирования автоостановки зоны {zone_id}: {e}")
 
+    # ===== Ручной последовательный запуск всех зон в группе =====
+    def start_group_sequence(self, group_id: int):
+        """Остановить все зоны группы и запустить последовательный полив всех зон по порядку."""
+        try:
+            zones = self.db.get_zones()
+            group_zones = sorted([z for z in zones if z['group_id'] == group_id], key=lambda x: x['id'])
+            if not group_zones:
+                logger.info(f"Группа {group_id}: нет зон для последовательного запуска")
+                return False
+
+            # Останавливаем все зоны в группе перед запуском
+            for z in group_zones:
+                self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+
+            zone_ids = [z['id'] for z in group_zones]
+            # Запускаем последовательность в отдельном джобе прямо сейчас
+            self.scheduler.add_job(
+                self._run_group_sequence,
+                DateTrigger(run_date=datetime.now()),
+                args=[group_id, zone_ids],
+                id=f"group_seq_{group_id}_{int(datetime.now().timestamp())}",
+                replace_existing=False,
+                misfire_grace_time=120,
+            )
+            logger.info(f"Группа {group_id}: последовательный полив запущен для зон {zone_ids}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка старта последовательного полива для группы {group_id}: {e}")
+            return False
+
+    def _run_group_sequence(self, group_id: int, zone_ids: List[int]):
+        """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
+        try:
+            for zone_id in zone_ids:
+                zone = self.db.get_zone(zone_id)
+                if not zone:
+                    logger.warning(f"Группа {group_id}: зона {zone_id} не найдена, пропуск")
+                    continue
+
+                duration = int(zone.get('duration') or 0)
+                if duration <= 0:
+                    logger.info(f"Группа {group_id}: зона {zone_id} имеет нулевую длительность, пропуск")
+                    continue
+
+                # Старт текущей зоны
+                start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+                try:
+                    self.db.add_log('group_seq_zone_start', json.dumps({
+                        'group_id': group_id,
+                        'zone_id': zone_id,
+                        'zone_name': zone.get('name'),
+                        'duration': duration
+                    }))
+                except Exception:
+                    pass
+
+                # Ждем окончание полива зоны
+                try:
+                    threading.Event().wait(duration * 60)
+                finally:
+                    self._stop_zone(zone_id)
+                    # watering_start_time очищается в _stop_zone
+
+            try:
+                self.db.add_log('group_seq_complete', json.dumps({'group_id': group_id, 'zones': zone_ids}))
+            except Exception:
+                pass
+            logger.info(f"Группа {group_id}: последовательный полив завершен")
+        except Exception as e:
+            logger.error(f"Ошибка выполнения последовательного полива группы {group_id}: {e}")
+
     def get_active_programs(self) -> Dict[int, Dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
         return {pid: {'job_ids': jobs} for pid, jobs in self.program_jobs.items()}
