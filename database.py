@@ -107,6 +107,8 @@ class IrrigationDB:
                 self._migrate_days_format(conn)
                 self._migrate_add_postpone_reason(conn)
                 self._migrate_add_watering_start_time(conn)
+                self._migrate_add_scheduled_start_time(conn)
+                self._migrate_add_last_watering_time(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -286,6 +288,30 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка миграции watering_start_time: {e}")
 
+    def _migrate_add_scheduled_start_time(self, conn):
+        """Миграция: добавление поля scheduled_start_time (плановое время старта)"""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'scheduled_start_time' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN scheduled_start_time TEXT')
+                conn.commit()
+                logger.info("Добавлено поле scheduled_start_time в таблицу zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции scheduled_start_time: {e}")
+
+    def _migrate_add_last_watering_time(self, conn):
+        """Миграция: добавление поля last_watering_time (время последнего полива)"""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'last_watering_time' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN last_watering_time TEXT')
+                conn.commit()
+                logger.info("Добавлено поле last_watering_time в таблицу zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции last_watering_time: {e}")
+
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
@@ -402,6 +428,14 @@ class IrrigationDB:
                 if 'watering_start_time' in updated_data:
                     sql_fields.append('watering_start_time = ?')
                     params.append(updated_data['watering_start_time'])
+
+                if 'scheduled_start_time' in updated_data:
+                    sql_fields.append('scheduled_start_time = ?')
+                    params.append(updated_data['scheduled_start_time'])
+
+                if 'last_watering_time' in updated_data:
+                    sql_fields.append('last_watering_time = ?')
+                    params.append(updated_data['last_watering_time'])
                 
                 # Добавляем updated_at
                 sql_fields.append('updated_at = CURRENT_TIMESTAMP')
@@ -521,6 +555,106 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка получения зон группы {group_id}: {e}")
             return []
+
+    def clear_group_scheduled_starts(self, group_id: int) -> None:
+        """Очистить плановые времена старта у всех зон в группе"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE zones
+                    SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE group_id = ?
+                ''', (group_id,))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка очистки scheduled_start_time в группе {group_id}: {e}")
+
+    def set_group_scheduled_starts(self, group_id: int, schedule: Dict[int, str]) -> None:
+        """Установить плановые времена старта по зоне в группе. schedule: {zone_id: '%Y-%m-%d %H:%M:%S'}"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                for zone_id, ts in schedule.items():
+                    conn.execute('''
+                        UPDATE zones
+                        SET scheduled_start_time = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ? AND group_id = ?
+                    ''', (ts, zone_id, group_id))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка установки расписания scheduled_start_time для группы {group_id}: {e}")
+
+    def clear_scheduled_for_zone_group_peers(self, zone_id: int, group_id: int) -> None:
+        """Очистить scheduled_start_time у всех зон группы, кроме указанной"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE zones
+                    SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE group_id = ? AND id != ?
+                ''', (group_id, zone_id))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка очистки расписания у одногруппных зон для зоны {zone_id}: {e}")
+
+    # ===== Расчет следующего времени полива и перестройка очереди =====
+    def compute_next_run_for_zone(self, zone_id: int) -> Optional[str]:
+        """Рассчитать ближайшее будущее время запуска зоны по всем программам.
+        Возвращает строку '%Y-%m-%d %H:%M:%S' или None, если программ нет.
+        """
+        try:
+            zone = self.get_zone(zone_id)
+            if not zone:
+                return None
+            programs = self.get_programs()
+            if not programs:
+                return None
+            now = datetime.now()
+            best_dt: Optional[datetime] = None
+            for prog in programs:
+                if zone_id not in prog.get('zones', []):
+                    continue
+                # Для каждого ближайшего дня из списка дней найдем ближайшую дату
+                for offset in range(0, 14):  # ищем на 2 недели вперед
+                    dt_candidate = now + timedelta(days=offset)
+                    if dt_candidate.weekday() in prog['days']:
+                        hour, minute = map(int, prog['time'].split(':'))
+                        start_dt = dt_candidate.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if start_dt <= now:
+                            continue
+                        # Сдвиг по позиции зоны в программе
+                        cum = 0
+                        for zid in sorted(prog['zones']):
+                            dur = self.get_zone_duration(zid)
+                            if zid == zone_id:
+                                candidate = start_dt + timedelta(minutes=cum)
+                                if best_dt is None or candidate < best_dt:
+                                    best_dt = candidate
+                                break
+                            cum += dur
+                        break
+            if best_dt:
+                return best_dt.strftime('%Y-%m-%d %H:%M:%S')
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка расчета следующего запуска для зоны {zone_id}: {e}")
+            return None
+
+    def reschedule_group_to_next_program(self, group_id: int) -> None:
+        """Пересчитать и записать scheduled_start_time всем зонам группы на ближайшие будущие запуски.
+        Используется при отмене текущего полива группы/запуске вручную.
+        """
+        try:
+            zones = self.get_zones_by_group(group_id)
+            schedule: Dict[int, str] = {}
+            for z in zones:
+                nxt = self.compute_next_run_for_zone(z['id'])
+                if nxt:
+                    schedule[z['id']] = nxt
+            self.clear_group_scheduled_starts(group_id)
+            if schedule:
+                self.set_group_scheduled_starts(group_id, schedule)
+        except Exception as e:
+            logger.error(f"Ошибка перестройки расписания группы {group_id}: {e}")
     
     def update_group(self, group_id: int, name: str) -> bool:
         """Обновить название группы"""

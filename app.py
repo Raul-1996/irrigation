@@ -909,10 +909,24 @@ def api_postpone():
 def api_stop_group(group_id):
     """Остановить все зоны в группе"""
     try:
+        # Останавливаем все зоны в группе
         zones = db.get_zones()
         group_zones = [z for z in zones if z['group_id'] == group_id]
         for zone in group_zones:
-            db.update_zone(zone['id'], {'state': 'off'})
+            db.update_zone(zone['id'], {'state': 'off', 'watering_start_time': None})
+        
+        # Отменяем все активные задачи планировщика для этой группы и ставим флаг отмены
+        scheduler = get_scheduler()
+        if scheduler:
+            scheduler.cancel_group_jobs(group_id)
+ 
+        # Чистим плановые старты группы
+        try:
+            # Перестраиваем расписание: переносим на следующую программу
+            db.reschedule_group_to_next_program(group_id)
+        except Exception:
+            pass
+
         db.add_log('group_stop', json.dumps({"group": group_id}))
         return jsonify({"success": True, "message": f"Группа {group_id} остановлена"})
     except Exception as e:
@@ -951,14 +965,19 @@ def api_start_zone_exclusive(group_id, zone_id):
         for z in group_zones:
             if z['id'] == zone_id:
                 db.update_zone(z['id'], {'state': 'on', 'watering_start_time': start_ts})
-                try:
-                    scheduler = get_scheduler()
-                    if scheduler:
-                        scheduler.schedule_zone_stop(z['id'], int(z['duration']))
-                except Exception:
-                    pass
             else:
                 db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+        # Очистим плановые старты у «соседей» по группе
+        try:
+            db.clear_scheduled_for_zone_group_peers(zone_id, group_id)
+        except Exception:
+            pass
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                scheduler.schedule_zone_stop(zone_id, int([z for z in group_zones if z['id']==zone_id][0]['duration']))
+        except Exception:
+            pass
         db.add_log('zone_start_exclusive', json.dumps({"group": group_id, "zone": zone_id}))
         return jsonify({"success": True, "message": f"Зона {zone_id} запущена, остальные остановлены"})
     except Exception as e:
@@ -1128,19 +1147,38 @@ def start_zone(zone_id):
     try:
         if app.config.get('EMERGENCY_STOP'):
             return jsonify({'success': False, 'message': 'Аварийная остановка активна. Сначала отключите аварийный режим.'}), 400
+        
+        # Проверяем, что нет других активных зон
+        zones = db.get_zones()
+        active_zones = [z for z in zones if z['state'] == 'on' and z['id'] != zone_id]
+        if active_zones:
+            active_zone_names = [z['name'] for z in active_zones]
+            return jsonify({
+                'success': False, 
+                'message': f'Нельзя запустить зону {zone_id}: уже активны зоны {", ".join(active_zone_names)}'
+            }), 400
+        
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         
+        # При ручном старте — отменяем текущую последовательность/программу для группы зоны
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                scheduler.cancel_group_jobs(int(zone['group_id']))
+        except Exception:
+            pass
+
         # Устанавливаем время начала полива для зоны
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
         try:
             scheduler = get_scheduler()
             if scheduler:
-                scheduler.active_zones[zone_id] = datetime.now() + timedelta(minutes=int(zone['duration']))
-        except Exception:
-            pass
+                scheduler.schedule_zone_stop(zone_id, int(zone['duration']))
+        except Exception as e:
+            logger.error(f"Ошибка планирования остановки зоны {zone_id}: {e}")
         db.add_log('zone_start', json.dumps({
             "zone": zone_id,
             "name": zone['name'],
@@ -1167,8 +1205,9 @@ def stop_zone(zone_id):
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         
-        # Очищаем время начала полива
-        db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
+        # Очищаем время начала полива и фиксируем last_watering_time
+        last_time = zone.get('watering_start_time')
+        db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
         db.add_log('zone_stop', json.dumps({
             "zone": zone_id,
             "name": zone['name']

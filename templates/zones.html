@@ -399,8 +399,9 @@
     
     .groups-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(260px, 260px));
         gap: 0.8rem;
+        justify-content: start;
     }
     
     .group-card {
@@ -409,6 +410,7 @@
         padding: 0.8rem;
         border: 1px solid #e9ecef;
         transition: var(--transition);
+        max-width: 320px;
     }
     
     .group-card:hover {
@@ -1043,8 +1045,7 @@
                 <td>
                     <div class="zone-actions">
                         <button class="save-btn" onclick="saveZone(${zone.id})" disabled>💾</button>
-                        <button class="start-btn" onclick="startZone(${zone.id})">▶️</button>
-                        <button class="stop-btn" onclick="stopZone(${zone.id})">⏹️</button>
+                        <button class="start-btn" onclick="toggleZone(${zone.id})">${zone.state === 'on' ? '⏹️' : '▶️'}</button>
                         <button class="delete-btn" onclick="deleteZone(${zone.id})">🗑️</button>
                     </div>
                 </td>
@@ -1330,6 +1331,24 @@
         } catch (error) {
             console.error('Ошибка остановки зоны:', error);
             showNotification('Ошибка остановки зоны', 'error');
+        }
+    }
+    
+    // Переключатель пуск/стоп одной кнопкой (как на странице статус)
+    async function toggleZone(zoneId) {
+        try {
+            const zone = zonesData.find(z => z.id === zoneId);
+            if (!zone) {
+                showNotification('Зона не найдена', 'error');
+                return;
+            }
+            if (zone.state === 'on') {
+                await stopZone(zoneId);
+            } else {
+                await startZone(zoneId);
+            }
+        } catch (e) {
+            showNotification('Ошибка переключения зоны', 'error');
         }
     }
     
