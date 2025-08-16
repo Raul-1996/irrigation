@@ -392,6 +392,7 @@ def api_groups():
     return jsonify(groups)
 
 @app.route('/api/groups/<int:group_id>', methods=['PUT'])
+@csrf.exempt
 def api_update_group(group_id):
     data = request.get_json()
     if db.update_group(group_id, data['name']):
@@ -400,6 +401,7 @@ def api_update_group(group_id):
     return ('Group not found', 404)
 
 @app.route('/api/groups', methods=['POST'])
+@csrf.exempt
 def api_create_group():
     data = request.get_json() or {}
     name = data.get('name') or 'Новая группа'
@@ -429,6 +431,13 @@ def api_program(prog_id):
     
     elif request.method == 'PUT':
         data = request.get_json()
+        # Серверная проверка конфликтов перед сохранением
+        try:
+            conflicts = db.check_program_conflicts(program_id=prog_id, time=data['time'], zones=data['zones'], days=data['days'])
+            if conflicts:
+                return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'}), 400
+        except Exception as e:
+            logger.error(f"Ошибка серверной проверки конфликтов: {e}")
         program = db.update_program(prog_id, data)
         if program:
             db.add_log('prog_edit', json.dumps({"prog": prog_id, "changes": data}))
@@ -457,6 +466,13 @@ def api_program(prog_id):
 @app.route('/api/programs', methods=['POST'])
 def api_create_program():
     data = request.get_json()
+    # Серверная проверка конфликтов перед созданием
+    try:
+        conflicts = db.check_program_conflicts(program_id=None, time=data['time'], zones=data['zones'], days=data['days'])
+        if conflicts:
+            return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'}), 400
+    except Exception as e:
+        logger.error(f"Ошибка серверной проверки конфликтов (create): {e}")
     program = db.create_program(data)
     if program:
         db.add_log('prog_create', json.dumps({"prog": program['id'], "name": program['name']}))
@@ -605,6 +621,65 @@ def api_check_zone_duration_conflicts():
     except Exception as e:
         logger.error(f"Ошибка проверки конфликтов длительности зоны: {e}")
         return jsonify({'success': False, 'message': 'Ошибка проверки конфликтов'}), 500
+
+# ===== MQTT Servers API =====
+@app.route('/api/mqtt/servers', methods=['GET'])
+def api_mqtt_servers_list():
+    try:
+        return jsonify({'success': True, 'servers': db.get_mqtt_servers()})
+    except Exception as e:
+        logger.error(f"Ошибка получения MQTT серверов: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка получения списка'}), 500
+
+@app.route('/api/mqtt/servers', methods=['POST'])
+@csrf.exempt
+def api_mqtt_server_create():
+    try:
+        data = request.get_json() or {}
+        server = db.create_mqtt_server(data)
+        if not server:
+            return jsonify({'success': False, 'message': 'Не удалось создать сервер'}), 400
+        return jsonify({'success': True, 'server': server}), 201
+    except Exception as e:
+        logger.error(f"Ошибка создания MQTT сервера: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка создания'}), 500
+
+@app.route('/api/mqtt/servers/<int:server_id>', methods=['GET'])
+def api_mqtt_server_get(server_id: int):
+    try:
+        server = db.get_mqtt_server(server_id)
+        if not server:
+            return jsonify({'success': False, 'message': 'Сервер не найден'}), 404
+        return jsonify({'success': True, 'server': server})
+    except Exception as e:
+        logger.error(f"Ошибка получения MQTT сервера {server_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка получения'}), 500
+
+@app.route('/api/mqtt/servers/<int:server_id>', methods=['PUT'])
+@csrf.exempt
+def api_mqtt_server_update(server_id: int):
+    try:
+        data = request.get_json() or {}
+        ok = db.update_mqtt_server(server_id, data)
+        if not ok:
+            return jsonify({'success': False, 'message': 'Не удалось обновить'}), 400
+        return jsonify({'success': True, 'server': db.get_mqtt_server(server_id)})
+    except Exception as e:
+        logger.error(f"Ошибка обновления MQTT сервера {server_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка обновления'}), 500
+
+@app.route('/api/mqtt/servers/<int:server_id>', methods=['DELETE'])
+@csrf.exempt
+def api_mqtt_server_delete(server_id: int):
+    try:
+        ok = db.delete_mqtt_server(server_id)
+        if not ok:
+            return jsonify({'success': False, 'message': 'Не удалось удалить'}), 400
+        return ('', 204)
+    except Exception as e:
+        logger.error(f"Ошибка удаления MQTT сервера {server_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка удаления'}), 500
+
 @app.route('/api/logs')
 def api_logs():
     """API для получения логов с фильтрацией"""
