@@ -764,12 +764,17 @@ def api_mqtt_probe(server_id: int):
                 events.append("subscribe failed")
 
         def on_message(cl, userdata, msg):
-            if len(received) < 100:
+            try:
+                topic = msg.topic
+            except Exception:
+                # paho v2 sometimes returns bytes; normalize
+                topic = getattr(msg, 'topic', '')
+            if len(received) < 1000:
                 try:
                     payload = msg.payload.decode('utf-8', errors='ignore')
                 except Exception:
                     payload = str(msg.payload)
-                received.append({'topic': msg.topic, 'payload': payload})
+                received.append({'topic': topic, 'payload': payload})
 
         client.on_connect = on_connect
         client.on_message = on_message

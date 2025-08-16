@@ -27,7 +27,7 @@
   @media (min-width: 900px){ .split { grid-template-columns: 1fr 1fr; } }
   .browser { background: var(--card-background); border: 1px solid var(--border-color); border-radius: 10px; padding: 1rem; box-shadow: var(--shadow); min-height: 360px; }
   .browser-controls { display:flex; gap:.5rem; margin-bottom:.5rem; align-items:center; }
-  .browser-log { height: 280px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .85rem; background: #0b1220; color: #e6edf3; border-radius: 8px; padding: .5rem; }
+  .browser-log { height: 280px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .85rem; background: #0b1220; color: #e6edf3; border-radius: 8px; padding: .5rem; white-space: pre-wrap; }
   .evt { color:#9cdcfe; }
   .err { color:#f28b82; }
   .tree { background: var(--card-background); border:1px solid var(--border-color); border-radius:10px; padding:.5rem .75rem; max-height: 400px; overflow:auto; }
@@ -247,6 +247,18 @@
   let scanTimer = null;
   let lastTopicMap = {}; // topic -> last payload
   let expandedPaths = new Set(); // 'devices/wb-.../controls'
+  function buildDisplayRegex(filterStr){
+    const raw = (filterStr||'').trim();
+    if (!raw) return new RegExp('^/devices/wb-');
+    // support MQTT wildcards '+' '#', and user '*' as regex '.*'
+    let s = raw;
+    // ensure leading '/'
+    if (s[0] !== '/') s = '/' + s;
+    s = s.replace(/[.*+?^${}()|[\]\\]/g, r=> r==='*' ? r : '\\'+r); // escape regex except '*'
+    s = s.replace(/\+/g, '[^/]+').replace(/#/g, '.*').replace(/\*/g, '.*');
+    return new RegExp('^' + s);
+  }
+  function hasMqttWildcards(str){ return /[#+]/.test(str||''); }
 
   function updateSelectedBadge(){
     const sel = document.getElementById('serverSelect');
@@ -275,7 +287,7 @@
   function appendLog(line){
     const log = document.getElementById('topicLog');
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
-    log.textContent += (line + '\n');
+    log.textContent += (line + '\n\n');
     if (atBottom) log.scrollTop = log.scrollHeight;
   }
 
@@ -367,19 +379,14 @@
     const serverId = sel.value;
     // подписываемся шире, а фильтруем по devices/wb- клиенстки
     const uiFilter = document.getElementById('filterInput').value.trim();
-    const subscribeFilter = uiFilter || '/devices/#';
+    const subscribeFilter = hasMqttWildcards(uiFilter) ? uiFilter : '/devices/#';
+    const displayRe = buildDisplayRegex(uiFilter);
     const duration = parseFloat(document.getElementById('durationSel').value || '3');
     try{
       const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter: subscribeFilter, duration})});
       if (res.ok){
         const data = await res.json();
-        const items = (data.items||[]).filter(it=>{
-          const t = (it.topic||'').replace(/^\/+/, '');
-          // по умолчанию показываем только devices/wb-*
-          const want = t.startsWith('devices/wb-');
-          // если пользователь задал свой фильтр, оставим всё, совпавшее
-          return uiFilter ? true : want;
-        });
+        const items = (data.items||[]).filter(it=> displayRe.test(it.topic||''));
         // merge into lastTopicMap (сохраняем только нужные ветки)
         for (const it of items){ lastTopicMap[it.topic]=it.payload; }
         // rebuild tree from map for performance predictability
