@@ -1296,7 +1296,8 @@
                 return;
             }
             
-            const response = await api.post(`/api/zones/${zoneId}/start`);
+            // MQTT: публикуем '1' и ждём подтверждения через zones-sse
+            const response = await api.post(`/api/zones/${zoneId}/mqtt/start`);
             
             if (response.success) {
                 showNotification(`Зона ${zoneId} запущена`, 'success');
@@ -1326,7 +1327,7 @@
     // Остановка зоны
     async function stopZone(zoneId) {
         try {
-            const response = await api.post(`/api/zones/${zoneId}/stop`);
+            const response = await api.post(`/api/zones/${zoneId}/mqtt/stop`);
             
             if (response.success) {
                 showNotification(`Зона ${zoneId} остановлена`, 'success');
@@ -1634,6 +1635,24 @@
     // Инициализация
     document.addEventListener('DOMContentLoaded', () => {
         loadData();
+        // Подпишемся на поток статусов зон через SSE
+        try {
+            const es = new EventSource('/api/mqtt/zones-sse');
+            es.onmessage = (ev)=>{
+                try{
+                    const data = JSON.parse(ev.data);
+                    const idx = zonesData.findIndex(z=>z.id===data.zone_id);
+                    if (idx>=0){
+                        zonesData[idx].state = data.state;
+                        const row = document.querySelector(`tr[data-zone-id="${data.zone_id}"]`);
+                        if (row){
+                            const btn = row.querySelector('.start-btn');
+                            if (btn){ btn.textContent = zonesData[idx].state==='on'?'⏹️':'▶️'; }
+                        }
+                    }
+                }catch(e){}
+            };
+        } catch (e) {}
     });
 
     // Функции для работы с чекбоксами

@@ -1566,6 +1566,125 @@ def api_zone_watering_time(zone_id):
         logger.error(f"Ошибка получения времени полива зоны {zone_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка получения времени полива'}), 500
 
+@app.route('/api/mqtt/zones-sse')
+def api_mqtt_zones_sse():
+    if mqtt is None:
+        return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
+    try:
+        zones = db.get_zones()
+        server_topics = {}
+        for z in zones:
+            sid = z.get('mqtt_server_id')
+            topic = (z.get('topic') or '').strip()
+            if not sid or not topic:
+                continue
+            t = topic if str(topic).startswith('/') else '/' + str(topic)
+            server_topics.setdefault(int(sid), {})[t] = z['id']
+        if not server_topics:
+            return jsonify({'success': False, 'message': 'no zone topics'}), 200
+        msg_queue = queue.Queue(maxsize=10000)
+        def _make_on_message(sid):
+            def _on_message(cl, userdata, msg):
+                t = str(getattr(msg, 'topic', '') or '')
+                if not t.startswith('/'): t = '/' + t
+                zone_id = server_topics.get(sid, {}).get(t)
+                if not zone_id:
+                    return
+                try:
+                    payload = msg.payload.decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    payload = str(msg.payload)
+                new_state = 'on' if payload in ('1', 'true', 'ON', 'on') else 'off'
+                try:
+                    db.update_zone(zone_id, {'state': new_state})
+                except Exception:
+                    pass
+                data = json.dumps({'zone_id': zone_id, 'topic': t, 'payload': payload, 'state': new_state})
+                try:
+                    msg_queue.put_nowait(data)
+                except queue.Full:
+                    pass
+            return _on_message
+        clients = []
+        for sid, topics in server_topics.items():
+            server = db.get_mqtt_server(sid)
+            try:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
+                if server.get('username'):
+                    client.username_pw_set(server.get('username'), server.get('password') or None)
+                client.on_message = _make_on_message(sid)
+                client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                for t in topics.keys():
+                    try:
+                        client.subscribe(t, qos=0)
+                    except Exception:
+                        pass
+                client.loop_start()
+                clients.append(client)
+            except Exception:
+                continue
+        @stream_with_context
+        def _gen():
+            try:
+                yield 'event: open\n' + 'data: {}\n\n'
+                while True:
+                    try:
+                        data = msg_queue.get(timeout=0.5)
+                        yield f'data: {data}\n\n'
+                    except queue.Empty:
+                        yield 'event: ping\n' + 'data: {}\n\n'
+            finally:
+                for c in clients:
+                    try:
+                        c.loop_stop()
+                        c.disconnect()
+                    except Exception:
+                        pass
+        return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    except Exception as e:
+        logger.error(f"zones SSE failed: {e}")
+        return jsonify({'success': False}), 200
+
+@app.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
+def api_zone_mqtt_start(zone_id: int):
+    z = db.get_zone(zone_id)
+    if not z: return jsonify({'success': False}), 404
+    sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+    if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
+    t = topic if str(topic).startswith('/') else '/' + str(topic)
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        server = db.get_mqtt_server(int(sid))
+        if server.get('username'):
+            client.username_pw_set(server.get('username'), server.get('password') or None)
+        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+        client.publish(t, payload='1', qos=0, retain=False)
+        client.disconnect()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"MQTT publish start failed: {e}")
+        return jsonify({'success': False}), 500
+
+@app.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
+def api_zone_mqtt_stop(zone_id: int):
+    z = db.get_zone(zone_id)
+    if not z: return jsonify({'success': False}), 404
+    sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+    if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
+    t = topic if str(topic).startswith('/') else '/' + str(topic)
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        server = db.get_mqtt_server(int(sid))
+        if server.get('username'):
+            client.username_pw_set(server.get('username'), server.get('password') or None)
+        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+        client.publish(t, payload='0', qos=0, retain=False)
+        client.disconnect()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"MQTT publish stop failed: {e}")
+        return jsonify({'success': False}), 500
+
 if __name__ == '__main__':
     # Инициализируем планировщик полива
     init_scheduler(db)
