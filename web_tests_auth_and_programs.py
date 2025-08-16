@@ -62,7 +62,7 @@ class WebAuthAndProgramsTest(unittest.TestCase):
         self.assertTrue(self.driver.find_element(By.LINK_TEXT, 'Карта зон').is_displayed())
         self.assertTrue(self.driver.find_element(By.LINK_TEXT, 'Расход воды').is_displayed())
         # пункты админа могут отсутствовать, проверяем отсутствие ошибок при поиске
-        admin_links = ['Зоны и группы', 'Программы', 'Логи']
+        admin_links = ['Зоны и группы', 'Программы', 'Логи', 'MQTT']
         for link in admin_links:
             try:
                 el = self.driver.find_element(By.LINK_TEXT, link)
@@ -79,6 +79,22 @@ class WebAuthAndProgramsTest(unittest.TestCase):
         time.sleep(2)
         # Проверим, что страница программ доступна
         self.assertIn('Программы', self.driver.title)
+
+    def test_mqtt_crud_ui(self):
+        if not self.driver:
+            self.skipTest('no driver')
+        # login as admin
+        self.driver.get(f'{BASE_URL_BROWSER}/login')
+        time.sleep(1)
+        self.driver.execute_script("fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'1234'})}).then(()=>location.href='/mqtt')")
+        time.sleep(2)
+        # На странице MQTT создадим запись через JS — формы управляются JS, заполним и вызовем createServer
+        self.assertIn('MQTT', self.driver.title)
+        self.driver.execute_script("document.getElementById('m_name').value='UI Test';document.getElementById('m_host').value='localhost';document.getElementById('m_port').value='1883';document.getElementById('m_user').value='u';document.getElementById('m_pass').value='p';document.getElementById('m_client').value='cid';document.getElementById('m_enabled').value='true';createServer();")
+        time.sleep(2)
+        # Проверим, что в таблице появился хотя бы один сервер
+        rows = self.driver.find_elements(By.CSS_SELECTOR, '#servers_body tr')
+        self.assertGreaterEqual(len(rows), 1)
 
 
 if __name__ == '__main__':

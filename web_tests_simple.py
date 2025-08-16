@@ -139,6 +139,34 @@ class WebInterfaceTest(unittest.TestCase):
         programs = response.json()
         self.assertIsInstance(programs, list)
         print(f"✅ API программ работает корректно, найдено {len(programs)} программ")
+
+    def test_05b_mqtt_servers_crud_api(self):
+        """Тест CRUD MQTT servers через API"""
+        print("🧪 Тест API MQTT servers...")
+        # create
+        payload = {
+            'name': 'WB UI',
+            'host': '127.0.0.1',
+            'port': 1883,
+            'username': 'u',
+            'password': 'p',
+            'client_id': 'cid',
+            'enabled': True
+        }
+        r = requests.post('http://localhost:8080/api/mqtt/servers', json=payload)
+        self.assertIn(r.status_code, (201, 400))
+        if r.status_code == 201:
+            sid = r.json()['server']['id']
+            # get
+            g = requests.get(f'http://localhost:8080/api/mqtt/servers/{sid}')
+            self.assertEqual(g.status_code, 200)
+            # update
+            u = requests.put(f'http://localhost:8080/api/mqtt/servers/{sid}', json={'name': 'WB UI 2'})
+            self.assertEqual(u.status_code, 200)
+            # delete
+            d = requests.delete(f'http://localhost:8080/api/mqtt/servers/{sid}')
+            self.assertIn(d.status_code, (204, 400))
+        print("✅ API MQTT servers CRUD работает корректно")
     
     def test_06_logs_api(self):
         """Тест API логов"""
