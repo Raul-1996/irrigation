@@ -109,6 +109,8 @@ class IrrigationDB:
                 self._migrate_add_watering_start_time(conn)
                 self._migrate_add_scheduled_start_time(conn)
                 self._migrate_add_last_watering_time(conn)
+                self._migrate_add_mqtt_servers(conn)
+                self._migrate_add_zone_mqtt_server_id(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -312,6 +314,39 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка миграции last_watering_time: {e}")
 
+    def _migrate_add_mqtt_servers(self, conn):
+        """Миграция: таблица MQTT серверов"""
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS mqtt_servers (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER DEFAULT 1883,
+                    username TEXT,
+                    password TEXT,
+                    client_id TEXT,
+                    enabled INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка миграции mqtt_servers: {e}")
+
+    def _migrate_add_zone_mqtt_server_id(self, conn):
+        """Миграция: поле mqtt_server_id у зон"""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'mqtt_server_id' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN mqtt_server_id INTEGER')
+                conn.commit()
+                logger.info("Добавлено поле mqtt_server_id в таблицу zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции mqtt_server_id: {e}")
+
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
@@ -436,6 +471,10 @@ class IrrigationDB:
                 if 'last_watering_time' in updated_data:
                     sql_fields.append('last_watering_time = ?')
                     params.append(updated_data['last_watering_time'])
+                
+                if 'mqtt_server_id' in updated_data:
+                    sql_fields.append('mqtt_server_id = ?')
+                    params.append(updated_data.get('mqtt_server_id'))
                 
                 # Добавляем updated_at
                 sql_fields.append('updated_at = CURRENT_TIMESTAMP')
@@ -687,6 +726,83 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка получения программ: {e}")
             return []
+
+    # ===== MQTT servers CRUD =====
+    def get_mqtt_servers(self) -> List[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT * FROM mqtt_servers ORDER BY id')
+                return [dict(row) for row in cur.fetchall()]
+        except Exception as e:
+            logger.error(f"Ошибка получения MQTT серверов: {e}")
+            return []
+
+    def create_mqtt_server(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute('''
+                    INSERT INTO mqtt_servers (name, host, port, username, password, client_id, enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    data.get('name', 'MQTT'),
+                    data.get('host', 'localhost'),
+                    int(data.get('port', 1883)),
+                    data.get('username'),
+                    data.get('password'),
+                    data.get('client_id'),
+                    1 if data.get('enabled', True) else 0
+                ))
+                server_id = cur.lastrowid
+                conn.commit()
+                return self.get_mqtt_server(server_id)
+        except Exception as e:
+            logger.error(f"Ошибка создания MQTT сервера: {e}")
+            return None
+
+    def get_mqtt_server(self, server_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT * FROM mqtt_servers WHERE id = ?', (server_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка получения MQTT сервера {server_id}: {e}")
+            return None
+
+    def update_mqtt_server(self, server_id: int, data: Dict[str, Any]) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    UPDATE mqtt_servers
+                    SET name = ?, host = ?, port = ?, username = ?, password = ?, client_id = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (
+                    data.get('name', 'MQTT'),
+                    data.get('host', 'localhost'),
+                    int(data.get('port', 1883)),
+                    data.get('username'),
+                    data.get('password'),
+                    data.get('client_id'),
+                    1 if data.get('enabled', True) else 0,
+                    server_id
+                ))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления MQTT сервера {server_id}: {e}")
+            return False
+
+    def delete_mqtt_server(self, server_id: int) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('DELETE FROM mqtt_servers WHERE id = ?', (server_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления MQTT сервера {server_id}: {e}")
+            return False
     
     def get_logs(self, event_type: str = None, from_date: str = None, to_date: str = None) -> List[Dict[str, Any]]:
         """Получить логи с фильтрацией"""

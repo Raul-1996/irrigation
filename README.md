@@ -466,3 +466,31 @@ MIT License - свободное использование и модифика�
 4. Запустите автотесты: `./test.sh`
 5. Проверьте, что порт 8080 свободен
 6. Создайте Issue с описанием проблемы
+
+## Refactor highlights (Aug 2025)
+
+- Added cancellable group sequences in scheduler with per-group cancel flags.
+- Introduced DB fields:
+  - `scheduled_start_time`: planned next start used for UI and rescheduling.
+  - `last_watering_time`: updated when a zone stops; used in UI "Последний полив".
+- Program-run zones now set `watering_start_time` so countdown works for programs.
+- On group stop or manual start, current sequence is cancelled and the group's schedule is rebuilt to the next suitable program window.
+
+## Testing
+
+### All tests
+
+```bash
+source venv/bin/activate
+python run_all_tests.py
+```
+
+### Pytest (unit style)
+
+We are migrating tests to pytest. To run pytest suites (as they are added):
+
+```bash
+pytest -q
+```
+
+Pytest plugins used: `pytest`, `pytest-selenium`.
