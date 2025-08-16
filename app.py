@@ -742,14 +742,15 @@ def api_mqtt_probe(server_id: int):
     try:
         server = db.get_mqtt_server(server_id)
         if not server:
-            return jsonify({'success': False, 'message': 'server not found'}), 404
+            return jsonify({'success': False, 'message': 'server not found', 'items': [], 'events': []}), 200
         if mqtt is None:
-            return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 400
+            return jsonify({'success': False, 'message': 'paho-mqtt not installed', 'items': [], 'events': []}), 200
         data = request.get_json() or {}
         topic_filter = data.get('filter', '#')
         duration = float(data.get('duration', 3))  # seconds
 
         received = []
+        events = [f"probe: connecting to {server.get('host')}:{server.get('port')} filter={topic_filter} duration={duration}s"]
         # paho-mqtt v2 style
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
         if server.get('username'):
@@ -758,8 +759,9 @@ def api_mqtt_probe(server_id: int):
         def on_connect(cl, userdata, flags, reason_code, properties=None):
             try:
                 cl.subscribe(topic_filter, qos=0)
+                events.append(f"connected rc={reason_code}, subscribed to {topic_filter}")
             except Exception:
-                pass
+                events.append("subscribe failed")
 
         def on_message(cl, userdata, msg):
             if len(received) < 100:
@@ -771,7 +773,11 @@ def api_mqtt_probe(server_id: int):
 
         client.on_connect = on_connect
         client.on_message = on_message
-        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+        try:
+            client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+        except Exception as ce:
+            events.append(f"connect error: {ce}")
+            return jsonify({'success': False, 'message': 'connect failed', 'items': [], 'events': events}), 200
         client.loop_start()
         import time as _t
         start = _t.time()
@@ -782,10 +788,12 @@ def api_mqtt_probe(server_id: int):
             client.disconnect()
         except Exception:
             pass
-        return jsonify({'success': True, 'items': received})
+        if not received:
+            events.append('no messages received')
+        return jsonify({'success': True, 'items': received, 'events': events})
     except Exception as e:
         logger.error(f"MQTT probe error: {e}")
-        return jsonify({'success': False, 'message': 'probe failed'}), 500
+        return jsonify({'success': False, 'message': 'probe failed', 'items': [], 'events': [str(e)]}), 200
 
 # Quick connection status check
 @app.route('/api/mqtt/<int:server_id>/status', methods=['GET'])
@@ -793,9 +801,9 @@ def api_mqtt_status(server_id: int):
     try:
         server = db.get_mqtt_server(server_id)
         if not server:
-            return jsonify({'success': False, 'connected': False, 'message': 'server not found'}), 404
+            return jsonify({'success': True, 'connected': False, 'message': 'server not found'}), 200
         if mqtt is None:
-            return jsonify({'success': False, 'connected': False, 'message': 'paho-mqtt not installed'}), 400
+            return jsonify({'success': True, 'connected': False, 'message': 'paho-mqtt not installed'}), 200
         ok = False
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
         if server.get('username'):
@@ -813,7 +821,7 @@ def api_mqtt_status(server_id: int):
         return jsonify({'success': True, 'connected': ok})
     except Exception as e:
         logger.error(f"MQTT status error: {e}")
-        return jsonify({'success': False, 'connected': False, 'message': 'status failed'}), 500
+        return jsonify({'success': True, 'connected': False, 'message': 'status failed'}), 200
 
 @app.route('/api/water')
 def api_water():

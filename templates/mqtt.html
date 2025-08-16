@@ -28,6 +28,8 @@
   .browser { background: var(--card-background); border: 1px solid var(--border-color); border-radius: 10px; padding: 1rem; box-shadow: var(--shadow); min-height: 360px; }
   .browser-controls { display:flex; gap:.5rem; margin-bottom:.5rem; align-items:center; }
   .browser-log { height: 280px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .85rem; background: #0b1220; color: #e6edf3; border-radius: 8px; padding: .5rem; }
+  .evt { color:#9cdcfe; }
+  .err { color:#f28b82; }
   .badge { display:inline-block; padding:.15rem .45rem; border-radius:10px; background:#e9ecef; color:#333; font-size:.75rem; }
 </style>
 {% endblock %}
@@ -77,6 +79,12 @@
       <select id="serverSelect" onchange="onServerChange()"></select>
       <input id="filterInput" placeholder="Фильтр (например: wb/#)" style="flex:1; padding:.5rem; border:1px solid var(--border-color); border-radius:8px;">
       <button class="btn btn-secondary" onclick="toggleSubscribe()" id="subBtn">Подписаться</button>
+      <select id="durationSel" title="Время ожидания" style="padding:.45rem; border:1px solid var(--border-color); border-radius:8px;">
+        <option value="2">2s</option>
+        <option value="3" selected>3s</option>
+        <option value="5">5s</option>
+        <option value="10">10s</option>
+      </select>
       <button class="btn btn-danger" onclick="clearBrowser()">Очистить</button>
     </div>
     <div class="browser-log" id="topicLog"></div>
@@ -263,9 +271,11 @@
     appendLog(`[i] Подписка на ${topicFilter}`);
     // пробный запрос на сервер, чтобы взять retained
     try {
-      const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter: topicFilter})});
+      const duration = parseFloat(document.getElementById('durationSel').value || '3');
+      const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter: topicFilter, duration: duration})});
       if (res.ok) {
         const data = await res.json();
+        (data.events||[]).forEach(ev=>appendLog(`% ${ev}`));
         (data.items||[]).forEach(it=>appendLog(`${it.topic}: ${it.payload}`));
       }
     } catch(e) {}
