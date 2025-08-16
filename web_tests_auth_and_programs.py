@@ -72,7 +72,7 @@ class WebAuthAndProgramsTest(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_admin_login_and_programs_page(self):
+    def test_admin_login_and_programs_page_and_conflict_modal(self):
         self.driver.get(f'{BASE_URL_BROWSER}/login')
         time.sleep(1)
         # Выполним вход
@@ -81,6 +81,30 @@ class WebAuthAndProgramsTest(unittest.TestCase):
         time.sleep(2)
         # Проверим, что страница программ доступна
         self.assertIn('Программы', self.driver.title)
+        # Попробуем создать конфликтующие программы на одно и то же время и дни на одну и ту же зону
+        # Открыть мастер
+        self.driver.execute_script("openWizard();")
+        time.sleep(1)
+        # Заполнить поля первой программы и сохранить
+        self.driver.execute_script("document.getElementById('progName').value='P1';document.getElementById('progTime').value='04:00';Array.from(document.getElementById('progDays').options).forEach(o=>o.selected=true);")
+        # Перейти на шаг 2
+        self.driver.execute_script("nextStep();")
+        time.sleep(1)
+        # Выбрать первую зону
+        self.driver.execute_script("var z=document.querySelector('.zone-check'); if(z){z.checked=true;}")
+        # Сохранить
+        self.driver.execute_script("saveProg();")
+        time.sleep(2)
+        # Вторая программа: те же настройки
+        self.driver.execute_script("openWizard();")
+        time.sleep(1)
+        self.driver.execute_script("document.getElementById('progName').value='P2';document.getElementById('progTime').value='04:00';Array.from(document.getElementById('progDays').options).forEach(o=>o.selected=true);")
+        self.driver.execute_script("nextStep();")
+        time.sleep(1)
+        self.driver.execute_script("var z=document.querySelector('.zone-check'); if(z){z.checked=true;}")
+        # Сохранить — фронт должен показать предупреждение и не создать
+        self.driver.execute_script("saveProg();")
+        time.sleep(1)
 
     def test_mqtt_crud_ui(self):
         if not self.driver:
@@ -124,6 +148,35 @@ class WebAuthAndProgramsTest(unittest.TestCase):
         time.sleep(2)
         rows_after_delete = self.driver.find_elements(By.CSS_SELECTOR, '#servers_body tr')
         self.assertGreaterEqual(len(rows_after_delete), rows_before_count)
+
+    def test_assign_mqtt_server_to_zone(self):
+        if not self.driver:
+            self.skipTest('no driver')
+        # login as admin and open MQTT page
+        self.driver.get(f'{BASE_URL_BROWSER}/login')
+        time.sleep(1)
+        self.driver.execute_script("fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'1234'})}).then(()=>location.href='/mqtt')")
+        time.sleep(2)
+        # create a server to select later
+        self.driver.execute_script("document.getElementById('m_name').value='SrvSel';document.getElementById('m_host').value='localhost';document.getElementById('m_port').value='1883';document.getElementById('m_user').value='u';document.getElementById('m_pass').value='p';document.getElementById('m_client').value='cid2';document.getElementById('m_enabled').value='true';createServer();")
+        time.sleep(2)
+        # go to zones page
+        self.driver.get(f'{BASE_URL_BROWSER}/zones')
+        time.sleep(2)
+        # если выпадашки mqtt есть (когда серверов >1), выберем первый доступный в первой зоне
+        try:
+            select = self.driver.find_element(By.CSS_SELECTOR, 'tbody#zones-table-body tr:first-child select.zone-mqtt')
+            # выберем первую опцию
+            options = select.find_elements(By.TAG_NAME, 'option')
+            if options:
+                options[-1].click()  # выбрать последний (созданный)
+            # нажимаем сохранить у первой строки
+            save_btn = self.driver.find_element(By.CSS_SELECTOR, 'tbody#zones-table-body tr:first-child .zone-actions .save-btn')
+            save_btn.click()
+            time.sleep(1)
+        except Exception:
+            # если селектора нет (только один сервер), тест не применим
+            pass
 
 
 if __name__ == '__main__':

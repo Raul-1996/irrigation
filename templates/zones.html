@@ -1168,6 +1168,8 @@
             const nameInput = row.querySelector('.zone-name');
             const durationInput = row.querySelector('.zone-duration');
             const groupSelect = row.querySelector('.zone-group');
+            const topicInput = row.querySelector('.zone-topic');
+            const mqttSelect = row.querySelector('.zone-mqtt');
             
             const updatedZone = {
                 ...zone,
@@ -1175,6 +1177,13 @@
                 duration: parseInt(durationInput.value),
                 group_id: parseInt(groupSelect.value)
             };
+            if (topicInput) {
+                updatedZone.topic = topicInput.value;
+            }
+            if (mqttSelect) {
+                const val = mqttSelect.value;
+                updatedZone.mqtt_server_id = val === '' ? null : parseInt(val);
+            }
 
             // 1) Перед сохранением проверяем конфликты по программам
             try {
