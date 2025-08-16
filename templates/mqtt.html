@@ -246,6 +246,7 @@
   let scanning = false;
   let scanTimer = null;
   let lastTopicMap = {}; // topic -> last payload
+  let expandedPaths = new Set(); // 'devices/wb-.../controls'
 
   function updateSelectedBadge(){
     const sel = document.getElementById('serverSelect');
@@ -322,13 +323,21 @@
       if (child && child.children){
         const caret = document.createElement('span');
         caret.className = 'toggle caret';
-        caret.onclick = ()=>{ caret.classList.toggle('open'); sub.style.display = caret.classList.contains('open') ? 'block' : 'none'; };
+        const currPath = path.concat(k).join('/');
+        // restore expanded state
+        if (expandedPaths.has(currPath)) caret.classList.add('open');
+        caret.onclick = ()=>{
+          caret.classList.toggle('open');
+          const opened = caret.classList.contains('open');
+          if (opened) expandedPaths.add(currPath); else expandedPaths.delete(currPath);
+          sub.style.display = opened ? 'block' : 'none';
+        };
         li.appendChild(caret);
         const label = document.createElement('span');
         label.textContent = k;
         li.appendChild(label);
         const sub = document.createElement('div');
-        sub.style.display = 'none';
+        sub.style.display = expandedPaths.has(currPath) ? 'block' : 'none';
         renderTree(child, sub, path.concat(k));
         li.appendChild(sub);
       }
@@ -356,21 +365,31 @@
     const sel = document.getElementById('serverSelect');
     if (!sel) return;
     const serverId = sel.value;
-    const filter = document.getElementById('filterInput').value || '#';
+    // подписываемся шире, а фильтруем по devices/wb- клиенстки
+    const uiFilter = document.getElementById('filterInput').value.trim();
+    const subscribeFilter = uiFilter || '/devices/#';
     const duration = parseFloat(document.getElementById('durationSel').value || '3');
     try{
-      const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter, duration})});
+      const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter: subscribeFilter, duration})});
       if (res.ok){
         const data = await res.json();
-        const items = data.items||[];
-        // merge into lastTopicMap
+        const items = (data.items||[]).filter(it=>{
+          const t = (it.topic||'').replace(/^\/+/, '');
+          // по умолчанию показываем только devices/wb-*
+          const want = t.startsWith('devices/wb-');
+          // если пользователь задал свой фильтр, оставим всё, совпавшее
+          return uiFilter ? true : want;
+        });
+        // merge into lastTopicMap (сохраняем только нужные ветки)
         for (const it of items){ lastTopicMap[it.topic]=it.payload; }
         // rebuild tree from map for performance predictability
         const mergedItems = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
         const tree = buildTreeFromTopics(mergedItems);
         const container = document.getElementById('topicTree');
+        // сохраняем текущее множество раскрытых путей (expandedPaths уже поддерживается caret-ами)
         container.innerHTML='';
         renderTree(tree, container);
+        appendLog(''); // пустая строка между порциями
         (data.events||[]).forEach(ev=>appendLog(`% ${ev}`));
       }
     }catch(e){ /* ignore */ }
