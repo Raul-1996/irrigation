@@ -7,6 +7,8 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException
 
 BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
@@ -90,11 +92,38 @@ class WebAuthAndProgramsTest(unittest.TestCase):
         time.sleep(2)
         # На странице MQTT создадим запись через JS — формы управляются JS, заполним и вызовем createServer
         self.assertIn('MQTT', self.driver.title)
+        rows_before = self.driver.find_elements(By.CSS_SELECTOR, '#servers_body tr')
+        rows_before_count = len(rows_before)
         self.driver.execute_script("document.getElementById('m_name').value='UI Test';document.getElementById('m_host').value='localhost';document.getElementById('m_port').value='1883';document.getElementById('m_user').value='u';document.getElementById('m_pass').value='p';document.getElementById('m_client').value='cid';document.getElementById('m_enabled').value='true';createServer();")
         time.sleep(2)
-        # Проверим, что в таблице появился хотя бы один сервер
+        # Проверим, что в таблице появился новый сервер
         rows = self.driver.find_elements(By.CSS_SELECTOR, '#servers_body tr')
-        self.assertGreaterEqual(len(rows), 1)
+        self.assertGreaterEqual(len(rows), rows_before_count + 1)
+
+        # Обновление имени у последней строки и сохранение
+        last_row = rows[-1]
+        name_input = last_row.find_elements(By.TAG_NAME, 'input')[0]
+        name_input.clear()
+        name_input.send_keys('UI Test Updated')
+        # Кнопка Сохранить — первая в последней ячейке
+        action_buttons = last_row.find_elements(By.TAG_NAME, 'button')
+        action_buttons[0].click()
+        time.sleep(2)
+
+        # Удаление созданной записи
+        rows_after_update = self.driver.find_elements(By.CSS_SELECTOR, '#servers_body tr')
+        last_row = rows_after_update[-1]
+        delete_btn = last_row.find_elements(By.TAG_NAME, 'button')[1]
+        delete_btn.click()
+        try:
+            WebDriverWait(self.driver, 3).until(EC.alert_is_present())
+            alert = self.driver.switch_to.alert
+            alert.accept()
+        except Exception:
+            pass
+        time.sleep(2)
+        rows_after_delete = self.driver.find_elements(By.CSS_SELECTOR, '#servers_body tr')
+        self.assertGreaterEqual(len(rows_after_delete), rows_before_count)
 
 
 if __name__ == '__main__':
