@@ -247,6 +247,7 @@
   let scanTimer = null;
   let lastTopicMap = {}; // topic -> last payload
   let expandedPaths = new Set(); // 'devices/wb-.../controls'
+  let sseSource = null; // EventSource
   function buildDisplayRegex(filterStr){
     const raw = (filterStr||'').trim();
     if (!raw) return new RegExp('^\/?devices\/');
@@ -367,10 +368,40 @@
   function toggleScan(){
     scanning = !scanning;
     document.getElementById('scanBtn').textContent = scanning ? 'Остановить сканирование' : 'Сканировать топики';
-    if (scanning) startScanLoop(); else stopScanLoop();
+    if (scanning) startSSE(); else stopSSE();
   }
 
   function stopScanLoop(){ if (scanTimer){ clearTimeout(scanTimer); scanTimer=null; } }
+
+  function stopSSE(){ if (sseSource){ sseSource.close(); sseSource=null; } }
+
+  function startSSE(){
+    stopSSE();
+    const sel = document.getElementById('serverSelect');
+    if (!sel) return;
+    const serverId = sel.value;
+    const uiFilter = document.getElementById('filterInput').value.trim();
+    const subFilter = hasMqttWildcards(uiFilter) ? uiFilter : '/devices/#';
+    const displayRe = buildDisplayRegex(uiFilter);
+    const url = `/api/mqtt/${serverId}/scan-sse?filter=${encodeURIComponent(subFilter)}`;
+    sseSource = new EventSource(url);
+    sseSource.onmessage = (ev)=>{
+      try{
+        const it = JSON.parse(ev.data);
+        const t = (String(it.topic||''));
+        const norm = t.startsWith('/') ? t : ('/' + t);
+        if (displayRe.test(norm)){
+          lastTopicMap[norm] = it.payload;
+          const merged = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
+          const tree = buildTreeFromTopics(merged);
+          const container = document.getElementById('topicTree');
+          container.innerHTML='';
+          renderTree(tree, container);
+        }
+      }catch(e){}
+    };
+    sseSource.addEventListener('ping', ()=>{});
+  }
 
   async function startScanLoop(){
     stopScanLoop();

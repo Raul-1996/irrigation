@@ -14,6 +14,9 @@ try:
     import paho.mqtt.client as mqtt
 except Exception:
     mqtt = None
+from flask import Response, stream_with_context
+import threading
+import queue
 from config import Config
 from routes.status import status_bp
 from routes.files import files_bp
@@ -827,6 +830,93 @@ def api_mqtt_status(server_id: int):
     except Exception as e:
         logger.error(f"MQTT status error: {e}")
         return jsonify({'success': True, 'connected': False, 'message': 'status failed'}), 200
+
+# Server-Sent Events: continuous scan stream
+@app.route('/api/mqtt/<int:server_id>/scan-sse')
+def api_mqtt_scan_sse(server_id: int):
+    """Stream MQTT messages as SSE for continuous scanning.
+
+    Query params:
+    - filter: MQTT subscription filter (e.g., /devices/#)
+    """
+    try:
+        server = db.get_mqtt_server(server_id)
+        if not server:
+            return jsonify({'success': False, 'message': 'server not found'}), 200
+        if mqtt is None:
+            return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
+
+        sub_filter = request.args.get('filter', '/devices/#') or '/devices/#'
+
+        msg_queue: "queue.Queue[str]" = queue.Queue(maxsize=10000)
+        stop_event = threading.Event()
+
+        def _run_client():
+            try:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
+                if server.get('username'):
+                    client.username_pw_set(server.get('username'), server.get('password') or None)
+
+                def on_connect(cl, userdata, flags, reason_code, properties=None):
+                    try:
+                        cl.subscribe(sub_filter, qos=0)
+                    except Exception:
+                        pass
+
+                def on_message(cl, userdata, msg):
+                    try:
+                        topic = msg.topic
+                    except Exception:
+                        topic = getattr(msg, 'topic', '')
+                    try:
+                        payload = msg.payload.decode('utf-8', errors='ignore')
+                    except Exception:
+                        payload = str(msg.payload)
+                    data = json.dumps({'topic': topic if str(topic).startswith('/') else '/' + str(topic), 'payload': payload})
+                    try:
+                        msg_queue.put_nowait(data)
+                    except queue.Full:
+                        pass
+
+                client.on_connect = on_connect
+                client.on_message = on_message
+                client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                client.loop_start()
+                while not stop_event.is_set():
+                    stop_event.wait(0.2)
+                client.loop_stop()
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"MQTT SSE thread error: {e}")
+
+        th = threading.Thread(target=_run_client, daemon=True)
+        th.start()
+
+        @stream_with_context
+        def _gen():
+            try:
+                yield 'event: open\n' + 'data: {"success": true}\n\n'
+                last_ping = 0
+                import time as _t
+                while True:
+                    try:
+                        data = msg_queue.get(timeout=0.5)
+                        yield f'data: {data}\n\n'
+                    except queue.Empty:
+                        pass
+                    now = int(_t.time())
+                    if now != last_ping:
+                        last_ping = now
+                        yield 'event: ping\n' + 'data: {}\n\n'
+            finally:
+                stop_event.set()
+        return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    except Exception as e:
+        logger.error(f"MQTT scan SSE error: {e}")
+        return jsonify({'success': False}), 200
 
 @app.route('/api/water')
 def api_water():
