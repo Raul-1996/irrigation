@@ -32,8 +32,8 @@
   .err { color:#f28b82; }
   .tree { background: var(--card-background); border:1px solid var(--border-color); border-radius:10px; padding:.5rem .75rem; max-height: 400px; overflow:auto; }
   .tree ul { list-style:none; padding-left: 1rem; margin:0; }
-  .tree li { margin:.15rem 0; color: var(--text-color); }
-  .tree .leaf { color:#333; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.85rem; }
+  .tree li { margin:.15rem 0; color: #fff; }
+  .tree .leaf { color:#fff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.85rem; }
   .toggle { cursor:pointer; user-select:none; margin-right:.35rem; }
   .caret::before { content: '▸'; display:inline-block; margin-right:.25rem; }
   .caret.open::before { content: '▾'; }
@@ -92,7 +92,7 @@
         <option value="5">5s</option>
         <option value="10">10s</option>
       </select>
-      <button class="btn btn-primary" onclick="scanTopics()">Сканировать топики</button>
+      <button class="btn btn-primary" id="scanBtn" onclick="toggleScan()">Сканировать топики</button>
       <button class="btn btn-secondary" onclick="showConnectLogs()">Показать логи подключения</button>
       <button class="btn btn-danger" onclick="clearBrowser()">Очистить</button>
     </div>
@@ -243,6 +243,9 @@
   let mqttWS = null; // reserved if ws backend appears later
   let polling = null;
   let subscribed = false;
+  let scanning = false;
+  let scanTimer = null;
+  let lastTopicMap = {}; // topic -> last payload
 
   function updateSelectedBadge(){
     const sel = document.getElementById('serverSelect');
@@ -276,7 +279,20 @@
   }
 
   function showConnectLogs(){
-    appendLog('% Откроем логи подключения... (используйте Сканировать/Подписаться, чтобы видеть шаги)');
+    const sel = document.getElementById('serverSelect');
+    if (!sel) return;
+    const serverId = sel.value;
+    const duration = parseFloat(document.getElementById('durationSel').value || '2');
+    (async ()=>{
+      try{
+        const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter:'#', duration})});
+        if (res.ok){
+          const data = await res.json();
+          (data.events||[]).forEach(ev=>appendLog(`% ${ev}`));
+          if ((data.items||[]).length===0) appendLog('% no messages in this interval');
+        }
+      }catch(e){ appendLog('% probe error'); }
+    })();
   }
 
   function buildTreeFromTopics(items){
@@ -305,13 +321,14 @@
       const child = node.children[k];
       if (child && child.children){
         const caret = document.createElement('span');
-        caret.className = 'toggle caret open';
+        caret.className = 'toggle caret';
         caret.onclick = ()=>{ caret.classList.toggle('open'); sub.style.display = caret.classList.contains('open') ? 'block' : 'none'; };
         li.appendChild(caret);
         const label = document.createElement('span');
         label.textContent = k;
         li.appendChild(label);
         const sub = document.createElement('div');
+        sub.style.display = 'none';
         renderTree(child, sub, path.concat(k));
         li.appendChild(sub);
       }
@@ -326,7 +343,16 @@
     container.appendChild(ul);
   }
 
-  async function scanTopics(){
+  function toggleScan(){
+    scanning = !scanning;
+    document.getElementById('scanBtn').textContent = scanning ? 'Остановить сканирование' : 'Сканировать топики';
+    if (scanning) startScanLoop(); else stopScanLoop();
+  }
+
+  function stopScanLoop(){ if (scanTimer){ clearTimeout(scanTimer); scanTimer=null; } }
+
+  async function startScanLoop(){
+    stopScanLoop();
     const sel = document.getElementById('serverSelect');
     if (!sel) return;
     const serverId = sel.value;
@@ -334,15 +360,21 @@
     const duration = parseFloat(document.getElementById('durationSel').value || '3');
     try{
       const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter, duration})});
-      if (!res.ok) return;
-      const data = await res.json();
-      const items = data.items||[];
-      const tree = buildTreeFromTopics(items);
-      const container = document.getElementById('topicTree');
-      container.innerHTML='';
-      renderTree(tree, container);
-      appendLog(`% Сканировано ${items.length} сообщений`);
-    }catch(e){ appendLog('% scan error'); }
+      if (res.ok){
+        const data = await res.json();
+        const items = data.items||[];
+        // merge into lastTopicMap
+        for (const it of items){ lastTopicMap[it.topic]=it.payload; }
+        // rebuild tree from map for performance predictability
+        const mergedItems = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
+        const tree = buildTreeFromTopics(mergedItems);
+        const container = document.getElementById('topicTree');
+        container.innerHTML='';
+        renderTree(tree, container);
+        (data.events||[]).forEach(ev=>appendLog(`% ${ev}`));
+      }
+    }catch(e){ /* ignore */ }
+    if (scanning){ scanTimer = setTimeout(startScanLoop, Math.max(1000, (duration*1000))); }
   }
 
   async function startPolling(){
