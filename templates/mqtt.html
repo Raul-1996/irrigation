@@ -248,6 +248,8 @@
   let lastTopicMap = {}; // topic -> last payload
   let expandedPaths = new Set(); // 'devices/wb-.../controls'
   let sseSource = null; // EventSource
+  let rebuildTimer = null;
+  let pendingCount = 0;
   function buildDisplayRegex(filterStr){
     const raw = (filterStr||'').trim();
     if (!raw) return new RegExp('^\/?devices\/');
@@ -392,15 +394,35 @@
         const norm = t.startsWith('/') ? t : ('/' + t);
         if (displayRe.test(norm)){
           lastTopicMap[norm] = it.payload;
-          const merged = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
-          const tree = buildTreeFromTopics(merged);
-          const container = document.getElementById('topicTree');
-          container.innerHTML='';
-          renderTree(tree, container);
+          pendingCount++;
+          if (!rebuildTimer){
+            rebuildTimer = setTimeout(()=>{
+              rebuildTimer = null;
+              // ограничим память: если более 20k топиков, сбрасываем на devices/*
+              const entries = Object.entries(lastTopicMap);
+              if (entries.length > 20000){
+                const pruned = {};
+                for (const [k,v] of entries){ if (k.startsWith('/devices/')) pruned[k]=v; }
+                lastTopicMap = pruned;
+              }
+              const merged = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
+              const tree = buildTreeFromTopics(merged);
+              const container = document.getElementById('topicTree');
+              container.innerHTML='';
+              renderTree(tree, container);
+              pendingCount = 0;
+            }, 300); // не чаще, чем раз в 300 мс
+          }
         }
       }catch(e){}
     };
     sseSource.addEventListener('ping', ()=>{});
+    sseSource.onerror = ()=>{
+      appendLog('% SSE error — поток будет остановлен');
+      stopSSE();
+      scanning = false;
+      document.getElementById('scanBtn').textContent = 'Сканировать топики';
+    };
   }
 
   async function startScanLoop(){
