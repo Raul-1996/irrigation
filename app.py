@@ -786,7 +786,7 @@ def api_mqtt_probe(server_id: int):
         client.loop_start()
         import time as _t
         start = _t.time()
-        while _t.time() - start < duration and len(received) < 200:
+        while _t.time() - start < duration and len(received) < 5000:
             _t.sleep(0.1)
         client.loop_stop()
         try:

@@ -249,14 +249,14 @@
   let expandedPaths = new Set(); // 'devices/wb-.../controls'
   function buildDisplayRegex(filterStr){
     const raw = (filterStr||'').trim();
-    if (!raw) return new RegExp('^/devices/wb-');
+    if (!raw) return new RegExp('^\/?devices\/');
     // support MQTT wildcards '+' '#', and user '*' as regex '.*'
     let s = raw;
     // ensure leading '/'
     if (s[0] !== '/') s = '/' + s;
     s = s.replace(/[.*+?^${}()|[\]\\]/g, r=> r==='*' ? r : '\\'+r); // escape regex except '*'
     s = s.replace(/\+/g, '[^/]+').replace(/#/g, '.*').replace(/\*/g, '.*');
-    return new RegExp('^' + s);
+    return new RegExp('^\/?' + s.replace(/^\//,'/'));
   }
   function hasMqttWildcards(str){ return /[#+]/.test(str||''); }
 
@@ -386,7 +386,11 @@
       const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter: subscribeFilter, duration})});
       if (res.ok){
         const data = await res.json();
-        const items = (data.items||[]).filter(it=> displayRe.test(it.topic||''));
+        const items = (data.items||[]).map(it=>{
+          const t = String(it.topic||'');
+          const norm = t.startsWith('/') ? t : ('/' + t);
+          return {topic: norm, payload: it.payload};
+        }).filter(it=> displayRe.test(it.topic));
         // merge into lastTopicMap (сохраняем только нужные ветки)
         for (const it of items){ lastTopicMap[it.topic]=it.payload; }
         // rebuild tree from map for performance predictability
