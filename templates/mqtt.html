@@ -30,6 +30,13 @@
   .browser-log { height: 280px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .85rem; background: #0b1220; color: #e6edf3; border-radius: 8px; padding: .5rem; }
   .evt { color:#9cdcfe; }
   .err { color:#f28b82; }
+  .tree { background: var(--card-background); border:1px solid var(--border-color); border-radius:10px; padding:.5rem .75rem; max-height: 400px; overflow:auto; }
+  .tree ul { list-style:none; padding-left: 1rem; margin:0; }
+  .tree li { margin:.15rem 0; color: var(--text-color); }
+  .tree .leaf { color:#333; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.85rem; }
+  .toggle { cursor:pointer; user-select:none; margin-right:.35rem; }
+  .caret::before { content: '▸'; display:inline-block; margin-right:.25rem; }
+  .caret.open::before { content: '▾'; }
   .badge { display:inline-block; padding:.15rem .45rem; border-radius:10px; background:#e9ecef; color:#333; font-size:.75rem; }
 </style>
 {% endblock %}
@@ -85,9 +92,15 @@
         <option value="5">5s</option>
         <option value="10">10s</option>
       </select>
+      <button class="btn btn-primary" onclick="scanTopics()">Сканировать топики</button>
+      <button class="btn btn-secondary" onclick="showConnectLogs()">Показать логи подключения</button>
       <button class="btn btn-danger" onclick="clearBrowser()">Очистить</button>
     </div>
     <div class="browser-log" id="topicLog"></div>
+    <div style="margin-top:.6rem">
+      <h4 class="section-title" style="margin:.25rem 0 .4rem">Дерево топиков</h4>
+      <div class="tree" id="topicTree">—</div>
+    </div>
   </div>
 </div>
 
@@ -260,6 +273,76 @@
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
     log.textContent += (line + '\n');
     if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  function showConnectLogs(){
+    appendLog('% Откроем логи подключения... (используйте Сканировать/Подписаться, чтобы видеть шаги)');
+  }
+
+  function buildTreeFromTopics(items){
+    const root = {};
+    for (const it of items){
+      const parts = (it.topic||'').split('/').filter(Boolean);
+      let node = root;
+      for (let i=0;i<parts.length;i++){
+        const p = parts[i];
+        node.children = node.children || {};
+        node.children[p] = node.children[p] || {};
+        if (i === parts.length-1){
+          node.children[p].value = it.payload;
+        }
+        node = node.children[p];
+      }
+    }
+    return root;
+  }
+
+  function renderTree(node, container, path=[]){
+    const ul = document.createElement('ul');
+    const keys = Object.keys(node.children||{}).sort();
+    for (const k of keys){
+      const li = document.createElement('li');
+      const child = node.children[k];
+      if (child && child.children){
+        const caret = document.createElement('span');
+        caret.className = 'toggle caret open';
+        caret.onclick = ()=>{ caret.classList.toggle('open'); sub.style.display = caret.classList.contains('open') ? 'block' : 'none'; };
+        li.appendChild(caret);
+        const label = document.createElement('span');
+        label.textContent = k;
+        li.appendChild(label);
+        const sub = document.createElement('div');
+        renderTree(child, sub, path.concat(k));
+        li.appendChild(sub);
+      }
+      if (child && child.value !== undefined){
+        const leaf = document.createElement('div');
+        leaf.className = 'leaf';
+        leaf.textContent = `${k} = ${child.value}`;
+        li.appendChild(leaf);
+      }
+      ul.appendChild(li);
+    }
+    container.appendChild(ul);
+  }
+
+  async function scanTopics(){
+    const sel = document.getElementById('serverSelect');
+    if (!sel) return;
+    const serverId = sel.value;
+    const filter = document.getElementById('filterInput').value || '#';
+    const duration = parseFloat(document.getElementById('durationSel').value || '3');
+    try{
+      const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter, duration})});
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = data.items||[];
+      const tree = buildTreeFromTopics(items);
+      const container = document.getElementById('topicTree');
+      container.innerHTML='';
+      renderTree(tree, container);
+      appendLog(`% Сканировано ${items.length} сообщений`);
+    }catch(e){ appendLog('% scan error'); }
   }
 
   async function startPolling(){

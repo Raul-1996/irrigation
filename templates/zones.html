@@ -1036,17 +1036,13 @@
                            placeholder="zone/1" onchange="updateZone(${zone.id}, 'topic', this.value)">
                 </td>
                 <td>
-                    ${ (window.mqttServers||[]).length > 1 ? `
-                        <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
-                            ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
-                        </select>
-                    ` : `
-                        <span style="color:#666;">${(window.mqttServers[0]&&window.mqttServers[0].name)||'—'}</span>
-                    `}
+                    <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
+                        ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
+                    </select>
                 </td>
                 <td>
                     <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
-                        ${mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
+                        ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
                     </select>
                 </td>
                 <td>
