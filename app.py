@@ -1175,11 +1175,28 @@ def api_postpone():
 def api_stop_group(group_id):
     """Остановить все зоны в группе"""
     try:
-        # Останавливаем все зоны в группе
+        # Останавливаем все зоны в группе (БД и физически через MQTT)
         zones = db.get_zones()
         group_zones = [z for z in zones if z['group_id'] == group_id]
         for zone in group_zones:
             db.update_zone(zone['id'], {'state': 'off', 'watering_start_time': None})
+            # Публикуем '0' в MQTT-топик зоны, если настроен
+            try:
+                sid = zone.get('mqtt_server_id')
+                topic = (zone.get('topic') or '').strip()
+                if mqtt and sid and topic:
+                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    server = db.get_mqtt_server(int(sid))
+                    if server:
+                        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                        if server.get('username'):
+                            client.username_pw_set(server.get('username'), server.get('password') or None)
+                        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                        client.publish(t, payload='0', qos=0, retain=False)
+                        client.disconnect()
+            except Exception:
+                # Не прерываем цикл при ошибке публикации, просто логируем
+                logger.exception("Ошибка публикации MQTT '0' при остановке группы")
         
         # Отменяем все активные задачи планировщика для этой группы и ставим флаг отмены
         scheduler = get_scheduler()
@@ -1256,10 +1273,41 @@ def api_emergency_stop():
     """Аварийная остановка всех зон. До отмены полив не возобновляется."""
     try:
         zones = db.get_zones()
+        # Публикуем '0' во все зоны с MQTT-настройками и выставляем статус в БД
         for zone in zones:
             db.update_zone(zone['id'], {'state': 'off'})
+            try:
+                sid = zone.get('mqtt_server_id')
+                topic = (zone.get('topic') or '').strip()
+                if mqtt and sid and topic:
+                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    server = db.get_mqtt_server(int(sid))
+                    if server:
+                        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                        if server.get('username'):
+                            client.username_pw_set(server.get('username'), server.get('password') or None)
+                        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                        client.publish(t, payload='0', qos=0, retain=False)
+                        client.disconnect()
+            except Exception:
+                logger.exception("Ошибка публикации MQTT '0' при аварийной остановке")
+
+        # Ставим флаг аварийной остановки
         app.config['EMERGENCY_STOP'] = True
         db.add_log('emergency_stop', json.dumps({"active": True}))
+
+        # Останавливаем любые активные задания последовательностей для всех групп
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                groups = db.get_groups()
+                for g in groups:
+                    try:
+                        scheduler.cancel_group_jobs(int(g['id']))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return jsonify({"success": True, "message": "Аварийная остановка выполнена"})
     except Exception as e:
         logger.error(f"Ошибка аварийной остановки: {e}")
@@ -1579,7 +1627,7 @@ def api_mqtt_zones_sse():
             if not sid or not topic:
                 continue
             t = topic if str(topic).startswith('/') else '/' + str(topic)
-            server_topics.setdefault(int(sid), {})[t] = z['id']
+            server_topics.setdefault(int(sid), {}).setdefault(t, []).append(z['id'])
         if not server_topics:
             return jsonify({'success': False, 'message': 'no zone topics'}), 200
         msg_queue = queue.Queue(maxsize=10000)
@@ -1587,23 +1635,34 @@ def api_mqtt_zones_sse():
             def _on_message(cl, userdata, msg):
                 t = str(getattr(msg, 'topic', '') or '')
                 if not t.startswith('/'): t = '/' + t
-                zone_id = server_topics.get(sid, {}).get(t)
-                if not zone_id:
+                zone_ids = server_topics.get(sid, {}).get(t)
+                if not zone_ids:
                     return
                 try:
                     payload = msg.payload.decode('utf-8', errors='ignore').strip()
                 except Exception:
                     payload = str(msg.payload)
                 new_state = 'on' if payload in ('1', 'true', 'ON', 'on') else 'off'
-                try:
-                    db.update_zone(zone_id, {'state': new_state})
-                except Exception:
-                    pass
-                data = json.dumps({'zone_id': zone_id, 'topic': t, 'payload': payload, 'state': new_state})
-                try:
-                    msg_queue.put_nowait(data)
-                except queue.Full:
-                    pass
+                for zone_id in zone_ids:
+                    try:
+                        z = db.get_zone(zone_id) or {}
+                        updates = {'state': new_state}
+                        if new_state == 'on':
+                            if not z.get('watering_start_time'):
+                                updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            # record last_watering_time
+                            if z.get('watering_start_time'):
+                                updates['last_watering_time'] = z.get('watering_start_time')
+                            updates['watering_start_time'] = None
+                        db.update_zone(zone_id, updates)
+                    except Exception:
+                        pass
+                    data = json.dumps({'zone_id': zone_id, 'topic': t, 'payload': payload, 'state': new_state})
+                    try:
+                        msg_queue.put_nowait(data)
+                    except queue.Full:
+                        pass
             return _on_message
         clients = []
         for sid, topics in server_topics.items():

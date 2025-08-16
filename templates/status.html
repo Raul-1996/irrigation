@@ -790,7 +790,7 @@
             // Находим группу зоны
             const zone = zonesData.find(z => z.id === zoneId);
             if (!zone) return;
-            const url = currentState === 'on' ? `/api/zones/${zoneId}/stop` : `/api/groups/${zone.group_id}/start-zone/${zoneId}`;
+            const url = currentState === 'on' ? `/api/zones/${zoneId}/mqtt/stop` : `/api/zones/${zoneId}/mqtt/start`;
             const res = await fetch(url, { method: 'POST' });
             const data = await res.json();
             if (data && data.success) {
@@ -876,6 +876,32 @@
         // Обработчик аварийной остановки
         document.getElementById('emergency-btn').addEventListener('click', emergencyStop);
         document.getElementById('resume-btn').addEventListener('click', resumeSchedule);
+        // Подписка на статусы зон через SSE
+        try {
+            const es = new EventSource('/api/mqtt/zones-sse');
+            es.onmessage = (ev)=>{
+                try{
+                    const data = JSON.parse(ev.data);
+                    const idx = zonesData.findIndex(z=>z.id===data.zone_id);
+                    if (idx>=0){
+                        zonesData[idx].state = data.state;
+                        const tbody = document.getElementById('zones-table-body');
+                        if (tbody){
+                            const rows = tbody.querySelectorAll('tr');
+                            rows.forEach(row=>{
+                                const cells = row.querySelectorAll('td');
+                                if (cells.length>1 && Number(cells[1].textContent.trim())===data.zone_id){
+                                    const ind = row.querySelector('.indicator');
+                                    if (ind){ ind.classList.remove('on','off'); ind.classList.add(data.state); }
+                                    const btn = row.querySelector('.zone-start-btn');
+                                    if (btn){ btn.textContent = data.state==='on'?'⏹':'▶'; }
+                                }
+                            });
+                        }
+                    }
+                }catch(e){}
+            };
+        } catch (e) {}
     });
 </script>
 {% endblock %}

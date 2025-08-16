@@ -14,6 +14,11 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+import os
+try:
+    import paho.mqtt.client as mqtt
+except Exception:
+    mqtt = None
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -100,6 +105,22 @@ class IrrigationScheduler:
                 try:
                     start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+                    # MQTT publish ON
+                    try:
+                        topic = (zone.get('topic') or '').strip()
+                        sid = zone.get('mqtt_server_id')
+                        if mqtt and topic and sid:
+                            t = topic if str(topic).startswith('/') else '/' + str(topic)
+                            server = self.db.get_mqtt_server(int(sid))
+                            if server:
+                                cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                                if server.get('username'):
+                                    cl.username_pw_set(server.get('username'), server.get('password') or None)
+                                cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                                cl.publish(t, payload='1', qos=0, retain=False)
+                                cl.disconnect()
+                    except Exception:
+                        pass
                     end_time = datetime.now() + timedelta(minutes=duration)
                     self.active_zones[zone_id] = end_time
                     self.db.add_log('zone_auto_start', json.dumps({
@@ -116,6 +137,8 @@ class IrrigationScheduler:
 
                 # Ждем окончания текущей зоны, проверяя отмену группы каждую секунду
                 remaining = duration * 60
+                if os.getenv('TESTING') == '1':
+                    remaining = min(6, max(1, duration))
                 while remaining > 0:
                     cancel_event = self.group_cancel_events.get(group_id)
                     if cancel_event and cancel_event.is_set():
@@ -124,7 +147,22 @@ class IrrigationScheduler:
                     time.sleep(1)
                     remaining -= 1
 
-                # Останавливаем зону и очищаем активность
+                # Публикуем OFF и останавливаем зону
+                try:
+                    topic = (zone.get('topic') or '').strip()
+                    sid = zone.get('mqtt_server_id')
+                    if mqtt and topic and sid:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = self.db.get_mqtt_server(int(sid))
+                        if server:
+                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                            if server.get('username'):
+                                cl.username_pw_set(server.get('username'), server.get('password') or None)
+                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                            cl.publish(t, payload='0', qos=0, retain=False)
+                            cl.disconnect()
+                except Exception:
+                    pass
                 self._stop_zone(zone_id)
                 self.active_zones.pop(zone_id, None)
 
@@ -293,6 +331,22 @@ class IrrigationScheduler:
                 # Старт текущей зоны
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+                # MQTT publish ON
+                try:
+                    topic = (zone.get('topic') or '').strip()
+                    sid = zone.get('mqtt_server_id')
+                    if mqtt and topic and sid:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = self.db.get_mqtt_server(int(sid))
+                        if server:
+                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                            if server.get('username'):
+                                cl.username_pw_set(server.get('username'), server.get('password') or None)
+                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                            cl.publish(t, payload='1', qos=0, retain=False)
+                            cl.disconnect()
+                except Exception:
+                    pass
                 try:
                     self.db.add_log('group_seq_zone_start', json.dumps({
                         'group_id': group_id,
@@ -305,13 +359,30 @@ class IrrigationScheduler:
 
                 # Ждем окончание полива зоны, проверяя флаг отмены каждую секунду
                 remaining = duration * 60
+                if os.getenv('TESTING') == '1':
+                    remaining = min(6, max(1, duration))
                 while remaining > 0:
                     if cancel_event and cancel_event.is_set():
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")
                         break
                     time.sleep(1)
                     remaining -= 1
-                # Останавливаем зону (независимо от причины выхода)
+                # MQTT publish OFF и останавливаем зону (независимо от причины выхода)
+                try:
+                    topic = (zone.get('topic') or '').strip()
+                    sid = zone.get('mqtt_server_id')
+                    if mqtt and topic and sid:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = self.db.get_mqtt_server(int(sid))
+                        if server:
+                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                            if server.get('username'):
+                                cl.username_pw_set(server.get('username'), server.get('password') or None)
+                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                            cl.publish(t, payload='0', qos=0, retain=False)
+                            cl.disconnect()
+                except Exception:
+                    pass
                 self._stop_zone(zone_id)
                 # Если отменено — выходим из последовательности
                 if cancel_event and cancel_event.is_set():
