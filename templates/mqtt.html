@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block title %}MQTT Настройки{% endblock %}
+{% block page_title %}MQTT Настройки{% endblock %}
+
+{% block extra_css %}
+<style>
+  .card { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .5rem; }
+  .row input { padding: .5rem; border:1px solid #ccc; border-radius: 4px; }
+  .row label { font-weight: 600; color: #333; }
+  .actions { display:flex; gap:.5rem; }
+  .servers { margin-top:1rem; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { border:1px solid #eee; padding:.5rem; text-align:left; }
+  th { background:#f8f9fa; }
+  .btn { padding:.4rem .8rem; border:none; border-radius:4px; cursor:pointer; }
+  .btn-primary { background: var(--primary-color); color:white; }
+  .btn-danger { background: var(--danger-color); color:white; }
+  .btn-secondary { background: #6c757d; color:white; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h3>Добавить MQTT сервер</h3>
+  <div class="row">
+    <div>
+      <label>Название</label>
+      <input id="m_name" placeholder="WB MQTT">
+    </div>
+    <div>
+      <label>Host</label>
+      <input id="m_host" placeholder="127.0.0.1">
+    </div>
+    <div>
+      <label>Port</label>
+      <input id="m_port" type="number" value="1883">
+    </div>
+    <div>
+      <label>Username</label>
+      <input id="m_user" placeholder="user">
+    </div>
+    <div>
+      <label>Password</label>
+      <input id="m_pass" type="password" placeholder="pass">
+    </div>
+    <div>
+      <label>Client ID</label>
+      <input id="m_client" placeholder="wb-client-1">
+    </div>
+    <div>
+      <label>Включен</label>
+      <select id="m_enabled"><option value="true">Да</option><option value="false">Нет</option></select>
+    </div>
+  </div>
+  <div class="actions" style="margin-top:.5rem;">
+    <button class="btn btn-primary" onclick="createServer()">Создать</button>
+  </div>
+  <div id="create_result"></div>
+</div>
+
+<div class="card servers">
+  <h3>Серверы</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Название</th><th>Host</th><th>Port</th><th>User</th><th>Client</th><th>Вкл</th><th>Действия</th>
+      </tr>
+    </thead>
+    <tbody id="servers_body"></tbody>
+  </table>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  async function loadServers() {
+    try {
+      const res = await api.get('/api/mqtt/servers');
+      const tbody = document.getElementById('servers_body');
+      tbody.innerHTML = '';
+      (res.servers || []).forEach(s => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${s.id}</td>
+          <td><input value="${s.name || ''}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${s.host || ''}" oninput="this.dataset.v=this.value"></td>
+          <td><input type="number" value="${s.port || 1883}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${s.username || ''}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${s.client_id || ''}" oninput="this.dataset.v=this.value"></td>
+          <td>
+            <select oninput="this.dataset.v=this.value">
+              <option value="true" ${s.enabled ? 'selected' : ''}>Да</option>
+              <option value="false" ${!s.enabled ? 'selected' : ''}>Нет</option>
+            </select>
+          </td>
+          <td>
+            <button class="btn btn-primary" onclick="updateRow(this, ${s.id})">Сохранить</button>
+            <button class="btn btn-danger" onclick="deleteServer(${s.id})">Удалить</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      showNotification('Ошибка загрузки серверов MQTT', 'error');
+    }
+  }
+
+  async function createServer() {
+    const payload = {
+      name: document.getElementById('m_name').value,
+      host: document.getElementById('m_host').value,
+      port: parseInt(document.getElementById('m_port').value || '1883'),
+      username: document.getElementById('m_user').value,
+      password: document.getElementById('m_pass').value,
+      client_id: document.getElementById('m_client').value,
+      enabled: document.getElementById('m_enabled').value === 'true'
+    };
+    try {
+      const res = await api.post('/api/mqtt/servers', payload);
+      if (res && res.success) {
+        showNotification('Сервер создан', 'success');
+        loadServers();
+      }
+    } catch (e) {
+      showNotification('Ошибка создания сервера', 'error');
+    }
+  }
+
+  async function updateRow(btn, id) {
+    const tds = btn.closest('tr').querySelectorAll('td');
+    const [_, name, host, port, username, client_id, enabledCell] = tds;
+    const payload = {
+      name: name.querySelector('input').dataset.v ?? name.querySelector('input').value,
+      host: host.querySelector('input').dataset.v ?? host.querySelector('input').value,
+      port: parseInt(port.querySelector('input').dataset.v ?? port.querySelector('input').value),
+      username: username.querySelector('input').dataset.v ?? username.querySelector('input').value,
+      client_id: client_id.querySelector('input').dataset.v ?? client_id.querySelector('input').value,
+      enabled: (enabledCell.querySelector('select').dataset.v ?? enabledCell.querySelector('select').value) === 'true'
+    };
+    try {
+      const res = await api.put(`/api/mqtt/servers/${id}`, payload);
+      if (res && res.success) {
+        showNotification('Сервер обновлён', 'success');
+        loadServers();
+      }
+    } catch (e) {
+      showNotification('Ошибка обновления сервера', 'error');
+    }
+  }
+
+  async function deleteServer(id) {
+    if (!confirm('Удалить сервер?')) return;
+    try {
+      const resp = await fetch(`/api/mqtt/servers/${id}`, { method: 'DELETE' });
+      if (resp.status === 204) {
+        showNotification('Сервер удалён', 'success');
+        loadServers();
+      } else {
+        showNotification('Не удалось удалить сервер', 'error');
+      }
+    } catch (e) {
+      showNotification('Ошибка удаления сервера', 'error');
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', loadServers);
+</script>
+{% endblock %}
+
+

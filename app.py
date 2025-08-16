@@ -134,6 +134,11 @@ app.register_blueprint(zones_bp)
 app.register_blueprint(programs_bp)
 app.register_blueprint(groups_bp)
 app.register_blueprint(auth_bp)
+try:
+    from routes.mqtt import mqtt_bp
+    app.register_blueprint(mqtt_bp)
+except Exception as _e:
+    logger.warning(f"MQTT blueprint not registered: {_e}")
 
 # 404 красивая страница
 @app.errorhandler(404)

@@ -801,6 +801,7 @@
                 <th class="sortable" onclick="sortTable(3)">⏱️ Время</th>
                 <th class="sortable" onclick="sortTable(4)">🏷️ Группа</th>
                 <th class="sortable" onclick="sortTable(5)">📡 MQTT Topic</th>
+                <th>🖧 MQTT Server</th>
                 <th>📸 Фото</th>
                 <th>⚡ Действия</th>
             </tr>
@@ -952,10 +953,14 @@
     // Загрузка данных
     async function loadData() {
         try {
-            [zonesData, groupsData] = await Promise.all([
+            const [zonesRes, groupsRes, mqttRes] = await Promise.all([
                 api.get('/api/zones'),
-                api.get('/api/groups')
+                api.get('/api/groups'),
+                api.get('/api/mqtt/servers')
             ]);
+            zonesData = zonesRes;
+            groupsData = groupsRes;
+            window.mqttServers = (mqttRes && mqttRes.servers) ? mqttRes.servers : [];
             
             renderZonesTable();
             renderGroupsGrid();
@@ -1029,6 +1034,20 @@
                 <td>
                     <input type="text" class="zone-topic" value="${zone.topic || ''}" 
                            placeholder="zone/1" onchange="updateZone(${zone.id}, 'topic', this.value)">
+                </td>
+                <td>
+                    ${ (window.mqttServers||[]).length > 1 ? `
+                        <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
+                            ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
+                        </select>
+                    ` : `
+                        <span style="color:#666;">${(window.mqttServers[0]&&window.mqttServers[0].name)||'—'}</span>
+                    `}
+                </td>
+                <td>
+                    <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
+                        ${mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
+                    </select>
                 </td>
                 <td>
                     <div class="zone-photo">
@@ -1543,7 +1562,8 @@
             icon: document.getElementById('zoneIcon').value,
             duration: parseInt(document.getElementById('zoneDuration').value),
             group_id: parseInt(document.getElementById('zoneGroup').value),
-            topic: document.getElementById('zoneTopic').value
+            topic: document.getElementById('zoneTopic').value,
+            mqtt_server_id: (window.mqttServers||[]).length === 1 ? ((window.mqttServers[0] && window.mqttServers[0].id) || null) : undefined
         };
         
         try {

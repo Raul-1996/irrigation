@@ -394,14 +394,15 @@ class IrrigationDB:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute('''
-                    INSERT INTO zones (name, icon, duration, group_id, topic)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     zone_data['name'],
                     zone_data['icon'],
                     zone_data['duration'],
                     zone_data.get('group_id', zone_data.get('group', 1)),
-                    zone_data.get('topic', '')
+                    zone_data.get('topic', ''),
+                    zone_data.get('mqtt_server_id')
                 ))
                 zone_id = cursor.lastrowid
                 conn.commit()

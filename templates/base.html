@@ -342,6 +342,7 @@
                     <a href="/zones" class="{% if request.endpoint == 'zones_page' %}active{% endif %}">Зоны и группы</a>
                     <a href="/programs" class="{% if request.endpoint == 'programs_page' %}active{% endif %}">Программы</a>
                     <a href="/logs" class="{% if request.endpoint == 'logs_page' %}active{% endif %}">Логи</a>
+                    <a href="/mqtt" class="{% if request.endpoint == 'mqtt_page' %}active{% endif %}">MQTT</a>
                     <a href="/logout">Выйти</a>
                 {% else %}
                     <a href="/login" class="{% if request.endpoint == 'auth_bp.login_page' %}active{% endif %}">Войти</a>
