@@ -5,63 +5,83 @@
 
 {% block extra_css %}
 <style>
-  .card { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .5rem; }
-  .row input { padding: .5rem; border:1px solid #ccc; border-radius: 4px; }
-  .row label { font-weight: 600; color: #333; }
+  .card { background: var(--card-background); border: 1px solid var(--border-color); border-radius: 10px; padding: 1rem; margin-bottom: 1rem; box-shadow: var(--shadow); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .9rem; }
+  .field { display:flex; flex-direction:column; gap:.35rem; }
+  .field label { font-weight: 600; color: var(--text-color); }
+  .field input, .field select { padding: .6rem .7rem; border:1px solid var(--border-color); border-radius: 8px; background: #fff; color: #222; box-shadow: inset 0 1px 2px rgba(0,0,0,0.03); }
   .actions { display:flex; gap:.5rem; }
   .servers { margin-top:1rem; }
-  table { width:100%; border-collapse: collapse; }
-  th, td { border:1px solid #eee; padding:.5rem; text-align:left; }
-  th { background:#f8f9fa; }
-  .btn { padding:.4rem .8rem; border:none; border-radius:4px; cursor:pointer; }
+  table { width:100%; border-collapse: collapse; background: var(--card-background); color: var(--text-color); }
+  th, td { border:1px solid var(--border-color); padding:.6rem; text-align:left; color: #222; }
+  th { background:#f1f3f5; color:#222; }
+  .btn { padding:.5rem .9rem; border:none; border-radius:6px; cursor:pointer; }
   .btn-primary { background: var(--primary-color); color:white; }
   .btn-danger { background: var(--danger-color); color:white; }
   .btn-secondary { background: #6c757d; color:white; }
+  .section-title { color: var(--text-color); margin: .25rem 0 .6rem; }
+  .split { display:grid; grid-template-columns: 1fr; gap:1rem; }
+  @media (min-width: 900px){ .split { grid-template-columns: 1fr 1fr; } }
+  .browser { background: var(--card-background); border: 1px solid var(--border-color); border-radius: 10px; padding: 1rem; box-shadow: var(--shadow); min-height: 360px; }
+  .browser-controls { display:flex; gap:.5rem; margin-bottom:.5rem; align-items:center; }
+  .browser-log { height: 280px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .85rem; background: #0b1220; color: #e6edf3; border-radius: 8px; padding: .5rem; }
+  .badge { display:inline-block; padding:.15rem .45rem; border-radius:10px; background:#e9ecef; color:#333; font-size:.75rem; }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="card">
-  <h3>Добавить MQTT сервер</h3>
-  <div class="row">
-    <div>
-      <label>Название</label>
-      <input id="m_name" placeholder="WB MQTT">
+<div class="split">
+  <div class="card">
+    <h3 class="section-title">Добавить MQTT сервер</h3>
+    <div class="grid">
+      <div class="field">
+        <label>Название</label>
+        <input id="m_name" placeholder="WB MQTT">
+      </div>
+      <div class="field">
+        <label>Host</label>
+        <input id="m_host" placeholder="127.0.0.1">
+      </div>
+      <div class="field">
+        <label>Port</label>
+        <input id="m_port" type="number" value="1883">
+      </div>
+      <div class="field">
+        <label>Username</label>
+        <input id="m_user" placeholder="user">
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input id="m_pass" type="password" placeholder="pass">
+      </div>
+      <div class="field">
+        <label>Client ID</label>
+        <input id="m_client" placeholder="wb-client-1">
+      </div>
+      <div class="field">
+        <label>Включен</label>
+        <select id="m_enabled"><option value="true">Да</option><option value="false">Нет</option></select>
+      </div>
     </div>
-    <div>
-      <label>Host</label>
-      <input id="m_host" placeholder="127.0.0.1">
-    </div>
-    <div>
-      <label>Port</label>
-      <input id="m_port" type="number" value="1883">
-    </div>
-    <div>
-      <label>Username</label>
-      <input id="m_user" placeholder="user">
-    </div>
-    <div>
-      <label>Password</label>
-      <input id="m_pass" type="password" placeholder="pass">
-    </div>
-    <div>
-      <label>Client ID</label>
-      <input id="m_client" placeholder="wb-client-1">
-    </div>
-    <div>
-      <label>Включен</label>
-      <select id="m_enabled"><option value="true">Да</option><option value="false">Нет</option></select>
+    <div class="actions" style="margin-top:.5rem;">
+      <button class="btn btn-primary" onclick="createServer()">Создать</button>
     </div>
   </div>
-  <div class="actions" style="margin-top:.5rem;">
-    <button class="btn btn-primary" onclick="createServer()">Создать</button>
+
+  <div class="browser">
+    <h3 class="section-title">Браузер топиков <span id="selServer" class="badge">—</span></h3>
+    <div class="browser-controls">
+      <select id="serverSelect" onchange="onServerChange()"></select>
+      <input id="filterInput" placeholder="Фильтр (например: wb/#)" style="flex:1; padding:.5rem; border:1px solid var(--border-color); border-radius:8px;">
+      <button class="btn btn-secondary" onclick="toggleSubscribe()" id="subBtn">Подписаться</button>
+      <button class="btn btn-danger" onclick="clearBrowser()">Очистить</button>
+    </div>
+    <div class="browser-log" id="topicLog"></div>
   </div>
-  <div id="create_result"></div>
 </div>
 
 <div class="card servers">
-  <h3>Серверы</h3>
+  <h3 class="section-title">Серверы</h3>
   <table>
     <thead>
       <tr>
@@ -103,6 +123,12 @@
         `;
         tbody.appendChild(tr);
       });
+      // Заполняем селектор серверов для браузера топиков
+      const select = document.getElementById('serverSelect');
+      if (select) {
+        select.innerHTML = (res.servers||[]).map(s=>`<option value="${s.id}" data-host="${s.host}" data-port="${s.port}" data-user="${s.username||''}" data-client="${s.client_id||''}">${s.name}</option>`).join('');
+        updateSelectedBadge();
+      }
     } catch (e) {
       showNotification('Ошибка загрузки серверов MQTT', 'error');
     }
@@ -167,6 +193,63 @@
   }
 
   document.addEventListener('DOMContentLoaded', loadServers);
+
+  // ===== MQTT Topic Browser (simple client via server polling) =====
+  let mqttWS = null; // reserved if ws backend appears later
+  let polling = null;
+  let subscribed = false;
+
+  function updateSelectedBadge(){
+    const sel = document.getElementById('serverSelect');
+    const badge = document.getElementById('selServer');
+    if (!sel || !badge) return;
+    const opt = sel.options[sel.selectedIndex];
+    badge.textContent = opt ? opt.textContent : '—';
+  }
+
+  function onServerChange(){
+    updateSelectedBadge();
+    if (subscribed) startPolling();
+  }
+
+  function toggleSubscribe(){
+    subscribed = !subscribed;
+    document.getElementById('subBtn').textContent = subscribed ? 'Отписаться' : 'Подписаться';
+    if (subscribed) startPolling(); else stopPolling();
+  }
+
+  function clearBrowser(){
+    const log = document.getElementById('topicLog');
+    log.textContent = '';
+  }
+
+  function appendLog(line){
+    const log = document.getElementById('topicLog');
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
+    log.textContent += (line + '\n');
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  async function startPolling(){
+    stopPolling();
+    const sel = document.getElementById('serverSelect');
+    if (!sel) return;
+    const serverId = sel.value;
+    const topicFilter = document.getElementById('filterInput').value || '#';
+    appendLog(`[i] Подписка на ${topicFilter}`);
+    // пробный запрос на сервер, чтобы взять retained
+    try {
+      const res = await fetch(`/api/mqtt/${serverId}/probe`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filter: topicFilter})});
+      if (res.ok) {
+        const data = await res.json();
+        (data.items||[]).forEach(it=>appendLog(`${it.topic}: ${it.payload}`));
+      }
+    } catch(e) {}
+    // далее — пассивный режим без постоянной связи, можно повторять вручную нажатием "Подписаться"
+    polling = setInterval(async ()=>{}, 60000);
+  }
+
+  function stopPolling(){ if (polling){ clearInterval(polling); polling=null; } }
 </script>
 {% endblock %}
 

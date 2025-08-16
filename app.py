@@ -10,6 +10,10 @@ import io
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
 from flask_wtf.csrf import CSRFProtect
+try:
+    import paho.mqtt.client as mqtt
+except Exception:
+    mqtt = None
 from config import Config
 from routes.status import status_bp
 from routes.files import files_bp
@@ -731,6 +735,56 @@ def api_logs():
     except Exception as e:
         logger.error(f"Ошибка получения логов: {e}")
         return jsonify({'error': 'Ошибка получения логов'}), 500
+
+# Lightweight MQTT probe to fetch retained messages quickly (best-effort)
+@app.route('/api/mqtt/<int:server_id>/probe', methods=['POST'])
+def api_mqtt_probe(server_id: int):
+    try:
+        server = db.get_mqtt_server(server_id)
+        if not server:
+            return jsonify({'success': False, 'message': 'server not found'}), 404
+        if mqtt is None:
+            return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 400
+        data = request.get_json() or {}
+        topic_filter = data.get('filter', '#')
+
+        received = []
+        # paho-mqtt v2 style
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
+        if server.get('username'):
+            client.username_pw_set(server.get('username'), server.get('password') or None)
+
+        def on_connect(cl, userdata, flags, reason_code, properties=None):
+            try:
+                cl.subscribe(topic_filter, qos=0)
+            except Exception:
+                pass
+
+        def on_message(cl, userdata, msg):
+            if len(received) < 100:
+                try:
+                    payload = msg.payload.decode('utf-8', errors='ignore')
+                except Exception:
+                    payload = str(msg.payload)
+                received.append({'topic': msg.topic, 'payload': payload})
+
+        client.on_connect = on_connect
+        client.on_message = on_message
+        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+        client.loop_start()
+        import time as _t
+        start = _t.time()
+        while _t.time() - start < 2.0 and len(received) < 100:
+            _t.sleep(0.1)
+        client.loop_stop()
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+        return jsonify({'success': True, 'items': received})
+    except Exception as e:
+        logger.error(f"MQTT probe error: {e}")
+        return jsonify({'success': False, 'message': 'probe failed'}), 500
 
 @app.route('/api/water')
 def api_water():
