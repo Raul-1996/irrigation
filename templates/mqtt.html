@@ -15,6 +15,9 @@
   table { width:100%; border-collapse: collapse; background: var(--card-background); color: var(--text-color); }
   th, td { border:1px solid var(--border-color); padding:.6rem; text-align:left; color: #222; }
   th { background:#f1f3f5; color:#222; }
+  .status-dot { width:10px; height:10px; display:inline-block; border-radius:50%; margin-right:.4rem; box-shadow:0 0 0 2px rgba(0,0,0,.05) inset; }
+  .ok { background:#2ecc71; }
+  .bad { background:#e74c3c; }
   .btn { padding:.5rem .9rem; border:none; border-radius:6px; cursor:pointer; }
   .btn-primary { background: var(--primary-color); color:white; }
   .btn-danger { background: var(--danger-color); color:white; }
@@ -104,7 +107,7 @@
       (res.servers || []).forEach(s => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td>${s.id}</td>
+          <td><span class="status-dot bad" data-id="${s.id}" title="offline"></span>${s.id}</td>
           <td><input value="${s.name || ''}" oninput="this.dataset.v=this.value"></td>
           <td><input value="${s.host || ''}" oninput="this.dataset.v=this.value"></td>
           <td><input type="number" value="${s.port || 1883}" oninput="this.dataset.v=this.value"></td>
@@ -129,6 +132,8 @@
         select.innerHTML = (res.servers||[]).map(s=>`<option value="${s.id}" data-host="${s.host}" data-port="${s.port}" data-user="${s.username||''}" data-client="${s.client_id||''}">${s.name}</option>`).join('');
         updateSelectedBadge();
       }
+      // Обновляем статусы
+      updateStatuses();
     } catch (e) {
       showNotification('Ошибка загрузки серверов MQTT', 'error');
     }
@@ -193,6 +198,25 @@
   }
 
   document.addEventListener('DOMContentLoaded', loadServers);
+  async function updateStatuses(){
+    try{
+      const rows = document.querySelectorAll('#servers_body tr');
+      for (const row of rows){
+        const idCell = row.querySelector('.status-dot');
+        if (!idCell) continue;
+        const serverId = idCell.getAttribute('data-id');
+        try{
+          const res = await api.get(`/api/mqtt/${serverId}/status`);
+          if (res && res.success){
+            idCell.classList.toggle('ok', !!res.connected);
+            idCell.classList.toggle('bad', !res.connected);
+            idCell.title = res.connected ? 'online' : 'offline';
+          }
+        }catch(e){}
+      }
+    }catch(e){}
+    setTimeout(updateStatuses, 5000);
+  }
 
   // ===== MQTT Topic Browser (simple client via server polling) =====
   let mqttWS = null; // reserved if ws backend appears later

@@ -736,7 +736,7 @@ def api_logs():
         logger.error(f"Ошибка получения логов: {e}")
         return jsonify({'error': 'Ошибка получения логов'}), 500
 
-# Lightweight MQTT probe to fetch retained messages quickly (best-effort)
+# Lightweight MQTT probe to fetch messages quickly (best-effort)
 @app.route('/api/mqtt/<int:server_id>/probe', methods=['POST'])
 def api_mqtt_probe(server_id: int):
     try:
@@ -747,6 +747,7 @@ def api_mqtt_probe(server_id: int):
             return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 400
         data = request.get_json() or {}
         topic_filter = data.get('filter', '#')
+        duration = float(data.get('duration', 3))  # seconds
 
         received = []
         # paho-mqtt v2 style
@@ -774,7 +775,7 @@ def api_mqtt_probe(server_id: int):
         client.loop_start()
         import time as _t
         start = _t.time()
-        while _t.time() - start < 2.0 and len(received) < 100:
+        while _t.time() - start < duration and len(received) < 200:
             _t.sleep(0.1)
         client.loop_stop()
         try:
@@ -785,6 +786,34 @@ def api_mqtt_probe(server_id: int):
     except Exception as e:
         logger.error(f"MQTT probe error: {e}")
         return jsonify({'success': False, 'message': 'probe failed'}), 500
+
+# Quick connection status check
+@app.route('/api/mqtt/<int:server_id>/status', methods=['GET'])
+def api_mqtt_status(server_id: int):
+    try:
+        server = db.get_mqtt_server(server_id)
+        if not server:
+            return jsonify({'success': False, 'connected': False, 'message': 'server not found'}), 404
+        if mqtt is None:
+            return jsonify({'success': False, 'connected': False, 'message': 'paho-mqtt not installed'}), 400
+        ok = False
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
+        if server.get('username'):
+            client.username_pw_set(server.get('username'), server.get('password') or None)
+        try:
+            client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 3)
+            ok = True
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        except Exception as _e:
+            logger.info(f"MQTT status connection failed for server {server_id}: {_e}")
+            ok = False
+        return jsonify({'success': True, 'connected': ok})
+    except Exception as e:
+        logger.error(f"MQTT status error: {e}")
+        return jsonify({'success': False, 'connected': False, 'message': 'status failed'}), 500
 
 @app.route('/api/water')
 def api_water():
