@@ -746,6 +746,9 @@
                     <option value="group">Изменить группу</option>
                     <option value="icon">Изменить иконку</option>
                     <option value="duration">Изменить время</option>
+                    <option value="delete">Удалить зоны</option>
+                    <option value="mqtt">Сменить MQTT сервер</option>
+                    <option value="delphoto">Удалить фото</option>
                 </select>
             </div>
             
@@ -784,6 +787,11 @@
             <div class="form-group" id="bulkDurationSelect" style="display: none;">
                 <label>Новое время (мин):</label>
                 <input type="number" id="bulkDuration" min="1" max="120" value="10">
+            </div>
+            
+            <div class="form-group" id="bulkMqttSelect" style="display: none;">
+                <label>MQTT сервер:</label>
+                <select id="bulkMqtt"></select>
             </div>
             
             <button onclick="applyBulkAction()" class="save-all-btn">💾 Применить к выбранным</button>
@@ -1139,6 +1147,11 @@
                 }).join('');
             }
         });
+        // MQTT servers for bulk
+        const bulkMqtt = document.getElementById('bulkMqtt');
+        if (bulkMqtt) {
+            bulkMqtt.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+        }
     }
     
     // Обновление счетчика зон
@@ -1405,6 +1418,7 @@
         document.getElementById('bulkGroupSelect').style.display = action === 'group' ? 'block' : 'none';
         document.getElementById('bulkIconSelect').style.display = action === 'icon' ? 'block' : 'none';
         document.getElementById('bulkDurationSelect').style.display = action === 'duration' ? 'block' : 'none';
+        const mqttSel = document.getElementById('bulkMqttSelect'); if (mqttSel) mqttSel.style.display = action === 'mqtt' ? 'block' : 'none';
     }
     
     async function applyBulkAction() {
@@ -1421,7 +1435,7 @@
         }
         
         try {
-            let value;
+            let value = null;
             switch (action) {
                 case 'group':
                     value = parseInt(document.getElementById('bulkGroup').value);
@@ -1432,41 +1446,49 @@
                 case 'duration':
                     value = parseInt(document.getElementById('bulkDuration').value);
                     break;
+                case 'mqtt':
+                    value = parseInt(document.getElementById('bulkMqtt').value);
+                    break;
             }
             
             // Применяем изменения ко всем выбранным зонам
             for (const zoneId of selectedZones) {
                 const zone = zonesData.find(z => z.id === zoneId);
                 if (zone) {
+                    if (action === 'delete') {
+                        await api.delete(`/api/zones/${zoneId}`);
+                        continue;
+                    }
+                    if (action === 'delphoto') {
+                        await api.delete(`/api/zones/${zoneId}/photo`);
+                        continue;
+                    }
+                    
                     const updatedZone = { ...zone };
                     switch (action) {
                         case 'group':
-                            updatedZone.group_id = value;
+                            updatedZone.group_id = parseInt(value);
                             break;
                         case 'icon':
                             updatedZone.icon = value;
                             break;
                         case 'duration':
-                            // Перед массовым сохранением проверяем конфликты
+                            // Проверка конфликтов как и раньше
                             try {
-                                const check = await fetch('/api/zones/check-duration-conflicts', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ zone_id: zoneId, new_duration: parseInt(value) })
-                                });
-                                const result = await check.json();
-                                if (result && result.has_conflicts) {
-                                    showDurationConflictModal(result.conflicts);
-                                    showNotification(`Конфликт для зоны ${zoneId}. Изменение пропущено.`, 'warning');
-                                    continue; // пропускаем сохранение этой зоны
+                                const conflict = await api.post('/api/zones/check-duration-conflicts', { zone_id: zoneId, new_duration: parseInt(value) });
+                                if (conflict && conflict.has_conflicts) {
+                                    showNotification(`Конфликт с программами для зоны ${zoneId}. Изменение пропущено`, 'warning');
+                                    continue;
                                 }
                             } catch (err) {
                                 console.error('Ошибка проверки конфликтов (bulk):', err);
                             }
                             updatedZone.duration = parseInt(value);
                             break;
+                        case 'mqtt':
+                            updatedZone.mqtt_server_id = parseInt(value);
+                            break;
                     }
-                    
                     await api.put(`/api/zones/${zoneId}`, updatedZone);
                 }
             }
@@ -1962,12 +1984,9 @@
         if (zonesData.length === 0) {
             // Создаем шаблон, если зон нет
             const template = [
-                ['id', 'name', 'icon', 'duration', 'group_id', 'state', 'topic'],
-                ['1', 'Зона 1', '🌿', '10', '1', 'off', 'zone/1'],
-                ['2', 'Зона 2', '🌳', '15', '1', 'off', 'zone/2'],
-                ['3', 'Зона 3', '🌺', '20', '2', 'off', 'zone/3'],
-                ['4', 'Зона 4', '🌻', '12', '2', 'off', 'zone/4'],
-                ['5', 'Зона 5', '🌹', '18', '3', 'off', 'zone/5']
+                ['id', 'name', 'icon', 'duration', 'group_id', 'state', 'topic', 'mqtt_server_id'],
+                ['1', 'Зона 1', '🌿', '10', '1', 'off', '/devices/wb-mr6cv3_101/controls/K1', '1'],
+                ['2', 'Зона 2', '🌳', '15', '1', 'off', '/devices/wb-mr6cv3_101/controls/K2', '1']
             ];
             
             const csv = template.map(row => row.join(',')).join('\n');
@@ -1977,7 +1996,7 @@
         }
         
         // Экспортируем существующие зоны
-        const headers = ['id', 'name', 'icon', 'duration', 'group_id', 'state', 'topic'];
+        const headers = ['id', 'name', 'icon', 'duration', 'group_id', 'state', 'topic', 'mqtt_server_id'];
         const csvData = [
             headers,
             ...zonesData.map(zone => [
@@ -1987,7 +2006,8 @@
                 zone.duration,
                 zone.group_id,
                 zone.state,
-                zone.topic || ''
+                zone.topic || '',
+                (zone.mqtt_server_id==null?'':zone.mqtt_server_id)
             ])
         ];
         
@@ -2009,29 +2029,32 @@
         try {
             const text = await file.text();
             const lines = text.split('\n').filter(line => line.trim());
-            const headers = lines[0].split(',');
+            const headers = lines[0].split(',').map(h=>h.trim());
             
             // Проверяем заголовки
-            const requiredHeaders = ['id', 'name', 'icon', 'duration', 'group_id'];
-            const missingHeaders = requiredHeaders.filter(h => !headers.includes(h));
-            
-            if (missingHeaders.length > 0) {
-                showNotification(`Неверный формат файла. Отсутствуют заголовки: ${missingHeaders.join(', ')}`, 'error');
+            // Для импорта обязательно только поле id. Остальные — опциональны
+            if (!headers.includes('id')) {
+                showNotification('Неверный формат файла. Должен быть столбец id', 'error');
                 return;
             }
             
             const zonesToImport = [];
             for (let i = 1; i < lines.length; i++) {
                 const values = lines[i].split(',');
-                const zone = {
-                    id: parseInt(values[0]),
-                    name: values[1],
-                    icon: values[2],
-                    duration: parseInt(values[3]),
-                    group_id: parseInt(values[4]),
-                    state: values[5] || 'off',
-                    topic: values[6] || ''
+                const get = (key) => {
+                    const idx = headers.indexOf(key);
+                    return idx >= 0 ? (values[idx] ?? '').trim() : '';
                 };
+                const idStr = get('id');
+                if (!idStr) continue;
+                const zone = { id: parseInt(idStr,10) };
+                const name = get('name'); if (name) zone.name = name;
+                const icon = get('icon'); if (icon) zone.icon = icon;
+                const dur = get('duration'); if (dur) zone.duration = parseInt(dur,10);
+                const gid = get('group_id'); if (gid) zone.group_id = parseInt(gid,10);
+                const state = get('state'); if (state) zone.state = state;
+                const topic = get('topic'); if (topic) zone.topic = topic;
+                const mqtt = get('mqtt_server_id'); if (mqtt) zone.mqtt_server_id = parseInt(mqtt,10);
                 zonesToImport.push(zone);
             }
             
@@ -2060,13 +2083,14 @@
             
             for (const zone of zonesToImport) {
                 try {
-                    if (zone.id) {
-                        // Обновляем существующую зону
-                        await api.put(`/api/zones/${zone.id}`, zone);
-                    } else {
-                        // Создаем новую зону
-                        await api.post('/api/zones', zone);
-                    }
+                    if (!zone.id) { continue; }
+                    // Обновляем существующую зону, передаём ТОЛЬКО поля, указанные в CSV
+                    const payload = { };
+                    ['name','icon','duration','group_id','state','topic','mqtt_server_id'].forEach(k=>{
+                        if (zone[k] !== undefined && zone[k] !== null && zone[k] !== '') payload[k] = zone[k];
+                    });
+                    if (Object.keys(payload).length === 0) continue;
+                    await api.put(`/api/zones/${zone.id}`, payload);
                 } catch (error) {
                     console.error(`Ошибка импорта зоны ${zone.id}:`, error);
                 }
