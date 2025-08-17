@@ -134,102 +134,22 @@ class IrrigationDB:
                         conn.commit()
                     return  # Данные уже есть
                 
-                # Создаем группы
+                # Создаём только базовые группы: 1 — Насос-1, 999 — БЕЗ ПОЛИВА
                 groups = [
-                    (1, 'Газон'),
-                    (2, 'Огород'),
-                    (3, 'Живая изгородь'),
-                    (4, 'Техзона'),
-                    (999, 'БЕЗ ПОЛИВА')  # Специальная группа для исключенных зон
+                    (1, 'Насос-1'),
+                    (999, 'БЕЗ ПОЛИВА')
                 ]
-                
                 for group_id, name in groups:
                     conn.execute('INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)', (group_id, name))
                 
-                # Создаем зоны
-                zones = [
-                    (1, 'off', 'Зона 1', '🌿', 10, 1, 'zone/1'),
-                    (2, 'off', 'Зона 2', '🌿', 15, 1, 'zone/2'),
-                    (3, 'off', 'Зона 3', '🌿', 12, 1, 'zone/3'),
-                    (4, 'off', 'Зона 4', '🌿', 8, 1, 'zone/4'),
-                    (5, 'off', 'Зона 5', '🌿', 20, 1, 'zone/5'),
-                    (6, 'off', 'Зона 6', '🌿', 10, 1, 'zone/6'),
-                    (7, 'off', 'Зона 7', '🌿', 15, 1, 'zone/7'),
-                    (8, 'off', 'Зона 8', '🌿', 12, 1, 'zone/8'),
-                    (9, 'off', 'Зона 9', '🌿', 8, 1, 'zone/9'),
-                    (10, 'off', 'Зона 10', '🌿', 20, 1, 'zone/10'),
-                    (11, 'off', 'Зона 11', '🌿', 10, 1, 'zone/11'),
-                    (12, 'off', 'Зона 12', '🌿', 15, 1, 'zone/12'),
-                    (13, 'off', 'Зона 13', '🌿', 12, 1, 'zone/13'),
-                    (14, 'off', 'Зона 14', '🌿', 8, 1, 'zone/14'),
-                    (15, 'on', 'Зона 15', '🌿', 20, 2, 'zone/15', '2025-08-15 23:59'),  # Активная зона с отложенным поливом
-                    (16, 'off', 'Зона 16', '🌿', 10, 2, 'zone/16'),
-                    (17, 'off', 'Зона 17', '🌿', 15, 2, 'zone/17'),
-                    (18, 'off', 'Зона 18', '🌿', 12, 2, 'zone/18'),
-                    (19, 'off', 'Зона 19', '🌿', 8, 2, 'zone/19'),
-                    (20, 'off', 'Зона 20', '🌿', 20, 2, 'zone/20'),
-                    (21, 'off', 'Зона 21', '🌿', 10, 3, 'zone/21'),
-                    (22, 'off', 'Зона 22', '🌿', 15, 3, 'zone/22'),
-                    (23, 'off', 'Зона 23', '🌿', 12, 3, 'zone/23'),
-                    (24, 'off', 'Зона 24', '🌿', 8, 3, 'zone/24'),
-                    (25, 'off', 'Зона 25', '🌿', 20, 4, 'zone/25'),
-                    (26, 'off', 'Зона 26', '🌿', 10, 4, 'zone/26'),
-                    (27, 'off', 'Зона 27', '🌿', 15, 4, 'zone/27'),
-                    (28, 'off', 'Зона 28', '🌿', 12, 4, 'zone/28'),
-                    (29, 'off', 'Зона 29', '🌿', 8, 4, 'zone/29'),
-                    (30, 'off', 'Зона 30', '🌿', 20, 4, 'zone/30')
-                ]
-                
-                for zone_data in zones:
-                    if len(zone_data) == 7:
-                        zone_id, state, name, icon, duration, group_id, topic = zone_data
-                        postpone_until = None
-                    else:
-                        zone_id, state, name, icon, duration, group_id, topic, postpone_until = zone_data
-                    
-                    conn.execute('''
-                        INSERT INTO zones (id, state, name, icon, duration, group_id, topic, postpone_until)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (zone_id, state, name, icon, duration, group_id, topic, postpone_until))
-                
-                # Создаем программы
-                programs = [
-                    # Дни недели в формате 0-6 (0=Понедельник)
-                    (1, 'Утренний полив', '06:00', json.dumps([0,1,2,3,4]), json.dumps([1,2,3,4,5])),
-                    (2, 'Вечерний полив', '20:00', json.dumps([0,1,2,3,4]), json.dumps([6,7,8,9,10])),
-                    (3, 'Полив огорода', '07:00', json.dumps([0,1,2,3,4]), json.dumps([15,16,17,18,19,20]))
-                ]
-                
-                for prog_id, name, time, days, zones in programs:
-                    conn.execute('''
-                        INSERT INTO programs (id, name, time, days, zones)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (prog_id, name, time, days, zones))
-                
-                # Создаем логи
-                logs = [
-                    ('zone_start', json.dumps({"zone": 15, "duration": 20}), '2025-08-14 10:30:00'),
-                    ('zone_stop', json.dumps({"zone": 15, "reason": "manual"}), '2025-08-14 10:50:00'),
-                    ('prog_start', json.dumps({"program": 1, "zones": [1,2,3,4,5]}), '2025-08-14 06:00:00'),
-                    ('prog_stop', json.dumps({"program": 1, "reason": "completed"}), '2025-08-14 06:30:00'),
-                    ('postpone_set', json.dumps({"group": 2, "days": 1, "until": "2025-08-15 23:59"}), '2025-08-14 11:00:00'),
-                    ('system_start', json.dumps({"version": "1.0"}), '2025-08-14 00:00:00'),
-                    ('zone_error', json.dumps({"zone": 5, "error": "pressure_low"}), '2025-08-14 09:15:00')
-                ]
-                
-                for log_type, details, timestamp in logs:
-                    conn.execute('''
-                        INSERT INTO logs (type, details, timestamp)
-                        VALUES (?, ?, ?)
-                    ''', (log_type, details, timestamp))
-                
+                # Без предзаполнения зон/программ/логов — чистая база по умолчанию
                 conn.commit()
                 # Пароль по умолчанию 1234
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
                     'password_hash', generate_password_hash('1234', method='pbkdf2:sha256')
                 ))
                 conn.commit()
-                logger.info("Начальные данные вставлены")
+                logger.info("Начальные данные вставлены: группы 1 (Насос-1) и 999 (БЕЗ ПОЛИВА)")
                 
         except Exception as e:
             logger.error(f"Ошибка вставки начальных данных: {e}")
