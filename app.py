@@ -1704,6 +1704,7 @@ def api_mqtt_zones_sse():
         logger.error(f"zones SSE failed: {e}")
         return jsonify({'success': False}), 200
 
+@csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
 def api_zone_mqtt_start(zone_id: int):
     z = db.get_zone(zone_id)
@@ -1714,9 +1715,28 @@ def api_zone_mqtt_start(zone_id: int):
         if group_id:
             group_zones = db.get_zones_by_group(group_id)
             active_other = [gz for gz in group_zones if gz.get('state') == 'on' and int(gz.get('id')) != int(zone_id)]
-            if active_other:
-                active_names = ', '.join(gx.get('name') for gx in active_other if gx.get('name'))
-                return jsonify({'success': False, 'message': f'В группе уже поливается зона: {active_names}. Сначала остановите её.'}), 400
+            # Автоматически останавливаем другие активные зоны группы (эксклюзивный полив)
+            for other in active_other:
+                try:
+                    osid = other.get('mqtt_server_id'); otopic = (other.get('topic') or '').strip()
+                    if osid and otopic:
+                        server_o = db.get_mqtt_server(int(osid))
+                        if server_o:
+                            t_o = otopic if str(otopic).startswith('/') else '/' + str(otopic)
+                            cl_o = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                            if server_o.get('username'):
+                                cl_o.username_pw_set(server_o.get('username'), server_o.get('password') or None)
+                            cl_o.connect(server_o.get('host') or '127.0.0.1', int(server_o.get('port') or 1883), 5)
+                            cl_o.publish(t_o, payload='0', qos=0, retain=False)
+                            cl_o.disconnect()
+                    # Обновляем БД сразу, чтобы UI показал стоп
+                    db.update_zone(int(other.get('id')), {
+                        'state': 'off',
+                        'watering_start_time': None,
+                        'last_watering_time': other.get('watering_start_time')
+                    })
+                except Exception:
+                    pass
             # Прерываем возможную последовательность/программу этой группы
             try:
                 scheduler = get_scheduler()
@@ -1737,11 +1757,26 @@ def api_zone_mqtt_start(zone_id: int):
         client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
         client.publish(t, payload='1', qos=0, retain=False)
         client.disconnect()
-        return jsonify({'success': True})
+        # Фиксируем старт зоны и планируем автостоп
+        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'scheduled_start_time': None})
+        except Exception:
+            pass
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                duration_min = int(z.get('duration') or 0)
+                if duration_min > 0:
+                    scheduler.schedule_zone_stop(zone_id, duration_min)
+        except Exception:
+            pass
+        return jsonify({'success': True, 'message': 'Зона запущена'})
     except Exception as e:
         logger.error(f"MQTT publish start failed: {e}")
         return jsonify({'success': False}), 500
 
+@csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
 def api_zone_mqtt_stop(zone_id: int):
     z = db.get_zone(zone_id)

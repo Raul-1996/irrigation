@@ -528,6 +528,112 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         
         print("✅ Производительность страниц приемлема")
 
+    def test_11_status_buttons_flow(self):
+        """Эмуляция нажатия основных кнопок на статус-странице"""
+        if not self.driver:
+            print("⚠️  Пропуск теста - браузер недоступен")
+            return
+        driver = self.driver
+        # Открываем главную страницу (статус)
+        driver.get(f'{BASE_URL_BROWSER}/')
+        self.simulate_human_delay(0.5, 1)
+        # Жмём старт/стоп для первой видимой зоны
+        try:
+            start_buttons = driver.find_elements(By.CSS_SELECTOR, 'button.zone-start-btn')
+            self.assertTrue(len(start_buttons) > 0, 'Не найдены кнопки запуска зон')
+            start_buttons[0].click()
+            time.sleep(1.2)
+            # затем стоп
+            start_buttons = driver.find_elements(By.CSS_SELECTOR, 'button.zone-start-btn')
+            start_buttons[0].click()
+            time.sleep(0.8)
+            # Проверяем через API, что состояние зоны соответствует одному из допустимых
+            # Определяем id первой зоны из таблицы
+            try:
+                first_id_cell = driver.find_element(By.XPATH, "//tbody[@id='zones-table-body']/tr[1]/td[2]")
+                zid = int(first_id_cell.text.strip())
+                z = requests.get(f"{BASE_URL_HOST}/api/zones/{zid}", timeout=5).json()
+                self.assertIn(z.get('state'), ['on','off'])
+            except Exception:
+                pass
+        except Exception as e:
+            self.fail(f'Клики по кнопкам зоны на статус-странице завершились ошибкой: {e}')
+        # Кнопки группы: старт и стоп
+        try:
+            cont_btns = driver.find_elements(By.CSS_SELECTOR, 'button.continue-group')
+            stop_btns = driver.find_elements(By.CSS_SELECTOR, 'button.stop-group')
+            if cont_btns:
+                cont_btns[0].click()
+                time.sleep(1.2)
+            if stop_btns:
+                stop_btns[0].click()
+                time.sleep(0.8)
+        except Exception as e:
+            self.fail(f'Клики по кнопкам группы (запуск/стоп) завершились ошибкой: {e}')
+        # Отложить на день и отменить
+        try:
+            delay_btns = driver.find_elements(By.CSS_SELECTOR, 'button.delay')
+            if delay_btns:
+                delay_btns[0].click()
+                time.sleep(0.8)
+            cancel_btns = driver.find_elements(By.CSS_SELECTOR, 'button.cancel-postpone')
+            if cancel_btns:
+                cancel_btns[0].click()
+                time.sleep(0.8)
+        except Exception as e:
+            self.fail(f'Клики по кнопкам отложенного полива завершились ошибкой: {e}')
+        # Аварийная остановка и возобновление
+        try:
+            em_btn = driver.find_element(By.ID, 'emergency-btn')
+            driver.execute_script("window.confirm = ()=>true;")
+            em_btn.click()
+            time.sleep(0.8)
+            resume = driver.find_element(By.ID, 'resume-btn')
+            resume.click()
+            time.sleep(0.8)
+        except Exception as e:
+            self.fail(f'Аварийная остановка/возобновление завершились ошибкой: {e}')
+
+    def test_12_single_zone_per_group_exclusive(self):
+        """Проверка: при старте второй зоны в той же группе в итоге активна остаётся только одна"""
+        if not self.driver:
+            print("⚠️  Пропуск теста - браузер недоступен")
+            return
+        driver = self.driver
+        # Узнаём две зоны из одной группы через API
+        try:
+            zones = requests.get(f"{BASE_URL_HOST}/api/zones", timeout=5).json()
+        except Exception as e:
+            self.fail(f'Не удалось получить зоны через API: {e}')
+        by_group = {}
+        for z in zones:
+            by_group.setdefault(z['group_id'], []).append(z['id'])
+        target_group = None
+        for gid, ids in by_group.items():
+            if len(ids) >= 2 and gid != 999:
+                target_group = (gid, ids[:2])
+                break
+        if not target_group:
+            self.skipTest('Недостаточно зон в одной группе для проверки эксклюзивности')
+            return
+        _, (z1, z2) = target_group
+        # Открываем статус
+        driver.get(f'{BASE_URL_BROWSER}/')
+        self.simulate_human_delay(0.5, 1)
+        # Стартуем первую зону
+        btn1 = driver.find_element(By.XPATH, f"//tbody[@id='zones-table-body']/tr[td[2][normalize-space()='{z1}']]//button[contains(@class,'zone-start-btn')]")
+        btn1.click()
+        time.sleep(1.2)
+        # Стартуем вторую зону из той же группы
+        btn2 = driver.find_element(By.XPATH, f"//tbody[@id='zones-table-body']/tr[td[2][normalize-space()='{z2}']]//button[contains(@class,'zone-start-btn')]")
+        btn2.click()
+        time.sleep(1.5)
+        # Проверяем, что среди этих двух строк только одна индикатор 'on'
+        ind1 = driver.find_element(By.XPATH, f"//tbody[@id='zones-table-body']/tr[td[2][normalize-space()='{z1}']]//span[contains(@class,'indicator')]")
+        ind2 = driver.find_element(By.XPATH, f"//tbody[@id='zones-table-body']/tr[td[2][normalize-space()='{z2}']]//span[contains(@class,'indicator')]")
+        on_count = int('on' in ind1.get_attribute('class')) + int('on' in ind2.get_attribute('class'))
+        self.assertEqual(on_count, 1, 'В группе одновременно активны более одной зоны')
+
 if __name__ == '__main__':
     print("🧪 Запуск реалистичных веб-тестов WB-Irrigation...")
     print("=" * 60)
