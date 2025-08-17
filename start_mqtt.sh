@@ -7,7 +7,7 @@ if lsof -i :5055 >/dev/null 2>&1; then
 fi
 
 # Ensure docker mosquitto is running with our config (if Docker daemon is available)
-CFG_SRC="$(pwd)/tool/MQTT_emulator/mosquitto.conf"
+CFG_SRC="$(pwd)/tools/MQTT_emulator/mosquitto.conf"
 if [ -f "$CFG_SRC" ]; then
   if command -v docker >/dev/null 2>&1; then
     if docker info >/dev/null 2>&1; then
@@ -80,9 +80,9 @@ export TEST_MQTT_HOST=${TEST_MQTT_HOST:-127.0.0.1}
 export TEST_MQTT_PORT=${TEST_MQTT_PORT:-1883}
 export EMULATOR_HTTP_PORT=${EMULATOR_HTTP_PORT:-5055}
 
-# Start emulator from tool folder if present, else from root
-if [ -f "tool/MQTT_emulator/mqtt_relay_emulator.py" ]; then
-  (cd tool/MQTT_emulator && nohup ${PYTHON:-python3} mqtt_relay_emulator.py > ../../emulator.out 2>&1 & echo $! > ../../emulator.pid)
+# Start emulator from tools folder if present, else from root
+if [ -f "tools/MQTT_emulator/mqtt_relay_emulator.py" ]; then
+  (cd tools/MQTT_emulator && nohup ${PYTHON:-python3} mqtt_relay_emulator.py > ../../emulator.out 2>&1 & echo $! > ../../emulator.pid)
 else
   nohup python mqtt_relay_emulator.py > emulator.out 2>&1 & echo $! > emulator.pid
 fi
