@@ -1,14 +1,9 @@
 #!/bin/zsh
 set -euo pipefail
 
-# Kill any process listening on 1883 and 5055 (MQTT + emulator HTTP)
-if lsof -i :1883 >/dev/null 2>&1; then
-  echo "Port 1883 is busy, killing listeners..."
-  lsof -ti :1883 | xargs -r kill -9 || true
-fi
+# Do not kill ports automatically to avoid stopping Docker or other services
 if lsof -i :5055 >/dev/null 2>&1; then
-  echo "Port 5055 is busy, killing listeners..."
-  lsof -ti :5055 | xargs -r kill -9 || true
+  echo "Port 5055 is busy; emulator HTTP may fail to bind. Stop existing process or change EMULATOR_HTTP_PORT."
 fi
 
 # Ensure docker mosquitto is running with our config (if Docker daemon is available)
@@ -28,6 +23,46 @@ else
   echo "Docker is not installed. Skipping broker startup via Docker."
 fi
 
+# If port 1883 is still free, try to start a local mosquitto binary
+if ! lsof -i :1883 >/dev/null 2>&1; then
+  MOSQ_BIN=""
+  # Try PATH first
+  if command -v mosquitto >/dev/null 2>&1; then
+    MOSQ_BIN="$(command -v mosquitto)"
+  fi
+  # Try common Homebrew locations
+  [ -z "$MOSQ_BIN" ] && [ -x "/opt/homebrew/sbin/mosquitto" ] && MOSQ_BIN="/opt/homebrew/sbin/mosquitto"
+  [ -z "$MOSQ_BIN" ] && [ -x "/usr/local/sbin/mosquitto" ] && MOSQ_BIN="/usr/local/sbin/mosquitto"
+
+  # Try to install via Homebrew if not found
+  if [ -z "$MOSQ_BIN" ]; then
+    BREW_BIN=""
+    if command -v brew >/dev/null 2>&1; then
+      BREW_BIN="$(command -v brew)"
+    elif [ -x "/opt/homebrew/bin/brew" ]; then
+      BREW_BIN="/opt/homebrew/bin/brew"
+    elif [ -x "/usr/local/bin/brew" ]; then
+      BREW_BIN="/usr/local/bin/brew"
+    fi
+    if [ -n "$BREW_BIN" ]; then
+      echo "Installing mosquitto via Homebrew..."
+      "$BREW_BIN" list mosquitto >/dev/null 2>&1 || "$BREW_BIN" install -q mosquitto
+      # After install, try to locate mosquitto again
+      [ -x "/opt/homebrew/sbin/mosquitto" ] && MOSQ_BIN="/opt/homebrew/sbin/mosquitto"
+      [ -z "$MOSQ_BIN" ] && [ -x "/usr/local/sbin/mosquitto" ] && MOSQ_BIN="/usr/local/sbin/mosquitto"
+      [ -z "$MOSQ_BIN" ] && MOSQ_BIN="$(command -v mosquitto 2>/dev/null || true)"
+    fi
+  fi
+
+  if [ -n "$MOSQ_BIN" ]; then
+    echo "Starting local mosquitto broker on 1883 using $MOSQ_BIN..."
+    nohup "$MOSQ_BIN" -c "$(pwd)/mosquitto.conf" > mosquitto.out 2>&1 &
+    sleep 0.8
+  else
+    echo "No broker found and Docker unavailable. Please install Mosquitto or start any MQTT broker on port 1883."
+  fi
+fi
+
 # Activate venv and install deps if needed
 if [ ! -x "venv/bin/python" ]; then
   python3 -m venv venv
@@ -40,8 +75,11 @@ export TEST_MQTT_HOST=${TEST_MQTT_HOST:-127.0.0.1}
 export TEST_MQTT_PORT=${TEST_MQTT_PORT:-1883}
 export EMULATOR_HTTP_PORT=${EMULATOR_HTTP_PORT:-5055}
 
-# Start emulator
-nohup python mqtt_relay_emulator.py > emulator.out 2>&1 &
-EMUPID=$!
-
-echo "Emulator started: PID=$EMUPID, UI: http://localhost:${EMULATOR_HTTP_PORT}"
+# Start emulator from tool folder if present, else from root
+if [ -f "tool/MQTT_emulator/mqtt_relay_emulator.py" ]; then
+  (cd tool/MQTT_emulator && nohup ${PYTHON:-python3} mqtt_relay_emulator.py > ../../emulator.out 2>&1 & echo $! > ../../emulator.pid)
+else
+  nohup python mqtt_relay_emulator.py > emulator.out 2>&1 & echo $! > emulator.pid
+fi
+EMUPID=$(cat emulator.pid 2>/dev/null || true)
+echo "Emulator started: PID=${EMUPID:-unknown}, UI: http://localhost:${EMULATOR_HTTP_PORT}"
