@@ -181,13 +181,22 @@ def publish_command(topic: str, value: str) -> None:
     t = normalize_topic(topic)
     v = "1" if value == "1" else "0"
     log_event(f"controller: CMD publish topic={t} payload={v}")
-    controller_client.publish(t, payload=v, qos=0, retain=False)
-    # Fallback: if device client isn't connected to any broker, apply state locally
+    info = None
     try:
-        connected = bool(getattr(device_client, "is_connected")() if hasattr(device_client, "is_connected") else False)
+        info = controller_client.publish(t, payload=v, qos=0, retain=False)
+    except Exception as exc:
+        log_event(f"controller: publish error: {exc}")
+    # Fallback: if either client isn't connected, or publish failed, apply state locally
+    try:
+        dev_connected = bool(getattr(device_client, "is_connected")() if hasattr(device_client, "is_connected") else False)
     except Exception:
-        connected = False
-    if not connected:
+        dev_connected = False
+    try:
+        ctrl_connected = bool(getattr(controller_client, "is_connected")() if hasattr(controller_client, "is_connected") else False)
+    except Exception:
+        ctrl_connected = False
+    publish_failed = (info is None) or (getattr(info, 'rc', 0) != 0)
+    if (not dev_connected) or (not ctrl_connected) or publish_failed:
         apply_local_state(t, v)
 
 # ------------------------------
@@ -195,6 +204,17 @@ def publish_command(topic: str, value: str) -> None:
 # ------------------------------
 
 app = Flask(__name__)
+
+
+@app.after_request
+def add_no_cache_headers(resp: Response):
+    try:
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    except Exception:
+        pass
+    return resp
 
 
 def build_structure() -> List[Tuple[str, List[Tuple[str, str]]]]:
@@ -261,6 +281,9 @@ def index():
     .btn { padding: 4px 8px; font-size: 12px; border: 1px solid #ccc; border-radius: 6px; background: #f8f8f8; cursor: pointer; }
     .btn:hover { background: #f0f0f0; }
     .controls { display: flex; gap: 6px; flex-wrap: wrap; }
+    .global-controls { display: flex; gap: 8px; margin: 8px 0 14px; }
+    .btn.primary { background: #e8f5e9; border-color: #b7e1c1; }
+    .btn.danger { background: #fdecea; border-color: #f5c2c7; }
     .legend { margin: 10px 0 16px; font-size: 13px; color: #555; }
     .muted { color: #777; font-size: 12px; }
     .logs { max-width: 980px; margin: 16px auto; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
@@ -278,6 +301,13 @@ def index():
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, value })
+      });
+    }
+    async function toggleAll(value) {
+      await fetch('/api/toggle-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value })
       });
     }
     function applyState(data) {
@@ -307,10 +337,20 @@ def index():
         const value = action === 'on' ? '1' : '0';
         toggle(topic, value).then(() => setTimeout(refresh, 150));
       });
+      // Global controls
+      const allOn = document.getElementById('all-on');
+      const allOff = document.getElementById('all-off');
+      if (allOn) allOn.addEventListener('click', ()=> { toggleAll('1').then(()=> setTimeout(refresh, 150)); });
+      if (allOff) allOff.addEventListener('click', ()=> { toggleAll('0').then(()=> setTimeout(refresh, 150)); });
+
       // Logs polling
       const poll = () => fetch('/api/logs').then(r=>r.json()).then(data=>{
         const box = document.getElementById('logs-box');
-        if (box) { box.textContent = (data.logs || []).join('\n'); box.scrollTop = box.scrollHeight; }
+        if (box) {
+          const safe = (data.logs || []).map(l => l.replace(/&/g,'&amp;').replace(/</g,'&lt;'));
+          box.innerHTML = safe.join('<br/>');
+          box.scrollTop = box.scrollHeight;
+        }
       }).catch(()=>{});
       poll(); setInterval(poll, 1000);
       const clearBtn = document.getElementById('logs-clear');
@@ -322,6 +362,10 @@ def index():
 <body>
   <h1>MQTT Эмулятор wb-mr6cv3</h1>
   <div class=\"legend\">Пять устройств: <strong>101–105</strong>, по шесть каналов <strong>K1–K6</strong>. Зелёная лампа — «включено» (1), красная — «выключено» (0).<div class=\"muted\">Брокер: \""" + BROKER_HOST + ":" + str(BROKER_PORT) + "\"</div></div>
+  <div class=\"global-controls\">
+    <button class=\"btn primary\" id=\"all-on\">Включить все (1)</button>
+    <button class=\"btn danger\" id=\"all-off\">Выключить все (0)</button>
+  </div>
   <div class=\"grid\">""" + cards_html + """\n  </div>
   <div class=\"logs\">
     <div class=\"logs-header\">Логи MQTT
@@ -332,7 +376,9 @@ def index():
 </body>
 </html>
 """
-    return Response(page, mimetype="text/html")
+    resp = Response(page, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 @app.get("/api/state")
@@ -365,6 +411,17 @@ def api_toggle():
         return jsonify({"ok": False, "error": "Invalid topic or value"}), 400
     publish_command(topic, value)
     return jsonify({"ok": True})
+
+
+@app.post("/api/toggle-all")
+def api_toggle_all():
+    data = request.get_json(silent=True) or {}
+    value = data.get("value")
+    if value not in ("0", "1"):
+        return jsonify({"ok": False, "error": "Invalid value"}), 400
+    for t in ALL_TOPICS:
+        publish_command(t, value)
+    return jsonify({"ok": True, "count": len(ALL_TOPICS)})
 
 
 def start_mqtt_clients():
