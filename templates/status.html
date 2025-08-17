@@ -529,7 +529,9 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            return `Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            const prevBtn = `<button class="zone-start-btn" title="Предыдущая зона" onclick="groupPrev(${group.id})">‹</button>`;
+            const nextBtn = `<button class="zone-start-btn" title="Следующая зона" onclick="groupNext(${group.id})">›</button>`;
+            return `${prevBtn} Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span> ${nextBtn}`;
         }
         switch (group.status) {
             case 'waiting': return 'Ожидание начала полива';
@@ -845,6 +847,31 @@
         } catch (error) {
             showNotification('Ошибка при остановке группы', 'error');
         }
+    }
+
+    async function groupNext(groupId){
+        try{
+            const res = await fetch(`/api/groups/${groupId}/next`, {method:'POST'});
+            const data = await res.json();
+            if (data && data.success){
+                showNotification(data.message, 'info');
+                await refreshSingleGroup(groupId);
+            } else {
+                showNotification(data && data.message ? data.message : 'Ошибка переключения на следующую', 'warning');
+            }
+        }catch(e){ showNotification('Ошибка сети', 'error'); }
+    }
+    async function groupPrev(groupId){
+        try{
+            const res = await fetch(`/api/groups/${groupId}/prev`, {method:'POST'});
+            const data = await res.json();
+            if (data && data.success){
+                showNotification(data.message, 'info');
+                await refreshSingleGroup(groupId);
+            } else {
+                showNotification(data && data.message ? data.message : 'Ошибка переключения на предыдущую', 'warning');
+            }
+        }catch(e){ showNotification('Ошибка сети', 'error'); }
     }
     
     async function startOrStopZone(zoneId, currentState) {

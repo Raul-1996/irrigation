@@ -563,6 +563,41 @@ class IrrigationScheduler:
         except Exception as e:
             logger.error(f"Ошибка отмены задач группы {group_id}: {e}")
 
+    def restart_group_sequence_from_zone(self, group_id: int, start_zone_id: int) -> bool:
+        """Перезапустить последовательность группы, начав с указанной зоны.
+        Останавливает текущие задачи и запускает подсписок зон, начиная с start_zone_id.
+        Гарантирует эксклюзивность внутри группы.
+        """
+        try:
+            # Отменяем текущие задачи/последовательность
+            self.cancel_group_jobs(group_id)
+
+            zones = self.db.get_zones()
+            group_zones = sorted([z for z in zones if z['group_id'] == group_id], key=lambda x: x['id'])
+            if not group_zones:
+                return False
+            zone_ids = [z['id'] for z in group_zones]
+            if start_zone_id not in zone_ids:
+                return False
+            idx = zone_ids.index(start_zone_id)
+            sub_seq = zone_ids[idx:]
+            if not sub_seq:
+                return False
+            # Немедленно планируем новый прогон
+            self.scheduler.add_job(
+                self._run_group_sequence,
+                DateTrigger(run_date=datetime.now()),
+                args=[group_id, sub_seq],
+                id=f"group_seq_{group_id}_{int(datetime.now().timestamp())}",
+                replace_existing=False,
+                misfire_grace_time=120,
+            )
+            logger.info(f"Группа {group_id}: перезапуск последовательности с зон {sub_seq}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка перезапуска последовательности для группы {group_id} c зоны {start_zone_id}: {e}")
+            return False
+
     def load_programs(self):
         try:
             programs = self.db.get_programs()
