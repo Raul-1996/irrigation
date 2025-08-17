@@ -156,6 +156,20 @@ def _not_found(e):
         return jsonify({'error': 'Not found'}), 404
 
 
+@csrf.exempt
+@app.route('/api/scheduler/init', methods=['POST'])
+def api_scheduler_init():
+    """Явная инициализация планировщика для UI/тестов."""
+    global _SCHEDULER_INIT_DONE
+    try:
+        init_scheduler(db)
+        _SCHEDULER_INIT_DONE = True
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Ошибка явной инициализации планировщика: {e}")
+        return jsonify({'success': False}), 500
+
+
 MAP_FOLDER = MAP_DIR  # использовать новый каталог media/maps
 
 
@@ -1229,7 +1243,10 @@ def api_start_group_from_first(group_id):
         if not ok:
             return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
 
-        db.add_log('group_start_from_first', json.dumps({"group": group_id}))
+        try:
+            db.add_log('group_start_from_first', json.dumps({"group": group_id}))
+        except Exception:
+            pass
         return jsonify({"success": True, "message": f"Группа {group_id}: запущен последовательный полив"})
     except Exception as e:
         logger.error(f"Ошибка запуска группы {group_id} с первой зоны: {e}")

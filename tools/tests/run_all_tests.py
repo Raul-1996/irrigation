@@ -57,14 +57,14 @@ def main():
     
     # 1. Модульные тесты
     success, output = run_command(
-        "source venv/bin/activate && python tests.py",
+        "source venv/bin/activate && python tools/tests/tests.py",
         "Модульные тесты (tests.py)"
     )
     test_results.append(("Модульные тесты", success, output))
     
     # 2. Веб-тесты (простые)
     success, output = run_command(
-        "source venv/bin/activate && python web_tests_simple.py",
+        "source venv/bin/activate && python tools/tests/web_tests_simple.py",
         "Веб-тесты (простые)"
     )
     test_results.append(("Веб-тесты (простые)", success, output))
@@ -75,7 +75,7 @@ def main():
         from webdriver_manager.chrome import ChromeDriverManager
         # 3. Веб-тесты (реалистичные)
         success, output = run_command(
-            "source venv/bin/activate && python web_tests_realistic.py",
+            "source venv/bin/activate && python tools/tests/web_tests_realistic.py",
             "Веб-тесты (реалистичные)"
         )
         test_results.append(("Веб-тесты (реалистичные)", success, output))
