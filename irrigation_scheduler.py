@@ -57,6 +57,23 @@ class IrrigationScheduler:
             last_time = None
             if zone and zone.get('watering_start_time'):
                 last_time = zone['watering_start_time']
+            # Публикуем MQTT OFF для зоны, если сконфигурирован — это важно для автостопа после ручного запуска
+            try:
+                topic = (zone.get('topic') or '').strip() if zone else ''
+                sid = zone.get('mqtt_server_id') if zone else None
+                if mqtt and topic and sid:
+                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    server = self.db.get_mqtt_server(int(sid))
+                    if server:
+                        logger.info(f"SCHED auto-stop publish OFF zone={zone_id} topic={t}")
+                        cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                        if server.get('username'):
+                            cl.username_pw_set(server.get('username'), server.get('password') or None)
+                        cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                        cl.publish(t, payload='0', qos=0, retain=False)
+                        cl.disconnect()
+            except Exception:
+                pass
             self.db.update_zone(zone_id, {
                 'state': 'off',
                 'watering_start_time': None,
@@ -281,7 +298,12 @@ class IrrigationScheduler:
         try:
             if duration_minutes is None:
                 return
-            run_at = datetime.now() + timedelta(minutes=int(duration_minutes))
+            # Раннее выключение: на 3 секунды раньше завершения таймера
+            run_at = datetime.now() + timedelta(minutes=int(duration_minutes)) - timedelta(seconds=3)
+            # Гарантируем, что время в будущем (минимум +1 сек)
+            now = datetime.now()
+            if run_at <= now:
+                run_at = now + timedelta(seconds=1)
             self.scheduler.add_job(
                 self._stop_zone,
                 DateTrigger(run_date=run_at),
