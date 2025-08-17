@@ -406,24 +406,13 @@ class IrrigationDB:
         """Создать новую зону"""
         try:
             with sqlite3.connect(self.db_path) as conn:
-                # Нормализуем topic по номеру зоны, если возможно
+                # Берём topic как есть, без какой-либо нормализации
                 topic = (zone_data.get('topic') or '').strip()
                 zid_explicit = None
                 try:
                     zid_explicit = int(zone_data.get('id')) if zone_data.get('id') is not None else None
                 except Exception:
                     zid_explicit = None
-                try:
-                    zid_for_topic = zid_explicit
-                    if zid_for_topic is None:
-                        # попробуем понять по текущему количеству (не идеально, но лучше, чем ничего)
-                        pass
-                    if zid_for_topic:
-                        dev = 101 + (zid_for_topic - 1) // 6
-                        ch = 1 + (zid_for_topic - 1) % 6
-                        topic = f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
-                except Exception:
-                    pass
                 
                 if zid_explicit is not None:
                     try:
@@ -496,16 +485,9 @@ class IrrigationDB:
                     params.append(updated_data.get('group_id', updated_data.get('group', 1)))
                 
                 if 'topic' in updated_data:
-                    # Нормализация топика к схеме /devices/wb-mr6cv3_{101..105}/controls/K{1..6}
-                    try:
-                        zid = int(zone_id)
-                        dev = 101 + (zid - 1) // 6
-                        ch = 1 + (zid - 1) % 6
-                        normalized = f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
-                    except Exception:
-                        normalized = updated_data.get('topic', '')
+                    # Сохраняем topic как есть, без нормализации
                     sql_fields.append('topic = ?')
-                    params.append(normalized)
+                    params.append((updated_data.get('topic') or '').strip())
                 
                 if 'state' in updated_data:
                     sql_fields.append('state = ?')
