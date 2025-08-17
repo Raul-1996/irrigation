@@ -175,6 +175,22 @@ try:
     app.register_blueprint(mqtt_bp)
 except Exception as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
+@csrf.exempt
+@app.route('/api/settings/early-off', methods=['GET', 'POST'])
+def api_setting_early_off():
+    try:
+        if request.method == 'GET':
+            seconds = db.get_early_off_seconds()
+            return jsonify({'success': True, 'seconds': seconds})
+        data = request.get_json(silent=True) or {}
+        seconds = int(data.get('seconds', 3))
+        if seconds < 0: seconds = 0
+        if seconds > 15: seconds = 15
+        ok = db.set_early_off_seconds(seconds)
+        return jsonify({'success': bool(ok), 'seconds': seconds})
+    except Exception as e:
+        logger.error(f"early-off setting failed: {e}")
+        return jsonify({'success': False}), 500
 # (initial sync moved into before_request)
 # Глобальная защита от дребезга запусков по группам (анти-флаппер)
 _GROUP_CHANGE_GUARD = {}
@@ -1666,7 +1682,7 @@ def start_zone(zone_id):
         try:
             scheduler = get_scheduler()
             if scheduler:
-                # На уровне планировщика ожидание уже укорочено на 3с
+                # На уровне планировщика ожидание уже укорочено на N секунд (настройка)
                 scheduler.schedule_zone_stop(zone_id, int(zone['duration']))
         except Exception as e:
             logger.error(f"Ошибка планирования остановки зоны {zone_id}: {e}")

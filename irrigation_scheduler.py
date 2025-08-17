@@ -298,8 +298,17 @@ class IrrigationScheduler:
         try:
             if duration_minutes is None:
                 return
-            # Раннее выключение: на 3 секунды раньше завершения таймера
-            run_at = datetime.now() + timedelta(minutes=int(duration_minutes)) - timedelta(seconds=3)
+            # Раннее выключение: за N секунд до окончания (настраивается), по умолчанию 3
+            try:
+                from database import db as _db
+                early = int(_db.get_early_off_seconds())
+            except Exception:
+                early = 3
+            if early < 0:
+                early = 0
+            if early > 15:
+                early = 15
+            run_at = datetime.now() + timedelta(minutes=int(duration_minutes)) - timedelta(seconds=early)
             # Гарантируем, что время в будущем (минимум +1 сек)
             now = datetime.now()
             if run_at <= now:

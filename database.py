@@ -1151,6 +1151,38 @@ class IrrigationDB:
             logger.error(f"Ошибка обновления пароля: {e}")
             return False
 
+    # === Settings: early off seconds (0..15) ===
+    def get_early_off_seconds(self) -> int:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('early_off_seconds',))
+                row = cur.fetchone()
+                val = int(row[0]) if row and row[0] is not None else 3
+                if val < 0: val = 0
+                if val > 15: val = 15
+                return val
+        except Exception as e:
+            logger.error(f"Ошибка чтения early_off_seconds: {e}")
+            return 3
+
+    def set_early_off_seconds(self, seconds: int) -> bool:
+        try:
+            try:
+                val = int(seconds)
+            except Exception:
+                return False
+            if val < 0: val = 0
+            if val > 15: val = 15
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
+                    'early_off_seconds', str(val)
+                ))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка записи early_off_seconds: {e}")
+            return False
+
     def get_zone_duration(self, zone_id: int) -> int:
         """Получить продолжительность полива зоны"""
         try:

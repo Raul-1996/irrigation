@@ -715,6 +715,15 @@
     </div>
 </div>
 
+<div class="zones-container" style="margin-top:12px;">
+  <h4>Настройки полива</h4>
+  <div>
+    <label for="early-off-seconds">За сколько секунд до конца таймера отключать зону:</label>
+    <input id="early-off-seconds" type="number" min="0" max="15" step="1" value="3" style="width:80px; margin: 0 8px;" />
+    <button class="save-all-btn" onclick="saveEarlyOff()">Сохранить</button>
+    <div class="muted">Допустимо: 0–15 секунд. Выключение выполняется заранее, запуск следующей зоны остаётся по расписанию.</div>
+  </div>
+</div>
 <!-- Секция зон -->
 <div class="zones-container">
     <div class="zones-header">
@@ -966,6 +975,7 @@
             renderGroupsGrid();
             loadGroupSelectors();
             updateZonesCount();
+            await loadEarlyOff();
         } catch (error) {
             console.error('Ошибка загрузки данных:', error);
             showNotification('Ошибка загрузки данных', 'error');
@@ -2081,6 +2091,31 @@
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+    }
+
+    // === Early OFF seconds setting ===
+    async function loadEarlyOff() {
+        try {
+            const r = await fetch('/api/settings/early-off');
+            const j = await r.json();
+            const el = document.getElementById('early-off-seconds');
+            if (el && j && typeof j.seconds === 'number') {
+                el.value = String(j.seconds);
+            }
+        } catch (e) {}
+    }
+    async function saveEarlyOff() {
+        const el = document.getElementById('early-off-seconds');
+        if (!el) return;
+        let v = parseInt(el.value, 10);
+        if (isNaN(v)) v = 3;
+        if (v < 0) v = 0; if (v > 15) v = 15;
+        try {
+            const r = await fetch('/api/settings/early-off', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({seconds: v})});
+            const j = await r.json();
+            if (!(j && j.success)) showNotification('Не удалось сохранить настройку', 'error');
+            else showNotification('Настройка сохранена', 'success');
+        } catch (e) { showNotification('Ошибка сохранения', 'error'); }
     }
 </script>
 
