@@ -589,10 +589,11 @@
                 </div>`;
             card.innerHTML = `
                 <div class="group-header">${group.name}</div>
-                <div>${statusText}</div>
+                <div id="group-status-${group.id}">${statusText}</div>
                 <div class="postpone-until">${postponeText}</div>
                 ${groupButtons}
             `;
+            card.id = `group-card-${group.id}`;
             container.appendChild(card);
             if (group.status === 'watering' && group.current_zone) {
                 initGroupTimer(group);
@@ -609,12 +610,73 @@
             if (Number.isNaN(sec) || sec <= 0) {
                 span.textContent = '00:00';
                 span.dataset.remainingSeconds = '';
+                // Попросим актуальный статус группы и перерисуем её карточку без полной перезагрузки страницы
+                const gid = span.dataset.groupId;
+                if (gid) refreshSingleGroup(parseInt(gid, 10));
                 return;
             }
             sec = sec - 1;
             span.dataset.remainingSeconds = String(sec);
             span.textContent = formatSeconds(sec);
         });
+    }
+
+    async function refreshSingleGroup(groupId) {
+        try {
+            const resp = await fetch(`/api/status?ts=${Date.now()}`, {cache: 'no-store'});
+            const data = await resp.json();
+            if (!data || !data.groups) return;
+            const group = (data.groups || []).find(g => String(g.id) === String(groupId));
+            if (!group) return;
+            const card = document.getElementById(`group-card-${group.id}`);
+            if (!card) return;
+            // Обновим строку статуса и таймер
+            const statusHtml = getStatusText(group);
+            const statusDiv = document.getElementById(`group-status-${group.id}`);
+            if (statusDiv) {
+                statusDiv.innerHTML = statusHtml;
+            }
+            if (group.status === 'watering' && group.current_zone) {
+                initGroupTimer(group);
+            }
+            // Обновим стилевой класс карточки (цвет, пульсация и т.п.)
+            const flowActive = group.status === 'watering' && Math.random() > 0.3;
+            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
+        } catch (e) {}
+    }
+
+    // Реакция на события MQTT через SSE для моментального обновления
+    function setupSseZones() {
+        try {
+            const es = new EventSource('/api/mqtt/zones-sse');
+            es.onmessage = function(ev) {
+                try {
+                    if (!ev || !ev.data) return;
+                    const msg = JSON.parse(ev.data);
+                    const zid = parseInt(msg.zone_id, 10);
+                    const payload = String(msg.payload || '').trim();
+                    const newState = (payload === '1' || payload === 'on' || payload === 'ON' || payload === 'true') ? 'on' : 'off';
+                    handleZoneUpdateFromSse(zid, newState);
+                } catch (e) {}
+            };
+            es.onerror = function() { /* keep connection attempts */ };
+        } catch (e) {}
+    }
+
+    function handleZoneUpdateFromSse(zoneId, newState) {
+        try {
+            // Обновим локальные zonesData, чтобы таблица зон была согласованной
+            const z = zonesData.find(x => Number(x.id) === Number(zoneId));
+            if (z) z.state = newState;
+            // Найдём группу и обновим только её карточку
+            const groupId = z ? z.group_id : null;
+            if (groupId) {
+                refreshSingleGroup(groupId);
+            } else {
+                // Если вдруг не нашли — перезагрузим статус целиком как запасной вариант
+                loadStatusData();
+            }
+        } catch (e) {}
     }
 
     async function setRain(on) {
@@ -885,6 +947,9 @@
                     const idx = zonesData.findIndex(z=>z.id===data.zone_id);
                     if (idx>=0){
                         zonesData[idx].state = data.state;
+                        // Обновим карточку соответствующей группы, чтобы строка "Полив — Зона X" сменилась мгновенно
+                        const gid = zonesData[idx].group_id;
+                        if (gid) { refreshSingleGroup(gid); }
                         const tbody = document.getElementById('zones-table-body');
                         if (tbody){
                             const rows = tbody.querySelectorAll('tr');

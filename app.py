@@ -232,15 +232,24 @@ def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: 
         logger.exception("MQTT publish failed")
         return False
 
-# === Safety: only one zone may be ON at a time ===
-def _force_all_zones_off(reason: str = "safety") -> None:
+# === Safety: only one zone may be ON inside a single group (groups independent) ===
+def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> None:
     try:
-        zones = db.get_zones()
-        for z in zones:
+        group_zones = db.get_zones_by_group(group_id)
+        on_zones = [z for z in group_zones if str(z.get('state')) == 'on']
+        if len(on_zones) <= 1:
+            return
+        # Оставляем только одну зону включенной: с самым поздним временем старта, иначе с минимальным id
+        def started_key(z):
             try:
-                db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
+                ts = z.get('watering_start_time') or ''
+                return datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
             except Exception:
-                pass
+                return datetime.min
+        on_zones_sorted = sorted(on_zones, key=started_key, reverse=True)
+        keep = on_zones_sorted[0]
+        to_off = [z for z in on_zones_sorted[1:]]
+        for z in to_off:
             try:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                 if mqtt and sid and topic:
@@ -250,20 +259,30 @@ def _force_all_zones_off(reason: str = "safety") -> None:
                         _publish_mqtt_value(server, t, '0')
             except Exception:
                 pass
+            try:
+                db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
+            except Exception:
+                pass
         try:
-            db.add_log('error', json.dumps({'type': 'safety_violation', 'message': 'Detected multiple zones ON — forced all OFF', 'reason': reason}))
+            db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': keep.get('id'), 'turned_off': [z.get('id') for z in to_off]}))
         except Exception:
             pass
-        logger.error(f"Safety: multiple zones ON detected, forced all OFF (reason={reason})")
     except Exception as e:
-        logger.error(f"Safety enforcement failed: {e}")
+        logger.error(f"Group exclusivity enforcement failed for group {group_id}: {e}")
 
-def _ensure_single_zone_rule(reason: str = "safety_check") -> None:
+def _enforce_group_exclusive_all_groups() -> None:
     try:
         zones = db.get_zones()
-        on_count = sum(1 for z in zones if str(z.get('state')) == 'on')
-        if on_count > 1:
-            _force_all_zones_off(reason)
+        zones_by_group = {}
+        for z in zones:
+            gid = int(z.get('group_id') or 0)
+            if gid == 0 or gid == 999:
+                continue
+            zones_by_group.setdefault(gid, []).append(z)
+        for gid, arr in zones_by_group.items():
+            on_list = [z for z in arr if str(z.get('state')) == 'on']
+            if len(on_list) > 1:
+                _force_group_exclusive(gid, 'watchdog')
     except Exception:
         pass
 
@@ -276,7 +295,7 @@ def _start_single_zone_watchdog():
     def _run():
         while True:
             try:
-                _ensure_single_zone_rule('watchdog')
+                _enforce_group_exclusive_all_groups()
             except Exception:
                 pass
             time.sleep(1.0)

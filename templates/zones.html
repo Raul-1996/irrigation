@@ -1037,9 +1037,8 @@
                 <td>
                     <select class="zone-group" onchange="updateZone(${zone.id}, 'group_id', this.value)">
                         ${groupsData.map(group => 
-                            `<option value="${group.id}" ${zone.group_id == group.id ? 'selected' : ''}>
-                                ${group.name}
-                            </option>`
+                            (group.id === 999 ? `<option value="999" ${zone.group_id == 999 ? 'selected' : ''}>БЕЗ ПОЛИВА</option>` :
+                            `<option value="${group.id}" ${zone.group_id == group.id ? 'selected' : ''}>${group.name}</option>`)
                         ).join('')}
                     </select>
                 </td>
@@ -1134,9 +1133,10 @@
         selectors.forEach(selectorId => {
             const selector = document.getElementById(selectorId);
             if (selector) {
-                selector.innerHTML = groupsData.map(group => 
-                    `<option value="${group.id}">${group.name}</option>`
-                ).join('');
+                selector.innerHTML = groupsData.map(group => {
+                    if (selectorId === 'bulkGroup' && group.id === 999) return '';
+                    return `<option value="${group.id}">${group.id===999?'БЕЗ ПОЛИВА':group.name}</option>`;
+                }).join('');
             }
         });
     }

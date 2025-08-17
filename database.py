@@ -111,6 +111,7 @@ class IrrigationDB:
                 self._migrate_add_last_watering_time(conn)
                 self._migrate_add_mqtt_servers(conn)
                 self._migrate_add_zone_mqtt_server_id(conn)
+                self._migrate_ensure_special_group(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -346,6 +347,18 @@ class IrrigationDB:
                 logger.info("Добавлено поле mqtt_server_id в таблицу zones")
         except Exception as e:
             logger.error(f"Ошибка миграции mqtt_server_id: {e}")
+
+    def _migrate_ensure_special_group(self, conn):
+        """Миграция: гарантировать наличие служебной группы 999 'БЕЗ ПОЛИВА'"""
+        try:
+            cur = conn.execute('SELECT COUNT(*) FROM groups WHERE id = 999')
+            cnt = cur.fetchone()[0] if cur else 0
+            if cnt == 0:
+                conn.execute("INSERT OR IGNORE INTO groups (id, name) VALUES (999, 'БЕЗ ПОЛИВА')")
+                conn.commit()
+                logger.info("Добавлена служебная группа 999 'БЕЗ ПОЛИВА'")
+        except Exception as e:
+            logger.error(f"Ошибка миграции ensure_special_group: {e}")
 
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
