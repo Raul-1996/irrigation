@@ -25,10 +25,10 @@ if __name__ == '__main__':
     try:
         testing = os.environ.get('TESTING') == '1'
         app.run(
-            debug=not testing,
+            debug=testing,  # в проде без debug
             host='0.0.0.0',
             port=8080,
-            use_reloader=False if testing else True
+            use_reloader=False  # отключаем reloader для стабильности
         )
     except KeyboardInterrupt:
         print("\n👋 Приложение остановлено")

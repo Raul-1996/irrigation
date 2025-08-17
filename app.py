@@ -295,19 +295,28 @@ def _enforce_group_exclusive_all_groups() -> None:
         pass
 
 _WATCHDOG_STARTED = False
+_WATCHDOG_STOP_EVENT = threading.Event()
 def _start_single_zone_watchdog():
     global _WATCHDOG_STARTED
     if _WATCHDOG_STARTED:
         return
     _WATCHDOG_STARTED = True
     def _run():
-        while True:
+        while not _WATCHDOG_STOP_EVENT.is_set():
             try:
                 _enforce_group_exclusive_all_groups()
             except Exception:
                 pass
-            time.sleep(1.0)
+            _WATCHDOG_STOP_EVENT.wait(1.0)
     threading.Thread(target=_run, daemon=True).start()
+
+import atexit
+def _shutdown_background_threads():
+    try:
+        _WATCHDOG_STOP_EVENT.set()
+    except Exception:
+        pass
+atexit.register(_shutdown_background_threads)
 
 # 404 красивая страница
 @app.errorhandler(404)
@@ -1110,8 +1119,13 @@ def api_mqtt_scan_sse(server_id: int):
                 client.on_message = on_message
                 client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
                 client.loop_start()
+                # ограничение времени жизни клиента во избежание зависаний
+                import time as _t
+                _start_ts = _t.time()
                 while not stop_event.is_set():
                     stop_event.wait(0.2)
+                    if _t.time() - _start_ts > 300:  # 5 минут
+                        break
                 client.loop_stop()
                 try:
                     client.disconnect()
@@ -1978,7 +1992,10 @@ def api_mqtt_zones_sse():
                         pass
             return _on_message
         clients = []
+        max_clients = 10
         for sid, topics in server_topics.items():
+            if len(clients) >= max_clients:
+                break
             server = db.get_mqtt_server(sid)
             try:
                 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
