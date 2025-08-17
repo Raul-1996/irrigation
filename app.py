@@ -1708,6 +1708,24 @@ def api_mqtt_zones_sse():
 def api_zone_mqtt_start(zone_id: int):
     z = db.get_zone(zone_id)
     if not z: return jsonify({'success': False}), 404
+    # Не допускаем одновременный полив более чем одной зоны в группе
+    try:
+        group_id = int(z.get('group_id') or 0)
+        if group_id:
+            group_zones = db.get_zones_by_group(group_id)
+            active_other = [gz for gz in group_zones if gz.get('state') == 'on' and int(gz.get('id')) != int(zone_id)]
+            if active_other:
+                active_names = ', '.join(gx.get('name') for gx in active_other if gx.get('name'))
+                return jsonify({'success': False, 'message': f'В группе уже поливается зона: {active_names}. Сначала остановите её.'}), 400
+            # Прерываем возможную последовательность/программу этой группы
+            try:
+                scheduler = get_scheduler()
+                if scheduler:
+                    scheduler.cancel_group_jobs(group_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
     sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
     if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
     t = topic if str(topic).startswith('/') else '/' + str(topic)

@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/mini_broker.py", line 3, in <module>
+    from hbmqtt.broker import Broker
+  File "/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/venv/lib/python3.9/site-packages/hbmqtt/broker.py", line 15, in <module>
+    from hbmqtt.session import Session
+  File "/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/venv/lib/python3.9/site-packages/hbmqtt/session.py", line 8, in <module>
+    from hbmqtt.mqtt.publish import PublishPacket
+  File "/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/venv/lib/python3.9/site-packages/hbmqtt/mqtt/__init__.py", line 5, in <module>
+    from hbmqtt.mqtt.packet import (
+  File "/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/venv/lib/python3.9/site-packages/hbmqtt/mqtt/packet.py", line 8, in <module>
+    from hbmqtt.adapters import ReaderAdapter, WriterAdapter
+  File "/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/venv/lib/python3.9/site-packages/hbmqtt/adapters.py", line 6, in <module>
+    from websockets.protocol import WebSocketCommonProtocol
+ImportError: cannot import name 'WebSocketCommonProtocol' from 'websockets.protocol' (/Users/raulkhalikov/Desktop/YANDEX/Yandex.Disk.localized/wb-irrigation/irrigation/venv/lib/python3.9/site-packages/websockets/protocol.py)

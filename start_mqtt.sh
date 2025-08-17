@@ -7,20 +7,25 @@ if lsof -i :5055 >/dev/null 2>&1; then
 fi
 
 # Ensure docker mosquitto is running with our config (if Docker daemon is available)
-if command -v docker >/dev/null 2>&1; then
-  if docker info >/dev/null 2>&1; then
-    if ! docker ps --format '{{.Names}}' | grep -q '^test-mosquitto$'; then
-      docker rm -f test-mosquitto >/dev/null 2>&1 || true
-      docker run -d --name test-mosquitto -p 1883:1883 \
-        -v "$(pwd)/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
-        eclipse-mosquitto:2 >/dev/null
-      echo "Started docker mosquitto on 1883"
+CFG_SRC="$(pwd)/tool/MQTT_emulator/mosquitto.conf"
+if [ -f "$CFG_SRC" ]; then
+  if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+      if ! docker ps --format '{{.Names}}' | grep -q '^test-mosquitto$'; then
+        docker rm -f test-mosquitto >/dev/null 2>&1 || true
+        docker run -d --name test-mosquitto -p 1883:1883 \
+          -v "$CFG_SRC:/mosquitto/config/mosquitto.conf:ro" \
+          eclipse-mosquitto:2 >/dev/null
+        echo "Started docker mosquitto on 1883"
+      fi
+    else
+      echo "Docker daemon is not running. Skipping broker startup via Docker."
     fi
   else
-    echo "Docker daemon is not running. Skipping broker startup via Docker."
+    echo "Docker is not installed. Skipping broker startup via Docker."
   fi
 else
-  echo "Docker is not installed. Skipping broker startup via Docker."
+  echo "Mosquitto config not found at $CFG_SRC. Skipping docker broker startup."
 fi
 
 # If port 1883 is still free, try to start a local mosquitto binary
@@ -56,7 +61,7 @@ if ! lsof -i :1883 >/dev/null 2>&1; then
 
   if [ -n "$MOSQ_BIN" ]; then
     echo "Starting local mosquitto broker on 1883 using $MOSQ_BIN..."
-    nohup "$MOSQ_BIN" -c "$(pwd)/mosquitto.conf" > mosquitto.out 2>&1 &
+    nohup "$MOSQ_BIN" -c "$CFG_SRC" > mosquitto.out 2>&1 &
     sleep 0.8
   else
     echo "No broker found and Docker unavailable. Please install Mosquitto or start any MQTT broker on port 1883."

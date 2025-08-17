@@ -8,7 +8,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   if ! docker ps --format '{{.Names}}' | grep -q '^test-mosquitto$'; then
     docker rm -f test-mosquitto >/dev/null 2>&1 || true
     docker run -d --name test-mosquitto -p 1883:1883 \
-      -v "$(pwd)/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
+      -v "$(pwd):/mosquitto/config:ro" \
       eclipse-mosquitto:2 >/dev/null
     echo "Started docker mosquitto on 1883"
   fi
