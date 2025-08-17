@@ -4,10 +4,11 @@ import pytest
 
 os.environ.setdefault("TESTING", "1")
 
-# Ensure root on path
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+# Ensure project root on path (…/irrigation)
+_HERE = os.path.abspath(os.path.dirname(__file__))
+_ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir, os.pardir))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from app import app  # noqa: E402
 from database import db  # noqa: E402

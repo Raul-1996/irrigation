@@ -4,6 +4,13 @@ import tempfile
 import os
 import shutil
 from datetime import datetime, timedelta
+import sys, os
+# Ensure project root on path
+_HERE = os.path.abspath(os.path.dirname(__file__))
+_ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from database import IrrigationDB
 from app import app
 
