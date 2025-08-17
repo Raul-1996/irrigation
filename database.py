@@ -445,8 +445,16 @@ class IrrigationDB:
                     params.append(updated_data.get('group_id', updated_data.get('group', 1)))
                 
                 if 'topic' in updated_data:
+                    # Нормализация топика к схеме /devices/wb-mr6cv3_{101..105}/controls/K{1..6}
+                    try:
+                        zid = int(zone_id)
+                        dev = 101 + (zid - 1) // 6
+                        ch = 1 + (zid - 1) % 6
+                        normalized = f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
+                    except Exception:
+                        normalized = updated_data.get('topic', '')
                     sql_fields.append('topic = ?')
-                    params.append(updated_data.get('topic', ''))
+                    params.append(normalized)
                 
                 if 'state' in updated_data:
                     sql_fields.append('state = ?')

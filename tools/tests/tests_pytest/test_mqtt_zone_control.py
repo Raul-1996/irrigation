@@ -3,12 +3,18 @@ import pytest
 import time
 
 
+def build_topic(zone_id: int) -> str:
+    dev = 101 + (zone_id - 1) // 6
+    ch = 1 + (zone_id - 1) % 6
+    return f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
+
+
 def test_zone_mqtt_endpoints_exist(client):
-    # set all zones to same mqtt topic to simplify manual testing
-    topic = '/devices/wb-mr6cv3_50/controls/K2'
+    # set each zone to its own mapped topic
     zones = client.get('/api/zones').get_json()
     for z in zones:
-        client.put(f"/api/zones/{z['id']}", json={'mqtt_server_id': 1, 'topic': topic})
+        zid = z['id']
+        client.put(f"/api/zones/{zid}", json={'mqtt_server_id': 1, 'topic': build_topic(zid)})
     # endpoints should exist and return 200/400 depending on broker
     r1 = client.post('/api/zones/1/mqtt/start')
     assert r1.status_code in (200, 400, 500)
@@ -21,7 +27,7 @@ def test_zone_mqtt_topic_toggles_when_called(client):
     import paho.mqtt.client as mqtt
     host = os.environ.get('TEST_MQTT_HOST', '127.0.0.1')
     port = int(os.environ.get('TEST_MQTT_PORT', '1883'))
-    topic = '/devices/wb-mr6cv3_50/controls/K2'
+    topic = build_topic(1)
     # set zone 1 config
     client.put('/api/zones/1', json={'mqtt_server_id': 1, 'topic': topic})
     seen = []
@@ -56,17 +62,19 @@ def test_group_stop_publishes_zero_to_all_group_topics(client):
     import json
     host = os.environ.get('TEST_MQTT_HOST', '127.0.0.1')
     port = int(os.environ.get('TEST_MQTT_PORT', '1883'))
-    topic = '/devices/wb-mr6cv3_50/controls/K2'
-    # assign same topic to all zones of group 1
     zones = client.get('/api/zones').get_json()
     group1 = [z for z in zones if z['group_id'] == 1]
     if not group1:
         pytest.skip('No zones in group 1')
+    # ensure topics are mapped correctly
     for z in group1:
-        client.put(f"/api/zones/{z['id']}", json={'mqtt_server_id': 1, 'topic': topic})
+        zid = z['id']
+        client.put(f"/api/zones/{zid}", json={'mqtt_server_id': 1, 'topic': build_topic(zid)})
     seen_zero = []
+    subscribe_topics = [build_topic(z['id']) for z in group1[:4]]
     def on_connect(c,u,f,rc,properties=None):
-        c.subscribe(topic)
+        for t in subscribe_topics:
+            c.subscribe(t)
     def on_message(c,u,m):
         try:
             if m.payload.decode('utf-8','ignore') == '0':
@@ -95,14 +103,16 @@ def test_emergency_stop_publishes_zero_for_all_zones(client):
     import paho.mqtt.client as mqtt
     host = os.environ.get('TEST_MQTT_HOST', '127.0.0.1')
     port = int(os.environ.get('TEST_MQTT_PORT', '1883'))
-    topic = '/devices/wb-mr6cv3_50/controls/K2'
     zones = client.get('/api/zones').get_json()
-    # set mqtt for all zones
+    # set mqtt for all zones with mapped topics
     for z in zones:
-        client.put(f"/api/zones/{z['id']}", json={'mqtt_server_id': 1, 'topic': topic})
+        zid = z['id']
+        client.put(f"/api/zones/{zid}", json={'mqtt_server_id': 1, 'topic': build_topic(zid)})
     zeros = []
     def on_connect(c,u,f,rc,properties=None):
-        c.subscribe(topic)
+        # subscribe a sample of topics to verify OFF broadcasts
+        for sid in (1, 6, 12, 18, 24, 30):
+            c.subscribe(build_topic(sid))
     def on_message(c,u,m):
         if m.payload.decode('utf-8','ignore') == '0':
             zeros.append(1)

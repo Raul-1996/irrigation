@@ -17,6 +17,7 @@ except Exception:
 from flask import Response, stream_with_context
 import threading
 import queue
+import time
 from config import Config
 from routes.status import status_bp
 from routes.files import files_bp
@@ -120,10 +121,11 @@ def admin_required(view):
 
 
 _SCHEDULER_INIT_DONE = False
+_INITIAL_SYNC_DONE = False
 
 @app.before_request
 def _init_scheduler_before_request():
-    global _SCHEDULER_INIT_DONE
+    global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE
     # Default role is "user" (no password)
     if 'role' not in session:
         session['role'] = 'user'
@@ -133,6 +135,33 @@ def _init_scheduler_before_request():
             _SCHEDULER_INIT_DONE = True
         except Exception as e:
             logger.error(f"Ошибка инициализации планировщика: {e}")
+    # Запускаем сторож одновременности зон (один раз)
+    try:
+        _start_single_zone_watchdog()
+    except Exception:
+        pass
+    # Стартовая синхронизация: единоразово выключаем все зоны и публикуем OFF
+    if not _INITIAL_SYNC_DONE and not app.config.get('TESTING'):
+        try:
+            zones = db.get_zones()
+            for z in zones:
+                try:
+                    db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
+                except Exception:
+                    pass
+                try:
+                    sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+                    if mqtt and sid and topic:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, t, '0')
+                except Exception:
+                    pass
+            _INITIAL_SYNC_DONE = True
+            logger.info("Initial sync: all zones set to OFF and MQTT OFF published")
+        except Exception as e:
+            logger.error(f"Initial sync failed: {e}")
 
 
 app.register_blueprint(status_bp)
@@ -146,6 +175,96 @@ try:
     app.register_blueprint(mqtt_bp)
 except Exception as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
+# (initial sync moved into before_request)
+# Глобальная защита от дребезга запусков по группам (анти-флаппер)
+_GROUP_CHANGE_GUARD = {}
+_GROUP_GUARD_LOCK = threading.Lock()
+def _should_throttle_group(group_id: int, window_sec: float = 0.8) -> bool:
+    now = time.time()
+    with _GROUP_GUARD_LOCK:
+        last = _GROUP_CHANGE_GUARD.get(group_id, 0)
+        if now - last < window_sec:
+            return True
+        _GROUP_CHANGE_GUARD[group_id] = now
+    return False
+
+# Отправка MQTT с анти-дребезгом по топику
+_TOPIC_LAST_SEND: dict[tuple[int, str], tuple[str, float]] = {}
+_TOPIC_LOCK = threading.Lock()
+
+def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.5) -> bool:
+    try:
+        t = topic if str(topic).startswith('/') else '/' + str(topic)
+        sid = int(server.get('id')) if server.get('id') else None
+        key = (sid or 0, t)
+        now = time.time()
+        with _TOPIC_LOCK:
+            last = _TOPIC_LAST_SEND.get(key)
+            if last and last[0] == value and (now - last[1]) < min_interval_sec:
+                logger.info(f"MQTT skip duplicate topic={t} value={value}")
+                return True  # считаем, что уже отослали недавно
+            _TOPIC_LAST_SEND[key] = (value, now)
+        logger.info(f"MQTT publish topic={t} value={value}")
+        cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        if server.get('username'):
+            cl.username_pw_set(server.get('username'), server.get('password') or None)
+        cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+        cl.publish(t, payload=value, qos=0, retain=False)
+        cl.disconnect()
+        return True
+    except Exception:
+        logger.exception("MQTT publish failed")
+        return False
+
+# === Safety: only one zone may be ON at a time ===
+def _force_all_zones_off(reason: str = "safety") -> None:
+    try:
+        zones = db.get_zones()
+        for z in zones:
+            try:
+                db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
+            except Exception:
+                pass
+            try:
+                sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+                if mqtt and sid and topic:
+                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    server = db.get_mqtt_server(int(sid))
+                    if server:
+                        _publish_mqtt_value(server, t, '0')
+            except Exception:
+                pass
+        try:
+            db.add_log('error', json.dumps({'type': 'safety_violation', 'message': 'Detected multiple zones ON — forced all OFF', 'reason': reason}))
+        except Exception:
+            pass
+        logger.error(f"Safety: multiple zones ON detected, forced all OFF (reason={reason})")
+    except Exception as e:
+        logger.error(f"Safety enforcement failed: {e}")
+
+def _ensure_single_zone_rule(reason: str = "safety_check") -> None:
+    try:
+        zones = db.get_zones()
+        on_count = sum(1 for z in zones if str(z.get('state')) == 'on')
+        if on_count > 1:
+            _force_all_zones_off(reason)
+    except Exception:
+        pass
+
+_WATCHDOG_STARTED = False
+def _start_single_zone_watchdog():
+    global _WATCHDOG_STARTED
+    if _WATCHDOG_STARTED:
+        return
+    _WATCHDOG_STARTED = True
+    def _run():
+        while True:
+            try:
+                _ensure_single_zone_rule('watchdog')
+            except Exception:
+                pass
+            time.sleep(1.0)
+    threading.Thread(target=_run, daemon=True).start()
 
 # 404 красивая страница
 @app.errorhandler(404)
@@ -1202,12 +1321,7 @@ def api_stop_group(group_id):
                     t = topic if str(topic).startswith('/') else '/' + str(topic)
                     server = db.get_mqtt_server(int(sid))
                     if server:
-                        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                        if server.get('username'):
-                            client.username_pw_set(server.get('username'), server.get('password') or None)
-                        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                        client.publish(t, payload='0', qos=0, retain=False)
-                        client.disconnect()
+                        _publish_mqtt_value(server, t, '0')
             except Exception:
                 # Не прерываем цикл при ошибке публикации, просто логируем
                 logger.exception("Ошибка публикации MQTT '0' при остановке группы")
@@ -1259,14 +1373,39 @@ def api_start_zone_exclusive(group_id, zone_id):
     try:
         if app.config.get('EMERGENCY_STOP'):
             return jsonify({"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}), 400
+        # Анти-дребезг по группе
+        if _should_throttle_group(int(group_id)):
+            return jsonify({"success": True, "message": "Группа уже обрабатывается"})
         zones = db.get_zones()
         group_zones = [z for z in zones if z['group_id'] == group_id]
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         for z in group_zones:
             if z['id'] == zone_id:
                 db.update_zone(z['id'], {'state': 'on', 'watering_start_time': start_ts})
+                # MQTT publish ON для выбранной зоны
+                try:
+                    sid = z.get('mqtt_server_id')
+                    topic = (z.get('topic') or '').strip()
+                    if mqtt and sid and topic:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, t, '1')
+                except Exception:
+                    logger.exception("Ошибка публикации MQTT '1' при эксклюзивном запуске зоны")
             else:
+                # БЕЗУСЛОВНО выключаем остальных (и MQTT OFF, и БД OFF)
                 db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+                try:
+                    sid = z.get('mqtt_server_id')
+                    topic = (z.get('topic') or '').strip()
+                    if mqtt and sid and topic:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, t, '0')
+                except Exception:
+                    logger.exception("Ошибка публикации MQTT '0' при эксклюзивном запуске зоны")
         # Очистим плановые старты у «соседей» по группе
         try:
             db.clear_scheduled_for_zone_group_peers(zone_id, group_id)
@@ -1478,17 +1617,7 @@ def start_zone(zone_id):
     try:
         if app.config.get('EMERGENCY_STOP'):
             return jsonify({'success': False, 'message': 'Аварийная остановка активна. Сначала отключите аварийный режим.'}), 400
-        
-        # Проверяем, что нет других активных зон
-        zones = db.get_zones()
-        active_zones = [z for z in zones if z['state'] == 'on' and z['id'] != zone_id]
-        if active_zones:
-            active_zone_names = [z['name'] for z in active_zones]
-            return jsonify({
-                'success': False, 
-                'message': f'Нельзя запустить зону {zone_id}: уже активны зоны {", ".join(active_zone_names)}'
-            }), 400
-        
+        # Получаем зону и её группу
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
@@ -1501,15 +1630,58 @@ def start_zone(zone_id):
         except Exception:
             pass
 
+        # Анти-дребезг по группе
+        try:
+            if _should_throttle_group(int(zone.get('group_id'))):
+                return jsonify({'success': True, 'message': 'Зона уже обрабатывается'}), 200
+        except Exception:
+            pass
+
+        # БЕЗУСЛОВНО выключаем все остальные зоны этой группы (MQTT OFF и БД OFF)
+        try:
+            zones = db.get_zones()
+            group_id = int(zone.get('group_id') or 0)
+            if group_id:
+                group_zones = [z for z in zones if z['group_id'] == group_id and int(z['id']) != int(zone_id)]
+                for gz in group_zones:
+                    try:
+                        sid = gz.get('mqtt_server_id'); topic = (gz.get('topic') or '').strip()
+                        if mqtt and sid and topic:
+                            t = topic if str(topic).startswith('/') else '/' + str(topic)
+                            server = db.get_mqtt_server(int(sid))
+                            if server:
+                                _publish_mqtt_value(server, t, '0')
+                    except Exception:
+                        logger.exception("Ошибка публикации MQTT '0' при ручном запуске: выключение соседей")
+                    try:
+                        db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # Устанавливаем время начала полива для зоны
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
         try:
             scheduler = get_scheduler()
             if scheduler:
+                # На уровне планировщика ожидание уже укорочено на 3с
                 scheduler.schedule_zone_stop(zone_id, int(zone['duration']))
         except Exception as e:
             logger.error(f"Ошибка планирования остановки зоны {zone_id}: {e}")
+        # Публикуем MQTT ON, если у зоны настроен MQTT
+        try:
+            sid = zone.get('mqtt_server_id')
+            topic = (zone.get('topic') or '').strip()
+            if mqtt and sid and topic:
+                t = topic if str(topic).startswith('/') else '/' + str(topic)
+                server = db.get_mqtt_server(int(sid))
+                if server:
+                    _publish_mqtt_value(server, t, '1')
+        except Exception:
+            logger.exception("Ошибка публикации MQTT '1' при ручном запуске зоны")
+
         db.add_log('zone_start', json.dumps({
             "zone": zone_id,
             "name": zone['name'],
@@ -1539,6 +1711,18 @@ def stop_zone(zone_id):
         # Очищаем время начала полива и фиксируем last_watering_time
         last_time = zone.get('watering_start_time')
         db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
+        # Публикуем MQTT OFF, если у зоны настроен MQTT
+        try:
+            sid = zone.get('mqtt_server_id')
+            topic = (zone.get('topic') or '').strip()
+            if mqtt and sid and topic:
+                t = topic if str(topic).startswith('/') else '/' + str(topic)
+                server = db.get_mqtt_server(int(sid))
+                if server:
+                    _publish_mqtt_value(server, t, '0')
+        except Exception:
+            logger.exception("Ошибка публикации MQTT '0' при ручной остановке зоны")
+
         db.add_log('zone_stop', json.dumps({
             "zone": zone_id,
             "name": zone['name']
@@ -1660,6 +1844,19 @@ def api_mqtt_zones_sse():
                 except Exception:
                     payload = str(msg.payload)
                 new_state = 'on' if payload in ('1', 'true', 'ON', 'on') else 'off'
+                # Если активен режим аварийной остановки, принудительно гасим любые включения
+                if app.config.get('EMERGENCY_STOP') and new_state == 'on':
+                    new_state = 'off'
+                    try:
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, t, '0')
+                    except Exception:
+                        pass
+                try:
+                    logger.info(f"MQTT RX sid={sid} topic={t} payload={payload} -> state={new_state} zones={zone_ids}")
+                except Exception:
+                    pass
                 for zone_id in zone_ids:
                     try:
                         z = db.get_zone(zone_id) or {}
@@ -1673,6 +1870,10 @@ def api_mqtt_zones_sse():
                                 updates['last_watering_time'] = z.get('watering_start_time')
                             updates['watering_start_time'] = None
                         db.update_zone(zone_id, updates)
+                        try:
+                            logger.info(f"DB state update from MQTT zone={zone_id} -> {new_state}")
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     data = json.dumps({'zone_id': zone_id, 'topic': t, 'payload': payload, 'state': new_state})
@@ -1726,27 +1927,37 @@ def api_mqtt_zones_sse():
 def api_zone_mqtt_start(zone_id: int):
     z = db.get_zone(zone_id)
     if not z: return jsonify({'success': False}), 404
-    # Не допускаем одновременный полив более чем одной зоны в группе
+    # Если уже включена — не публикуем повторно
+    try:
+        if str(z.get('state')) == 'on':
+            return jsonify({'success': True, 'message': 'Зона уже запущена'})
+    except Exception:
+        pass
+    # Анти-дребезг по группе
+    try:
+        gid = int(z.get('group_id') or 0)
+        if gid and _should_throttle_group(gid):
+            return jsonify({'success': True, 'message': 'Группа уже обрабатывается'})
+    except Exception:
+        pass
+    # Эксклюзивность: БЕЗУСЛОВНО выключаем все остальные зоны в группе (и MQTT OFF, и БД OFF)
     try:
         group_id = int(z.get('group_id') or 0)
         if group_id:
             group_zones = db.get_zones_by_group(group_id)
-            active_other = [gz for gz in group_zones if gz.get('state') == 'on' and int(gz.get('id')) != int(zone_id)]
-            # Автоматически останавливаем другие активные зоны группы (эксклюзивный полив)
-            for other in active_other:
+            for other in group_zones:
+                if int(other.get('id')) == int(zone_id):
+                    continue
                 try:
                     osid = other.get('mqtt_server_id'); otopic = (other.get('topic') or '').strip()
                     if osid and otopic:
                         server_o = db.get_mqtt_server(int(osid))
                         if server_o:
                             t_o = otopic if str(otopic).startswith('/') else '/' + str(otopic)
-                            cl_o = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                            if server_o.get('username'):
-                                cl_o.username_pw_set(server_o.get('username'), server_o.get('password') or None)
-                            cl_o.connect(server_o.get('host') or '127.0.0.1', int(server_o.get('port') or 1883), 5)
-                            cl_o.publish(t_o, payload='0', qos=0, retain=False)
-                            cl_o.disconnect()
-                    # Обновляем БД сразу, чтобы UI показал стоп
+                            _publish_mqtt_value(server_o, t_o, '0')
+                except Exception:
+                    logger.exception("Ошибка публикации MQTT '0' при MQTT-старте: выключение соседей")
+                try:
                     db.update_zone(int(other.get('id')), {
                         'state': 'off',
                         'watering_start_time': None,
@@ -1767,13 +1978,11 @@ def api_zone_mqtt_start(zone_id: int):
     if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
     t = topic if str(topic).startswith('/') else '/' + str(topic)
     try:
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         server = db.get_mqtt_server(int(sid))
-        if server.get('username'):
-            client.username_pw_set(server.get('username'), server.get('password') or None)
-        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-        client.publish(t, payload='1', qos=0, retain=False)
-        client.disconnect()
+        if not server:
+            return jsonify({'success': False, 'message': 'MQTT server not found'}), 400
+        logger.info(f"HTTP publish ON zone={zone_id} topic={t}")
+        _publish_mqtt_value(server, t, '1')
         # Фиксируем старт зоны и планируем автостоп
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
@@ -1791,7 +2000,7 @@ def api_zone_mqtt_start(zone_id: int):
         return jsonify({'success': True, 'message': 'Зона запущена'})
     except Exception as e:
         logger.error(f"MQTT publish start failed: {e}")
-        return jsonify({'success': False}), 500
+        return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
 
 @csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
@@ -1802,17 +2011,15 @@ def api_zone_mqtt_stop(zone_id: int):
     if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
     t = topic if str(topic).startswith('/') else '/' + str(topic)
     try:
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         server = db.get_mqtt_server(int(sid))
-        if server.get('username'):
-            client.username_pw_set(server.get('username'), server.get('password') or None)
-        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-        client.publish(t, payload='0', qos=0, retain=False)
-        client.disconnect()
+        if not server:
+            return jsonify({'success': False, 'message': 'MQTT server not found'}), 400
+        logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
+        _publish_mqtt_value(server, t, '0')
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"MQTT publish stop failed: {e}")
-        return jsonify({'success': False}), 500
+        return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива

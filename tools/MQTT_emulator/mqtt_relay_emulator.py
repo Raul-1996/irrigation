@@ -34,6 +34,10 @@ NUM_CHANNELS = int(os.getenv("EMULATOR_CHANNELS", "6"))
 
 # Optional artificial delay before the device publishes its confirmation (seconds)
 ECHO_DELAY_SECONDS = float(os.getenv("EMULATOR_ECHO_DELAY_SECONDS", "0.05"))
+# Optional toggle to disable echoing back device confirmations entirely ("1" to enable, "0" to disable)
+ECHO_ENABLED = (os.getenv("EMULATOR_ECHO_ENABLED", "1") == "1")
+# Optional suppression window for re-echoing per-topic (seconds). If another change arrives within this window, skip echo.
+ECHO_SUPPRESS_WINDOW = float(os.getenv("EMULATOR_ECHO_SUPPRESS_WINDOW", "0.10"))
 
 # HTTP server settings
 HTTP_HOST = os.getenv("EMULATOR_HTTP_HOST", "0.0.0.0")
@@ -56,6 +60,7 @@ ALL_TOPICS: List[str] = build_topics(DEVICE_IDS, NUM_CHANNELS)
 
 state_lock = threading.Lock()
 topic_to_state: Dict[str, str] = {t: "0" for t in ALL_TOPICS}
+last_echo_ts: Dict[str, float] = {}
 log_lock = threading.Lock()
 log_buffer: deque[str] = deque(maxlen=1000)
 
@@ -132,7 +137,8 @@ def device_on_connect(client: mqtt.Client, userdata, flags, reason_code, propert
     for t in ALL_TOPICS:
         # Using MQTT v5 SubscribeOptions if available
         try:
-            options = mqtt.SubscribeOptions(qos=0, noLocal=False)
+            # Avoid receiving our own published echoes to further reduce feedback
+            options = mqtt.SubscribeOptions(qos=0, noLocal=True)
             client.subscribe(t, options=options)
         except Exception:
             client.subscribe(t, qos=0)
@@ -154,7 +160,15 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
         topic_to_state[topic] = want
 
     # Simulate device switching delay and publish confirmation only if state changed
-    if changed:
+    if changed and ECHO_ENABLED:
+        # Suppress too-frequent echoes on the same topic
+        now = time.time()
+        with state_lock:
+            last_ts = last_echo_ts.get(topic, 0.0)
+            if (now - last_ts) < ECHO_SUPPRESS_WINDOW:
+                log_event(f"device: SUPPRESS echo topic={topic} payload={want}")
+                return
+            last_echo_ts[topic] = now
         if ECHO_DELAY_SECONDS > 0:
             time.sleep(ECHO_DELAY_SECONDS)
         log_event(f"device: TX echo topic={topic} payload={want}")

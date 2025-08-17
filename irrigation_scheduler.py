@@ -101,6 +101,34 @@ class IrrigationScheduler:
                         self.db.update_zone_postpone(zone_id, None)
 
                 duration = int(zone['duration'])
+
+                # БЕЗУСЛОВНО выключаем все зоны этой группы перед стартом текущей
+                try:
+                    all_zones = self.db.get_zones()
+                    group_peers = [z for z in all_zones if z['group_id'] == group_id and int(z['id']) != int(zone_id)]
+                    for gz in group_peers:
+                        try:
+                            topic = (gz.get('topic') or '').strip()
+                            sid = gz.get('mqtt_server_id')
+                            if mqtt and topic and sid:
+                                t = topic if str(topic).startswith('/') else '/' + str(topic)
+                                server = self.db.get_mqtt_server(int(sid))
+                                if server:
+                                    logger.info(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
+                                    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                                    if server.get('username'):
+                                        cl.username_pw_set(server.get('username'), server.get('password') or None)
+                                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                                    cl.publish(t, payload='0', qos=0, retain=False)
+                                    cl.disconnect()
+                        except Exception:
+                            pass
+                        try:
+                            self.db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 # Старт зоны: фиксируем время начала, чтобы таймер в UI работал
                 try:
                     start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -113,6 +141,7 @@ class IrrigationScheduler:
                             t = topic if str(topic).startswith('/') else '/' + str(topic)
                             server = self.db.get_mqtt_server(int(sid))
                             if server:
+                                logger.info(f"SCHED publish ON zone={zone_id} topic={t}")
                                 cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                                 if server.get('username'):
                                     cl.username_pw_set(server.get('username'), server.get('password') or None)
@@ -137,6 +166,10 @@ class IrrigationScheduler:
 
                 # Ждем окончания текущей зоны, проверяя отмену группы каждую секунду
                 remaining = duration * 60
+                # Раннее выключение: на 3 секунды раньше
+                early_cut = 3
+                if remaining > early_cut:
+                    remaining -= early_cut
                 if os.getenv('TESTING') == '1':
                     remaining = min(6, max(1, duration))
                 while remaining > 0:
@@ -147,7 +180,7 @@ class IrrigationScheduler:
                     time.sleep(1)
                     remaining -= 1
 
-                # Публикуем OFF и останавливаем зону
+                # Публикуем OFF и останавливаем зону (ранее на 3с уже смещено ожидание)
                 try:
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
@@ -155,6 +188,7 @@ class IrrigationScheduler:
                         t = topic if str(topic).startswith('/') else '/' + str(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
+                            logger.info(f"SCHED publish OFF zone={zone_id} topic={t}")
                             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                             if server.get('username'):
                                 cl.username_pw_set(server.get('username'), server.get('password') or None)

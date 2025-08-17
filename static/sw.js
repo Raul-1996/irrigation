@@ -2,8 +2,6 @@
 const CACHE_NAME = 'wb-irrigation-v1';
 const urlsToCache = [
     '/',
-    '/static/css/style.css',
-    '/static/js/app.js'
 ];
 
 // Install event
@@ -12,7 +10,10 @@ self.addEventListener('install', event => {
         caches.open(CACHE_NAME)
             .then(cache => {
                 console.log('Opened cache');
-                return cache.addAll(urlsToCache);
+                return Promise.all(urlsToCache.map(u => fetch(u, {cache: 'no-store'}).then(r=>{
+                    if(!r.ok) throw new Error('bad response');
+                    return cache.put(u, r.clone());
+                }).catch(()=>{})));
             })
     );
 });
