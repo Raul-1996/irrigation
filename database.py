@@ -406,15 +406,53 @@ class IrrigationDB:
         """Создать новую зону"""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # Нормализуем topic по номеру зоны, если возможно
+                topic = (zone_data.get('topic') or '').strip()
+                zid_explicit = None
+                try:
+                    zid_explicit = int(zone_data.get('id')) if zone_data.get('id') is not None else None
+                except Exception:
+                    zid_explicit = None
+                try:
+                    zid_for_topic = zid_explicit
+                    if zid_for_topic is None:
+                        # попробуем понять по текущему количеству (не идеально, но лучше, чем ничего)
+                        pass
+                    if zid_for_topic:
+                        dev = 101 + (zid_for_topic - 1) // 6
+                        ch = 1 + (zid_for_topic - 1) % 6
+                        topic = f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
+                except Exception:
+                    pass
+                
+                if zid_explicit is not None:
+                    try:
+                        conn.execute('''
+                            INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            zid_explicit,
+                            zone_data.get('name') or 'Зона',
+                            zone_data.get('icon') or '🌿',
+                            int(zone_data.get('duration') or 10),
+                            int(zone_data.get('group_id', zone_data.get('group', 1))),
+                            topic,
+                            zone_data.get('mqtt_server_id')
+                        ))
+                        conn.commit()
+                        return self.get_zone(zid_explicit)
+                    except Exception:
+                        # fallback — без явного id
+                        pass
                 cursor = conn.execute('''
                     INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
-                    zone_data['name'],
-                    zone_data['icon'],
-                    zone_data['duration'],
-                    zone_data.get('group_id', zone_data.get('group', 1)),
-                    zone_data.get('topic', ''),
+                    zone_data.get('name') or 'Зона',
+                    zone_data.get('icon') or '🌿',
+                    int(zone_data.get('duration') or 10),
+                    int(zone_data.get('group_id', zone_data.get('group', 1))),
+                    topic,
                     zone_data.get('mqtt_server_id')
                 ))
                 zone_id = cursor.lastrowid
