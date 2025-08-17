@@ -32,6 +32,7 @@ class TestIrrigationSystem(unittest.TestCase):
         
         # Создаем тестовый Flask app
         app.config['TESTING'] = True
+        app.config['EMERGENCY_STOP'] = False
         self.client = app.test_client()
         
         # Сохраняем оригинальную БД и заменяем на тестовую
@@ -45,6 +46,12 @@ class TestIrrigationSystem(unittest.TestCase):
         # Также заменяем глобальную переменную db в app.py
         import app as app_module
         app_module.db = self.db
+        # Гарантируем, что в тестовой БД нет активных зон
+        for z in self.db.get_zones() or []:
+            try:
+                self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+            except Exception:
+                pass
     
     def tearDown(self):
         """Очистка после тестов"""
