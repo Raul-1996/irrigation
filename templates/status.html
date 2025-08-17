@@ -256,10 +256,10 @@
         background: #4caf50;
         color: white;
         border: none;
-        border-radius: 6px;
-        padding: 0.35rem 0.7rem;
+        border-radius: 3px;
+        padding: 0.2rem 0.4rem;
         cursor: pointer;
-        font-size: 1.0rem;
+        font-size: 0.8rem;
     }
     .zone-start-btn:hover {
         background: #45a049;
@@ -529,9 +529,7 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            const prevBtn = `<button class=\"zone-start-btn\" title=\"Предыдущая зона\" onclick=\"groupPrev(${group.id})\">‹</button>`;
-            const nextBtn = `<button class=\"zone-start-btn\" title=\"Следующая зона\" onclick=\"groupNext(${group.id})\">›</button>`;
-            return `${prevBtn} Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span> ${nextBtn}`;
+            return `Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
         }
         switch (group.status) {
             case 'waiting': return 'Ожидание начала полива';
@@ -847,31 +845,6 @@
         } catch (error) {
             showNotification('Ошибка при остановке группы', 'error');
         }
-    }
-
-    async function groupNext(groupId){
-        try{
-            const res = await fetch(`/api/groups/${groupId}/next`, {method:'POST'});
-            const data = await res.json();
-            if (data && data.success){
-                showNotification(data.message, 'info');
-                await refreshSingleGroup(groupId);
-            } else {
-                showNotification(data && data.message ? data.message : 'Ошибка переключения на следующую', 'warning');
-            }
-        }catch(e){ showNotification('Ошибка сети', 'error'); }
-    }
-    async function groupPrev(groupId){
-        try{
-            const res = await fetch(`/api/groups/${groupId}/prev`, {method:'POST'});
-            const data = await res.json();
-            if (data && data.success){
-                showNotification(data.message, 'info');
-                await refreshSingleGroup(groupId);
-            } else {
-                showNotification(data && data.message ? data.message : 'Ошибка переключения на предыдущую', 'warning');
-            }
-        }catch(e){ showNotification('Ошибка сети', 'error'); }
     }
     
     async function startOrStopZone(zoneId, currentState) {

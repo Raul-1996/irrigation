@@ -26,7 +26,6 @@ from routes.programs import programs_bp
 from routes.groups import groups_bp
 from routes.auth import auth_bp
 from werkzeug.security import check_password_hash
-from irrigation_scheduler import get_scheduler
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -2133,68 +2132,6 @@ def api_zone_mqtt_stop(zone_id: int):
     except Exception as e:
         logger.error(f"MQTT publish stop failed: {e}")
         return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
-
-@csrf.exempt
-@app.route('/api/groups/<int:group_id>/next', methods=['POST'])
-def api_group_next_zone(group_id: int):
-    """Пропустить текущую зону и перейти к следующей в последовательности."""
-    try:
-        scheduler = get_scheduler()
-        if not scheduler:
-            return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
-        zones = db.get_zones()
-        group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
-        if not group_zones:
-            return jsonify({"success": False, "message": "В группе нет зон"}), 400
-        on_ids = [int(z['id']) for z in group_zones if str(z.get('state')) == 'on']
-        current_id = on_ids[0] if on_ids else None
-        zone_ids = sorted([int(z['id']) for z in group_zones])
-        if current_id is None:
-            start_id = zone_ids[0]
-        else:
-            try:
-                idx = zone_ids.index(current_id)
-                start_id = zone_ids[idx + 1] if idx + 1 < len(zone_ids) else None
-            except Exception:
-                start_id = None
-            if start_id is None:
-                return jsonify({"success": False, "message": "Это последняя зона"}), 400
-        ok = scheduler.restart_group_sequence_from_zone(int(group_id), int(start_id))
-        return jsonify({"success": bool(ok), "message": "Запущена следующая зона" if ok else "Не удалось переключить"})
-    except Exception as e:
-        logger.error(f"next-zone failed for group {group_id}: {e}")
-        return jsonify({"success": False, "message": "Ошибка переключения"}), 500
-
-@csrf.exempt
-@app.route('/api/groups/<int:group_id>/prev', methods=['POST'])
-def api_group_prev_zone(group_id: int):
-    """Перейти к предыдущей зоне в последовательности."""
-    try:
-        scheduler = get_scheduler()
-        if not scheduler:
-            return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
-        zones = db.get_zones()
-        group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
-        if not group_zones:
-            return jsonify({"success": False, "message": "В группе нет зон"}), 400
-        zone_ids = sorted([int(z['id']) for z in group_zones])
-        on_ids = [int(z['id']) for z in group_zones if str(z.get('state')) == 'on']
-        current_id = on_ids[0] if on_ids else None
-        if current_id is None:
-            start_id = zone_ids[-1]
-        else:
-            try:
-                idx = zone_ids.index(current_id)
-                start_id = zone_ids[idx - 1] if idx - 1 >= 0 else None
-            except Exception:
-                start_id = None
-            if start_id is None:
-                return jsonify({"success": False, "message": "Это первая зона"}), 400
-        ok = scheduler.restart_group_sequence_from_zone(int(group_id), int(start_id))
-        return jsonify({"success": bool(ok), "message": "Запущена предыдущая зона" if ok else "Не удалось переключить"})
-    except Exception as e:
-        logger.error(f"prev-zone failed for group {group_id}: {e}")
-        return jsonify({"success": False, "message": "Ошибка переключения"}), 500
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива
