@@ -2084,13 +2084,21 @@
             for (const zone of zonesToImport) {
                 try {
                     if (!zone.id) { continue; }
+                    // Если зоны нет — создадим с явным id
+                    const existing = await api.get(`/api/zones/${zone.id}`);
+                    if (!existing || (existing && existing.success === false)) {
+                        const createPayload = { id: zone.id };
+                        ['name','icon','duration','group_id','state','topic','mqtt_server_id'].forEach(k=>{ if (zone[k] !== undefined) createPayload[k] = zone[k]; });
+                        await api.request(`/api/zones?source=csv`, { method: 'POST', body: JSON.stringify(createPayload), headers: { 'Content-Type': 'application/json', 'X-Import-Op': 'csv' } });
+                        continue;
+                    }
                     // Обновляем существующую зону, передаём ТОЛЬКО поля, указанные в CSV
                     const payload = { };
                     ['name','icon','duration','group_id','state','topic','mqtt_server_id'].forEach(k=>{
                         if (zone[k] !== undefined && zone[k] !== null && zone[k] !== '') payload[k] = zone[k];
                     });
                     if (Object.keys(payload).length === 0) continue;
-                    await api.put(`/api/zones/${zone.id}`, payload);
+                    await api.request(`/api/zones/${zone.id}?source=csv`, { method: 'PUT', body: JSON.stringify(payload), headers: { 'Content-Type': 'application/json', 'X-Import-Op': 'csv' } });
                 } catch (error) {
                     console.error(`Ошибка импорта зоны ${zone.id}:`, error);
                 }

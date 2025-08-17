@@ -39,6 +39,14 @@ try:
     fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
     fh.setFormatter(fmt)
     logger.addHandler(fh)
+    # Отдельный логгер для импорт/экспорт операций
+    imp_logger = logging.getLogger('import_export')
+    imp_logger.setLevel(logging.INFO)
+    if not any(isinstance(h, RotatingFileHandler) and 'import-export.log' in getattr(h, 'baseFilename', '') for h in imp_logger.handlers):
+        imp_fh = RotatingFileHandler(os.path.join(log_dir, 'import-export.log'), maxBytes=1_000_000, backupCount=3)
+        imp_fh.setLevel(logging.INFO)
+        imp_fh.setFormatter(fmt)
+        imp_logger.addHandler(imp_fh)
 except Exception:
     pass
 
@@ -544,11 +552,30 @@ def api_zone(zone_id):
         return jsonify({'success': False, 'message': 'Zone not found'}), 404
     
     elif request.method == 'PUT':
-        data = request.get_json()
+        data = request.get_json() or {}
+        try:
+            is_csv = (request.headers.get('X-Import-Op') == 'csv') or (request.args.get('source') == 'csv')
+        except Exception:
+            is_csv = False
+        if is_csv:
+            try:
+                logging.getLogger('import_export').info(f"PUT zone from CSV id={zone_id} payload={json.dumps(data, ensure_ascii=False)}")
+            except Exception:
+                pass
         zone = db.update_zone(zone_id, data)
         if zone:
+            if is_csv:
+                try:
+                    logging.getLogger('import_export').info(f"PUT result id={zone_id} OK")
+                except Exception:
+                    pass
             db.add_log('zone_edit', json.dumps({"zone": zone_id, "changes": data}))
             return jsonify(zone)
+        if is_csv:
+            try:
+                logging.getLogger('import_export').info(f"PUT result id={zone_id} NOT_FOUND")
+            except Exception:
+                pass
         return ('Zone not found', 404)
     
     elif request.method == 'DELETE':
@@ -559,11 +586,30 @@ def api_zone(zone_id):
 
 @app.route('/api/zones', methods=['POST'])
 def api_create_zone():
-    data = request.get_json()
+    data = request.get_json() or {}
+    try:
+        is_csv = (request.headers.get('X-Import-Op') == 'csv') or (request.args.get('source') == 'csv')
+    except Exception:
+        is_csv = False
+    if is_csv:
+        try:
+            logging.getLogger('import_export').info(f"POST create zone from CSV payload={json.dumps(data, ensure_ascii=False)}")
+        except Exception:
+            pass
     zone = db.create_zone(data)
     if zone:
         db.add_log('zone_create', json.dumps({"zone": zone['id'], "name": zone['name']}))
+        if is_csv:
+            try:
+                logging.getLogger('import_export').info(f"POST result id={zone.get('id')} OK")
+            except Exception:
+                pass
         return jsonify(zone), 201
+    if is_csv:
+        try:
+            logging.getLogger('import_export').info("POST result ERROR")
+        except Exception:
+            pass
     return ('Error creating zone', 400)
 
 @app.route('/api/groups')
