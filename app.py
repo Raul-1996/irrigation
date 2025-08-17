@@ -610,12 +610,19 @@ def api_program(prog_id):
         return jsonify(program) if program else ('Program not found', 404)
     
     elif request.method == 'PUT':
-        data = request.get_json()
+        data = request.get_json() or {}
+        # Нормализуем дни в числа 0..6 на всякий случай
+        try:
+            if isinstance(data.get('days'), list):
+                data['days'] = [int(d) for d in data['days']]
+        except Exception:
+            pass
         # Серверная проверка конфликтов перед сохранением
         try:
             conflicts = db.check_program_conflicts(program_id=prog_id, time=data['time'], zones=data['zones'], days=data['days'])
             if conflicts:
-                return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'}), 400
+                # Возвращаем 200, чтобы фронтенд мог показать предупреждение без исключения fetch
+                return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'})
         except Exception as e:
             logger.error(f"Ошибка серверной проверки конфликтов: {e}")
         program = db.update_program(prog_id, data)
@@ -645,12 +652,19 @@ def api_program(prog_id):
 
 @app.route('/api/programs', methods=['POST'])
 def api_create_program():
-    data = request.get_json()
+    data = request.get_json() or {}
+    # Нормализуем дни (строки->int)
+    try:
+        if isinstance(data.get('days'), list):
+            data['days'] = [int(d) for d in data['days']]
+    except Exception:
+        pass
     # Серверная проверка конфликтов перед созданием
     try:
         conflicts = db.check_program_conflicts(program_id=None, time=data['time'], zones=data['zones'], days=data['days'])
         if conflicts:
-            return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'}), 400
+            # 200 вместо 400 — фронтенд обработает предупреждение и не будет кидать исключение
+            return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'})
     except Exception as e:
         logger.error(f"Ошибка серверной проверки конфликтов (create): {e}")
     program = db.create_program(data)
@@ -1356,7 +1370,7 @@ def api_stop_group(group_id):
                     t = topic if str(topic).startswith('/') else '/' + str(topic)
                     server = db.get_mqtt_server(int(sid))
                     if server:
-                        _publish_mqtt_value(server, t, '0')
+                        _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
             except Exception:
                 # Не прерываем цикл при ошибке публикации, просто логируем
                 logger.exception("Ошибка публикации MQTT '0' при остановке группы")
@@ -1438,7 +1452,7 @@ def api_start_zone_exclusive(group_id, zone_id):
                         t = topic if str(topic).startswith('/') else '/' + str(topic)
                         server = db.get_mqtt_server(int(sid))
                         if server:
-                            _publish_mqtt_value(server, t, '0')
+                            _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
                 except Exception:
                     logger.exception("Ошибка публикации MQTT '0' при эксклюзивном запуске зоны")
         # Очистим плановые старты у «соседей» по группе
@@ -1685,7 +1699,7 @@ def start_zone(zone_id):
                             t = topic if str(topic).startswith('/') else '/' + str(topic)
                             server = db.get_mqtt_server(int(sid))
                             if server:
-                                _publish_mqtt_value(server, t, '0')
+                                _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
                     except Exception:
                         logger.exception("Ошибка публикации MQTT '0' при ручном запуске: выключение соседей")
                     try:

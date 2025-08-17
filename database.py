@@ -1053,6 +1053,12 @@ class IrrigationDB:
                 except:
                     return conflicts
                 
+                # Нормализуем массив дней (могут прийти строками)
+                try:
+                    norm_days = [int(d) for d in days]
+                except Exception:
+                    norm_days = days
+
                 # Получаем суммарную продолжительность полива для выбранных зон
                 # Зоны поливаются последовательно, поэтому суммируем их длительности
                 total_duration = 0
@@ -1069,7 +1075,7 @@ class IrrigationDB:
                     program_data['zones'] = json.loads(program_data['zones'])
                     
                     # Проверяем пересечение дней
-                    common_days = set(days) & set(program_data['days'])
+                    common_days = set(norm_days) & set(program_data['days'])
                     if not common_days:
                         continue
                     

@@ -181,7 +181,7 @@
         border: 1px solid #ccc;
         padding: 1rem;
         border-radius: 4px;
-        max-height: 300px;
+        max-height: 70vh;
         overflow: auto;
         margin-bottom: 1rem;
         background: #f9f9f9;
@@ -303,6 +303,7 @@
                 <th>#</th>
                 <th>Название</th>
                 <th>Время старта</th>
+                <th>Финиш</th>
                 <th>Дни недели</th>
                 <th>Зоны</th>
                 <th>Действия</th>
@@ -373,10 +374,12 @@
     // Загрузка данных
     async function loadData() {
         try {
-            [programsData, zonesData] = await Promise.all([
+            const [progs, zones, groups] = await Promise.all([
                 api.get('/api/programs'),
-                api.get('/api/zones')
+                api.get('/api/zones'),
+                api.get('/api/groups')
             ]);
+            programsData = progs; zonesData = zones; window.groupsCache = groups;
             renderProgramsList();
         } catch (error) {
             console.error('Ошибка загрузки данных:', error);
@@ -438,11 +441,13 @@
             // Форматируем список зон
             const zonesText = formatZonesList(program.zones);
             
+            const finishText = computeProgramFinishText(program);
             tr.innerHTML = `
                 <td>${program.id}</td>
                 <td>${program.name}</td>
                 <td>${program.time}</td>
-                <td>${program.days.join(', ')}</td>
+                <td>${finishText}</td>
+                <td>${formatDays(program.days)}</td>
                 <td>${zonesText}</td>
                 <td>
                     <button class="edit-btn" onclick="editProg(${program.id})">✏</button>
@@ -451,6 +456,40 @@
             `;
             tbody.appendChild(tr);
         });
+    }
+
+    function formatDays(days) {
+        const map = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+        return (days||[]).map(d=>map[Number(d)||0]).join(', ');
+    }
+
+    function computeProgramFinishText(program){
+        try{
+            const time = program.time; // 'HH:MM'
+            const [h,m] = time.split(':').map(Number);
+            const startMin = h*60+m;
+            // сгруппируем зоны по group_id
+            const zonesByGroup = {};
+            (program.zones||[]).forEach(zid=>{
+                const z = zonesData.find(x=>x.id===zid);
+                if(!z) return;
+                const gid = z.group_id;
+                zonesByGroup[gid] = zonesByGroup[gid]||[];
+                zonesByGroup[gid].push(zid);
+            });
+            const parts=[];
+            for (const gid of Object.keys(zonesByGroup)){
+                const list = zonesByGroup[gid];
+                let total=0;
+                list.forEach(zid=>{ const z = zonesData.find(x=>x.id===zid); total += Number(z?.duration||0); });
+                const endMin = startMin + total;
+                const hh = String(Math.floor((endMin%1440)/60)).padStart(2,'0');
+                const mm = String(endMin%60).padStart(2,'0');
+                const gname = (gid==999)?'БЕЗ ПОЛИВА':(((window.groupsCache||[]).find(g=>g.id==gid)||{}).name||`Группа ${gid}`);
+                parts.push(`${gname}: ${hh}:${mm}`);
+            }
+            return parts.join('<br/>');
+        }catch(e){return '—'}
     }
     
     // Мастер создания/редактирования
@@ -477,7 +516,7 @@
         
         // Выбираем дни
         Array.from(document.getElementById('progDays').options).forEach(option => {
-            option.selected = program.days.includes(option.value);
+            option.selected = program.days.includes(parseInt(option.value));
         });
         
         // Выбираем зоны
@@ -556,39 +595,54 @@
             const groups = await api.get('/api/groups');
             const zones = await api.get('/api/zones');
             
-            // Группируем зоны по группам
+            // Группируем зоны по группам (по факту наличия зон)
             const zonesByGroup = {};
             zones.forEach(zone => {
-                if (!zonesByGroup[zone.group_id]) {
-                    zonesByGroup[zone.group_id] = [];
-                }
-                zonesByGroup[zone.group_id].push(zone);
+                const gid = Number(zone.group_id ?? zone.group);
+                if (!Number.isFinite(gid)) return;
+                zonesByGroup[gid] = zonesByGroup[gid] || [];
+                zonesByGroup[gid].push(zone);
             });
             
-            // Создаем блоки для каждой группы
-            groups.forEach(group => {
-                // Пропускаем специальные группы (например, "БЕЗ ПОЛИВА")
-                if (group.id >= 999) return;
-                
-                const groupZones = zonesByGroup[group.id] || [];
-                if (groupZones.length === 0) return; // Пропускаем пустые группы
+            // Построим метаданные групп: из API групп + из самих зон (если вдруг группа есть в зонах, но не пришла в списке)
+            const groupMeta = {};
+            (groups || []).forEach(g => { groupMeta[Number(g.id)] = { id: Number(g.id), name: g.name }; });
+            Object.keys(zonesByGroup).forEach(k => {
+                const gid = Number(k);
+                if (!groupMeta[gid]) groupMeta[gid] = { id: gid, name: `Группа ${gid}` };
+            });
+            
+            // Список групп, которые реально имеют зоны, отсортированный по id
+            const renderGroupIds = Object.keys(zonesByGroup).map(n=>Number(n)).filter(gid => gid !== 999).sort((a,b)=>a-b);
+            
+            // Если почему-то ничего не отрендерилось — покажем подсказку
+            if (renderGroupIds.length === 0) {
+                const hint = document.createElement('div');
+                hint.style.color = '#555';
+                hint.textContent = 'Зоны не найдены. Проверьте, что зоны привязаны к группам.';
+                container.appendChild(hint);
+            }
+            
+            // Создаем блоки
+            renderGroupIds.forEach(gid => {
+                const groupZones = (zonesByGroup[gid] || []).slice().sort((a,b)=>a.id-b.id);
+                if (!groupZones.length) return;
+                const meta = groupMeta[gid] || { id: gid, name: `Группа ${gid}` };
                 
                 const groupDiv = document.createElement('div');
                 groupDiv.className = 'group-block';
                 
                 const groupLabel = document.createElement('label');
-                groupLabel.innerHTML = `<input type='checkbox' class='group-check' data-group='${group.id}' onclick='toggleGroup(${group.id}, this)'> ${group.name}`;
+                groupLabel.innerHTML = `<input type='checkbox' class='group-check' data-group='${gid}' onclick='toggleGroup(${gid}, this)'> ${meta.name}`;
                 groupDiv.appendChild(groupLabel);
                 
                 const zonesDiv = document.createElement('div');
                 zonesDiv.className = 'zone-item';
                 
-                // Сортируем зоны по ID
-                groupZones.sort((a, b) => a.id - b.id);
-                
                 groupZones.forEach(zone => {
                     const zoneLabel = document.createElement('label');
-                    zoneLabel.innerHTML = `<input type='checkbox' class='zone-check' data-group='${group.id}' value='${zone.id}'> ${zone.icon} Зона ${zone.id} (${zone.name})`;
+                    const icon = zone.icon || '';
+                    zoneLabel.innerHTML = `<input type='checkbox' class='zone-check' data-group='${gid}' value='${zone.id}'> ${icon} Зона ${zone.id} (${zone.name})`;
                     zonesDiv.appendChild(zoneLabel);
                 });
                 
@@ -617,7 +671,7 @@
     
     async function checkConflicts() {
         const time = document.getElementById('progTime').value;
-        const days = Array.from(document.getElementById('progDays').selectedOptions).map(option => option.value);
+        const days = Array.from(document.getElementById('progDays').selectedOptions).map(option => parseInt(option.value));
         const zones = Array.from(document.querySelectorAll('.zone-check:checked')).map(checkbox => parseInt(checkbox.value));
         
         if (!time || !days.length || !zones.length) {
@@ -663,7 +717,7 @@
     async function saveProg() {
         const name = document.getElementById('progName').value.trim();
         const time = document.getElementById('progTime').value;
-        const days = Array.from(document.getElementById('progDays').selectedOptions).map(option => option.value);
+        const days = Array.from(document.getElementById('progDays').selectedOptions).map(option => parseInt(option.value));
         const zones = Array.from(document.querySelectorAll('.zone-check:checked')).map(checkbox => parseInt(checkbox.value));
         
         if (!name || !time || !days.length || !zones.length) {
@@ -691,13 +745,29 @@
                 if (!program) throw new Error('Программа не найдена');
                 
                 const updatedProgram = { ...program, name, time, days, zones };
-                await api.put(`/api/programs/${editId}`, updatedProgram);
+                const res = await api.put(`/api/programs/${editId}`, updatedProgram);
+                if (res && res.has_conflicts) {
+                    let message = '⚠️ Обнаружены конфликты с существующими программами:\n\n';
+                    res.conflicts.forEach(conflict => {
+                        message += `• ${formatConflictMessage(conflict)}\n`;
+                    });
+                    showNotification(message, 'warning');
+                    return;
+                }
                 Object.assign(program, updatedProgram);
                 showNotification('Программа обновлена', 'success');
             } else {
                 // Создание
-                const newProgram = await api.post('/api/programs', { name, time, days, zones });
-                programsData.push(newProgram);
+                const res = await api.post('/api/programs', { name, time, days, zones });
+                if (res && res.has_conflicts) {
+                    let message = '⚠️ Обнаружены конфликты с существующими программами:\n\n';
+                    res.conflicts.forEach(conflict => {
+                        message += `• ${formatConflictMessage(conflict)}\n`;
+                    });
+                    showNotification(message, 'warning');
+                    return;
+                }
+                programsData.push(res);
                 showNotification('Программа создана', 'success');
             }
             

@@ -399,16 +399,20 @@
                 try {
                     const response = await fetch(url, config);
                     
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                    }
+                    // Не бросаем исключение для 4xx/5xx, чтобы экран мог обработать soft-ошибки (например, конфликты программ)
+                    // Ответ всё равно прочитаем ниже и вернём вызывающему коду
                     
                     // Check if response is JSON
                     const contentType = response.headers.get('content-type');
                     if (contentType && contentType.includes('application/json')) {
-                        return await response.json();
+                        const data = await response.json();
+                        // Если сервер прислал success:false + has_conflicts — возвращаем как есть
+                        if (!response.ok) {
+                            return data;
+                        }
+                        return data;
                     }
-                    
+                    // Для не-JSON ответов просто возвращаем текст (даже если !ok)
                     return await response.text();
                 } catch (error) {
                     console.error('API request failed:', error);
