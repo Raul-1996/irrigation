@@ -256,10 +256,10 @@
         background: #4caf50;
         color: white;
         border: none;
-        border-radius: 3px;
-        padding: 0.2rem 0.4rem;
+        border-radius: 6px;
+        padding: 0.35rem 0.7rem;
         cursor: pointer;
-        font-size: 0.8rem;
+        font-size: 1.0rem;
     }
     .zone-start-btn:hover {
         background: #45a049;
@@ -529,8 +529,8 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            const prevBtn = `<button class="zone-start-btn" title="Предыдущая зона" onclick="groupPrev(${group.id})">‹</button>`;
-            const nextBtn = `<button class="zone-start-btn" title="Следующая зона" onclick="groupNext(${group.id})">›</button>`;
+            const prevBtn = `<button class=\"zone-start-btn\" title=\"Предыдущая зона\" onclick=\"groupPrev(${group.id})\">‹</button>`;
+            const nextBtn = `<button class=\"zone-start-btn\" title=\"Следующая зона\" onclick=\"groupNext(${group.id})\">›</button>`;
             return `${prevBtn} Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span> ${nextBtn}`;
         }
         switch (group.status) {

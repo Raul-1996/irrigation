@@ -583,6 +583,39 @@ class IrrigationScheduler:
             sub_seq = zone_ids[idx:]
             if not sub_seq:
                 return False
+            # Жестко выключаем все зоны группы перед новым стартом (и в БД, и по MQTT)
+            for z in group_zones:
+                try:
+                    self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+                    topic = (z.get('topic') or '').strip()
+                    sid = z.get('mqtt_server_id')
+                    if mqtt and topic and sid:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = self.db.get_mqtt_server(int(sid))
+                        if server:
+                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                            if server.get('username'):
+                                cl.username_pw_set(server.get('username'), server.get('password') or None)
+                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                            cl.publish(t, payload='0', qos=0, retain=False)
+                            cl.disconnect()
+                except Exception:
+                    pass
+
+            # Пересчёт плановых стартов для оставшейся последовательности
+            try:
+                start_base = datetime.now()
+                cumulative = 0
+                schedule_map: Dict[int, str] = {}
+                for zid in sub_seq:
+                    start_dt = start_base + timedelta(minutes=cumulative)
+                    schedule_map[zid] = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+                    z = next((zz for zz in group_zones if zz['id'] == zid), None)
+                    cumulative += int((z or {}).get('duration') or 0)
+                self.db.clear_group_scheduled_starts(group_id)
+                self.db.set_group_scheduled_starts(group_id, schedule_map)
+            except Exception as e:
+                logger.error(f"Ошибка расчета плановых стартов при перезапуске группы {group_id}: {e}")
             # Немедленно планируем новый прогон
             self.scheduler.add_job(
                 self._run_group_sequence,
