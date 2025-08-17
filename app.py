@@ -184,8 +184,8 @@ def api_setting_early_off():
             return jsonify({'success': True, 'seconds': seconds})
         data = request.get_json(silent=True) or {}
         seconds = int(data.get('seconds', 3))
-        if seconds < 0: seconds = 0
-        if seconds > 15: seconds = 15
+        if seconds < 0 or seconds > 15:
+            return jsonify({'success': False, 'message': 'seconds must be within 0..15'}), 400
         ok = db.set_early_off_seconds(seconds)
         return jsonify({'success': bool(ok), 'seconds': seconds})
     except Exception as e:

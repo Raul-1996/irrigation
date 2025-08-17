@@ -181,14 +181,19 @@ class IrrigationScheduler:
                     logger.error(f"Ошибка запуска зоны {zone_id}: {e}")
                     continue
 
-                # Ждем окончания текущей зоны, проверяя отмену группы каждую секунду
-                remaining = duration * 60
-                # Раннее выключение: на 3 секунды раньше
-                early_cut = 3
-                if remaining > early_cut:
-                    remaining -= early_cut
+                # Ждем окончания текущей зоны с ранним выключением, проверяя отмену группы каждую секунду
+                # Раннее выключение настраивается в settings (0..15 сек)
+                try:
+                    from database import db as _db
+                    early = int(_db.get_early_off_seconds())
+                except Exception:
+                    early = 3
+                early = 0 if early < 0 else (15 if early > 15 else early)
+                total_seconds = duration * 60
                 if os.getenv('TESTING') == '1':
-                    remaining = min(6, max(1, duration))
+                    total_seconds = min(6, max(1, duration))
+                    early = 0  # в тестовом режиме не усложняем тайминги
+                remaining = max(0, total_seconds - early)
                 while remaining > 0:
                     cancel_event = self.group_cancel_events.get(group_id)
                     if cancel_event and cancel_event.is_set():
@@ -197,7 +202,7 @@ class IrrigationScheduler:
                     time.sleep(1)
                     remaining -= 1
 
-                # Публикуем OFF и останавливаем зону (ранее на 3с уже смещено ожидание)
+                # Публикуем OFF и останавливаем зону
                 try:
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
@@ -216,6 +221,16 @@ class IrrigationScheduler:
                     pass
                 self._stop_zone(zone_id)
                 self.active_zones.pop(zone_id, None)
+
+                # Дождёмся оставшиеся ранние секунды до «номинального» конца зоны, чтобы старт следующей был вовремя
+                if early > 0:
+                    waited = 0
+                    while waited < early:
+                        cancel_event = self.group_cancel_events.get(group_id)
+                        if cancel_event and cancel_event.is_set():
+                            break
+                        time.sleep(1)
+                        waited += 1
 
                 # Если отмена — пропускаем оставшиеся зоны этой группы, но не мешаем другим группам
                 cancel_event = self.group_cancel_events.get(group_id)
@@ -423,16 +438,25 @@ class IrrigationScheduler:
                     pass
 
                 # Ждем окончание полива зоны, проверяя флаг отмены каждую секунду
-                remaining = duration * 60
+                # Раннее выключение и выравнивание старта следующей зоны
+                try:
+                    from database import db as _db
+                    early = int(_db.get_early_off_seconds())
+                except Exception:
+                    early = 3
+                early = 0 if early < 0 else (15 if early > 15 else early)
+                total_seconds = duration * 60
                 if os.getenv('TESTING') == '1':
-                    remaining = min(6, max(1, duration))
+                    total_seconds = min(6, max(1, duration))
+                    early = 0
+                remaining = max(0, total_seconds - early)
                 while remaining > 0:
                     if cancel_event and cancel_event.is_set():
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")
                         break
                     time.sleep(1)
                     remaining -= 1
-                # MQTT publish OFF и останавливаем зону (независимо от причины выхода)
+                # MQTT publish OFF и останавливаем зону
                 try:
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
@@ -449,6 +473,9 @@ class IrrigationScheduler:
                 except Exception:
                     pass
                 self._stop_zone(zone_id)
+                # Добираем ранние секунды, чтобы следующий старт был вовремя
+                if early > 0 and not (cancel_event and cancel_event.is_set()):
+                    time.sleep(early)
                 # Если отменено — выходим из последовательности
                 if cancel_event and cancel_event.is_set():
                     break

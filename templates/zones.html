@@ -715,15 +715,6 @@
     </div>
 </div>
 
-<div class="zones-container" style="margin-top:12px;">
-  <h4>Настройки полива</h4>
-  <div>
-    <label for="early-off-seconds">За сколько секунд до конца таймера отключать зону:</label>
-    <input id="early-off-seconds" type="number" min="0" max="15" step="1" value="3" style="width:80px; margin: 0 8px;" />
-    <button class="save-all-btn" onclick="saveEarlyOff()">Сохранить</button>
-    <div class="muted">Допустимо: 0–15 секунд. Выключение выполняется заранее, запуск следующей зоны остаётся по расписанию.</div>
-  </div>
-</div>
 <!-- Секция зон -->
 <div class="zones-container">
     <div class="zones-header">
@@ -819,6 +810,17 @@
             <!-- Зоны будут загружены динамически -->
         </tbody>
     </table>
+</div>
+
+<!-- Блок настроек перенесён в самый низ страницы, под списком зон -->
+<div class="zones-container" style="margin-top:12px;">
+  <h4 style="color:#333;">Настройки полива</h4>
+  <div style="color:#333;">
+    <label for="early-off-seconds" style="color:#333;">За сколько секунд до конца таймера отключать зону:</label>
+    <input id="early-off-seconds" type="number" min="0" max="15" step="1" value="3" style="width:80px; margin: 0 8px; color:#333;" />
+    <button class="save-all-btn" onclick="saveEarlyOff()">Сохранить</button>
+    <div class="muted" style="color:#333;">Допустимо: 0–15 секунд. Выключение выполняется заранее, запуск следующей зоны остаётся по расписанию.</div>
+  </div>
 </div>
 
 <!-- Модальные окна -->
@@ -2109,11 +2111,11 @@
         if (!el) return;
         let v = parseInt(el.value, 10);
         if (isNaN(v)) v = 3;
-        if (v < 0) v = 0; if (v > 15) v = 15;
+        if (v < 0 || v > 15) { showNotification('Допустимо только 0–15 секунд', 'warning'); return; }
         try {
             const r = await fetch('/api/settings/early-off', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({seconds: v})});
             const j = await r.json();
-            if (!(j && j.success)) showNotification('Не удалось сохранить настройку', 'error');
+            if (!(j && j.success)) showNotification(j && j.message ? j.message : 'Не удалось сохранить настройку', 'error');
             else showNotification('Настройка сохранена', 'success');
         } catch (e) { showNotification('Ошибка сохранения', 'error'); }
     }
