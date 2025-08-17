@@ -1,9 +1,13 @@
 #!/bin/zsh
 set -euo pipefail
 
-# Do not kill ports automatically to avoid stopping Docker or other services
-if lsof -i :5055 >/dev/null 2>&1; then
-  echo "Port 5055 is busy; emulator HTTP may fail to bind. Stop existing process or change EMULATOR_HTTP_PORT."
+# Kill processes occupying emulator HTTP port (default 5055 or EMULATOR_HTTP_PORT)
+PORT_TO_KILL=${EMULATOR_HTTP_PORT:-5055}
+if lsof -i :${PORT_TO_KILL} >/dev/null 2>&1; then
+  echo "Port ${PORT_TO_KILL} is busy, killing listeners..."
+  for pid in $(lsof -ti :${PORT_TO_KILL}); do
+    kill -9 "$pid" || true
+  done
 fi
 
 # Ensure docker mosquitto is running with our config (if Docker daemon is available)
