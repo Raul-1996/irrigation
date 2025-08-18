@@ -67,6 +67,16 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 MAP_DIR = os.path.join(MEDIA_ROOT, MAP_MEDIA_SUBDIR)
 os.makedirs(MAP_DIR, exist_ok=True)
 
+def _parse_dt(s: str):
+    if not s:
+        return None
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -378,13 +388,14 @@ def api_map():
             ext = os.path.splitext(file.filename)[1].lower()
             if ext not in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
                 return jsonify({'success': False, 'message': 'Неподдерживаемый формат'}), 400
-            # очищаем старые карты
+            # очищаем старые карты (оставим только последний загруженный файл)
             for f in os.listdir(MAP_FOLDER):
                 try:
                     os.remove(os.path.join(MAP_FOLDER, f))
                 except Exception:
                     pass
-            filename = f"zones_map{ext}"
+            # уникальное имя для обхода кэша SW/браузера
+            filename = f"zones_map_{int(time.time())}{ext}"
             save_path = os.path.join(MAP_FOLDER, filename)
             file.save(save_path)
             return jsonify({'success': True, 'message': 'Карта загружена', 'path': f"media/maps/{filename}"})
@@ -469,8 +480,8 @@ def api_zone_next_watering(zone_id):
         try:
             pu = zone.get('postpone_until')
             if pu:
-                pu_dt = datetime.strptime(pu, '%Y-%m-%d %H:%M')
-                if pu_dt > now:
+                pu_dt = _parse_dt(pu)
+                if pu_dt and pu_dt > now:
                     now = pu_dt
         except Exception:
             pass
@@ -1284,8 +1295,8 @@ def api_status():
                     for z in group_zones:
                         pu = z.get('postpone_until')
                         if pu:
-                            pu_dt = datetime.strptime(pu, '%Y-%m-%d %H:%M')
-                            if pu_dt > search_from:
+                            pu_dt = _parse_dt(pu)
+                            if pu_dt and pu_dt > search_from:
                                 pu_candidates.append(pu_dt)
                     if pu_candidates:
                         search_from = max(pu_candidates)
@@ -1317,7 +1328,7 @@ def api_status():
             postpone_until = 'До отмены аварийной остановки'
             group_postpone_reason = 'emergency'
         elif postponed_zones:
-            postpone_until = postponed_zones[0]['postpone_until']
+            postpone_until = postponed_zones[0].get('postpone_until')
             # Берём причину первой отложенной зоны (приоритет ручной приостановки)
             try:
                 reasons = [z.get('postpone_reason') for z in postponed_zones if z.get('postpone_reason')]
@@ -1329,7 +1340,7 @@ def api_status():
                 pass
         elif rain_manual is True:
             # Если включен ручной дождь, откладываем полив до конца текущего дня
-            postpone_until = datetime.now().strftime('%Y-%m-%d 23:59')
+            postpone_until = datetime.now().strftime('%Y-%m-%d 23:59:59')
             status = 'postponed'
             group_postpone_reason = 'rain'
         
@@ -1395,7 +1406,7 @@ def api_postpone():
     elif action == 'postpone':
         # Откладываем полив на указанное количество дней
         postpone_date = datetime.now() + timedelta(days=days)
-        postpone_until = postpone_date.strftime('%Y-%m-%d 23:59')
+        postpone_until = postpone_date.strftime('%Y-%m-%d 23:59:59')
         
         zones = db.get_zones()
         group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
@@ -1413,7 +1424,7 @@ def api_postpone():
         return jsonify({
             "success": True, 
             "message": f"Полив отложен на {days} дней",
-            "postpone_until": postpone_date.strftime('%d.%m.%Y %H:%M')
+            "postpone_until": postpone_date.strftime('%d.%m.%Y %H:%M:%S')
         })
     
     return jsonify({"success": False, "message": "Неверное действие"}), 400

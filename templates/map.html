@@ -53,7 +53,8 @@ async function loadMap() {
     container.innerHTML = '';
     if (res && res.path) {
       const img = document.createElement('img');
-      img.src = '/static/' + res.path; // путь относительно static/
+      // Добавим ts для обхода кэша браузера/SW
+      img.src = '/static/' + res.path + '?t=' + Date.now();
       img.alt = 'Карта зон';
       img.className = 'map-image';
       container.appendChild(img);

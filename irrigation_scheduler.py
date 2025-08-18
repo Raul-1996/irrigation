@@ -20,8 +20,10 @@ try:
 except Exception:
     mqtt = None
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования: по умолчанию INFO; можно задать через env SCHEDULER_LOG_LEVEL=WARNING
+level_name = os.getenv('SCHEDULER_LOG_LEVEL', 'INFO').upper()
+level = getattr(logging, level_name, logging.INFO)
+logging.basicConfig(level=level)
 logger = logging.getLogger(__name__)
 
 
