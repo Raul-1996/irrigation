@@ -353,9 +353,21 @@ def api_change_password():
 def api_map():
     try:
         if request.method == 'GET':
-            files = [f for f in os.listdir(MAP_FOLDER) if os.path.isfile(os.path.join(MAP_FOLDER, f))]
-            if files:
-                return jsonify({'success': True, 'path': f"media/maps/{files[0]}"})
+            # Отдаём последний загруженный файл с допустимым расширением
+            allowed_ext = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+            candidates = []
+            for f in os.listdir(MAP_FOLDER):
+                p = os.path.join(MAP_FOLDER, f)
+                try:
+                    ext = os.path.splitext(f)[1].lower()
+                    if os.path.isfile(p) and ext in allowed_ext:
+                        candidates.append((p, os.path.getmtime(p)))
+                except Exception:
+                    continue
+            if candidates:
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                latest_path = candidates[0][0]
+                return jsonify({'success': True, 'path': f"media/maps/{os.path.basename(latest_path)}"})
             return jsonify({'success': True, 'path': None})
         else:
             if 'file' not in request.files:
