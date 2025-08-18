@@ -112,6 +112,7 @@ class IrrigationDB:
                 self._migrate_add_mqtt_servers(conn)
                 self._migrate_add_zone_mqtt_server_id(conn)
                 self._migrate_ensure_special_group(conn)
+                self._migrate_add_zones_indexes(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -279,6 +280,18 @@ class IrrigationDB:
                 logger.info("Добавлена служебная группа 999 'БЕЗ ПОЛИВА'")
         except Exception as e:
             logger.error(f"Ошибка миграции ensure_special_group: {e}")
+
+    def _migrate_add_zones_indexes(self, conn):
+        """Миграция: индексы для ускорения выборок зон по MQTT.
+
+        Индексы безопасно создаются idempotent-но (IF NOT EXISTS).
+        """
+        try:
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_zones_mqtt_server ON zones(mqtt_server_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_zones_topic ON zones(topic)')
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка миграции индексов zones: {e}")
 
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""

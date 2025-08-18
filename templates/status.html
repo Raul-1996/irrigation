@@ -536,7 +536,7 @@
             case 'error': return 'Авария — Ошибка счётчика';
             case 'postponed':
                 if (group.postpone_reason === 'emergency') return 'Полив отложен из-за аварийной остановки';
-                if (group.postpone_reason === 'manual') return 'Полив отложен вручную пользователем';
+                if (group.postpone_reason === 'manual') return 'Полив приостановлен пользователем';
                 return 'Полив отложен из-за дождя';
             default: return 'Неизвестный статус';
         }
@@ -626,42 +626,41 @@
             const resp = await fetch(`/api/status?ts=${Date.now()}`, {cache: 'no-store'});
             const data = await resp.json();
             if (!data || !data.groups) return;
+            // Обновим глобальные данные статуса, чтобы кнопки/условия отображались корректно
+            statusData = data;
             const group = (data.groups || []).find(g => String(g.id) === String(groupId));
             if (!group) return;
             const card = document.getElementById(`group-card-${group.id}`);
             if (!card) return;
-            // Обновим строку статуса и таймер
-            const statusHtml = getStatusText(group);
-            const statusDiv = document.getElementById(`group-status-${group.id}`);
-            if (statusDiv) {
-                statusDiv.innerHTML = statusHtml;
-            }
+            // Полностью пересоберем содержимое карточки по актуальным данным
+            const flowActive = group.status === 'watering' && Math.random() > 0.3;
+            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
+            const statusText = getStatusText(group);
+            const postponeText = group.status === 'postponed' && group.postpone_until ? `Не будет поливаться до: ${group.postpone_until}` : '—';
+            const groupButtons = `
+                <div class="btn-group">
+                    <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 2)">Остановить полив на 2 дня</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 3)">Остановить полив на 3 дня</button>
+                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">Продолжить по расписанию</button>` : ''}
+                </div>
+                <div class="btn-group">
+                    <button class="continue-group" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>
+                    <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
+                </div>`;
+            card.innerHTML = `
+                <div class="group-header">${group.name}</div>
+                <div id="group-status-${group.id}">${statusText}</div>
+                <div class="postpone-until">${postponeText}</div>
+                ${groupButtons}
+            `;
             if (group.status === 'watering' && group.current_zone) {
                 initGroupTimer(group);
             }
-            // Обновим стилевой класс карточки (цвет, пульсация и т.п.)
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
-            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
         } catch (e) {}
     }
 
-    // Реакция на события MQTT через SSE для моментального обновления
-    function setupSseZones() {
-        try {
-            const es = new EventSource('/api/mqtt/zones-sse');
-            es.onmessage = function(ev) {
-                try {
-                    if (!ev || !ev.data) return;
-                    const msg = JSON.parse(ev.data);
-                    const zid = parseInt(msg.zone_id, 10);
-                    const payload = String(msg.payload || '').trim();
-                    const newState = (payload === '1' || payload === 'on' || payload === 'ON' || payload === 'true') ? 'on' : 'off';
-                    handleZoneUpdateFromSse(zid, newState);
-                } catch (e) {}
-            };
-            es.onerror = function() { /* keep connection attempts */ };
-        } catch (e) {}
-    }
+    // Реакция на события MQTT через SSE для моментального обновления (используется ниже в DOMContentLoaded)
 
     function handleZoneUpdateFromSse(zoneId, newState) {
         try {
@@ -727,24 +726,18 @@
         });
         
         const nextWateringData = await Promise.all(nextWateringPromises);
-        const nextWateringMap = {};
-        nextWateringData.forEach(item => {
-            nextWateringMap[item.zone_id] = item.next_watering;
-        });
         
         filteredZones.forEach(zone => {
-            let nextWatering = nextWateringMap[zone.id] || 'Ошибка';
-            // Подмена на даты/сообщения
+            let nextWatering = '—';
             if (statusData.emergency_stop) {
                 nextWatering = 'До отмены аварии';
-            } else if (zone.postpone_until) {
-                // если есть отложка на зоне
-                nextWatering = zone.postpone_until.replace(' ', ' ');
             } else {
-                const nextDT = (nextWateringData.find(x => x.zone_id === zone.id) || {}).next_datetime;
+                const item = nextWateringData.find(x => x.zone_id === zone.id) || {};
+                const nextDT = item.next_datetime;
                 if (nextDT) {
-                    // Пишем дату и время
-                    nextWatering = nextDT.replace('T',' ').slice(0,16);
+                    nextWatering = String(nextDT).replace('T',' ').slice(0,16);
+                } else if (item.next_watering === 'Никогда') {
+                    nextWatering = 'Никогда';
                 }
             }
             const tr = document.createElement('tr');
@@ -776,6 +769,12 @@
     // Обработчики действий
     async function delayGroup(groupId, days) {
         try {
+            // Блокируем кнопки в карточке группы на время запроса
+            const card = document.getElementById(`group-card-${groupId}`);
+            if (card) {
+                const buttons = card.querySelectorAll('button');
+                buttons.forEach(b=>b.disabled=true);
+            }
             const response = await api.post('/api/postpone', {
                 group_id: groupId,
                 days: days,
@@ -784,18 +783,32 @@
             
             if (response.success) {
                 showNotification(response.message, 'success');
-                loadStatusData(); // Обновляем данные
+                // Точечно обновляем карточку группы и строки зон этой группы
+                await refreshSingleGroup(groupId);
+                await refreshZonesRowsForGroup(groupId);
             } else {
                 showNotification(response.message, 'error');
             }
         } catch (error) {
             console.error('Ошибка при отложке полива:', error);
             showNotification('Ошибка при отложке полива', 'error');
+        } finally {
+            const card = document.getElementById(`group-card-${groupId}`);
+            if (card) {
+                const buttons = card.querySelectorAll('button');
+                buttons.forEach(b=>b.disabled=false);
+            }
         }
     }
     
     async function cancelPostpone(groupId) {
         try {
+            // Блокируем кнопки в карточке группы на время запроса
+            const card = document.getElementById(`group-card-${groupId}`);
+            if (card) {
+                const buttons = card.querySelectorAll('button');
+                buttons.forEach(b=>b.disabled=true);
+            }
             const response = await api.post('/api/postpone', {
                 group_id: groupId,
                 action: 'cancel'
@@ -803,13 +816,21 @@
             
             if (response.success) {
                 showNotification(response.message, 'success');
-                loadStatusData(); // Обновляем данные
+                // Точечно обновляем карточку группы и строки зон этой группы
+                await refreshSingleGroup(groupId);
+                await refreshZonesRowsForGroup(groupId);
             } else {
                 showNotification(response.message, 'error');
             }
         } catch (error) {
             console.error('Ошибка при отмене отложенного полива:', error);
             showNotification('Ошибка при отмене отложенного полива', 'error');
+        } finally {
+            const card = document.getElementById(`group-card-${groupId}`);
+            if (card) {
+                const buttons = card.querySelectorAll('button');
+                buttons.forEach(b=>b.disabled=false);
+            }
         }
     }
     
@@ -968,5 +989,40 @@
             };
         } catch (e) {}
     });
+
+    // Точечное обновление строк зон группы (без полной перерисовки таблицы)
+    async function refreshZonesRowsForGroup(groupId) {
+        try {
+            const tbody = document.getElementById('zones-table-body');
+            if (!tbody) return;
+            const zonesForGroup = (zonesData || []).filter(z => String(z.group_id) === String(groupId));
+            const promises = zonesForGroup.map(async (zone) => {
+                try {
+                    const resp = await fetch(`/api/zones/${zone.id}/next-watering`, { cache: 'no-store' });
+                    const data = await resp.json();
+                    let nextText = '—';
+                    if (data && data.next_datetime) {
+                        nextText = String(data.next_datetime).replace('T',' ').slice(0,16);
+                    } else if (data && data.next_watering === 'Никогда') {
+                        nextText = 'Никогда';
+                    }
+                    // Найти строку зоны по её № (вторая колонка)
+                    const rows = tbody.querySelectorAll('tr');
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 9) {
+                            const idCell = cells[1];
+                            if (idCell && String(idCell.textContent.trim()) === String(zone.id)) {
+                                // Колонка "Следующий полив" — девятая (index 8)
+                                const nextCell = cells[8];
+                                if (nextCell) nextCell.textContent = nextText;
+                            }
+                        }
+                    });
+                } catch (e) { /* ignore single zone error */ }
+            });
+            await Promise.all(promises);
+        } catch (e) { /* ignore group update error */ }
+    }
 </script>
 {% endblock %}

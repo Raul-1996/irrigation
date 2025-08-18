@@ -1,16 +1,5 @@
-from typing import Dict, Any
-from irrigation_scheduler import get_scheduler
+"""Deprecated thin wrappers around scheduler. Kept for legacy imports."""
 
-
-def reschedule_program(program: Dict[str, Any]) -> None:
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.schedule_program(program['id'], program)
-
-
-def cancel_program(program_id: int) -> None:
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.cancel_program(program_id)
+# Intentionally left empty; use irrigation_scheduler.get_scheduler() directly.
 
 

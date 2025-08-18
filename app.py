@@ -1,6 +1,5 @@
 from flask import Flask, render_template, jsonify, request, send_file, redirect, url_for, session
 from datetime import datetime, timedelta
-import random
 import json
 from database import db
 import os
@@ -94,38 +93,7 @@ def compress_image(image_data, max_size=(800, 600), quality=85):
         logger.error(f"Ошибка сжатия изображения: {e}")
         return image_data
 
-# Генерация демо-данных расхода воды
-def generate_water_data(days, zone):
-    labels, data, log_rows = [], [], []
-    for i in range(days - 1, -1, -1):
-        d = datetime.now() - timedelta(days=i)
-        day = d.strftime('%Y-%m-%d')
-        labels.append(f"{d.day:02d}.{d.month:02d}")
-        usage = random.randint(10, 60)
-        data.append(usage)
-        log_rows.append({
-            'date': day,
-            'zone': 'all' if zone == 'all' else zone,
-            'usage': usage
-        })
-    return {'labels': labels, 'data': data, 'logRows': log_rows}
-
-def login_required(view):
-    def wrapper(*args, **kwargs):
-        # Deprecated: use role-based decorators below
-        return view(*args, **kwargs)
-    wrapper.__name__ = view.__name__
-    return wrapper
-
-def admin_required(view):
-    def wrapper(*args, **kwargs):
-        if app.config.get('TESTING'):
-            return view(*args, **kwargs)
-        if session.get('role') != 'admin':
-            return redirect(url_for('login'))
-        return view(*args, **kwargs)
-    wrapper.__name__ = view.__name__
-    return wrapper
+# удалены устаревшие функции generate_water_data/login_required/admin_required
 
 
 _SCHEDULER_INIT_DONE = False
@@ -344,21 +312,7 @@ def api_scheduler_init():
 MAP_FOLDER = MAP_DIR  # использовать новый каталог media/maps
 
 
-@csrf.exempt
-@app.route('/api/login', methods=['POST'])
-def api_login():
-    try:
-        data = request.get_json() or {}
-        password = data.get('password', '')
-        stored_hash = db.get_password_hash()
-        if stored_hash and check_password_hash(stored_hash, password):
-            session['logged_in'] = True
-            session['role'] = 'admin'
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'message': 'Неверный пароль'}), 401
-    except Exception as e:
-        logger.error(f"Ошибка входа: {e}")
-        return jsonify({'success': False, 'message': 'Ошибка входа'}), 500
+# удалён дублирующий эндпойнт /api/login (оставлен в routes/auth.py)
 
 
 @app.route('/api/auth/status')
@@ -499,6 +453,15 @@ def api_zone_next_watering(zone_id):
         # Рассчитываем ближайшую дату/время полива за ближайшие 14 дней
         weekday_map = { 'Пн':0, 'Вт':1, 'Ср':2, 'Чт':3, 'Пт':4, 'Сб':5, 'Вс':6 }
         now = datetime.now()
+        # Если зона отложена до будущего времени — считаем расписание ПОСЛЕ этой даты
+        try:
+            pu = zone.get('postpone_until')
+            if pu:
+                pu_dt = datetime.strptime(pu, '%Y-%m-%d %H:%M')
+                if pu_dt > now:
+                    now = pu_dt
+        except Exception:
+            pass
         best_dt = None
         best_payload = None
 
@@ -1281,7 +1244,7 @@ def api_status():
             status = 'waiting'
             current_zone = None
         
-        # Определяем следующее время запуска
+        # Определяем следующее время запуска (после возможной отложки группы)
         next_start = None
         if group_zones:
             # Ищем программы полива для этой группы
@@ -1301,8 +1264,21 @@ def api_status():
                     group_programs.append(program)
             
             if group_programs:
-                # Вычислим ближайшее стартовое время среди программ на 14 дней
-                now = datetime.now()
+                # Базовое "сейчас"
+                search_from = datetime.now()
+                # Если есть отложенные зоны в группе — начинаем поиск строго ПОСЛЕ конца паузы
+                try:
+                    pu_candidates = []
+                    for z in group_zones:
+                        pu = z.get('postpone_until')
+                        if pu:
+                            pu_dt = datetime.strptime(pu, '%Y-%m-%d %H:%M')
+                            if pu_dt > search_from:
+                                pu_candidates.append(pu_dt)
+                    if pu_candidates:
+                        search_from = max(pu_candidates)
+                except Exception:
+                    pass
                 best_dt = None
                 for program in group_programs:
                     program_time = datetime.strptime(program['time'], '%H:%M').time()
@@ -1312,11 +1288,11 @@ def api_status():
                         continue
                     prog_weekdays = set(int(d) for d in (program['days'] if isinstance(program['days'], list) else json.loads(program['days'])))
                     for add_days in range(0, 14):
-                        day_date = now.date() + timedelta(days=add_days)
+                        day_date = search_from.date() + timedelta(days=add_days)
                         if ((day_date.weekday() + 0) % 7) not in prog_weekdays:
                             continue
                         dt_candidate = datetime.combine(day_date, program_time)
-                        if dt_candidate > now and (best_dt is None or dt_candidate < best_dt):
+                        if dt_candidate > search_from and (best_dt is None or dt_candidate < best_dt):
                             best_dt = dt_candidate
                             break
                 if best_dt:
@@ -1324,14 +1300,26 @@ def api_status():
         
         # Определяем отложенный полив
         postpone_until = None
+        group_postpone_reason = None
         if app.config.get('EMERGENCY_STOP'):
             postpone_until = 'До отмены аварийной остановки'
+            group_postpone_reason = 'emergency'
         elif postponed_zones:
             postpone_until = postponed_zones[0]['postpone_until']
+            # Берём причину первой отложенной зоны (приоритет ручной приостановки)
+            try:
+                reasons = [z.get('postpone_reason') for z in postponed_zones if z.get('postpone_reason')]
+                if 'manual' in reasons:
+                    group_postpone_reason = 'manual'
+                elif reasons:
+                    group_postpone_reason = reasons[0]
+            except Exception:
+                pass
         elif rain_manual is True:
             # Если включен ручной дождь, откладываем полив до конца текущего дня
             postpone_until = datetime.now().strftime('%Y-%m-%d 23:59')
             status = 'postponed'
+            group_postpone_reason = 'rain'
         
         groups_status.append({
             'id': group_id,
@@ -1339,7 +1327,8 @@ def api_status():
             'status': status,
             'current_zone': current_zone,
             'postpone_until': postpone_until,
-            'next_start': next_start
+            'next_start': next_start,
+            'postpone_reason': group_postpone_reason
         })
     
     # Проверяем состояние отложенного полива
@@ -1373,16 +1362,20 @@ def api_postpone():
     """API для отложенного полива"""
     data = request.get_json()
     group_id = data.get('group_id')
+    try:
+        group_id = int(group_id)
+    except Exception:
+        return jsonify({"success": False, "message": "Некорректный идентификатор группы"}), 400
     days = data.get('days', 1)
     action = data.get('action')  # 'postpone' или 'cancel'
     
     if action == 'cancel':
         # Отменяем отложенный полив для всех зон группы
         zones = db.get_zones()
-        group_zones = [z for z in zones if z['group_id'] == group_id]
+        group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
         
         for zone in group_zones:
-            db.update_zone_postpone(zone['id'], None)
+            db.update_zone_postpone(zone['id'], None, None)
         
         db.add_log('postpone_cancel', json.dumps({"group": group_id}))
         return jsonify({"success": True, "message": "Отложенный полив отменен"})
@@ -1393,10 +1386,11 @@ def api_postpone():
         postpone_until = postpone_date.strftime('%Y-%m-%d 23:59')
         
         zones = db.get_zones()
-        group_zones = [z for z in zones if z['group_id'] == group_id]
+        group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
         
         for zone in group_zones:
-            db.update_zone_postpone(zone['id'], postpone_until)
+            # Фиксируем причину: ручная приостановка пользователем
+            db.update_zone_postpone(zone['id'], postpone_until, 'manual')
         
         db.add_log('postpone_set', json.dumps({
             "group": group_id, 

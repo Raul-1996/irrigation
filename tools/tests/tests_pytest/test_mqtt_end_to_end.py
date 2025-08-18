@@ -23,28 +23,14 @@ class MqttSniffer:
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
-        self.client.on_disconnect = self._on_disconnect
-        self.connected = False
-        self.subscribed = False
 
     def _on_connect(self, cl, u, flags, rc, properties=None):
-        print(f"MQTT Sniffer connected with result code {rc}")
-        self.connected = True
-        if rc == 0:
-            # Subscribe to all topics
-            for t in self.topics:
-                try:
-                    options = mqtt.SubscribeOptions(qos=0, noLocal=False)
-                    cl.subscribe(t, options=options)
-                except Exception:
-                    cl.subscribe(t, qos=0)
-            self.subscribed = True
-            print(f"MQTT Sniffer subscribed to {len(self.topics)} topics")
-
-    def _on_disconnect(self, cl, u, rc):
-        print(f"MQTT Sniffer disconnected with result code {rc}")
-        self.connected = False
-        self.subscribed = False
+        for t in self.topics:
+            try:
+                options = mqtt.SubscribeOptions(qos=0, noLocal=False)
+                cl.subscribe(t, options=options)
+            except Exception:
+                cl.subscribe(t, qos=0)
 
     def _on_message(self, cl, u, msg):
         try:
@@ -55,32 +41,11 @@ class MqttSniffer:
             payload = msg.payload.decode('utf-8', 'ignore').strip()
         except Exception:
             payload = str(msg.payload)
-        normalized_topic = str(topic if str(topic).startswith('/') else '/' + str(topic))
-        print(f"MQTT Sniffer received: {normalized_topic} = {payload}")
-        self.events.put((normalized_topic, payload))
+        self.events.put((str(topic if str(topic).startswith('/') else '/' + str(topic)), payload))
 
     def start(self):
-        try:
-            self.client.connect(self.host, self.port, 5)
-            self.client.loop_start()
-            # Wait for connection
-            for _ in range(50):  # Wait up to 5 seconds
-                if self.connected:
-                    break
-                time.sleep(0.1)
-            if not self.connected:
-                raise Exception("Failed to connect to MQTT broker")
-            # Wait for subscription
-            for _ in range(50):  # Wait up to 5 seconds
-                if self.subscribed:
-                    break
-                time.sleep(0.1)
-            if not self.subscribed:
-                raise Exception("Failed to subscribe to MQTT topics")
-            print(f"MQTT Sniffer ready, listening on {self.host}:{self.port}")
-        except Exception as e:
-            print(f"MQTT Sniffer start failed: {e}")
-            raise
+        self.client.connect(self.host, self.port, 5)
+        self.client.loop_start()
 
     def stop(self):
         try:
@@ -114,7 +79,7 @@ def test_e2e_mqtt_commands(client):
     topics = [f"/devices/wb-mr6cv3_{dev}/controls/K{ch}" for dev in range(101, 106) for ch in range(1, 7)]
     sniffer = MqttSniffer(host, port, topics)
     sniffer.start()
-    time.sleep(0.5)  # Give more time for connection
+    time.sleep(0.2)
 
     # Pick an existing MQTT server id
     servers = client.get('/api/mqtt/servers').get_json().get('servers', [])
@@ -132,14 +97,12 @@ def test_e2e_mqtt_commands(client):
     z2 = 2
     t2 = build_topic(z2)
     client.post(f"/api/zones/{z2}/mqtt/start")
-    time.sleep(0.5)  # Increased wait time
+    time.sleep(0.3)
     ev = sniffer.drain()
-    print(f"Zone {z2} start events: {ev}")
     assert (t2, '1') in ev, f"zone {z2} start missing in {ev}"
     client.post(f"/api/zones/{z2}/mqtt/stop")
-    time.sleep(0.5)  # Increased wait time
+    time.sleep(0.3)
     ev = sniffer.drain()
-    print(f"Zone {z2} stop events: {ev}")
     assert (t2, '0') in ev, f"zone {z2} stop missing in {ev}"
 
     # 2) Exclusive group start: ON for chosen zone, OFF for others in group
@@ -150,11 +113,9 @@ def test_e2e_mqtt_commands(client):
     chosen_topic = build_topic(chosen)
     # ensure a few peers in same group
     peers = [zid for zid in group_zone_ids if zid != chosen][:3]
-    print(f"Starting group {group_id}, chosen zone {chosen}, peers {peers}")
     client.post(f"/api/groups/{group_id}/start-zone/{chosen}")
-    time.sleep(1.0)  # Increased wait time for group operations
+    time.sleep(0.8)
     ev = sniffer.drain()
-    print(f"Group start events: {ev}")
     # Allow that OFF may be published before or after ON due to concurrent publishes
     ons = [x for x in ev if x == (chosen_topic, '1')]
     assert ons, f"chosen ON missing in {ev}"
@@ -164,15 +125,14 @@ def test_e2e_mqtt_commands(client):
 
     # 3) Group stop publishes OFF for all group zones
     client.post(f"/api/groups/{group_id}/stop")
-    time.sleep(0.8)  # Increased wait time
+    time.sleep(0.5)
     ev = sniffer.drain()
-    print(f"Group stop events: {ev}")
     for z in [zid for zid in [chosen] + peers]:
         assert (build_topic(z), '0') in ev
 
     # 4) Emergency stop publishes OFF for all zones
     client.post('/api/emergency-stop')
-    time.sleep(0.8)  # Increased wait time
+    time.sleep(0.5)
     ev = dict()
     for t, p in sniffer.drain():
         ev.setdefault(t, []).append(p)
