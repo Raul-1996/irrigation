@@ -441,11 +441,12 @@
             // Форматируем список зон
             const zonesText = formatZonesList(program.zones);
             
+            const startText = computeProgramStartText(program);
             const finishText = computeProgramFinishText(program);
             tr.innerHTML = `
                 <td>${program.id}</td>
                 <td>${program.name}</td>
-                <td>${program.time}</td>
+                <td>${startText}</td>
                 <td>${finishText}</td>
                 <td>${formatDays(program.days)}</td>
                 <td>${zonesText}</td>
@@ -463,33 +464,48 @@
         return (days||[]).map(d=>map[Number(d)||0]).join(', ');
     }
 
-    function computeProgramFinishText(program){
+    function computeProgramGroupTimes(program){
         try{
             const time = program.time; // 'HH:MM'
             const [h,m] = time.split(':').map(Number);
             const startMin = h*60+m;
-            // сгруппируем зоны по group_id
-            const zonesByGroup = {};
-            (program.zones||[]).forEach(zid=>{
+            // последовательный порядок — по возрастанию id зон
+            const sortedZones = (program.zones||[]).slice().sort((a,b)=>a-b);
+            const groupInfo = {}; // gid -> {start, total}
+            let cumulative = 0;
+            for (const zid of sortedZones){
                 const z = zonesData.find(x=>x.id===zid);
-                if(!z) return;
+                if(!z) continue;
                 const gid = z.group_id;
-                zonesByGroup[gid] = zonesByGroup[gid]||[];
-                zonesByGroup[gid].push(zid);
-            });
-            const parts=[];
-            for (const gid of Object.keys(zonesByGroup)){
-                const list = zonesByGroup[gid];
-                let total=0;
-                list.forEach(zid=>{ const z = zonesData.find(x=>x.id===zid); total += Number(z?.duration||0); });
-                const endMin = startMin + total;
-                const hh = String(Math.floor((endMin%1440)/60)).padStart(2,'0');
-                const mm = String(endMin%60).padStart(2,'0');
-                const gname = (gid==999)?'БЕЗ ПОЛИВА':(((window.groupsCache||[]).find(g=>g.id==gid)||{}).name||`Группа ${gid}`);
-                parts.push(`${gname}: ${hh}:${mm}`);
+                if (!groupInfo[gid]){
+                    groupInfo[gid] = { start: startMin + cumulative, total: 0 };
+                }
+                const dur = Number(z.duration||0);
+                groupInfo[gid].total += dur;
+                cumulative += dur;
             }
-            return parts.join('<br/>');
-        }catch(e){return '—'}
+            const rows = [];
+            const fmt = (min)=>String(Math.floor((min%1440)/60)).padStart(2,'0')+":"+String(min%60).padStart(2,'0');
+            for (const gid of Object.keys(groupInfo)){
+                const info = groupInfo[gid];
+                const gname = (gid==999)?'БЕЗ ПОЛИВА':(((window.groupsCache||[]).find(g=>g.id==gid)||{}).name||`Группа ${gid}`);
+                rows.push({ gid: Number(gid), name: gname, start: fmt(info.start), end: fmt(info.start + info.total) });
+            }
+            rows.sort((a,b)=>a.gid-b.gid);
+            return rows;
+        }catch(e){return []}
+    }
+
+    function computeProgramStartText(program){
+        const rows = computeProgramGroupTimes(program);
+        if (rows.length<=1) return program.time;
+        return rows.map(r=>`${r.name}: ${r.start}`).join('<br/>');
+    }
+
+    function computeProgramFinishText(program){
+        const rows = computeProgramGroupTimes(program);
+        if (rows.length===0) return '—';
+        return rows.map(r=>`${r.name}: ${r.end}`).join('<br/>');
     }
     
     // Мастер создания/редактирования
