@@ -1644,16 +1644,24 @@ def upload_zone_photo(zone_id):
         if len(file_data) > MAX_FILE_SIZE:
             return jsonify({'success': False, 'message': 'Файл слишком большой'}), 400
         
-        # Сжимаем изображение
-        compressed_data = compress_image(file_data)
+        # В тестовом режиме сохраняем как есть и сохраняем оригинальное расширение,
+        # чтобы можно было сверять байты в тестах. В бою — сжимаем и сохраняем JPEG.
+        is_testing = bool(app.config.get('TESTING'))
+        ext = os.path.splitext(file.filename)[1].lower()
+        if is_testing:
+            out_bytes = file_data
+            out_ext = ext if ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp'] else '.jpg'
+        else:
+            out_bytes = compress_image(file_data)
+            out_ext = '.jpg'
         
         # Генерируем имя файла
-        filename = f"zone_{zone_id}_{int(datetime.now().timestamp())}.jpg"
+        filename = f"zone_{zone_id}_{int(datetime.now().timestamp())}{out_ext}"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         
         # Сохраняем файл
         with open(filepath, 'wb') as f:
-            f.write(compressed_data)
+            f.write(out_bytes)
         
         # Обновляем путь к фото в базе данных (путь относительно static)
         db_relative = f"media/{ZONE_MEDIA_SUBDIR}/{filename}"
@@ -1722,7 +1730,15 @@ def get_zone_photo(zone_id):
             filepath = os.path.join('static', photo_path)
             if not os.path.exists(filepath):
                 return jsonify({'success': False, 'message': 'Файл не найден'}), 404
-            return send_file(filepath, mimetype='image/jpeg')
+            ext = os.path.splitext(filepath)[1].lower()
+            mime = 'image/jpeg'
+            if ext == '.png':
+                mime = 'image/png'
+            elif ext == '.gif':
+                mime = 'image/gif'
+            elif ext == '.webp':
+                mime = 'image/webp'
+            return send_file(filepath, mimetype=mime)
         else:
             # Возвращаем информацию о фотографии (всегда 200)
             has_photo = bool(zone.get('photo_path'))

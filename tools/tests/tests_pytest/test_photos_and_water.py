@@ -4,15 +4,36 @@ from PIL import Image
 
 
 def make_image_bytes(idx: int = 0):
-    # Try to read preloaded zone images from tools/tests/images: zone_1.*, zone_2.*, zone_3.*
+    # Try to read preloaded zone images from tools/tests/images.
     here = os.path.abspath(os.path.dirname(__file__))
     images_dir = os.path.abspath(os.path.join(here, os.pardir, 'images'))
-    base = f"zone_{idx}."
+    try:
+        files = os.listdir(images_dir)
+    except Exception:
+        files = []
+    # Prefer exact known patterns first
+    candidates = []
     for ext in ['jpg','jpeg','png','webp','gif']:
-        p = os.path.join(images_dir, base+ext)
+        candidates.append(f"zone_{idx}.{ext}")
+        candidates.append(f"{idx}_zone.{ext}")
+        candidates.append(f"{idx} zone.{ext}")
+        candidates.append(f"zone {idx}.{ext}")
+        candidates.append(f"Zone{idx}.{ext}")
+    for name in candidates:
+        p = os.path.join(images_dir, name)
         if os.path.exists(p):
             with open(p, 'rb') as f:
                 return f.read()
+    # Fallback: any file which contains both 'zone' and the idx in name
+    for fname in files:
+        low = fname.lower()
+        if 'zone' in low and str(idx) in low:
+            p = os.path.join(images_dir, fname)
+            try:
+                with open(p, 'rb') as f:
+                    return f.read()
+            except Exception:
+                pass
     # Fallback synthetic image
     img = Image.new('RGB', (128, 128), color=(123, 20, 220))
     buf = io.BytesIO()
