@@ -294,37 +294,15 @@
             font-size: 0.8rem; 
             padding: 0.4rem 0.3rem;
         }
-        .status-grid {
-            grid-template-columns: 1fr;
-            gap: 0.8rem;
-        }
-        .card {
-            min-height: 160px;
-            padding: 0.6rem;
-        }
-        .top-bar {
-            flex-direction: column;
-            gap: 0.3rem;
-        }
-        .info-box {
-            flex: 1 1 auto;
-            width: 100%;
-        }
-        .legend-grid {
-            grid-template-columns: 1fr;
-            gap: 0.3rem;
-        }
-        .zones-table {
-            font-size: 0.75rem;
-        }
-        .zones-table th,
-        .zones-table td {
-            padding: 0.3rem 0.2rem;
-        }
-        .emergency {
-            width: 100%;
-            margin: 0.5rem 0;
-        }
+        .status-grid { grid-template-columns: 1fr; gap: 0.8rem; }
+        .card { min-height: 160px; padding: 0.6rem; }
+        .top-bar { flex-direction: column; gap: 0.3rem; }
+        .info-box { flex: 1 1 auto; width: 100%; }
+        .legend-grid { grid-template-columns: 1fr; gap: 0.3rem; }
+        .zones-section { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .zones-table { font-size: 0.75rem; min-width: 640px; }
+        .zones-table th, .zones-table td { padding: 0.3rem 0.2rem; }
+        .emergency { width: 100%; margin: 0.5rem 0; }
     }
 
     /* Модальное окно для просмотра фотографий */
@@ -347,8 +325,8 @@
         flex-direction: column;
         align-items: center;
         gap: 12px;
-        max-width: 90%;
-        max-height: 90%;
+        max-width: min(90vw, 720px);
+        max-height: 90vh;
     }
 
     .photo-modal-actions {

@@ -5,6 +5,7 @@ from database import db
 import os
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageOps
+from typing import Optional, Tuple
 import io
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
@@ -103,7 +104,7 @@ def compress_image(image_data, max_size=(800, 600), quality=85):
         logger.error(f"Ошибка сжатия изображения: {e}")
         return image_data
 
-def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WEBP', quality: int = 90, lossless: bool = False) -> tuple[bytes, str]:
+def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WEBP', quality: int = 90, lossless: bool = False, target_size: Optional[Tuple[int, int]] = None) -> Tuple[bytes, str]:
     """Нормализация изображения: авто-поворот по EXIF, приведение к RGB, масштабирование
     с сохранением пропорций по большей стороне и сохранение в выбранный формат.
     Возвращает (bytes, extension_with_dot).
@@ -117,12 +118,23 @@ def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WE
             pass
         if img.mode in ('RGBA', 'LA', 'P'):
             img = img.convert('RGB')
-        # масштабирование
+        # масштабирование/приведение размера
         w, h = img.size
-        if max(w, h) > max_long_side:
-            scale = max_long_side / float(max(w, h))
+        if target_size:
+            tw, th = target_size
+            # cover: растянуть до заполнения и откадрировать центр
+            scale = max(tw / w, th / h)
             new_size = (int(w * scale), int(h * scale))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
+            # центрированный кроп
+            left = max(0, (img.size[0] - tw) // 2)
+            top = max(0, (img.size[1] - th) // 2)
+            img = img.crop((left, top, left + tw, top + th))
+        else:
+            if max(w, h) > max_long_side:
+                scale = max_long_side / float(max(w, h))
+                new_size = (int(w * scale), int(h * scale))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
         out = io.BytesIO()
         fmt_upper = fmt.upper()
         if fmt_upper == 'WEBP':
@@ -1682,16 +1694,31 @@ def upload_zone_photo(zone_id):
             return jsonify({'success': False, 'message': 'Файл слишком большой'}), 400
         
         # Нормализация: в TESTING сохраняем исходные байты (для байтового сравнения),
-        # в обычном режиме приводим к WEBP (или JPEG, если нужно) с автоориентацией и ресайзом.
+        # в обычном режиме приводим к единому размеру и формату WEBP.
         is_testing = bool(app.config.get('TESTING'))
         if is_testing:
             out_bytes = file_data
             out_ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
         else:
-            out_bytes, out_ext = normalize_image(file_data, max_long_side=1024, fmt='WEBP', quality=90)
+            # единый размер, например 800x600 (Landscape). Для вертикальных — кроп по центру
+            out_bytes, out_ext = normalize_image(file_data, target_size=(800, 600), fmt='WEBP', quality=90)
         
-        # Генерируем имя файла
-        filename = f"zone_{zone_id}_{int(datetime.now().timestamp())}{out_ext}"
+        # Перемещаем старый файл в OLD
+        try:
+            current = db.get_zone(zone_id)
+            old_rel = (current or {}).get('photo_path')
+            if old_rel:
+                old_abs = os.path.join('static', old_rel)
+                if os.path.exists(old_abs):
+                    old_dir = os.path.join(UPLOAD_FOLDER, 'OLD')
+                    os.makedirs(old_dir, exist_ok=True)
+                    os.replace(old_abs, os.path.join(old_dir, os.path.basename(old_abs)))
+        except Exception:
+            pass
+
+        # Генерируем стандартное имя
+        base_name = f"ZONE_{zone_id}"
+        filename = f"{base_name}{out_ext}"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         
         # Сохраняем файл
