@@ -1,4 +1,5 @@
 import io
+import os
 
 
 def test_login_and_auth_status(client):
@@ -36,9 +37,28 @@ def test_map_upload_and_get(client):
     # GET map when empty should succeed
     r0 = client.get('/api/map')
     assert r0.status_code == 200
-    # POST new map
-    img = io.BytesIO(b'\xff\xd8\xff\xe0' + b'0' * 2048)
-    r = client.post('/api/map', data={'file': (img, 'zones.jpg')}, content_type='multipart/form-data')
+    # Try to use real map from tools/tests/images if present
+    here = os.path.abspath(os.path.dirname(__file__))
+    images_dir = os.path.abspath(os.path.join(here, os.pardir, 'images'))
+    candidates = ['map.jpg', 'map.jpeg', 'map.png', 'map.webp', 'map.gif']
+    file_obj = None
+    fname = None
+    for name in candidates:
+        p = os.path.join(images_dir, name)
+        if os.path.exists(p):
+            file_obj = open(p, 'rb')
+            fname = name
+            break
+    if file_obj is None:
+        file_obj = io.BytesIO(b'\xff\xd8\xff\xe0' + b'0' * 2048)
+        fname = 'zones.jpg'
+    try:
+        r = client.post('/api/map', data={'file': (file_obj, fname)}, content_type='multipart/form-data')
+    finally:
+        try:
+            file_obj.close()
+        except Exception:
+            pass
     assert r.status_code in (200, 400)
 
 

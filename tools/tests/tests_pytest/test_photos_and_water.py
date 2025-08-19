@@ -1,9 +1,20 @@
 import io
+import os
 from PIL import Image
 
 
-def make_image_bytes():
-    img = Image.new('RGB', (64, 64), color=(123, 20, 220))
+def make_image_bytes(idx: int = 0):
+    # Try to read preloaded zone images from tools/tests/images: zone_1.*, zone_2.*, zone_3.*
+    here = os.path.abspath(os.path.dirname(__file__))
+    images_dir = os.path.abspath(os.path.join(here, os.pardir, 'images'))
+    base = f"zone_{idx}."
+    for ext in ['jpg','jpeg','png','webp','gif']:
+        p = os.path.join(images_dir, base+ext)
+        if os.path.exists(p):
+            with open(p, 'rb') as f:
+                return f.read()
+    # Fallback synthetic image
+    img = Image.new('RGB', (128, 128), color=(123, 20, 220))
     buf = io.BytesIO()
     img.save(buf, format='JPEG')
     buf.seek(0)
@@ -18,20 +29,20 @@ def test_water_endpoint(client):
 
 
 def test_photo_lifecycle(client):
-    # upload
-    data = {
-        'photo': (io.BytesIO(make_image_bytes()), 'test.jpg')
-    }
-    r = client.post('/api/zones/1/photo', data=data, content_type='multipart/form-data')
-    assert r.status_code in (200, 404)
-    if r.status_code == 404:
-        return
+    # upload images for first three zones if available
+    for zid in (1, 2, 3):
+        data = {
+            'photo': (io.BytesIO(make_image_bytes(zid)), f'zone_{zid}.jpg')
+        }
+        r = client.post(f'/api/zones/{zid}/photo', data=data, content_type='multipart/form-data')
+        assert r.status_code in (200, 404)
+        if r.status_code == 404:
+            continue
+        payload = r.get_json()
+        assert payload.get('success') is True
+        info = client.get(f'/api/zones/{zid}/photo')
+        assert info.status_code == 200
 
-    payload = r.get_json()
-    assert payload.get('success') is True
-    # info
-    info = client.get('/api/zones/1/photo')
-    assert info.status_code == 200
-    # delete
-    d = client.delete('/api/zones/1/photo')
-    assert d.status_code in (200, 404)
+    # Single-zone delete test for zone 1
+    r = client.delete('/api/zones/1/photo')
+    assert r.status_code in (200, 404)
