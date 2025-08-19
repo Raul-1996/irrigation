@@ -97,6 +97,40 @@ def main():
         "Проверка импортов модулей"
     )
     test_results.append(("Проверка импортов", success, output))
+
+    # 7. Загрузка тестовых изображений в живой сервер (если доступен)
+    try:
+        import requests
+        base = os.environ.get('WB_BASE_URL', 'http://127.0.0.1:8080')
+        # map image
+        images_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'images'))
+        def pick(first_names):
+            for name in first_names:
+                p = os.path.join(images_dir, name)
+                if os.path.exists(p):
+                    return p
+            return None
+        map_path = pick(['map.jpg','map.jpeg','map.png','map.webp','map.gif'])
+        if map_path:
+            with open(map_path, 'rb') as f:
+                r = requests.post(f"{base}/api/map", files={'file': (os.path.basename(map_path), f)})
+                print('📎 Upload map ->', r.status_code, r.text[:120])
+        # zone photos 1..3
+        for zid in (1,2,3):
+            zp = pick([f'zone_{zid}.jpg', f'zone_{zid}.jpeg', f'zone_{zid}.png', f'zone_{zid}.webp', f'zone_{zid}.gif'])
+            if not zp:
+                continue
+            with open(zp, 'rb') as f:
+                r = requests.post(f"{base}/api/zones/{zid}/photo", files={'photo': (os.path.basename(zp), f)})
+                print(f'📎 Upload zone {zid} photo ->', r.status_code)
+            # quick verify
+            inf = requests.get(f"{base}/api/zones/{zid}/photo")
+            try:
+                print('ℹ️ ', zid, inf.json())
+            except Exception:
+                print('ℹ️ ', zid, inf.status_code)
+    except Exception as e:
+        print('⚠️  Не удалось загрузить тестовые изображения на живой сервер:', e)
     
     # Создание отчета
     print(f"\n{'='*80}")
