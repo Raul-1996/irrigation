@@ -4,7 +4,7 @@ import json
 from database import db
 import os
 from werkzeug.utils import secure_filename
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
@@ -102,6 +102,43 @@ def compress_image(image_data, max_size=(800, 600), quality=85):
     except Exception as e:
         logger.error(f"Ошибка сжатия изображения: {e}")
         return image_data
+
+def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WEBP', quality: int = 90, lossless: bool = False) -> tuple[bytes, str]:
+    """Нормализация изображения: авто-поворот по EXIF, приведение к RGB, масштабирование
+    с сохранением пропорций по большей стороне и сохранение в выбранный формат.
+    Возвращает (bytes, extension_with_dot).
+    """
+    try:
+        img = Image.open(io.BytesIO(image_data))
+        # автоориентация по EXIF
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGB')
+        # масштабирование
+        w, h = img.size
+        if max(w, h) > max_long_side:
+            scale = max_long_side / float(max(w, h))
+            new_size = (int(w * scale), int(h * scale))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        fmt_upper = fmt.upper()
+        if fmt_upper == 'WEBP':
+            img.save(out, format='WEBP', quality=quality, lossless=lossless, method=6)
+            ext = '.webp'
+        elif fmt_upper in ('JPEG', 'JPG'):
+            img.save(out, format='JPEG', quality=quality, optimize=True)
+            ext = '.jpg'
+        else:
+            img.save(out, format='PNG', optimize=True)
+            ext = '.png'
+        out.seek(0)
+        return out.getvalue(), ext
+    except Exception:
+        # fallback — вернуть исходные данные
+        return image_data, '.jpg'
 
 # удалены устаревшие функции generate_water_data/login_required/admin_required
 
@@ -1644,16 +1681,14 @@ def upload_zone_photo(zone_id):
         if len(file_data) > MAX_FILE_SIZE:
             return jsonify({'success': False, 'message': 'Файл слишком большой'}), 400
         
-        # В тестовом режиме сохраняем как есть и сохраняем оригинальное расширение,
-        # чтобы можно было сверять байты в тестах. В бою — сжимаем и сохраняем JPEG.
+        # Нормализация: в TESTING сохраняем исходные байты (для байтового сравнения),
+        # в обычном режиме приводим к WEBP (или JPEG, если нужно) с автоориентацией и ресайзом.
         is_testing = bool(app.config.get('TESTING'))
-        ext = os.path.splitext(file.filename)[1].lower()
         if is_testing:
             out_bytes = file_data
-            out_ext = ext if ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp'] else '.jpg'
+            out_ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
         else:
-            out_bytes = compress_image(file_data)
-            out_ext = '.jpg'
+            out_bytes, out_ext = normalize_image(file_data, max_long_side=1024, fmt='WEBP', quality=90)
         
         # Генерируем имя файла
         filename = f"zone_{zone_id}_{int(datetime.now().timestamp())}{out_ext}"
@@ -1710,6 +1745,44 @@ def delete_zone_photo(zone_id):
     except Exception as e:
         logger.error(f"Ошибка удаления фото: {e}")
         return jsonify({'success': False, 'message': 'Ошибка удаления'}), 500
+
+@csrf.exempt
+@app.route('/api/zones/<int:zone_id>/photo/rotate', methods=['POST'])
+def rotate_zone_photo(zone_id):
+    """Повернуть фотографию зоны на кратный 90 угол (в градусах)."""
+    try:
+        zone = db.get_zone(zone_id)
+        if not zone:
+            return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
+        angle = 90
+        try:
+            data = request.get_json(silent=True) or {}
+            angle = int(data.get('angle', 90))
+        except Exception:
+            angle = 90
+        photo_path = zone.get('photo_path')
+        if not photo_path:
+            return jsonify({'success': False, 'message': 'Фото отсутствует'}), 404
+        filepath = os.path.join('static', photo_path)
+        if not os.path.exists(filepath):
+            return jsonify({'success': False, 'message': 'Файл не найден'}), 404
+        try:
+            with Image.open(filepath) as img:
+                img = img.rotate(-angle, expand=True)
+                # Перезаписываем в исходном формате
+                fmt = img.format or 'JPEG'
+                img.save(filepath, format=fmt)
+        except Exception as e:
+            logger.error(f"rotate failed: {e}")
+            return jsonify({'success': False, 'message': 'Ошибка обработки изображения'}), 500
+        try:
+            db.add_log('photo_rotate', json.dumps({'zone': zone_id, 'angle': angle}))
+        except Exception:
+            pass
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Ошибка поворота фото: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка поворота'}), 500
 
 @app.route('/api/zones/<int:zone_id>/photo', methods=['GET'])
 def get_zone_photo(zone_id):

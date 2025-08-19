@@ -1066,7 +1066,11 @@
                             `<div class="no-photo" onclick="uploadPhoto(${zone.id})">📷</div>`
                         }
                         ${zone.photo_path ? 
-                            `<button class="photo-delete-btn" onclick="deletePhoto(${zone.id})">Удалить</button>` :
+                            `<div style="display:flex; gap:.3rem; margin-top:.2rem;">
+                                <button class="photo-delete-btn" onclick="deletePhoto(${zone.id})">Удалить</button>
+                                <button class="photo-upload-btn" onclick="rotatePhoto(${zone.id}, 90)">⟳ 90°</button>
+                                <button class="photo-upload-btn" onclick="rotatePhoto(${zone.id}, -90)">⟲ -90°</button>
+                            </div>` :
                             `<button class="photo-upload-btn" onclick="uploadPhoto(${zone.id})">Загрузить</button>`
                         }
                     </div>
@@ -1838,6 +1842,19 @@
             console.error('Ошибка удаления фотографии:', error);
             showNotification('Ошибка удаления фотографии', 'error');
         }
+    }
+
+    async function rotatePhoto(zoneId, angle){
+        try{
+            const r = await fetch(`/api/zones/${zoneId}/photo/rotate`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({angle})});
+            const j = await r.json();
+            if (j && j.success){
+                showNotification('Фото повернуто', 'success');
+                await loadData();
+            } else {
+                showNotification((j && j.message)||'Не удалось повернуть фото', 'error');
+            }
+        }catch(e){ showNotification('Ошибка поворота фото', 'error'); }
     }
     
     function showPhotoModal(photoUrl) {
