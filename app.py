@@ -312,6 +312,10 @@ class EnvMonitor:
         self.stop(); self.cfg = cfg or {}
         if mqtt is None:
             return
+        try:
+            logger.info("EnvMonitor starting with cfg=%s", cfg)
+        except Exception:
+            pass
         # Temperature
         tcfg = (self.cfg.get('temp') or {})
         if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
@@ -330,16 +334,21 @@ class EnvMonitor:
                             logger.info(f"EnvMonitor temp RX topic={getattr(msg,'topic',topic_t)} value={self.temp_value}")
                         except Exception:
                             pass
+                    def _on_connect_temp(c, u, flags, reason_code, properties=None):
+                        try:
+                            c.subscribe(topic_t, qos=0)
+                            logger.info("EnvMonitor temp subscribed %s", topic_t)
+                        except Exception:
+                            pass
                     cl.on_message = _on_msg_temp
-                    cl.on_connect = lambda c, u, f=None, rc=0, p=None: (
-                        (c.subscribe(topic_t, qos=0))
-                    )
+                    cl.on_connect = _on_connect_temp
+                    cl.loop_start()
+                    # Also subscribe immediately in case already connected
                     try:
-                        options = mqtt.SubscribeOptions(qos=0, noLocal=False)
-                        cl.subscribe(topic_t, options=options)
-                    except Exception:
                         cl.subscribe(topic_t, qos=0)
-                    cl.loop_start(); self.temp_client = cl
+                    except Exception:
+                        pass
+                    self.temp_client = cl
                 except Exception:
                     logger.exception('EnvMonitor temp start failed')
         # Humidity
@@ -360,16 +369,20 @@ class EnvMonitor:
                             logger.info(f"EnvMonitor hum RX topic={getattr(msg,'topic',topic_h)} value={self.hum_value}")
                         except Exception:
                             pass
+                    def _on_connect_hum(c, u, flags, reason_code, properties=None):
+                        try:
+                            c.subscribe(topic_h, qos=0)
+                            logger.info("EnvMonitor hum subscribed %s", topic_h)
+                        except Exception:
+                            pass
                     cl.on_message = _on_msg_hum
-                    cl.on_connect = lambda c, u, f=None, rc=0, p=None: (
-                        (c.subscribe(topic_h, qos=0))
-                    )
+                    cl.on_connect = _on_connect_hum
+                    cl.loop_start()
                     try:
-                        options = mqtt.SubscribeOptions(qos=0, noLocal=False)
-                        cl.subscribe(topic_h, options=options)
-                    except Exception:
                         cl.subscribe(topic_h, qos=0)
-                    cl.loop_start(); self.hum_client = cl
+                    except Exception:
+                        pass
+                    self.hum_client = cl
                 except Exception:
                     logger.exception('EnvMonitor hum start failed')
 
