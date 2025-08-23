@@ -158,9 +158,140 @@ def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WE
 _SCHEDULER_INIT_DONE = False
 _INITIAL_SYNC_DONE = False
 
+_RAIN_MONITOR_STARTED = False
+_RAIN_MONITOR_CFG_SIG = None
+
+class RainMonitor:
+    def __init__(self):
+        self.client = None
+        self.cfg = None
+        self.is_rain = None
+
+    def stop(self):
+        try:
+            if self.client is not None:
+                self.client.loop_stop()
+                self.client.disconnect()
+        except Exception:
+            pass
+        self.client = None
+
+    def start(self, cfg: dict):
+        self.stop()
+        self.cfg = cfg or {}
+        if not self.cfg.get('enabled'):
+            return
+        if mqtt is None:
+            return
+        try:
+            topic = (self.cfg.get('topic') or '').strip()
+            sid = self.cfg.get('server_id')
+            if not topic or not sid:
+                return
+            server = db.get_mqtt_server(int(sid))
+            if not server:
+                return
+            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            if server.get('username'):
+                cl.username_pw_set(server.get('username'), server.get('password') or None)
+            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+            cl.on_message = self._on_message
+            cl.on_connect = lambda c, u, f=None, rc=0, p=None: self._on_connect(c, topic)
+            self.client = cl
+            cl.loop_start()
+            logger.info("RainMonitor started")
+        except Exception:
+            logger.exception('RainMonitor start failed')
+
+    def _on_connect(self, client, topic: str):
+        try:
+            try:
+                options = mqtt.SubscribeOptions(qos=0, noLocal=False)
+                client.subscribe(topic, options=options)
+            except Exception:
+                client.subscribe(topic, qos=0)
+            logger.info(f"RainMonitor subscribed {topic}")
+        except Exception:
+            logger.exception('RainMonitor subscribe failed')
+
+    def _interpret_payload(self, payload: str) -> Optional[bool]:
+        s = (payload or '').strip().lower()
+        val = None
+        if s in ('1', 'true', 'on', 'yes'):
+            val = True
+        elif s in ('0', 'false', 'off', 'no'):
+            val = False
+        else:
+            try:
+                val = bool(int(s))
+            except Exception:
+                val = None
+        if val is None:
+            return None
+        sensor_type = (self.cfg.get('type') or 'NO').upper()
+        # NO: дождь -> вход True; NC: дождь -> вход False
+        return (not val) if sensor_type == 'NC' else val
+
+    def _on_message(self, client, u, msg):
+        try:
+            try:
+                payload = msg.payload.decode('utf-8', 'ignore')
+            except Exception:
+                payload = str(msg.payload)
+            rain_now = self._interpret_payload(payload)
+            if rain_now is None:
+                return
+            self.is_rain = bool(rain_now)
+            if self.is_rain:
+                self._apply_rain_postpone()
+        except Exception:
+            logger.exception('RainMonitor on_message failed')
+
+    def _apply_rain_postpone(self):
+        try:
+            groups = db.get_groups()
+            target_groups = [int(g['id']) for g in groups if db.get_group_use_rain(int(g['id'])) and int(g['id']) != 999]
+            if not target_groups:
+                return
+            postpone_until = datetime.now().strftime('%Y-%m-%d 23:59:59')
+            zones = db.get_zones()
+            for z in zones:
+                if int(z.get('group_id') or 0) in target_groups:
+                    db.update_zone_postpone(int(z['id']), postpone_until, 'rain')
+            scheduler = get_scheduler()
+            if scheduler:
+                for gid in target_groups:
+                    try:
+                        scheduler.cancel_group_jobs(int(gid))
+                    except Exception:
+                        pass
+            # Публикуем OFF и сбрасываем state
+            for z in zones:
+                try:
+                    if int(z.get('group_id') or 0) not in target_groups:
+                        continue
+                    sid = z.get('mqtt_server_id')
+                    topic = (z.get('topic') or '').strip()
+                    if mqtt and sid and topic:
+                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
+                    db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
+                except Exception:
+                    pass
+            try:
+                db.add_log('rain_postpone', json.dumps({'groups': target_groups, 'until': postpone_until}))
+            except Exception:
+                pass
+        except Exception:
+            logger.exception('RainMonitor apply postpone failed')
+
+rain_monitor = RainMonitor()
+
 @app.before_request
 def _init_scheduler_before_request():
-    global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE
+    global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE, _RAIN_MONITOR_STARTED, _RAIN_MONITOR_CFG_SIG
     # Default role is "user" (no password)
     if 'role' not in session:
         session['role'] = 'user'
@@ -197,6 +328,18 @@ def _init_scheduler_before_request():
             logger.info("Initial sync: all zones set to OFF and MQTT OFF published")
         except Exception as e:
             logger.error(f"Initial sync failed: {e}")
+
+    # Инициализация/перезапуск RainMonitor при изменении конфигурации
+    try:
+        if not app.config.get('TESTING'):
+            cfg = db.get_rain_config()
+            sig = (cfg.get('enabled'), cfg.get('topic'), cfg.get('type'), cfg.get('server_id'))
+            if (not _RAIN_MONITOR_STARTED) or sig != _RAIN_MONITOR_CFG_SIG:
+                rain_monitor.start(cfg)
+                _RAIN_MONITOR_STARTED = True
+                _RAIN_MONITOR_CFG_SIG = sig
+    except Exception:
+        pass
 
 
 app.register_blueprint(status_bp)
@@ -477,21 +620,25 @@ def api_scheduler_status():
         logger.error(f"Ошибка получения статуса планировщика: {e}")
         return jsonify({'error': 'Ошибка получения статуса'}), 500
 
-@app.route('/api/rain-toggle', methods=['POST'])
-def api_rain_toggle():
-    """Ручной тумблер датчика дождя для тестирования: {'on': true|false}"""
+@app.route('/api/rain', methods=['GET', 'POST'])
+def api_rain_config():
+    """GET — вернуть конфигурацию датчика дождя; POST — обновить.
+    { enabled: bool, topic: str, type: 'NO'|'NC', server_id?: int }
+    """
     try:
+        if request.method == 'GET':
+            return jsonify({'success': True, 'config': db.get_rain_config()})
         data = request.get_json() or {}
-        on = data.get('on')
-        if on is True:
-            app.config['RAIN_MANUAL'] = True
-        elif on is False:
-            app.config['RAIN_MANUAL'] = False
-        else:
-            app.config['RAIN_MANUAL'] = None
-        return jsonify({'success': True, 'rain_manual': app.config['RAIN_MANUAL']})
+        cfg = {
+            'enabled': bool(data.get('enabled')),
+            'topic': (data.get('topic') or '').strip(),
+            'type': data.get('type') if data.get('type') in ('NO', 'NC') else 'NO',
+            'server_id': data.get('server_id')
+        }
+        ok = db.set_rain_config(cfg)
+        return jsonify({'success': bool(ok)})
     except Exception as e:
-        logger.error(f"Ошибка переключения статуса дождя: {e}")
+        logger.error(f"rain config failed: {e}")
         return jsonify({'success': False}), 500
 
 @app.route('/api/zones/<int:zone_id>/next-watering')
@@ -664,8 +811,20 @@ def api_groups():
 @app.route('/api/groups/<int:group_id>', methods=['PUT'])
 @csrf.exempt
 def api_update_group(group_id):
-    data = request.get_json()
-    if db.update_group(group_id, data['name']):
+    data = request.get_json() or {}
+    # Обновление имени
+    updated = False
+    if 'name' in data:
+        if db.update_group(group_id, data['name']):
+            updated = True
+    # Обновление флага использования датчика дождя
+    if 'use_rain_sensor' in data:
+        try:
+            ok = db.set_group_use_rain(group_id, bool(data.get('use_rain_sensor')))
+            updated = updated or ok
+        except Exception as e:
+            logger.error(f"Ошибка обновления use_rain_sensor группы {group_id}: {e}")
+    if updated:
         db.add_log('group_edit', json.dumps({"group": group_id, "name": data['name']}))
         return jsonify({"success": True})
     return ('Group not found', 404)
@@ -1257,8 +1416,7 @@ def api_water():
 
 @app.route('/api/status')
 def api_status():
-    # Получаем ручной переключатель дождя заранее (используется ниже)
-    rain_manual = app.config.get('RAIN_MANUAL')
+    rain_cfg = db.get_rain_config()
     
     # Получаем зоны и группы из БД
     zones = db.get_zones()
@@ -1387,8 +1545,8 @@ def api_status():
                     group_postpone_reason = reasons[0]
             except Exception:
                 pass
-        elif rain_manual is True:
-            # Если включен ручной дождь, откладываем полив до конца текущего дня
+        elif rain_cfg.get('enabled') and db.get_group_use_rain(int(group_id)):
+            # При активном датчике дождя откладываем до конца дня
             postpone_until = datetime.now().strftime('%Y-%m-%d 23:59:59')
             status = 'postponed'
             group_postpone_reason = 'rain'
@@ -1403,21 +1561,8 @@ def api_status():
             'postpone_reason': group_postpone_reason
         })
     
-    # Проверяем состояние отложенного полива
-    rain_sensor_status = 'дождя нет (полив разрешен)'
-    zones = db.get_zones()
-    postponed_zones = [z for z in zones if z.get('postpone_until')]
-    
-    # Для тестирования убираем дождь
-    # if postponed_zones:
-    #     # Если есть отложенные зоны, показываем статус дождя
-    #     rain_sensor_status = 'дождь (полив отложен)'
-    
-    # Отладочный ручной тумблер дождя (для тестирования)
-    if rain_manual is True:
-        rain_sensor_status = 'дождь (полив отложен)'
-    elif rain_manual is False:
-        rain_sensor_status = 'дождя нет (полив разрешен)'
+    # Статус датчика дождя
+    rain_sensor_status = 'датчик дождя: ' + ('включен' if rain_cfg.get('enabled') else 'выключен')
 
     return jsonify({
         'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),

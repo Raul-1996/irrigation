@@ -829,6 +829,27 @@
     <button class="save-all-btn" onclick="saveEarlyOff()">Сохранить</button>
     <div class="muted" style="color:#333;">Допустимо: 0–15 секунд. Выключение выполняется заранее, запуск следующей зоны остаётся по расписанию.</div>
   </div>
+  <hr style="margin:12px 0;">
+  <div style="color:#333;">
+    <h5 style="margin:0 0 6px 0;">Датчик дождя (глобально)</h5>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <label><input type="checkbox" id="rain-enabled"> Использовать датчик дождя</label>
+      <label>Тип контактов:
+        <select id="rain-type">
+          <option value="NO">NO (нормально разомкнут)</option>
+          <option value="NC">NC (нормально замкнут)</option>
+        </select>
+      </label>
+      <label>MQTT сервер:
+        <select id="rain-server"></select>
+      </label>
+      <label>MQTT топик:
+        <input id="rain-topic" placeholder="/devices/wb-mr6cv3_101/controls/Input 1" style="min-width:280px;">
+      </label>
+      <button class="save-all-btn" onclick="saveRainConfig()">Сохранить датчик дождя</button>
+    </div>
+    <div class="muted">Значения: true/false. При дожде полив групп, где датчик разрешён, будет остановлен и отложен до конца дня.</div>
+  </div>
 </div>
 
 <!-- Модальные окна -->
@@ -972,20 +993,23 @@
     // Загрузка данных
     async function loadData() {
         try {
-            const [zonesRes, groupsRes, mqttRes] = await Promise.all([
+            const [zonesRes, groupsRes, mqttRes, rainRes] = await Promise.all([
                 api.get('/api/zones'),
                 api.get('/api/groups'),
-                api.get('/api/mqtt/servers')
+                api.get('/api/mqtt/servers'),
+                api.get('/api/rain')
             ]);
             zonesData = zonesRes;
             groupsData = groupsRes;
             window.mqttServers = (mqttRes && mqttRes.servers) ? mqttRes.servers : [];
+            window.rainConfig = (rainRes && rainRes.config) ? rainRes.config : {enabled:false, type:'NO', topic:'', server_id:null};
             
             renderZonesTable();
             renderGroupsGrid();
             loadGroupSelectors();
             updateZonesCount();
             await loadEarlyOff();
+            initRainUi();
         } catch (error) {
             console.error('Ошибка загрузки данных:', error);
             showNotification('Ошибка загрузки данных', 'error');
@@ -1111,6 +1135,10 @@
                 <div class="group-actions">
                     <button class="save-btn" onclick="saveGroup(${group.id})" disabled>Сохранить</button>
                     <button class="delete-btn" onclick="deleteGroup(${group.id})">Удалить</button>
+                    <label style="display:inline-flex; gap:6px; align-items:center; margin-left:8px;">
+                      <input type="checkbox" class="group-use-rain" ${group.use_rain_sensor ? 'checked' : ''} onchange="toggleGroupUseRain(${group.id}, this.checked)">
+                      Использовать датчик дождя
+                    </label>
                 </div>
             `;
             container.appendChild(card);
@@ -1156,11 +1184,59 @@
         if (bulkMqtt) {
             bulkMqtt.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
         }
+        // Rain server selector
+        const rs = document.getElementById('rain-server');
+        if (rs) {
+            rs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+        }
     }
     
     // Обновление счетчика зон
     function updateZonesCount() {
         document.getElementById('zones-count').textContent = zonesData.length;
+    }
+
+    function initRainUi() {
+        try {
+            const cfg = window.rainConfig || {enabled:false, type:'NO', topic:'', server_id:null};
+            document.getElementById('rain-enabled').checked = !!cfg.enabled;
+            document.getElementById('rain-type').value = (cfg.type==='NC'?'NC':'NO');
+            document.getElementById('rain-topic').value = cfg.topic || '';
+            const rs = document.getElementById('rain-server');
+            if (rs && cfg.server_id) rs.value = String(cfg.server_id);
+        } catch {}
+    }
+
+    async function saveRainConfig() {
+        try {
+            const enabled = document.getElementById('rain-enabled').checked;
+            const type = document.getElementById('rain-type').value;
+            const topic = document.getElementById('rain-topic').value;
+            const rs = document.getElementById('rain-server');
+            const server_id = rs && rs.value ? parseInt(rs.value) : null;
+            const resp = await fetch('/api/rain', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled, type, topic, server_id})});
+            const data = await resp.json();
+            if (data && data.success) {
+                showNotification('Конфигурация датчика дождя сохранена', 'success');
+            } else {
+                showNotification('Не удалось сохранить конфигурацию', 'error');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения конфигурации', 'error');
+        }
+    }
+
+    async function toggleGroupUseRain(groupId, enabled) {
+        try {
+            const ok = await api.put(`/api/groups/${groupId}`, { name: groupsData.find(g=>g.id===groupId).name, use_rain_sensor: !!enabled });
+            if (ok) {
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) groupsData[gi].use_rain_sensor = !!enabled;
+                showNotification('Настройка датчика дождя для группы сохранена', 'success');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения настройки группы', 'error');
+        }
     }
     
     // Обновление зоны (отметка как измененной)

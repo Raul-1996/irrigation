@@ -113,6 +113,7 @@ class IrrigationDB:
                 self._migrate_add_zone_mqtt_server_id(conn)
                 self._migrate_ensure_special_group(conn)
                 self._migrate_add_zones_indexes(conn)
+                self._migrate_add_group_rain_flag(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -235,6 +236,18 @@ class IrrigationDB:
                 logger.info("Добавлено поле last_watering_time в таблицу zones")
         except Exception as e:
             logger.error(f"Ошибка миграции last_watering_time: {e}")
+
+    def _migrate_add_group_rain_flag(self, conn):
+        """Миграция: флаг использования датчика дождя на уровне группы"""
+        try:
+            cursor = conn.execute("PRAGMA table_info(groups)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'use_rain_sensor' not in columns:
+                conn.execute('ALTER TABLE groups ADD COLUMN use_rain_sensor INTEGER DEFAULT 0')
+                conn.commit()
+                logger.info("Добавлено поле use_rain_sensor в таблицу groups")
+        except Exception as e:
+            logger.error(f"Ошибка миграции use_rain_sensor: {e}")
 
     def _migrate_add_mqtt_servers(self, conn):
         """Миграция: таблица MQTT серверов"""
@@ -596,6 +609,81 @@ class IrrigationDB:
                 conn.commit()
         except Exception as e:
             logger.error(f"Ошибка установки расписания scheduled_start_time для группы {group_id}: {e}")
+
+    # ===== Настройки (settings) — универсальные геттеры/сеттеры и конфиг датчика дождя =====
+    def get_setting_value(self, key: str) -> Optional[str]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', (key,))
+                row = cur.fetchone()
+                return str(row['value']) if row and row['value'] is not None else None
+        except Exception as e:
+            logger.error(f"Ошибка чтения settings[{key}]: {e}")
+            return None
+
+    def set_setting_value(self, key: str, value: Optional[str]) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                if value is None:
+                    conn.execute('DELETE FROM settings WHERE key = ?', (key,))
+                else:
+                    conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (key, str(value)))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка записи settings[{key}]: {e}")
+            return False
+
+    def get_rain_config(self) -> Dict[str, Any]:
+        """Глобальная конфигурация датчика дождя."""
+        enabled = self.get_setting_value('rain.enabled')
+        topic = self.get_setting_value('rain.topic') or ''
+        sensor_type = self.get_setting_value('rain.type') or 'NO'
+        server_id = self.get_setting_value('rain.server_id')
+        return {
+            'enabled': str(enabled or '0') in ('1', 'true', 'True'),
+            'topic': topic,
+            'type': sensor_type if sensor_type in ('NO', 'NC') else 'NO',
+            'server_id': int(server_id) if server_id and str(server_id).isdigit() else None,
+        }
+
+    def set_rain_config(self, cfg: Dict[str, Any]) -> bool:
+        ok = True
+        ok &= self.set_setting_value('rain.enabled', '1' if cfg.get('enabled') else '0')
+        if 'topic' in cfg:
+            ok &= self.set_setting_value('rain.topic', cfg.get('topic') or '')
+        if 'type' in cfg:
+            t = cfg.get('type')
+            ok &= self.set_setting_value('rain.type', t if t in ('NO', 'NC') else 'NO')
+        if 'server_id' in cfg:
+            sid = cfg.get('server_id')
+            ok &= self.set_setting_value('rain.server_id', str(int(sid)) if sid is not None else None)
+        return bool(ok)
+
+    def get_group_use_rain(self, group_id: int) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT use_rain_sensor FROM groups WHERE id = ? LIMIT 1', (group_id,))
+                row = cur.fetchone()
+                if not row:
+                    return False
+                val = row['use_rain_sensor']
+                return bool(int(val or 0))
+        except Exception as e:
+            logger.error(f"Ошибка чтения use_rain_sensor для группы {group_id}: {e}")
+            return False
+
+    def set_group_use_rain(self, group_id: int, enabled: bool) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('UPDATE groups SET use_rain_sensor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (1 if enabled else 0, group_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка записи use_rain_sensor для группы {group_id}: {e}")
+            return False
 
     def clear_scheduled_for_zone_group_peers(self, zone_id: int, group_id: int) -> None:
         """Очистить scheduled_start_time у всех зон группы, кроме указанной"""

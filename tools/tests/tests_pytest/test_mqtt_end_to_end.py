@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import socket
 import queue
 import pytest
 
@@ -74,6 +75,13 @@ def build_topic(zone_id: int) -> str:
 def test_e2e_mqtt_commands(client):
     host = os.environ.get('TEST_MQTT_HOST', '127.0.0.1')
     port = int(os.environ.get('TEST_MQTT_PORT', '1883'))
+
+    # Skip gracefully if no broker is running (CI/local without MQTT)
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            pass
+    except Exception:
+        pytest.skip(f"MQTT broker {host}:{port} is not running")
 
     # Subscribe to all device topics: 101..105/K1..K6
     topics = [f"/devices/wb-mr6cv3_{dev}/controls/K{ch}" for dev in range(101, 106) for ch in range(1, 7)]

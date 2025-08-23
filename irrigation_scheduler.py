@@ -14,6 +14,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 import os
 try:
     import paho.mqtt.client as mqtt
@@ -44,6 +45,11 @@ class IrrigationScheduler:
         self.scheduler.start()
         self.is_running = True
         logger.info("Планировщик полива (APScheduler) запущен")
+        # Плановый джоб: регулярная очистка истекших отложек
+        try:
+            self.schedule_postpone_sweeper()
+        except Exception as e:
+            logger.error(f"Не удалось запланировать очистку отложек: {e}")
 
     def stop(self):
         if not self.is_running:
@@ -51,6 +57,59 @@ class IrrigationScheduler:
         self.scheduler.shutdown(wait=False)
         self.is_running = False
         logger.info("Планировщик полива остановлен")
+
+    # --- Отложки: парсинг и фоновая очистка ---
+    @staticmethod
+    def _parse_dt(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                continue
+        return None
+
+    def clear_expired_postpones(self) -> None:
+        """Сбрасывает отложенный полив для зон, у которых срок истек."""
+        try:
+            zones = self.db.get_zones()
+            now = datetime.now()
+            expired: List[int] = []
+            for z in zones:
+                pu = z.get('postpone_until')
+                if not pu:
+                    continue
+                dt = self._parse_dt(pu)
+                if dt is None or now >= dt:
+                    expired.append(int(z['id']))
+            for zone_id in expired:
+                try:
+                    self.db.update_zone_postpone(zone_id, None, None)
+                    try:
+                        self.db.add_log('postpone_expired', json.dumps({'zone': zone_id}))
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.error(f"Не удалось сбросить отложку для зоны {zone_id}: {e}")
+            if expired:
+                logger.info(f"Сброшены истекшие отложки зон: {expired}")
+        except Exception as e:
+            logger.error(f"Ошибка очистки истекших отложек: {e}")
+
+    def schedule_postpone_sweeper(self) -> None:
+        """Планирует периодическую очистку истекших отложек (каждую минуту)."""
+        try:
+            # первая отработка — немедленно
+            self.scheduler.add_job(
+                self.clear_expired_postpones,
+                trigger=IntervalTrigger(minutes=1),
+                id='postpone_sweeper',
+                replace_existing=True,
+                next_run_time=datetime.now()
+            )
+        except Exception as e:
+            logger.error(f"Не удалось добавить джоб postpone_sweeper: {e}")
 
     def _stop_zone(self, zone_id: int):
         try:
@@ -108,16 +167,13 @@ class IrrigationScheduler:
                 # Проверяем отложенный полив
                 postpone_until = zone.get('postpone_until')
                 if postpone_until:
-                    try:
-                        postpone_dt = datetime.strptime(postpone_until, '%Y-%m-%d %H:%M')
-                        if datetime.now() < postpone_dt:
-                            logger.info(f"Зона {zone_id} отложена до {postpone_until}")
-                            continue
-                        else:
-                            self.db.update_zone_postpone(zone_id, None)
-                    except Exception:
-                        # Если формат неожиданный — сбрасываем отложку
-                        self.db.update_zone_postpone(zone_id, None)
+                    postpone_dt = self._parse_dt(postpone_until)
+                    if postpone_dt is None or datetime.now() >= postpone_dt:
+                        # истекло или непарсибельно — сбрасываем
+                        self.db.update_zone_postpone(zone_id, None, None)
+                    else:
+                        logger.info(f"Зона {zone_id} отложена до {postpone_until}")
+                        continue
 
                 duration = int(zone['duration'])
 
@@ -584,6 +640,11 @@ def init_scheduler(db: IrrigationDB):
     if scheduler is None:
         scheduler = IrrigationScheduler(db)
         scheduler.start()
+        # Очистим истекшие отложки на старте
+        try:
+            scheduler.clear_expired_postpones()
+        except Exception:
+            pass
         scheduler.load_programs()
     return scheduler
 

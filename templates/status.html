@@ -371,11 +371,6 @@
     </div>
     <div class="info-box">
         <strong>Датчик дождя:</strong> <span id="rain-value">—</span>
-        <div style="margin-top:.3rem; display:flex; gap:.3rem; justify-content:center;">
-            <button class="btn-secondary" onclick="setRain(false)">Нет дождя</button>
-            <button class="btn-secondary" onclick="setRain(true)">Дождь</button>
-            <button class="btn-secondary" onclick="setRain(null)">Авто</button>
-        </div>
     </div>
 </div>
 
@@ -654,25 +649,6 @@
                 loadStatusData();
             }
         } catch (e) {}
-    }
-
-    async function setRain(on) {
-        try {
-            const res = await fetch('/api/rain-toggle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ on })
-            });
-            const data = await res.json();
-            if (data && data.success) {
-                showNotification('Статус дождя обновлен', 'success');
-                await loadStatusData();
-            } else {
-                showNotification('Ошибка обновления статуса дождя', 'error');
-            }
-        } catch (e) {
-            showNotification('Ошибка сети при обновлении статуса дождя', 'error');
-        }
     }
     
     async function updateZonesTable() {

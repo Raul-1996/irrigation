@@ -13,7 +13,7 @@ from collections import deque
 from datetime import datetime
 import threading
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 
 from flask import Flask, jsonify, request, Response
 import paho.mqtt.client as mqtt
@@ -44,7 +44,7 @@ HTTP_HOST = os.getenv("EMULATOR_HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("EMULATOR_HTTP_PORT", "5055"))
 
 
-def build_topics(device_ids: List[str], num_channels: int) -> List[str]:
+def build_relay_topics(device_ids: List[str], num_channels: int) -> List[str]:
     topics: List[str] = []
     for dev in device_ids:
         for ch in range(1, num_channels + 1):
@@ -52,14 +52,46 @@ def build_topics(device_ids: List[str], num_channels: int) -> List[str]:
     return topics
 
 
-ALL_TOPICS: List[str] = build_topics(DEVICE_IDS, NUM_CHANNELS)
+# Inputs for wb-mr6cv3_101: Input 0..6 and Input N counter
+INPUT_DEVICE_ID = os.getenv("EMULATOR_INPUT_DEVICE_ID", "101")
+INPUT_RANGE_ENV = os.getenv("EMULATOR_INPUT_RANGE", "0-6")  # inclusive
+try:
+    _start, _end = INPUT_RANGE_ENV.split("-", 1)
+    INPUT_INDEX_START = int(_start)
+    INPUT_INDEX_END = int(_end)
+except Exception:
+    INPUT_INDEX_START, INPUT_INDEX_END = 0, 6
+
+
+def build_input_topics(device_id: str, start_idx: int, end_idx: int) -> Tuple[List[str], List[str]]:
+    switch_topics: List[str] = []
+    counter_topics: List[str] = []
+    for i in range(start_idx, end_idx + 1):
+        switch_topics.append(f"/devices/wb-mr6cv3_{device_id}/controls/Input {i}")
+        counter_topics.append(f"/devices/wb-mr6cv3_{device_id}/controls/Input {i} counter")
+    return switch_topics, counter_topics
+
+
+RELAY_TOPICS: List[str] = build_relay_topics(DEVICE_IDS, NUM_CHANNELS)
+INPUT_SWITCH_TOPICS, INPUT_COUNTER_TOPICS = build_input_topics(INPUT_DEVICE_ID, INPUT_INDEX_START, INPUT_INDEX_END)
+ALL_TOPICS: List[str] = RELAY_TOPICS + INPUT_SWITCH_TOPICS + INPUT_COUNTER_TOPICS
+RELAY_TOPICS_SET: Set[str] = set(RELAY_TOPICS)
+INPUT_SWITCH_TOPICS_SET: Set[str] = set(INPUT_SWITCH_TOPICS)
+INPUT_COUNTER_TOPICS_SET: Set[str] = set(INPUT_COUNTER_TOPICS)
 
 # ------------------------------
 # Shared State
 # ------------------------------
 
 state_lock = threading.Lock()
-topic_to_state: Dict[str, str] = {t: "0" for t in ALL_TOPICS}
+# Initialize relays as "0", input switches as "false", counters as "0"
+topic_to_state: Dict[str, str] = {}
+for t in RELAY_TOPICS:
+    topic_to_state[t] = "0"
+for t in INPUT_SWITCH_TOPICS:
+    topic_to_state[t] = "false"
+for t in INPUT_COUNTER_TOPICS:
+    topic_to_state[t] = "0"
 last_echo_ts: Dict[str, float] = {}
 log_lock = threading.Lock()
 log_buffer: deque[str] = deque(maxlen=1000)
@@ -74,9 +106,9 @@ def log_event(message: str) -> None:
     print(line)
 
 
-def apply_local_state(topic: str, value: str) -> None:
+def apply_local_state_raw(topic: str, value: str) -> None:
     t = normalize_topic(topic)
-    want = "1" if value == "1" else "0"
+    want = value
     with state_lock:
         previous = topic_to_state.get(t, "0")
         changed = (want != previous)
@@ -91,12 +123,12 @@ def normalize_topic(t: str) -> str:
     return t if t.startswith("/") else "/" + t
 
 
-def normalize_payload(raw: bytes) -> str:
-    try:
-        payload = raw.decode("utf-8", "ignore").strip()
-    except Exception:
-        payload = "0"
-    return "1" if payload in ("1", "true", "on", "ON", "True", "YES", "yes") else "0"
+def normalize_bool_10(raw: str) -> str:
+    return "1" if raw in ("1", "true", "on", "ON", "True", "YES", "yes") else "0"
+
+
+def normalize_bool_true_false(raw: str) -> str:
+    return "true" if raw in ("1", "true", "on", "ON", "True", "YES", "yes") else "false"
 
 # ------------------------------
 # MQTT Clients (device + controller)
@@ -147,11 +179,27 @@ def device_on_connect(client: mqtt.Client, userdata, flags, reason_code, propert
 
 def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
     topic = normalize_topic(msg.topic)
-    want = normalize_payload(msg.payload)
     try:
-        raw = msg.payload.decode('utf-8','ignore')
+        raw = msg.payload.decode('utf-8', 'ignore').strip()
     except Exception:
         raw = str(msg.payload)
+
+    # Determine desired state based on topic type
+    if topic in RELAY_TOPICS_SET:
+        want = normalize_bool_10(raw)  # '1'/'0'
+    elif topic in INPUT_SWITCH_TOPICS_SET:
+        want = normalize_bool_true_false(raw)  # 'true'/'false'
+    elif topic in INPUT_COUNTER_TOPICS_SET:
+        try:
+            # Allow integer values only; fall back to previous if invalid
+            want = str(int(raw))
+        except Exception:
+            with state_lock:
+                want = topic_to_state.get(topic, "0")
+    else:
+        # Unknown topic: store raw
+        want = raw
+
     log_event(f"device: RX topic={topic} payload={raw!r} -> want={want}")
 
     with state_lock:
@@ -193,7 +241,22 @@ def device_connect() -> None:
 
 def publish_command(topic: str, value: str) -> None:
     t = normalize_topic(topic)
-    v = "1" if value == "1" else "0"
+    raw = (value or "").strip()
+
+    # Normalize value per topic kind
+    if t in RELAY_TOPICS_SET:
+        v = normalize_bool_10(raw)
+    elif t in INPUT_SWITCH_TOPICS_SET:
+        v = normalize_bool_true_false(raw)
+    elif t in INPUT_COUNTER_TOPICS_SET:
+        try:
+            v = str(int(raw))
+        except Exception:
+            with state_lock:
+                v = topic_to_state.get(t, "0")
+    else:
+        v = raw
+
     log_event(f"controller: CMD publish topic={t} payload={v}")
     info = None
     try:
@@ -211,7 +274,7 @@ def publish_command(topic: str, value: str) -> None:
         ctrl_connected = False
     publish_failed = (info is None) or (getattr(info, 'rc', 0) != 0)
     if (not dev_connected) or (not ctrl_connected) or publish_failed:
-        apply_local_state(t, v)
+        apply_local_state_raw(t, v)
 
 # ------------------------------
 # Flask app
@@ -231,21 +294,33 @@ def add_no_cache_headers(resp: Response):
     return resp
 
 
-def build_structure() -> List[Tuple[str, List[Tuple[str, str]]]]:
-    # Returns list of (device_id, [ (topic, state), ...channels ]) preserving order
-    structure: List[Tuple[str, List[Tuple[str, str]]]] = []
+def build_structure() -> Tuple[List[Tuple[str, List[Tuple[str, str]]]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+    # Returns:
+    #  - list of (device_id, [ (topic, state) ]) for relay channels
+    #  - list of (topic, state) for input switches (wb-mr6cv3_101)
+    #  - list of (topic, state) for input counters (wb-mr6cv3_101)
+    relay_structure: List[Tuple[str, List[Tuple[str, str]]]] = []
+    switch_rows: List[Tuple[str, str]] = []
+    counter_rows: List[Tuple[str, str]] = []
     with state_lock:
         for dev in DEVICE_IDS:
             channels: List[Tuple[str, str]] = []
             for ch in range(1, NUM_CHANNELS + 1):
                 topic = f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
                 channels.append((topic, topic_to_state.get(topic, "0")))
-            structure.append((dev, channels))
-    return structure
+            relay_structure.append((dev, channels))
+
+        for t in INPUT_SWITCH_TOPICS:
+            switch_rows.append((t, topic_to_state.get(t, "false")))
+        for t in INPUT_COUNTER_TOPICS:
+            counter_rows.append((t, topic_to_state.get(t, "0")))
+    return relay_structure, switch_rows, counter_rows
 
 
 @app.get("/")
 def index():
+    relay_structure, input_switch_rows, input_counter_rows = build_structure()
+
     cards_html = "\n".join([
         (
             "  <div class=\"card\">\n"
@@ -265,8 +340,32 @@ def index():
             ])
             + "\n      </tbody>\n    </table>\n  </div>"
         )
-        for dev in DEVICE_IDS
+        for dev, _channels in relay_structure
     ])
+
+    # Inputs (only wb-mr6cv3_101 by default)
+    inputs_html = (
+        "  <div class=\"card\">\n"
+        f"    <div class=\"device-title\">wb-mr6cv3_{INPUT_DEVICE_ID} — Inputs</div>\n"
+        "    <table>\n      <thead><tr><th>Контрол</th><th>Статус</th><th>Топик</th><th>Действие</th></tr></thead>\n      <tbody>\n"
+        + "\n".join([
+            (
+                "        <tr>\n          <td>" + t.split("/")[-1] + "</td>\n          <td><span class=\"lamp off\" id=\"lamp-"
+                + base64.b64encode(t.encode()).decode()
+                + "\"></span> <span id=\"status-"
+                + base64.b64encode(t.encode()).decode()
+                + "\">false</span></td>\n          <td class=\"topic\">" + t + "</td>\n          <td class=\"controls\">\n            <button class=\"btn\" data-topic=\"" + t + "\" data-action=\"true\">true</button>\n            <button class=\"btn\" data-topic=\"" + t + "\" data-action=\"false\">false</button>\n          </td>\n        </tr>"
+            ) for (t, _s) in input_switch_rows
+        ])
+        + "\n".join([
+            (
+                "        <tr>\n          <td>" + t.split("/")[-1] + "</td>\n          <td><span id=\"status-"
+                + base64.b64encode(t.encode()).decode()
+                + "\">0</span></td>\n          <td class=\"topic\">" + t + "</td>\n          <td class=\"controls\">\n            <button class=\"btn\" data-counter-topic=\"" + t + "\">+1</button>\n          </td>\n        </tr>"
+            ) for (t, _s) in input_counter_rows
+        ])
+        + "\n      </tbody>\n    </table>\n  </div>"
+    )
 
     page = """
 <!DOCTYPE html>
@@ -317,6 +416,13 @@ def index():
         body: JSON.stringify({ topic, value })
       });
     }
+    async function counterIncr(topic) {
+      await fetch('/api/counter-incr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic })
+      });
+    }
     async function toggleAll(value) {
       await fetch('/api/toggle-all', {
         method: 'POST',
@@ -329,12 +435,14 @@ def index():
         const id = btoa(topic);
         const lamp = document.getElementById('lamp-' + id);
         const status = document.getElementById('status-' + id);
-        if (!lamp || !status) continue;
-        if (String(val) === '1') {
-          lamp.classList.add('on'); lamp.classList.remove('off'); status.textContent = '1';
-        } else {
-          lamp.classList.add('off'); lamp.classList.remove('on'); status.textContent = '0';
+        if (!status) continue;
+        const sval = String(val);
+        const isOn = (sval === '1') || (sval.toLowerCase && sval.toLowerCase() === 'true');
+        if (lamp) {
+          if (isOn) { lamp.classList.add('on'); lamp.classList.remove('off'); }
+          else { lamp.classList.add('off'); lamp.classList.remove('on'); }
         }
+        status.textContent = sval;
       }
     }
     async function refresh() {
@@ -344,12 +452,21 @@ def index():
       refresh();
       setInterval(refresh, 1000);
       document.body.addEventListener('click', function(e) {
-        const el = e.target.closest('[data-topic][data-action]');
-        if (!el) return;
-        const topic = el.getAttribute('data-topic');
-        const action = el.getAttribute('data-action');
-        const value = action === 'on' ? '1' : '0';
-        toggle(topic, value).then(() => setTimeout(refresh, 150));
+        const btn = e.target.closest('[data-topic][data-action]');
+        if (btn) {
+          const topic = btn.getAttribute('data-topic');
+          const action = btn.getAttribute('data-action');
+          // action can be 'on'/'off' for K-channels or 'true'/'false' for inputs
+          const value = (action === 'on') ? '1' : (action === 'off') ? '0' : action;
+          toggle(topic, value).then(() => setTimeout(refresh, 150));
+          return;
+        }
+        const cnt = e.target.closest('[data-counter-topic]');
+        if (cnt) {
+          const topic = cnt.getAttribute('data-counter-topic');
+          counterIncr(topic).then(() => setTimeout(refresh, 150));
+          return;
+        }
       });
       // Global controls
       const allOn = document.getElementById('all-on');
@@ -380,7 +497,7 @@ def index():
     <button class=\"btn primary\" id=\"all-on\">Включить все (1)</button>
     <button class=\"btn danger\" id=\"all-off\">Выключить все (0)</button>
   </div>
-  <div class=\"grid\">""" + cards_html + """\n  </div>
+  <div class=\"grid\">""" + cards_html + "\n" + inputs_html + """\n  </div>
   <div class=\"logs\">
     <div class=\"logs-header\">Логи MQTT
       <div class=\"logs-actions\"><button class=\"btn\" id=\"logs-clear\">Очистить</button></div>
@@ -421,10 +538,30 @@ def api_toggle():
     data = request.get_json(silent=True) or {}
     topic = data.get("topic")
     value = data.get("value")
-    if not topic or value not in ("0", "1"):
+    if not topic or value is None:
         return jsonify({"ok": False, "error": "Invalid topic or value"}), 400
     publish_command(topic, value)
     return jsonify({"ok": True})
+
+
+@app.post("/api/counter-incr")
+def api_counter_incr():
+    data = request.get_json(silent=True) or {}
+    topic = data.get("topic")
+    if not topic:
+        return jsonify({"ok": False, "error": "Invalid topic"}), 400
+    t = normalize_topic(topic)
+    if t not in INPUT_COUNTER_TOPICS_SET:
+        return jsonify({"ok": False, "error": "Not a counter topic"}), 400
+    with state_lock:
+        try:
+            cur = int(topic_to_state.get(t, "0"))
+        except Exception:
+            cur = 0
+        new_val = cur + 1
+        topic_to_state[t] = str(new_val)
+    publish_command(t, str(new_val))
+    return jsonify({"ok": True, "value": new_val})
 
 
 @app.post("/api/toggle-all")
