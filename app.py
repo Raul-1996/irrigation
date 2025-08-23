@@ -322,18 +322,23 @@ class EnvMonitor:
                     if server.get('username'):
                         cl.username_pw_set(server.get('username'), server.get('password') or None)
                     cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                    topic_t = (tcfg['topic'] or '').strip()
                     def _on_msg_temp(c, u, msg):
                         try:
-                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip()
+                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip().replace(',', '.')
                             self.temp_value = round(float(s))
+                            logger.info(f"EnvMonitor temp RX topic={getattr(msg,'topic',topic_t)} value={self.temp_value}")
                         except Exception:
                             pass
                     cl.on_message = _on_msg_temp
+                    cl.on_connect = lambda c, u, f=None, rc=0, p=None: (
+                        (c.subscribe(topic_t, qos=0))
+                    )
                     try:
                         options = mqtt.SubscribeOptions(qos=0, noLocal=False)
-                        cl.subscribe(tcfg['topic'], options=options)
+                        cl.subscribe(topic_t, options=options)
                     except Exception:
-                        cl.subscribe(tcfg['topic'], qos=0)
+                        cl.subscribe(topic_t, qos=0)
                     cl.loop_start(); self.temp_client = cl
                 except Exception:
                     logger.exception('EnvMonitor temp start failed')
@@ -347,18 +352,23 @@ class EnvMonitor:
                     if server.get('username'):
                         cl.username_pw_set(server.get('username'), server.get('password') or None)
                     cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                    topic_h = (hcfg['topic'] or '').strip()
                     def _on_msg_hum(c, u, msg):
                         try:
-                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip()
+                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip().replace(',', '.')
                             self.hum_value = round(float(s))
+                            logger.info(f"EnvMonitor hum RX topic={getattr(msg,'topic',topic_h)} value={self.hum_value}")
                         except Exception:
                             pass
                     cl.on_message = _on_msg_hum
+                    cl.on_connect = lambda c, u, f=None, rc=0, p=None: (
+                        (c.subscribe(topic_h, qos=0))
+                    )
                     try:
                         options = mqtt.SubscribeOptions(qos=0, noLocal=False)
-                        cl.subscribe(hcfg['topic'], options=options)
+                        cl.subscribe(topic_h, options=options)
                     except Exception:
-                        cl.subscribe(hcfg['topic'], qos=0)
+                        cl.subscribe(topic_h, qos=0)
                     cl.loop_start(); self.hum_client = cl
                 except Exception:
                     logger.exception('EnvMonitor hum start failed')
