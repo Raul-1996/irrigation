@@ -808,14 +808,14 @@ def api_groups():
     groups = db.get_groups()
     return jsonify(groups)
 
-@app.route('/api/groups/<int:group_id>', methods=['PUT'])
 @csrf.exempt
+@app.route('/api/groups/<int:group_id>', methods=['PUT'])
 def api_update_group(group_id):
     data = request.get_json() or {}
     # Обновление имени
     updated = False
     if 'name' in data:
-    if db.update_group(group_id, data['name']):
+        if db.update_group(group_id, data['name']):
             updated = True
     # Обновление флага использования датчика дождя
     if 'use_rain_sensor' in data:
@@ -1556,6 +1556,16 @@ def api_status():
         # Не навязываем отложку только по факту включенного датчика.
         # Отложка ставится RainMonitor'ом в момент дождя и хранится в БД.
         
+        # Определяем источник запуска текущей зоны (manual|schedule), если полив идёт
+        current_zone_source = None
+        try:
+            if status == 'watering' and current_zone:
+                cz = next((z for z in group_zones if int(z['id']) == int(current_zone)), None)
+                if cz:
+                    current_zone_source = cz.get('watering_start_source')
+        except Exception:
+            pass
+
         groups_status.append({
             'id': group_id,
             'name': group['name'],
@@ -1564,7 +1574,8 @@ def api_status():
             'postpone_until': postpone_until,
             'next_start': next_start,
             'postpone_reason': group_postpone_reason,
-            'was_postponed': bool(postponed_zones)
+            'was_postponed': bool(postponed_zones),
+            'current_zone_source': current_zone_source
         })
     
     # Статус датчика дождя

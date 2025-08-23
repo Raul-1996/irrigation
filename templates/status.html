@@ -328,6 +328,15 @@
         max-width: min(90vw, 720px);
         max-height: 90vh;
     }
+    /* Гарантия вписывания фото в экран смартфона */
+    .photo-modal img {
+        display: block;
+        max-width: 95vw;
+        max-height: 85vh;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+    }
 
     .photo-modal-actions {
         display: flex;
@@ -502,19 +511,20 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            if (group.was_postponed) {
-                return `Полив запущен вручную — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
-            }
-            return `Полив по расписанию — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            const isManual = group.current_zone_source === 'manual';
+            return `Полив - активно поливается(${isManual ? 'запущено вручную' : 'по расписанию'})`;
         }
         switch (group.status) {
-            case 'waiting': return 'Ожидание начала полива';
-            case 'error': return 'Авария — Ошибка счётчика';
-            case 'postponed':
-                if (group.postpone_reason === 'emergency') return 'Полив отложен из-за аварийной остановки';
-                if (group.postpone_reason === 'manual') return 'Полив приостановлен пользователем';
-                return 'Полив отложен из-за дождя';
-            default: return 'Неизвестный статус';
+            case 'waiting': return 'Ожидание - готов к поливу';
+            case 'error': return 'Ошибка - проблема с системой';
+            case 'postponed': {
+                const r = (group.postpone_reason || '').toString();
+                if (r === 'rain') return 'Отложено - полив отложен из за дождя';
+                if (r === 'manual') return 'Отложено - полив отложен пользователем';
+                if (r === 'emergency') return 'Отложено - полив отложен из за аварии';
+                return 'Отложено - полив отложен';
+            }
+            default: return 'Ожидание - готов к поливу';
         }
     }
 
@@ -551,7 +561,15 @@
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
-            const postponeText = group.status === 'postponed' && group.postpone_until ? `${group.postpone_until}` : '—';
+            // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
+            let extraText = '—';
+            if (group.status === 'watering' && group.current_zone) {
+                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            } else if (group.status === 'postponed' && group.postpone_until) {
+                extraText = `До ${group.postpone_until}`;
+            } else if (group.status === 'error' && group.error_message) {
+                extraText = String(group.error_message);
+            }
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
@@ -566,7 +584,7 @@
             card.innerHTML = `
                 <div class="group-header">${group.name}</div>
                 <div id="group-status-${group.id}">${statusText}</div>
-                <div class="postpone-until">${postponeText}</div>
+                <div class="postpone-until">${extraText}</div>
                 ${groupButtons}
             `;
             card.id = `group-card-${group.id}`;
@@ -612,7 +630,14 @@
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
-            const postponeText = group.status === 'postponed' && group.postpone_until ? `${group.postpone_until}` : '—';
+            let extraText2 = '—';
+            if (group.status === 'watering' && group.current_zone) {
+                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            } else if (group.status === 'postponed' && group.postpone_until) {
+                extraText2 = `До ${group.postpone_until}`;
+            } else if (group.status === 'error' && group.error_message) {
+                extraText2 = String(group.error_message);
+            }
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
@@ -627,7 +652,7 @@
             card.innerHTML = `
                 <div class="group-header">${group.name}</div>
                 <div id="group-status-${group.id}">${statusText}</div>
-                <div class="postpone-until">${postponeText}</div>
+                <div class="postpone-until">${extraText2}</div>
                 ${groupButtons}
             `;
             if (group.status === 'watering' && group.current_zone) {
