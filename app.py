@@ -815,7 +815,7 @@ def api_update_group(group_id):
     # Обновление имени
     updated = False
     if 'name' in data:
-        if db.update_group(group_id, data['name']):
+    if db.update_group(group_id, data['name']):
             updated = True
     # Обновление флага использования датчика дождя
     if 'use_rain_sensor' in data:
@@ -2393,7 +2393,7 @@ def api_zone_mqtt_start(zone_id: int):
         # Фиксируем старт зоны и планируем автостоп
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
-            db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'scheduled_start_time': None})
+            db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'scheduled_start_time': None, 'watering_start_source': 'manual'})
         except Exception:
             pass
         try:

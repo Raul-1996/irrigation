@@ -503,9 +503,9 @@
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
             if (group.was_postponed) {
-                return `Полив - активно поливается (запущен вручную) — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                return `Полив запущен вручную — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
             }
-            return `Полив - активно поливается — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            return `Полив по расписанию — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
         }
         switch (group.status) {
             case 'waiting': return 'Ожидание начала полива';
@@ -551,7 +551,7 @@
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
-            const postponeText = group.status === 'postponed' && group.postpone_until ? `Не будет поливаться до: ${group.postpone_until}` : '—';
+            const postponeText = group.status === 'postponed' && group.postpone_until ? `${group.postpone_until}` : '—';
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
@@ -612,7 +612,7 @@
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
-            const postponeText = group.status === 'postponed' && group.postpone_until ? `Не будет поливаться до: ${group.postpone_until}` : '—';
+            const postponeText = group.status === 'postponed' && group.postpone_until ? `${group.postpone_until}` : '—';
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>

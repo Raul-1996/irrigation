@@ -114,6 +114,7 @@ class IrrigationDB:
                 self._migrate_ensure_special_group(conn)
                 self._migrate_add_zones_indexes(conn)
                 self._migrate_add_group_rain_flag(conn)
+                self._migrate_add_watering_start_source(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -236,6 +237,18 @@ class IrrigationDB:
                 logger.info("Добавлено поле last_watering_time в таблицу zones")
         except Exception as e:
             logger.error(f"Ошибка миграции last_watering_time: {e}")
+
+    def _migrate_add_watering_start_source(self, conn):
+        """Миграция: текстовый источник старта полива (manual|schedule)."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'watering_start_source' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN watering_start_source TEXT')
+                conn.commit()
+                logger.info("Добавлено поле watering_start_source в таблицу zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции watering_start_source: {e}")
 
     def _migrate_add_group_rain_flag(self, conn):
         """Миграция: флаг использования датчика дождя на уровне группы"""

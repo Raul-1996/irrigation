@@ -207,7 +207,7 @@ class IrrigationScheduler:
                 # Старт зоны: фиксируем время начала, чтобы таймер в UI работал
                 try:
                     start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule'})
                     # MQTT publish ON
                     try:
                         topic = (zone.get('topic') or '').strip()
