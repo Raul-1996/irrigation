@@ -74,10 +74,26 @@ def build_input_topics(device_id: str, start_idx: int, end_idx: int) -> Tuple[Li
 
 RELAY_TOPICS: List[str] = build_relay_topics(DEVICE_IDS, NUM_CHANNELS)
 INPUT_SWITCH_TOPICS, INPUT_COUNTER_TOPICS = build_input_topics(INPUT_DEVICE_ID, INPUT_INDEX_START, INPUT_INDEX_END)
-ALL_TOPICS: List[str] = RELAY_TOPICS + INPUT_SWITCH_TOPICS + INPUT_COUNTER_TOPICS
+
+# wb-msw-v4_107 sensors with editable values in UI
+MSW_DEVICE_ID = os.getenv("EMULATOR_MSW_DEVICE_ID", "107")
+MSW_CONTROL_NAMES: List[str] = [
+    "Temperature",
+    "Humidity",
+    "CO2",
+    "Air Quality (VOC)",
+    "Sound Level",
+    "Illuminance",
+    "Max Motion",
+    "Current Motion",
+]
+MSW_TOPICS: List[str] = [f"/devices/wb-msw-v4_{MSW_DEVICE_ID}/controls/{name}" for name in MSW_CONTROL_NAMES]
+
+ALL_TOPICS: List[str] = RELAY_TOPICS + INPUT_SWITCH_TOPICS + INPUT_COUNTER_TOPICS + MSW_TOPICS
 RELAY_TOPICS_SET: Set[str] = set(RELAY_TOPICS)
 INPUT_SWITCH_TOPICS_SET: Set[str] = set(INPUT_SWITCH_TOPICS)
 INPUT_COUNTER_TOPICS_SET: Set[str] = set(INPUT_COUNTER_TOPICS)
+MSW_TOPICS_SET: Set[str] = set(MSW_TOPICS)
 
 # ------------------------------
 # Shared State
@@ -92,6 +108,20 @@ for t in INPUT_SWITCH_TOPICS:
     topic_to_state[t] = "false"
 for t in INPUT_COUNTER_TOPICS:
     topic_to_state[t] = "0"
+for t, default in zip(
+    MSW_TOPICS,
+    [
+        "22.09",  # Temperature
+        "42.63",  # Humidity
+        "508",    # CO2
+        "725",    # Air Quality (VOC)
+        "42.49",  # Sound Level
+        "215.57", # Illuminance
+        "20",     # Max Motion
+        "15",     # Current Motion
+    ],
+):
+    topic_to_state[t] = default
 last_echo_ts: Dict[str, float] = {}
 log_lock = threading.Lock()
 log_buffer: deque[str] = deque(maxlen=1000)
@@ -196,6 +226,9 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
         except Exception:
             with state_lock:
                 want = topic_to_state.get(topic, "0")
+    elif topic in MSW_TOPICS_SET:
+        # Accept any raw numeric/string; keep as-is
+        want = raw
     else:
         # Unknown topic: store raw
         want = raw
@@ -254,6 +287,9 @@ def publish_command(topic: str, value: str) -> None:
         except Exception:
             with state_lock:
                 v = topic_to_state.get(t, "0")
+    elif t in MSW_TOPICS_SET:
+        # Keep raw user-entered value
+        v = raw
     else:
         v = raw
 
@@ -367,6 +403,22 @@ def index():
         + "\n      </tbody>\n    </table>\n  </div>"
     )
 
+    # Build MSW sensors table
+    msw_rows = []
+    for t in MSW_TOPICS:
+        control_name = t.split("/")[-1]
+        tid = base64.b64encode(t.encode()).decode()
+        msw_rows.append(
+            "        <tr>\n          <td>" + control_name + "</td>\n          <td><span id=\"status-" + tid + "\">" + topic_to_state.get(t, "") + "</span></td>\n          <td class=\"topic\">" + t + "</td>\n          <td class=\"controls\">\n            <input type=\"text\" class=\"in\" data-input-for=\"" + tid + "\" style=\"width:100px\" />\n            <button class=\"btn\" data-input-topic=\"" + t + "\">Установить</button>\n          </td>\n        </tr>"
+        )
+    msw_html = (
+        "  <div class=\"card\">\n"
+        f"    <div class=\"device-title\">wb-msw-v4_{MSW_DEVICE_ID} — Sensors</div>\n"
+        "    <table>\n      <thead><tr><th>Контрол</th><th>Значение</th><th>Топик</th><th>Действие</th></tr></thead>\n      <tbody>\n"
+        + "\n".join(msw_rows)
+        + "\n      </tbody>\n    </table>\n  </div>"
+    )
+
     page = """
 <!DOCTYPE html>
 <html lang=\"ru\">
@@ -383,9 +435,10 @@ def index():
     .device-title { font-weight: 600; margin-bottom: 8px; }
     table { border-collapse: collapse; width: 100%; table-layout: fixed; }
     th, td { border-bottom: 1px solid #eee; padding: 6px 4px; text-align: left; vertical-align: middle; }
-    th:nth-child(1){ width: 60px; }
-    th:nth-child(2){ width: 70px; }
-    th:nth-child(4){ width: 170px; }
+    /* Wider columns to prevent overlapping in sensors table */
+    th:nth-child(1){ width: 160px; }
+    th:nth-child(2){ width: 110px; }
+    th:nth-child(4){ width: 220px; }
     .row { display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
     .lamp { width: 14px; height: 14px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,0.2); vertical-align: middle; margin-right: 8px; }
     .on { background: #14a44d; box-shadow: 0 0 6px rgba(20,164,77,0.6); }
@@ -443,6 +496,13 @@ def index():
           else { lamp.classList.add('off'); lamp.classList.remove('on'); }
         }
         status.textContent = sval;
+        const inEl = document.querySelector('[data-input-for="' + id + '"]');
+        if (inEl) {
+          // Do not override user's typing or pending manual edit
+          if (document.activeElement !== inEl && !inEl.dataset.pending) {
+            inEl.value = sval;
+          }
+        }
       }
     }
     async function refresh() {
@@ -467,6 +527,19 @@ def index():
           counterIncr(topic).then(() => setTimeout(refresh, 150));
           return;
         }
+        const setBtn = e.target.closest('[data-input-topic]');
+        if (setBtn) {
+          const topic = setBtn.getAttribute('data-input-topic');
+          const input = setBtn.parentElement.querySelector('input');
+          const value = input ? input.value : '';
+          toggle(topic, value).then(() => { if (input) { delete input.dataset.pending; } setTimeout(refresh, 150); });
+          return;
+        }
+      });
+      // Mark fields as pending when user types to prevent auto-override
+      document.body.addEventListener('input', function(e){
+        const inp = e.target.closest('input[data-input-for]');
+        if (inp) { inp.dataset.pending = '1'; }
       });
       // Global controls
       const allOn = document.getElementById('all-on');
@@ -497,7 +570,7 @@ def index():
     <button class=\"btn primary\" id=\"all-on\">Включить все (1)</button>
     <button class=\"btn danger\" id=\"all-off\">Выключить все (0)</button>
   </div>
-  <div class=\"grid\">""" + cards_html + "\n" + inputs_html + """\n  </div>
+  <div class=\"grid\">""" + cards_html + "\n" + inputs_html + "\n" + msw_html + """\n  </div>
   <div class=\"logs\">
     <div class=\"logs-header\">Логи MQTT
       <div class=\"logs-actions\"><button class=\"btn\" id=\"logs-clear\">Очистить</button></div>

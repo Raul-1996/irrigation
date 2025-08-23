@@ -372,10 +372,10 @@
     <div class="info-box">
         <strong>Время:</strong> <span id="datetime">—</span>
     </div>
-    <div class="info-box">
+    <div class="info-box" id="temp-box" style="display:none;">
         <strong>Температура:</strong> <span id="temp-value">—</span>°C
     </div>
-    <div class="info-box">
+    <div class="info-box" id="hum-box" style="display:none;">
         <strong>Влажность:</strong> <span id="hum-value">—</span>%
     </div>
     <div class="info-box">
@@ -549,8 +549,23 @@
     async function updateStatusDisplay() {
         if (!statusData) return;
         updateDateTime();
-        document.getElementById('temp-value').textContent = statusData.temperature;
-        document.getElementById('hum-value').textContent = statusData.humidity;
+        // Температура/влажность: показываем блоки, только если датчики включены
+        const tb = document.getElementById('temp-box');
+        const hb = document.getElementById('hum-box');
+        const tv = document.getElementById('temp-value');
+        const hv = document.getElementById('hum-value');
+        if (statusData.temperature === null || typeof statusData.temperature === 'undefined') {
+            tb.style.display = 'none';
+        } else {
+            tb.style.display = 'inline-block';
+            tv.textContent = (statusData.temperature === 'нет данных') ? 'нет данных' : String(statusData.temperature);
+        }
+        if (statusData.humidity === null || typeof statusData.humidity === 'undefined') {
+            hb.style.display = 'none';
+        } else {
+            hb.style.display = 'inline-block';
+            hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(statusData.humidity);
+        }
         document.getElementById('rain-value').textContent = statusData.rain_sensor;
         const container = document.getElementById('groups-container');
         container.innerHTML = '';

@@ -160,6 +160,8 @@ _INITIAL_SYNC_DONE = False
 
 _RAIN_MONITOR_STARTED = False
 _RAIN_MONITOR_CFG_SIG = None
+_ENV_MONITOR_STARTED = False
+_ENV_MONITOR_CFG_SIG = None
 
 class RainMonitor:
     def __init__(self):
@@ -289,6 +291,80 @@ class RainMonitor:
 
 rain_monitor = RainMonitor()
 
+class EnvMonitor:
+    def __init__(self):
+        self.temp_client = None
+        self.hum_client = None
+        self.temp_value = None
+        self.hum_value = None
+        self.cfg = None
+
+    def stop(self):
+        for cl in (self.temp_client, self.hum_client):
+            try:
+                if cl is not None:
+                    cl.loop_stop(); cl.disconnect()
+            except Exception:
+                pass
+        self.temp_client = None; self.hum_client = None
+
+    def start(self, cfg: dict):
+        self.stop(); self.cfg = cfg or {}
+        if mqtt is None:
+            return
+        # Temperature
+        tcfg = (self.cfg.get('temp') or {})
+        if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
+            server = db.get_mqtt_server(int(tcfg['server_id']))
+            if server:
+                try:
+                    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                    if server.get('username'):
+                        cl.username_pw_set(server.get('username'), server.get('password') or None)
+                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                    def _on_msg_temp(c, u, msg):
+                        try:
+                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip()
+                            self.temp_value = round(float(s))
+                        except Exception:
+                            pass
+                    cl.on_message = _on_msg_temp
+                    try:
+                        options = mqtt.SubscribeOptions(qos=0, noLocal=False)
+                        cl.subscribe(tcfg['topic'], options=options)
+                    except Exception:
+                        cl.subscribe(tcfg['topic'], qos=0)
+                    cl.loop_start(); self.temp_client = cl
+                except Exception:
+                    logger.exception('EnvMonitor temp start failed')
+        # Humidity
+        hcfg = (self.cfg.get('hum') or {})
+        if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
+            server = db.get_mqtt_server(int(hcfg['server_id']))
+            if server:
+                try:
+                    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                    if server.get('username'):
+                        cl.username_pw_set(server.get('username'), server.get('password') or None)
+                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                    def _on_msg_hum(c, u, msg):
+                        try:
+                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip()
+                            self.hum_value = round(float(s))
+                        except Exception:
+                            pass
+                    cl.on_message = _on_msg_hum
+                    try:
+                        options = mqtt.SubscribeOptions(qos=0, noLocal=False)
+                        cl.subscribe(hcfg['topic'], options=options)
+                    except Exception:
+                        cl.subscribe(hcfg['topic'], qos=0)
+                    cl.loop_start(); self.hum_client = cl
+                except Exception:
+                    logger.exception('EnvMonitor hum start failed')
+
+env_monitor = EnvMonitor()
+
 @app.before_request
 def _init_scheduler_before_request():
     global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE, _RAIN_MONITOR_STARTED, _RAIN_MONITOR_CFG_SIG
@@ -338,6 +414,20 @@ def _init_scheduler_before_request():
                 rain_monitor.start(cfg)
                 _RAIN_MONITOR_STARTED = True
                 _RAIN_MONITOR_CFG_SIG = sig
+    except Exception:
+        pass
+    # Инициализация/перезапуск EnvMonitor
+    try:
+        if not app.config.get('TESTING'):
+            ecfg = db.get_env_config()
+            esig = (
+                ecfg.get('temp',{}).get('enabled'), ecfg.get('temp',{}).get('topic'), ecfg.get('temp',{}).get('server_id'),
+                ecfg.get('hum',{}).get('enabled'), ecfg.get('hum',{}).get('topic'), ecfg.get('hum',{}).get('server_id'),
+            )
+            if (not _ENV_MONITOR_STARTED) or esig != _ENV_MONITOR_CFG_SIG:
+                env_monitor.start(ecfg)
+                _ENV_MONITOR_STARTED = True
+                _ENV_MONITOR_CFG_SIG = esig
     except Exception:
         pass
 
@@ -1592,14 +1682,32 @@ def api_status():
         except Exception:
             rain_sensor_status = 'дождя нет'
 
+    # Температура/влажность из MQTT (если включено), иначе скрывать или показывать 'нет данных'
+    env_cfg = db.get_env_config()
+    temp_enabled = bool(env_cfg.get('temp',{}).get('enabled'))
+    hum_enabled = bool(env_cfg.get('hum',{}).get('enabled'))
+    temperature = None if not temp_enabled else (env_monitor.temp_value if env_monitor.temp_value is not None else 'нет данных')
+    humidity = None if not hum_enabled else (env_monitor.hum_value if env_monitor.hum_value is not None else 'нет данных')
+
     return jsonify({
         'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
-        'temperature': 18,
-        'humidity': 55,
+        'temperature': temperature,
+        'humidity': humidity,
         'rain_sensor': rain_sensor_status,
         'groups': groups_status,
         'emergency_stop': app.config.get('EMERGENCY_STOP', False)
     })
+@app.route('/api/env', methods=['GET','POST'])
+def api_env_config():
+    try:
+        if request.method == 'GET':
+            return jsonify({'success': True, 'config': db.get_env_config()})
+        data = request.get_json() or {}
+        ok = db.set_env_config(data)
+        return jsonify({'success': bool(ok)})
+    except Exception as e:
+        logger.error(f"env config failed: {e}")
+        return jsonify({'success': False}), 500
 
 @csrf.exempt
 @app.route('/api/postpone', methods=['POST'])

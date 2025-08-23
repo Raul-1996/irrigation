@@ -873,6 +873,30 @@
     </div>
     <div class="muted">Значения: true/false. При дожде полив групп, где датчик разрешён, будет остановлен и отложен до конца дня.</div>
   </div>
+  <hr style="margin:12px 0;">
+  <div style="color:#333;">
+    <h5 style="margin:0 0 6px 0;">Датчики среды</h5>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <label><input type="checkbox" id="env-temp-enabled"> Использовать датчик температуры</label>
+      <label>MQTT сервер:
+        <select id="env-temp-server"></select>
+      </label>
+      <label>Топик температуры:
+        <input id="env-temp-topic" placeholder="/devices/wb-msw-v4_107/controls/Temperature" style="min-width:280px;">
+      </label>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:6px;">
+      <label><input type="checkbox" id="env-hum-enabled"> Использовать датчик влажности</label>
+      <label>MQTT сервер:
+        <select id="env-hum-server"></select>
+      </label>
+      <label>Топик влажности:
+        <input id="env-hum-topic" placeholder="/devices/wb-msw-v4_107/controls/Humidity" style="min-width:280px;">
+      </label>
+      <button class="save-all-btn" onclick="saveEnvConfig()">Сохранить датчики среды</button>
+    </div>
+    <div class="muted">Значения округляются до целого (арифметически). Если датчик включен, но нет данных, в статусе будет «нет данных». Если датчик отключён — блоки скрываются на статусе.</div>
+  </div>
 </div>
 
 <!-- Модальные окна -->
@@ -1016,16 +1040,18 @@
     // Загрузка данных
     async function loadData() {
         try {
-            const [zonesRes, groupsRes, mqttRes, rainRes] = await Promise.all([
+            const [zonesRes, groupsRes, mqttRes, rainRes, envRes] = await Promise.all([
                 api.get('/api/zones'),
                 api.get('/api/groups'),
                 api.get('/api/mqtt/servers'),
-                api.get('/api/rain')
+                api.get('/api/rain'),
+                api.get('/api/env')
             ]);
             zonesData = zonesRes;
             groupsData = groupsRes;
             window.mqttServers = (mqttRes && mqttRes.servers) ? mqttRes.servers : [];
             window.rainConfig = (rainRes && rainRes.config) ? rainRes.config : {enabled:false, type:'NO', topic:'', server_id:null};
+            window.envConfig = (envRes && envRes.config) ? envRes.config : { temp:{enabled:false, topic:'', server_id:null}, hum:{enabled:false, topic:'', server_id:null} };
             
             renderZonesTable();
             renderGroupsGrid();
@@ -1033,6 +1059,7 @@
             updateZonesCount();
             await loadEarlyOff();
             initRainUi();
+            initEnvUi();
         } catch (error) {
             console.error('Ошибка загрузки данных:', error);
             showNotification('Ошибка загрузки данных', 'error');
@@ -1197,6 +1224,11 @@
         if (rs) {
             rs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
         }
+        // Env servers
+        const ets = document.getElementById('env-temp-server');
+        if (ets) ets.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+        const ehs = document.getElementById('env-hum-server');
+        if (ehs) ehs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
     }
     
     // Обновление счетчика зон
@@ -1251,6 +1283,42 @@
             }
         } catch (e) {
             showNotification('Ошибка сохранения конфигурации', 'error');
+        }
+    }
+
+    function initEnvUi() {
+        try {
+            const cfg = window.envConfig || { temp:{enabled:false}, hum:{enabled:false} };
+            document.getElementById('env-temp-enabled').checked = !!(cfg.temp && cfg.temp.enabled);
+            document.getElementById('env-temp-topic').value = (cfg.temp && cfg.temp.topic) || '';
+            if (cfg.temp && cfg.temp.server_id) document.getElementById('env-temp-server').value = String(cfg.temp.server_id);
+            document.getElementById('env-hum-enabled').checked = !!(cfg.hum && cfg.hum.enabled);
+            document.getElementById('env-hum-topic').value = (cfg.hum && cfg.hum.topic) || '';
+            if (cfg.hum && cfg.hum.server_id) document.getElementById('env-hum-server').value = String(cfg.hum.server_id);
+        } catch {}
+    }
+
+    async function saveEnvConfig() {
+        try {
+            const temp = {
+                enabled: document.getElementById('env-temp-enabled').checked,
+                server_id: (document.getElementById('env-temp-server').value || '') ? parseInt(document.getElementById('env-temp-server').value) : null,
+                topic: document.getElementById('env-temp-topic').value,
+            };
+            const hum = {
+                enabled: document.getElementById('env-hum-enabled').checked,
+                server_id: (document.getElementById('env-hum-server').value || '') ? parseInt(document.getElementById('env-hum-server').value) : null,
+                topic: document.getElementById('env-hum-topic').value,
+            };
+            const resp = await fetch('/api/env', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ temp, hum })});
+            const data = await resp.json();
+            if (data && data.success) {
+                showNotification('Настройки датчиков среды сохранены', 'success');
+            } else {
+                showNotification('Не удалось сохранить настройки датчиков', 'error');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения настроек датчиков', 'error');
         }
     }
 

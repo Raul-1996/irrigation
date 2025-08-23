@@ -674,6 +674,39 @@ class IrrigationDB:
             ok &= self.set_setting_value('rain.server_id', str(int(sid)) if sid is not None else None)
         return bool(ok)
 
+    # ===== Датчики среды (температура/влажность) =====
+    def get_env_config(self) -> Dict[str, Any]:
+        temp_enabled = self.get_setting_value('env.temp.enabled')
+        temp_topic = self.get_setting_value('env.temp.topic') or ''
+        temp_server_id = self.get_setting_value('env.temp.server_id')
+        hum_enabled = self.get_setting_value('env.hum.enabled')
+        hum_topic = self.get_setting_value('env.hum.topic') or ''
+        hum_server_id = self.get_setting_value('env.hum.server_id')
+        return {
+            'temp': {
+                'enabled': str(temp_enabled or '0') in ('1','true','True'),
+                'topic': temp_topic,
+                'server_id': int(temp_server_id) if temp_server_id and str(temp_server_id).isdigit() else None,
+            },
+            'hum': {
+                'enabled': str(hum_enabled or '0') in ('1','true','True'),
+                'topic': hum_topic,
+                'server_id': int(hum_server_id) if hum_server_id and str(hum_server_id).isdigit() else None,
+            }
+        }
+
+    def set_env_config(self, cfg: Dict[str, Any]) -> bool:
+        ok = True
+        temp = cfg.get('temp') or {}
+        hum = cfg.get('hum') or {}
+        ok &= self.set_setting_value('env.temp.enabled', '1' if temp.get('enabled') else '0')
+        ok &= self.set_setting_value('env.temp.topic', temp.get('topic') or '')
+        ok &= self.set_setting_value('env.temp.server_id', str(int(temp.get('server_id'))) if temp.get('server_id') is not None else None)
+        ok &= self.set_setting_value('env.hum.enabled', '1' if hum.get('enabled') else '0')
+        ok &= self.set_setting_value('env.hum.topic', hum.get('topic') or '')
+        ok &= self.set_setting_value('env.hum.server_id', str(int(hum.get('server_id'))) if hum.get('server_id') is not None else None)
+        return bool(ok)
+
     def get_group_use_rain(self, group_id: int) -> bool:
         try:
             with sqlite3.connect(self.db_path) as conn:
