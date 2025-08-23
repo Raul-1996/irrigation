@@ -1724,9 +1724,32 @@ def api_status():
 def api_env_config():
     try:
         if request.method == 'GET':
-            return jsonify({'success': True, 'config': db.get_env_config()})
+            cfg = db.get_env_config()
+            values = {
+                'temp': env_monitor.temp_value,
+                'hum': env_monitor.hum_value,
+            }
+            return jsonify({'success': True, 'config': cfg, 'values': values})
         data = request.get_json() or {}
+        # Special action: restart monitor without changing config
+        action = data.get('action')
+        if action == 'restart':
+            try:
+                cfg = db.get_env_config()
+                env_monitor.start(cfg)
+                # best-effort probe
+                _probe_env_values(cfg)
+            except Exception:
+                pass
+            return jsonify({'success': True})
         ok = db.set_env_config(data)
+        # Apply new config immediately
+        try:
+            cfg = db.get_env_config()
+            env_monitor.start(cfg)
+            _probe_env_values(cfg)
+        except Exception:
+            pass
         return jsonify({'success': bool(ok)})
     except Exception as e:
         logger.error(f"env config failed: {e}")
@@ -2569,6 +2592,52 @@ def api_zone_mqtt_stop(zone_id: int):
     except Exception as e:
         logger.error(f"MQTT publish stop failed: {e}")
         return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
+
+def _probe_env_values(cfg: dict) -> None:
+    try:
+        if mqtt is None:
+            return
+        # Subscribe one-shot to fetch retained values
+        topics = []
+        tcfg = (cfg.get('temp') or {})
+        hcfg = (cfg.get('hum') or {})
+        if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
+            topics.append((int(tcfg['server_id']), (tcfg['topic'] or '').strip(), 'temp'))
+        if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
+            topics.append((int(hcfg['server_id']), (hcfg['topic'] or '').strip(), 'hum'))
+        for sid, topic, kind in topics:
+            server = db.get_mqtt_server(int(sid))
+            if not server or not topic:
+                continue
+            try:
+                cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                if server.get('username'):
+                    cl.username_pw_set(server.get('username'), server.get('password') or None)
+                cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                done = {'v': False}
+                def _on(c,u,m):
+                    try:
+                        s = (m.payload.decode('utf-8','ignore') or '').strip().replace(',', '.')
+                        v = round(float(s))
+                        if kind=='temp':
+                            env_monitor.temp_value = v
+                        else:
+                            env_monitor.hum_value = v
+                    except Exception:
+                        pass
+                    finally:
+                        done['v'] = True
+                cl.on_message = _on
+                cl.subscribe(topic, qos=0)
+                cl.loop_start()
+                # wait brief time
+                import time as _t
+                _t.sleep(0.3)
+                cl.loop_stop(); cl.disconnect()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива
