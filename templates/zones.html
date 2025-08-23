@@ -399,23 +399,49 @@
     
     .groups-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 260px));
-        gap: 0.8rem;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 240px));
+        gap: 0.6rem;
         justify-content: start;
     }
     
     .group-card {
         background: #f8f9fa;
         border-radius: 8px;
-        padding: 0.8rem;
+        padding: 0.6rem;
         border: 1px solid #e9ecef;
         transition: var(--transition);
-        max-width: 320px;
+        max-width: 280px;
+        min-height: 110px;
     }
     
     .group-card:hover {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        transform: translateY(-2px);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        transform: translateY(-1px);
+    }
+    
+    /* Delete cross button */
+    .group-card .delete-btn {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        background: #fff;
+        color: #b71c1c;
+        border: 1px solid #e0e0e0;
+        border-radius: 50%;
+        font-size: 14px;
+        line-height: 14px;
+        width: 18px;
+        height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .group-card .delete-btn:hover {
+        color: #fff;
+        background: #d32f2f;
+        border-color: #b71c1c;
     }
     
     .group-card h4 {
@@ -699,18 +725,15 @@
 {% block content %}
 <!-- Секция групп -->
 <div class="groups-section">
-    <div class="groups-header">
-        <h3>Группы зон</h3>
-        <div class="groups-actions">
-            <button class="btn btn-primary" onclick="saveAllGroups()" id="saveAllGroupsBtn" disabled>
-                💾 Сохранить все группы
-            </button>
+    <div class="groups-header" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <h3 style="margin:0;">Группы зон</h3>
+        <div class="groups-actions" style="display:flex; gap:8px; align-items:center;">
             <button class="btn btn-success" onclick="showAddGroupModal()">
                 ➕ Добавить группу
             </button>
         </div>
     </div>
-    <div class="groups-grid" id="groups-grid">
+    <div class="groups-grid" id="groups-grid" style="margin-top:8px;">
         <!-- Группы будут загружены динамически -->
     </div>
 </div>
@@ -1120,24 +1143,25 @@
         container.innerHTML = '';
         
         groupsData
-            .filter(group => group.id !== 999) // скрываем БЕЗ ПОЛИВА
+            .filter(group => group.id !== 999)
             .forEach(group => {
             const card = document.createElement('div');
             card.className = 'group-card';
             card.dataset.groupId = group.id;
+            card.style.position = 'relative';
             card.innerHTML = `
-                <h4>
+                <button class="delete-btn" title="Удалить группу" onclick="deleteGroup(${group.id})">✖</button>
+                <div style="padding:10px 10px 6px 10px;">
                     <input type="text" class="group-name" value="${group.name}" 
-                           onchange="markGroupModified(${group.id})" 
-                           placeholder="Название группы">
-                </h4>
-                <p style="color: #333 !important;">Зон: ${group.zone_count || 0}</p>
-                <div class="group-actions">
-                    <button class="save-btn" onclick="saveGroup(${group.id})" disabled>Сохранить</button>
-                    <button class="delete-btn" onclick="deleteGroup(${group.id})">Удалить</button>
-                    <label style="display:inline-flex; gap:6px; align-items:center; margin-left:8px;">
-                      <input type="checkbox" class="group-use-rain" ${group.use_rain_sensor ? 'checked' : ''} onchange="toggleGroupUseRain(${group.id}, this.checked)">
-                      Использовать датчик дождя
+                           oninput="autoSaveGroupName(${group.id}, this.value)"
+                           placeholder="Название группы"
+                           style="width: calc(100% - 0px); display:block;">
+                </div>
+                <div style="padding:0 10px 6px 10px; color:#333;">Зон: ${group.zone_count || 0}</div>
+                <div style="padding:0 10px 10px 10px;">
+                    <label style="display:flex; gap:8px; align-items:center; color:#222;">
+                        <input type="checkbox" class="group-use-rain" ${group.use_rain_sensor ? 'checked' : ''} onchange="toggleGroupUseRain(${group.id}, this.checked)">
+                        Использовать датчик дождя?
                     </label>
                 </div>
             `;
@@ -1147,25 +1171,9 @@
 
     function markGroupModified(groupId) {
         modifiedGroups.add(groupId);
-        const row = document.querySelector(`[data-group-id="${groupId}"]`);
-        if (row) {
-            row.classList.add('modified');
-            const saveBtn = row.querySelector('.save-btn');
-            if (saveBtn) {
-                saveBtn.disabled = false;
-            }
-        }
-        
-        // Обновляем состояние кнопки "Сохранить все"
-        updateSaveAllButton();
     }
 
-    function updateSaveAllButton() {
-        const saveAllBtn = document.getElementById('saveAllGroupsBtn');
-        if (saveAllBtn) {
-            saveAllBtn.disabled = modifiedGroups.size === 0;
-        }
-    }
+    function updateSaveAllButton() {}
     
     // Загрузка селекторов групп
     function loadGroupSelectors() {
@@ -1194,6 +1202,26 @@
     // Обновление счетчика зон
     function updateZonesCount() {
         document.getElementById('zones-count').textContent = zonesData.length;
+    }
+
+    // Автосохранение имени группы
+    let _saveTimers = {};
+    function autoSaveGroupName(groupId, value) {
+        markGroupModified(groupId);
+        if (_saveTimers[groupId]) clearTimeout(_saveTimers[groupId]);
+        _saveTimers[groupId] = setTimeout(async () => {
+            try {
+                const ok = await api.put(`/api/groups/${groupId}`, { name: value });
+                if (ok && ok.success) {
+                    const gi = groupsData.findIndex(g=>g.id===groupId);
+                    if (gi>=0) groupsData[gi].name = value;
+                } else {
+                    showNotification('Не удалось сохранить имя группы', 'error');
+                }
+            } catch (e) {
+                showNotification('Ошибка сохранения группы', 'error');
+            }
+        }, 400);
     }
 
     function initRainUi() {

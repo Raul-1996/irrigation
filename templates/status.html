@@ -502,7 +502,10 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            return `Полив — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            if (group.was_postponed) {
+                return `Полив - активно поливается (запущен вручную) — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+            }
+            return `Полив - активно поливается — Зона ${group.current_zone} — осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
         }
         switch (group.status) {
             case 'waiting': return 'Ожидание начала полива';

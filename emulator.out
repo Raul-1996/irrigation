@@ -1009,3 +1009,1657 @@
 127.0.0.1 - - [23/Aug/2025 12:27:42] "GET /api/state HTTP/1.1" 200 -
 127.0.0.1 - - [23/Aug/2025 12:28:42] "GET /api/state HTTP/1.1" 200 -
 127.0.0.1 - - [23/Aug/2025 12:28:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:29:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:29:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:30:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:30:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:31:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:31:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:32:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:32:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:33:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:33:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:34:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:34:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:35:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:35:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:36:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:36:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:37:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:37:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:38:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:38:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:39:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:39:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:40:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:40:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:41:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:41:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:42:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:42:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:43:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:43:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:44:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:44:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:45:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:45:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:46:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:46:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:47:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:47:42] "GET /api/logs HTTP/1.1" 200 -
+[12:05:40] device: connected to MQTT 127.0.0.1:1883
+[12:05:40] controller: connected to MQTT 127.0.0.1:1883
+[12:05:40] device: connected to MQTT (rc=Success) — subscribing to topics
+[12:05:40] device: subscribed to 44 topics
+[12:05:48] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=true
+[12:05:48] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='true' -> want=true
+[12:05:49] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=true
+[12:05:49] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='true' -> want=true
+[12:06:17] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=false
+[12:06:17] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='false' -> want=false
+[12:06:18] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=false
+[12:06:18] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='false' -> want=false
+[12:06:18] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=true
+[12:06:18] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='true' -> want=true
+[12:06:18] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=true
+[12:06:18] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='true' -> want=true
+[12:06:24] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=false
+[12:06:24] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='false' -> want=false
+[12:06:24] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 0 payload=false
+[12:06:24] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 payload='false' -> want=false
+[12:06:25] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload=1
+[12:06:25] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload='1' -> want=1
+[12:06:27] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload=2
+[12:06:27] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload='2' -> want=2
+[12:06:28] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload=3
+[12:06:28] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload='3' -> want=3
+[12:06:29] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload=4
+[12:06:29] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload='4' -> want=4
+[12:06:29] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload=5
+[12:06:29] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload='5' -> want=5
+[12:06:29] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload=6
+[12:06:29] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 0 counter payload='6' -> want=6
+[12:16:06] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=true
+[12:16:06] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='true' -> want=true
+[12:16:06] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=true
+[12:16:06] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='true' -> want=true
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[12:48:07] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[12:48:07] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[12:48:10] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+127.0.0.1 - - [23/Aug/2025 12:48:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:48:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:49:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:49:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:50:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:50:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:51:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:51:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:52:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:52:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:53:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:53:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:54:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:54:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:55:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:55:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:56:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:56:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:57:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:57:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:58:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:58:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:59:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 12:59:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:00:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:00:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:01:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:01:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:02:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:02:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:03:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:03:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:04:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:04:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:05:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:05:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:06:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:06:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:07:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:07:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:08:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:08:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:09:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:09:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:10:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:10:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:11:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:11:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:12:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:12:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:13:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:13:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:14:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:14:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:15:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:15:42] "GET /api/logs HTTP/1.1" 200 -
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='1' -> want=1
+[12:48:10] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K2 payload=1
+[12:48:10] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='1' -> want=1
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[12:48:12] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K2 payload=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='1' -> want=1
+[12:48:12] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K3 payload=1
+[12:48:12] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='1' -> want=1
+[12:49:09] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[12:49:09] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K3 payload=0
+[12:49:09] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:05:52] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:15:45] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:45] device: SUPPRESS echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:15:45] device: SUPPRESS echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:45] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:15:45] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='1' -> want=1
+[13:15:55] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K2 payload=1
+[13:15:55] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='1' -> want=1
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:56] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K2 payload=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:15:56] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:15:56] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:57] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:15:57] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:15:58] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+127.0.0.1 - - [23/Aug/2025 13:16:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:16:59] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:00] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:00] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:01] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:01] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:02] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:02] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:17:59] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:00] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:00] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:01] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:01] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:02] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:02] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:18:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:19:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:19:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:20:59] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:00] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:00] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:01] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:01] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:02] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:02] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:21:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:22:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:22:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:23:59] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:00] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:00] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:01] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:01] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:02] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:02] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:29] "GET /api/logs HTTP/1.1" 200 -
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:16:02] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:16:02] device: SUPPRESS echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:16:02] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:16:02] device: SUPPRESS echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:16:03] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:16:03] device: SUPPRESS echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:16:03] device: SUPPRESS echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:16:03] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:16:04] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:16:04] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:16:04] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:17:22] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+127.0.0.1 - - [23/Aug/2025 13:24:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:24:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:28] "POST /api/toggle HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:37] "POST /api/toggle HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:59] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:59] "POST /api/toggle HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:25:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:00] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:00] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:01] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:01] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:02] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:02] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:59] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:26:59] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:00] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:00] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:01] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:01] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:02] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:02] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:03] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:03] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:04] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:04] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:05] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:05] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:06] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:06] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:07] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:07] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:08] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:08] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:09] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:09] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:10] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:10] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:11] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:11] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:12] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:12] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:13] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:13] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:14] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:15] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:15] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:16] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:16] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:17] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:17] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:18] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:18] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:19] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:19] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:20] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:20] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:21] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:21] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:22] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:22] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:23] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:23] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:24] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:24] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:25] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:25] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:26] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:26] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:27] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:27] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:28] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:28] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:29] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:30] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:30] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:31] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:31] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:32] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:32] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:33] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:33] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:34] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:34] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:35] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:35] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:36] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:36] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:37] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:37] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:38] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:38] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:39] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:39] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:40] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:40] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:41] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:41] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:43] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:43] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:44] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:44] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:45] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:45] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:46] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:46] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:47] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:47] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:48] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:48] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:49] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:49] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:50] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:50] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:51] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:51] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:52] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:52] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:53] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:54] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:54] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:55] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:56] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:57] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:57] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:58] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:27:58] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:28:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:28:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:29:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:29:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:30:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:30:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:31:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:31:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:32:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:32:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:33:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:33:42] "GET /api/logs HTTP/1.1" 200 -
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:24:29] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:25:28] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=false
+[13:25:28] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='false' -> want=false
+[13:25:28] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=false
+[13:25:28] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='false' -> want=false
+[13:25:37] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=true
+[13:25:37] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='true' -> want=true
+[13:25:37] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=true
+[13:25:37] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='true' -> want=true
+[13:25:59] controller: CMD publish topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=false
+[13:25:59] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='false' -> want=false
+[13:25:59] device: TX echo topic=/devices/wb-mr6cv3_101/controls/Input 1 payload=false
+[13:25:59] device: RX topic=/devices/wb-mr6cv3_101/controls/Input 1 payload='false' -> want=false
+[13:26:16] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:26:16] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:26:16] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:26:20] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:26:21] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:26:21] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+127.0.0.1 - - [23/Aug/2025 13:34:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:34:42] "GET /api/logs HTTP/1.1" 200 -
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:34:34] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:34:35] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:34:35] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:34:35] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:35:26] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:35:26] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_103/controls/K5 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_103/controls/K6 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_104/controls/K1 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_104/controls/K2 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_104/controls/K3 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_104/controls/K4 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_104/controls/K5 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_104/controls/K6 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_105/controls/K1 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_105/controls/K2 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_105/controls/K3 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_105/controls/K4 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_105/controls/K5 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_105/controls/K6 payload='0' -> want=0
+[13:35:31] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:35:32] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:35:32] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:35:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:35:34] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:35:34] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:35:37] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:35:37] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=1
+[13:35:37] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='1' -> want=1
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:35:40] device: TX echo topic=/devices/wb-mr6cv3_101/controls/K1 payload=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K2 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K3 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K4 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K5 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K6 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_102/controls/K1 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_101/controls/K1 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_102/controls/K2 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_102/controls/K3 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_102/controls/K4 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_102/controls/K5 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_102/controls/K6 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_103/controls/K1 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_103/controls/K2 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_103/controls/K3 payload='0' -> want=0
+[13:35:40] device: RX topic=/devices/wb-mr6cv3_103/controls/K4 payload='0' -> want=0
+127.0.0.1 - - [23/Aug/2025 13:35:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:35:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:36:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:36:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:37:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:37:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:38:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:38:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:39:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:39:42] "GET /api/logs HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:40:42] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [23/Aug/2025 13:40:42] "GET /api/logs HTTP/1.1" 200 -

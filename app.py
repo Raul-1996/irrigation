@@ -825,7 +825,15 @@ def api_update_group(group_id):
         except Exception as e:
             logger.error(f"Ошибка обновления use_rain_sensor группы {group_id}: {e}")
     if updated:
-        db.add_log('group_edit', json.dumps({"group": group_id, "name": data['name']}))
+        try:
+            payload = {"group": group_id}
+            if 'name' in data:
+                payload["name"] = data['name']
+            if 'use_rain_sensor' in data:
+                payload["use_rain_sensor"] = bool(data.get('use_rain_sensor'))
+            db.add_log('group_edit', json.dumps(payload))
+        except Exception:
+            pass
         return jsonify({"success": True})
     return ('Group not found', 404)
 
@@ -1545,11 +1553,8 @@ def api_status():
                     group_postpone_reason = reasons[0]
             except Exception:
                 pass
-        elif rain_cfg.get('enabled') and db.get_group_use_rain(int(group_id)):
-            # При активном датчике дождя откладываем до конца дня
-            postpone_until = datetime.now().strftime('%Y-%m-%d 23:59:59')
-            status = 'postponed'
-            group_postpone_reason = 'rain'
+        # Не навязываем отложку только по факту включенного датчика.
+        # Отложка ставится RainMonitor'ом в момент дождя и хранится в БД.
         
         groups_status.append({
             'id': group_id,
@@ -1558,11 +1563,23 @@ def api_status():
             'current_zone': current_zone,
             'postpone_until': postpone_until,
             'next_start': next_start,
-            'postpone_reason': group_postpone_reason
+            'postpone_reason': group_postpone_reason,
+            'was_postponed': bool(postponed_zones)
         })
     
     # Статус датчика дождя
-    rain_sensor_status = 'датчик дождя: ' + ('включен' if rain_cfg.get('enabled') else 'выключен')
+    # Текстовый статус датчика: выключен / дождя нет / идёт дождь
+    if not rain_cfg.get('enabled'):
+        rain_sensor_status = 'выключен'
+    else:
+        try:
+            # ориентируемся по мониторингу, если есть последнее состояние
+            if hasattr(rain_monitor, 'is_rain') and rain_monitor.is_rain is not None:
+                rain_sensor_status = 'идёт дождь' if rain_monitor.is_rain else 'дождя нет'
+            else:
+                rain_sensor_status = 'дождя нет'
+        except Exception:
+            rain_sensor_status = 'дождя нет'
 
     return jsonify({
         'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
