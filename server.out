@@ -1,0 +1,9 @@
+INFO:database:База данных инициализирована успешно
+🚀 Запуск WB-Irrigation...
+📱 Откройте браузер и перейдите по адресу: http://localhost:8080
+⏹️  Для остановки нажмите Ctrl+C
+--------------------------------------------------
+ * Serving Flask app 'app'
+ * Debug mode: off
+Address already in use
+Port 8080 is in use by another program. Either identify and stop that program, or start the server with a different port.

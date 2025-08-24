@@ -18,7 +18,9 @@ def user_required(view_func):
     def wrapper(*args, **kwargs):
         if current_app.config.get('TESTING'):
             return view_func(*args, **kwargs)
-        if session.get('role') not in ['user', 'admin']:
+        # Разрешаем доступ гостю для пользовательских страниц (Статус, карта),
+        # а также для всех действий на странице Статус по требованию.
+        if session.get('role') not in ['guest', 'user', 'admin']:
             return redirect(url_for('auth_bp.login_page'))
         return view_func(*args, **kwargs)
     return wrapper

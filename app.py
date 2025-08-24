@@ -437,7 +437,7 @@ def _init_scheduler_before_request():
     global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE, _RAIN_MONITOR_STARTED, _RAIN_MONITOR_CFG_SIG, _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG
     # Default role is "user" (no password)
     if 'role' not in session:
-        session['role'] = 'user'
+        session['role'] = 'guest'
     if not _SCHEDULER_INIT_DONE and not app.config.get('TESTING'):
         try:
             init_scheduler(db)
