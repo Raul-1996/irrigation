@@ -573,6 +573,42 @@ def _should_throttle_group(group_id: int, window_sec: float = 0.8) -> bool:
 _TOPIC_LAST_SEND: dict[tuple[int, str], tuple[str, float]] = {}
 _TOPIC_LOCK = threading.Lock()
 
+# Кэш MQTT‑клиентов по server_id для публикаций
+_MQTT_CLIENTS: dict[int, object] = {}
+_MQTT_CLIENTS_LOCK = threading.Lock()
+
+def _get_or_create_mqtt_client(server: dict):
+    try:
+        sid = int(server.get('id')) if server.get('id') is not None else 0
+    except Exception:
+        sid = 0
+    with _MQTT_CLIENTS_LOCK:
+        cl = _MQTT_CLIENTS.get(sid)
+        if cl is None:
+            try:
+                cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                if server.get('username'):
+                    cl.username_pw_set(server.get('username'), server.get('password') or None)
+                host = server.get('host') or '127.0.0.1'
+                port = int(server.get('port') or 1883)
+                try:
+                    cl.connect(host, port, 30)
+                except Exception:
+                    # не кэшируем неудачное подключение
+                    return None
+                def _on_disconnect(c, u, rc, properties=None):
+                    try:
+                        with _MQTT_CLIENTS_LOCK:
+                            if _MQTT_CLIENTS.get(sid) is c:
+                                _MQTT_CLIENTS.pop(sid, None)
+                    except Exception:
+                        pass
+                cl.on_disconnect = _on_disconnect
+                _MQTT_CLIENTS[sid] = cl
+            except Exception:
+                return None
+        return cl
+
 def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.5) -> bool:
     try:
         t = topic if str(topic).startswith('/') else '/' + str(topic)
@@ -586,12 +622,18 @@ def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: 
                 return True  # считаем, что уже отослали недавно
             _TOPIC_LAST_SEND[key] = (value, now)
         logger.info(f"MQTT publish topic={t} value={value}")
-        cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        if server.get('username'):
-            cl.username_pw_set(server.get('username'), server.get('password') or None)
-        cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-        cl.publish(t, payload=value, qos=0, retain=False)
-        cl.disconnect()
+        cl = _get_or_create_mqtt_client(server)
+        if cl is None:
+            logger.warning("MQTT publish: client unavailable, dropping message")
+            return False
+        try:
+            cl.publish(t, payload=value, qos=0, retain=False)
+        except Exception:
+            # Попробуем один раз пересоздать клиента и отправить
+            cl = _get_or_create_mqtt_client(server)
+            if cl is None:
+                return False
+            cl.publish(t, payload=value, qos=0, retain=False)
         return True
     except Exception:
         logger.exception("MQTT publish failed")

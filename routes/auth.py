@@ -10,8 +10,8 @@ def login_page():
     # Поддержка гостевого входа
     if request.args.get('guest') == '1':
         session['logged_in'] = True
-        session['role'] = 'user'
-        return redirect(url_for('status.index')) if 'status' in url_for.__globals__ else redirect('/')
+        session['role'] = 'guest'
+        return redirect(url_for('status_bp.index'))
     return render_template('login.html')
 
 
