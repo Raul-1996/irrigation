@@ -18,6 +18,7 @@ from flask import Response, stream_with_context
 import threading
 import queue
 import time
+import random
 from config import Config
 from routes.status import status_bp
 from routes.files import files_bp
@@ -162,6 +163,7 @@ _RAIN_MONITOR_STARTED = False
 _RAIN_MONITOR_CFG_SIG = None
 _ENV_MONITOR_STARTED = False
 _ENV_MONITOR_CFG_SIG = None
+_ENV_MONITOR_LAST_RESTART = 0.0
 
 class RainMonitor:
     def __init__(self):
@@ -298,6 +300,8 @@ class EnvMonitor:
         self.temp_value = None
         self.hum_value = None
         self.cfg = None
+        self.last_temp_rx_ts = 0.0
+        self.last_hum_rx_ts = 0.0
 
     def stop(self):
         for cl in (self.temp_client, self.hum_client):
@@ -307,10 +311,16 @@ class EnvMonitor:
             except Exception:
                 pass
         self.temp_client = None; self.hum_client = None
+        self.last_temp_rx_ts = 0.0
+        self.last_hum_rx_ts = 0.0
 
     def start(self, cfg: dict):
         self.stop(); self.cfg = cfg or {}
         if mqtt is None:
+            try:
+                logger.warning('EnvMonitor start skipped: paho.mqtt not available')
+            except Exception:
+                pass
             return
         try:
             logger.info("EnvMonitor starting with cfg=%s", cfg)
@@ -325,32 +335,49 @@ class EnvMonitor:
                     cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                     if server.get('username'):
                         cl.username_pw_set(server.get('username'), server.get('password') or None)
-                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
                     topic_t = (tcfg['topic'] or '').strip()
+                    try:
+                        logger.info('EnvMonitor temp connecting host=%s port=%s topic=%s', server.get('host'), server.get('port'), topic_t)
+                    except Exception:
+                        pass
                     def _on_msg_temp(c, u, msg):
                         try:
                             s = (msg.payload.decode('utf-8', 'ignore') or '').strip().replace(',', '.')
                             self.temp_value = round(float(s))
+                            try:
+                                self.last_temp_rx_ts = time.time()
+                            except Exception:
+                                pass
                             logger.info(f"EnvMonitor temp RX topic={getattr(msg,'topic',topic_t)} value={self.temp_value}")
                         except Exception:
-                            pass
+                            logger.exception('EnvMonitor temp parse failed')
                     def _on_connect_temp(c, u, flags, reason_code, properties=None):
                         try:
                             c.subscribe(topic_t, qos=0)
                             logger.info("EnvMonitor temp subscribed %s", topic_t)
                         except Exception:
+                            logger.exception('EnvMonitor temp subscribe failed')
+                    def _on_disconnect_temp(c, u, rc, properties=None):
+                        try:
+                            self.temp_client = None
+                            logger.info("EnvMonitor temp disconnected: rc=%s", rc)
+                        except Exception:
                             pass
                     cl.on_message = _on_msg_temp
                     cl.on_connect = _on_connect_temp
+                    cl.on_disconnect = _on_disconnect_temp
+                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
                     cl.loop_start()
                     # Also subscribe immediately in case already connected
                     try:
                         cl.subscribe(topic_t, qos=0)
                     except Exception:
-                        pass
+                        logger.exception('EnvMonitor temp immediate subscribe failed')
                     self.temp_client = cl
                 except Exception:
                     logger.exception('EnvMonitor temp start failed')
+                    # В случае ошибки старта не блокируем будущие попытки
+                    self.temp_client = None
         # Humidity
         hcfg = (self.cfg.get('hum') or {})
         if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
@@ -360,37 +387,54 @@ class EnvMonitor:
                     cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                     if server.get('username'):
                         cl.username_pw_set(server.get('username'), server.get('password') or None)
-                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
                     topic_h = (hcfg['topic'] or '').strip()
+                    try:
+                        logger.info('EnvMonitor hum connecting host=%s port=%s topic=%s', server.get('host'), server.get('port'), topic_h)
+                    except Exception:
+                        pass
                     def _on_msg_hum(c, u, msg):
                         try:
                             s = (msg.payload.decode('utf-8', 'ignore') or '').strip().replace(',', '.')
                             self.hum_value = round(float(s))
+                            try:
+                                self.last_hum_rx_ts = time.time()
+                            except Exception:
+                                pass
                             logger.info(f"EnvMonitor hum RX topic={getattr(msg,'topic',topic_h)} value={self.hum_value}")
                         except Exception:
-                            pass
+                            logger.exception('EnvMonitor hum parse failed')
                     def _on_connect_hum(c, u, flags, reason_code, properties=None):
                         try:
                             c.subscribe(topic_h, qos=0)
                             logger.info("EnvMonitor hum subscribed %s", topic_h)
                         except Exception:
+                            logger.exception('EnvMonitor hum subscribe failed')
+                    def _on_disconnect_hum(c, u, rc, properties=None):
+                        try:
+                            self.hum_client = None
+                            logger.info("EnvMonitor hum disconnected: rc=%s", rc)
+                        except Exception:
                             pass
                     cl.on_message = _on_msg_hum
                     cl.on_connect = _on_connect_hum
+                    cl.on_disconnect = _on_disconnect_hum
+                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
                     cl.loop_start()
                     try:
                         cl.subscribe(topic_h, qos=0)
                     except Exception:
-                        pass
+                        logger.exception('EnvMonitor hum immediate subscribe failed')
                     self.hum_client = cl
                 except Exception:
                     logger.exception('EnvMonitor hum start failed')
+                    # В случае ошибки старта не блокируем будущие попытки
+                    self.hum_client = None
 
 env_monitor = EnvMonitor()
 
 @app.before_request
 def _init_scheduler_before_request():
-    global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE, _RAIN_MONITOR_STARTED, _RAIN_MONITOR_CFG_SIG
+    global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE, _RAIN_MONITOR_STARTED, _RAIN_MONITOR_CFG_SIG, _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG
     # Default role is "user" (no password)
     if 'role' not in session:
         session['role'] = 'user'
@@ -439,20 +483,50 @@ def _init_scheduler_before_request():
                 _RAIN_MONITOR_CFG_SIG = sig
     except Exception:
         pass
-    # Инициализация/перезапуск EnvMonitor
+    # Инициализация/перезапуск EnvMonitor (не зависим от TESTING, чтобы значения появлялись сразу)
     try:
-        if not app.config.get('TESTING'):
-            ecfg = db.get_env_config()
-            esig = (
-                ecfg.get('temp',{}).get('enabled'), ecfg.get('temp',{}).get('topic'), ecfg.get('temp',{}).get('server_id'),
-                ecfg.get('hum',{}).get('enabled'), ecfg.get('hum',{}).get('topic'), ecfg.get('hum',{}).get('server_id'),
+        ecfg = db.get_env_config()
+        esig = (
+            ecfg.get('temp',{}).get('enabled'), ecfg.get('temp',{}).get('topic'), ecfg.get('temp',{}).get('server_id'),
+            ecfg.get('hum',{}).get('enabled'), ecfg.get('hum',{}).get('topic'), ecfg.get('hum',{}).get('server_id'),
+        )
+        # Стартуем/перезапускаем монитор, если он ещё не стартовал, поменялась конфигурация
+        # или оба клиента отсутствуют (например, предыдущий старт не удался).
+        try:
+            logger.info(
+                "EnvMonitor check: started=%s cfg_sig=%s esig=%s temp_client=%s hum_client=%s",
+                _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG, esig,
+                'ok' if getattr(env_monitor, 'temp_client', None) else 'none',
+                'ok' if getattr(env_monitor, 'hum_client', None) else 'none',
             )
-            if (not _ENV_MONITOR_STARTED) or esig != _ENV_MONITOR_CFG_SIG:
-                env_monitor.start(ecfg)
-                _ENV_MONITOR_STARTED = True
-                _ENV_MONITOR_CFG_SIG = esig
+        except Exception:
+            pass
+        need_start = (not _ENV_MONITOR_STARTED) or (esig != _ENV_MONITOR_CFG_SIG)
+        if not need_start:
+            try:
+                no_clients = (getattr(env_monitor, 'temp_client', None) is None and getattr(env_monitor, 'hum_client', None) is None)
+            except Exception:
+                no_clients = True
+            need_start = no_clients
+        try:
+            logger.info(
+                "EnvMonitor decision: need_start=%s reason=%s",
+                need_start,
+                ('cfg_changed' if esig != _ENV_MONITOR_CFG_SIG else ('no_clients' if (getattr(env_monitor, 'temp_client', None) is None and getattr(env_monitor, 'hum_client', None) is None) else ('not_started' if not _ENV_MONITOR_STARTED else 'none')))
+            )
+        except Exception:
+            pass
+        if need_start:
+            env_monitor.start(ecfg)
+            # Разово пробуем получить retained-значения после старта, чтобы данные появились сразу
+            try:
+                _probe_env_values(ecfg)
+            except Exception:
+                logger.exception('EnvMonitor probe call failed')
+            _ENV_MONITOR_STARTED = True
+            _ENV_MONITOR_CFG_SIG = esig
     except Exception:
-        pass
+        logger.exception('EnvMonitor before_request failed')
 
 
 app.register_blueprint(status_bp)
@@ -1712,6 +1786,10 @@ def api_status():
     temperature = None if not temp_enabled else (env_monitor.temp_value if env_monitor.temp_value is not None else 'нет данных')
     humidity = None if not hum_enabled else (env_monitor.hum_value if env_monitor.hum_value is not None else 'нет данных')
 
+    try:
+        logger.info('api_status: temp=%s hum=%s temp_enabled=%s hum_enabled=%s', temperature, humidity, temp_enabled, hum_enabled)
+    except Exception:
+        pass
     return jsonify({
         'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
         'temperature': temperature,
@@ -1753,6 +1831,19 @@ def api_env_config():
         return jsonify({'success': bool(ok)})
     except Exception as e:
         logger.error(f"env config failed: {e}")
+        return jsonify({'success': False}), 500
+
+@app.route('/api/env/values', methods=['GET'])
+def api_env_values():
+    try:
+        cfg = db.get_env_config()
+        temp_enabled = bool((cfg.get('temp') or {}).get('enabled'))
+        hum_enabled = bool((cfg.get('hum') or {}).get('enabled'))
+        temperature = None if not temp_enabled else (env_monitor.temp_value if env_monitor.temp_value is not None else 'нет данных')
+        humidity = None if not hum_enabled else (env_monitor.hum_value if env_monitor.hum_value is not None else 'нет данных')
+        return jsonify({'success': True, 'temperature': temperature, 'humidity': humidity, 'enabled': {'temp': temp_enabled, 'hum': hum_enabled}})
+    except Exception as e:
+        logger.error(f"env values failed: {e}")
         return jsonify({'success': False}), 500
 
 @csrf.exempt
@@ -2598,6 +2689,10 @@ def _probe_env_values(cfg: dict) -> None:
         if mqtt is None:
             return
         # Subscribe one-shot to fetch retained values
+        try:
+            logger.info('EnvProbe: starting')
+        except Exception:
+            pass
         topics = []
         tcfg = (cfg.get('temp') or {})
         hcfg = (cfg.get('hum') or {})
@@ -2610,6 +2705,7 @@ def _probe_env_values(cfg: dict) -> None:
             if not server or not topic:
                 continue
             try:
+                logger.info('EnvProbe: connect sid=%s host=%s port=%s topic=%s kind=%s', sid, server.get('host'), server.get('port'), topic, kind)
                 cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                 if server.get('username'):
                     cl.username_pw_set(server.get('username'), server.get('password') or None)
@@ -2623,8 +2719,9 @@ def _probe_env_values(cfg: dict) -> None:
                             env_monitor.temp_value = v
                         else:
                             env_monitor.hum_value = v
+                        logger.info('EnvProbe: got %s=%s from topic=%s', kind, v, getattr(m, 'topic', topic))
                     except Exception:
-                        pass
+                        logger.exception('EnvProbe: parse failed kind=%s', kind)
                     finally:
                         done['v'] = True
                 cl.on_message = _on
@@ -2635,9 +2732,9 @@ def _probe_env_values(cfg: dict) -> None:
                 _t.sleep(0.3)
                 cl.loop_stop(); cl.disconnect()
             except Exception:
-                pass
+                logger.exception('EnvProbe: failed sid=%s topic=%s kind=%s', sid, topic, kind)
     except Exception:
-        pass
+        logger.exception('EnvProbe: outer failed')
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива

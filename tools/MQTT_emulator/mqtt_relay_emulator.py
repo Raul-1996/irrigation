@@ -13,6 +13,7 @@ from collections import deque
 from datetime import datetime
 import threading
 import time
+import random
 from typing import Dict, List, Tuple, Set
 
 from flask import Flask, jsonify, request, Response
@@ -42,6 +43,8 @@ ECHO_SUPPRESS_WINDOW = float(os.getenv("EMULATOR_ECHO_SUPPRESS_WINDOW", "0.10"))
 # HTTP server settings
 HTTP_HOST = os.getenv("EMULATOR_HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("EMULATOR_HTTP_PORT", "5055"))
+MSW_AUTO_ENABLED = (os.getenv("EMULATOR_MSW_AUTO_ENABLED", "1") == "1")
+MSW_AUTO_INTERVAL_SECONDS = float(os.getenv("EMULATOR_MSW_AUTO_INTERVAL", "2.0"))
 
 
 def build_relay_topics(device_ids: List[str], num_channels: int) -> List[str]:
@@ -88,6 +91,8 @@ MSW_CONTROL_NAMES: List[str] = [
     "Current Motion",
 ]
 MSW_TOPICS: List[str] = [f"/devices/wb-msw-v4_{MSW_DEVICE_ID}/controls/{name}" for name in MSW_CONTROL_NAMES]
+MSW_TEMPERATURE_TOPIC = f"/devices/wb-msw-v4_{MSW_DEVICE_ID}/controls/Temperature"
+MSW_HUMIDITY_TOPIC = f"/devices/wb-msw-v4_{MSW_DEVICE_ID}/controls/Humidity"
 
 ALL_TOPICS: List[str] = RELAY_TOPICS + INPUT_SWITCH_TOPICS + INPUT_COUNTER_TOPICS + MSW_TOPICS
 RELAY_TOPICS_SET: Set[str] = set(RELAY_TOPICS)
@@ -125,6 +130,8 @@ for t, default in zip(
 last_echo_ts: Dict[str, float] = {}
 log_lock = threading.Lock()
 log_buffer: deque[str] = deque(maxlen=1000)
+msw_temp_direction: int = 1
+msw_hum_direction: int = 1
 
 
 def log_event(message: str) -> None:
@@ -653,8 +660,58 @@ def start_mqtt_clients():
     device_connect()
 
 
+def _bounded_oscillate(cur: float, direction: int, min_v: float, max_v: float) -> Tuple[float, int]:
+    # step is 1.x where x in [0,9]
+    frac = random.randint(0, 9) / 10.0
+    step = 1.0 + frac
+    nxt = cur + (step * (1 if direction >= 0 else -1))
+    new_dir = direction
+    if nxt > max_v:
+        nxt = max_v
+        new_dir = -1
+    elif nxt < min_v:
+        nxt = min_v
+        new_dir = 1
+    return nxt, new_dir
+
+
+def start_msw_autopublish_thread():
+    if not MSW_AUTO_ENABLED:
+        return
+    def _loop():
+        global msw_temp_direction, msw_hum_direction
+        # Initialize from current state
+        with state_lock:
+            try:
+                cur_t = float(topic_to_state.get(MSW_TEMPERATURE_TOPIC, "22.0"))
+            except Exception:
+                cur_t = 22.0
+            try:
+                cur_h = float(topic_to_state.get(MSW_HUMIDITY_TOPIC, "42.0"))
+            except Exception:
+                cur_h = 42.0
+        while True:
+            try:
+                # Compute next values
+                cur_t, msw_temp_direction = _bounded_oscillate(cur_t, msw_temp_direction, 10.0, 40.0)
+                cur_h, msw_hum_direction = _bounded_oscillate(cur_h, msw_hum_direction, 10.0, 40.0)
+
+                # Format with one or two decimals
+                t_str = f"{cur_t:.2f}"
+                h_str = f"{cur_h:.2f}"
+
+                # Publish via controller path (so device echo applies uniformly)
+                publish_command(MSW_TEMPERATURE_TOPIC, t_str)
+                publish_command(MSW_HUMIDITY_TOPIC, h_str)
+            except Exception as exc:
+                log_event(f"msw-auto: error {exc}")
+            time.sleep(max(0.2, MSW_AUTO_INTERVAL_SECONDS))
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def main():
     start_mqtt_clients()
+    start_msw_autopublish_thread()
     app.run(host=HTTP_HOST, port=HTTP_PORT, debug=False, use_reloader=False)
 
 

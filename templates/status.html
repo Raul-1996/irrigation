@@ -457,6 +457,8 @@
     let statusData = null;
     let zonesData = [];
     let connectionError = false;
+    let envProbeTimer = null;
+    let envProbeAttempts = 0;
     
     // Функция обновления времени
     function updateDateTime() {
@@ -511,7 +513,7 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            const isManual = group.current_zone_source === 'manual';
+            const isManual = String(group.current_zone_source || '').toLowerCase() === 'manual';
             return `Полив - активно поливается(${isManual ? 'запущено вручную' : 'по расписанию'})`;
         }
         switch (group.status) {
@@ -566,7 +568,39 @@
             hb.style.display = 'inline-block';
             hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(statusData.humidity);
         }
-        document.getElementById('rain-value').textContent = statusData.rain_sensor;
+        // Приводим датчик дождя к двум вариантам: "нет дождя" или "дождь идет"
+        (function(){
+            const rv = document.getElementById('rain-value');
+            const s = String(statusData.rain_sensor || '').toLowerCase();
+            rv.textContent = (s.indexOf('идёт дожд') !== -1 || s.indexOf('идет дожд') !== -1) ? 'дождь идет' : 'нет дождя';
+        })();
+
+        // Быстрый пробник: если сейчас отображается "нет данных", опрашиваем /api/env чаще (до 10 попыток)
+        if ((tv.textContent === 'нет данных' || hv.textContent === 'нет данных') && !envProbeTimer) {
+            envProbeAttempts = 0;
+            envProbeTimer = setInterval(async () => {
+                try {
+                    envProbeAttempts += 1;
+                    const resp = await fetch(`/api/env?ts=${Date.now()}`, { cache: 'no-store' });
+                    const js = await resp.json();
+                    const val = js && js.values ? js.values : {};
+                    if (typeof val.temp !== 'undefined' && val.temp !== null) {
+                        tb.style.display = 'inline-block';
+                        tv.textContent = String(val.temp);
+                    }
+                    if (typeof val.hum !== 'undefined' && val.hum !== null) {
+                        hb.style.display = 'inline-block';
+                        hv.textContent = String(val.hum);
+                    }
+                    if (tv.textContent !== 'нет данных' && hv.textContent !== 'нет данных') {
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                    }
+                    if (envProbeAttempts >= 10) { clearInterval(envProbeTimer); envProbeTimer = null; }
+                } catch (e) {
+                    if (envProbeAttempts >= 10) { clearInterval(envProbeTimer); envProbeTimer = null; }
+                }
+            }, 1000);
+        }
         const container = document.getElementById('groups-container');
         container.innerHTML = '';
         const resumeBtn = document.getElementById('resume-btn');
