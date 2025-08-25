@@ -26,6 +26,15 @@ level_name = os.getenv('SCHEDULER_LOG_LEVEL', 'INFO').upper()
 level = getattr(logging, level_name, logging.INFO)
 logging.basicConfig(level=level)
 logger = logging.getLogger(__name__)
+try:
+    fmt = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.StreamHandler):
+            h.setFormatter(fmt)
+except Exception:
+    pass
+# Избегаем записи в stdout/stderr из потоков APScheduler при закрытии пайпов тест-раннером
+logger.propagate = False
 # Урезаем болтливость APScheduler, чтобы в тестах и проде не было лишних сообщений
 try:
     aps_logger = logging.getLogger('apscheduler')

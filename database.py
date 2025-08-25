@@ -10,6 +10,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+try:
+    fmt = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.StreamHandler):
+            h.setFormatter(fmt)
+except Exception:
+    pass
 # В тестах отключаем распространение в root, чтобы не писать в закрытый stdout из фоновых потоков
 logger.propagate = False
 

@@ -31,8 +31,40 @@ from werkzeug.security import check_password_hash
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-# Не прокидываем в root, чтобы потоковые хендлеры stdout/stderr не падали при закрытии пайпов в тестах
-logger.propagate = False
+# Не прокидываем в root в режиме тестов, чтобы потоковые хендлеры stdout/stderr не падали при закрытии пайпов
+try:
+    import builtins as _bi
+    _IN_TESTS = bool(__name__ != '__main__' and 'PYTEST_CURRENT_TEST' in os.environ)
+except Exception:
+    _IN_TESTS = False
+logger.propagate = not _IN_TESTS
+
+# Единый формат логов
+_LOG_FORMAT = '%(asctime)s [%(levelname)s] [%(name)s] %(message)s'
+_LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+
+def _ensure_console_handler():
+    """Гарантирует наличие StreamHandler на root с единым форматтером."""
+    try:
+        root = logging.getLogger()
+        # Ищем уже существующий StreamHandler
+        sh = None
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler):
+                sh = h
+                break
+        if sh is None:
+            sh = logging.StreamHandler()
+            root.addHandler(sh)
+        sh.setLevel(root.level)
+        sh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        # Приводим werkzeug к нашему форматтеру
+        wlg = logging.getLogger('werkzeug')
+        for h in (wlg.handlers or []):
+            if isinstance(h, logging.StreamHandler):
+                h.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    except Exception:
+        pass
 try:
     from logging.handlers import RotatingFileHandler
     log_dir = os.path.join(os.getcwd(), 'backups')
@@ -88,6 +120,7 @@ def _apply_runtime_log_level():
         level = logging.DEBUG if is_debug else logging.WARNING
         root = logging.getLogger()
         root.setLevel(level)
+        _ensure_console_handler()
         for lg_name in ('app', __name__, 'apscheduler', 'werkzeug', 'database', 'irrigation_scheduler'):
             lg = logging.getLogger(lg_name)
             lg.setLevel(level if lg_name in ('app', __name__, 'database', 'irrigation_scheduler') else (logging.ERROR if not is_debug else logging.INFO))
