@@ -904,14 +904,16 @@
     
     async function startGroupFromFirst(groupId) {
         try {
+            const grp = (statusData && statusData.groups ? statusData.groups : []).find(g => String(g.id) === String(groupId));
+            const gname = grp && grp.name ? grp.name : groupId;
             const res = await fetch(`/api/groups/${groupId}/start-from-first`, { method: 'POST' });
             const data = await res.json();
             if (data && data.success) {
-                showNotification(data.message, 'success');
+                showNotification(`Группа "${gname}": ${data.message || 'запущена'}`, 'success');
                 await loadStatusData();
                 await loadZonesData();
             } else {
-                showNotification(data.message || 'Ошибка запуска полива группы', 'error');
+                showNotification(data.message || `Ошибка запуска группы "${gname}"`, 'error');
             }
         } catch (error) {
             showNotification('Ошибка при запуске полива группы', 'error');
@@ -919,7 +921,13 @@
     }
     
     async function stopGroup(groupId) {
-        if (!confirm(`Остановить полив группы ${groupId}?`)) return;
+        try {
+            const grp = (statusData && statusData.groups ? statusData.groups : []).find(g => String(g.id) === String(groupId));
+            const gname = grp && grp.name ? grp.name : groupId;
+            if (!confirm(`Остановить полив группы "${gname}"?`)) return;
+        } catch (e) {
+            if (!confirm(`Остановить полив группы ${groupId}?`)) return;
+        }
         
         try {
             const res = await fetch(`/api/groups/${groupId}/stop`, { method: 'POST' });
