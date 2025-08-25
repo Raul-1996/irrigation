@@ -294,6 +294,7 @@
             logsData = await api.get('/api/logs');
             filteredLogs = [...logsData];
             updateEventTypeOptions();
+            applyDebugVisibility();
             renderLogs();
         } catch (error) {
             console.error('Ошибка загрузки логов:', error);
@@ -371,6 +372,24 @@
             tbody.appendChild(tr);
         });
     }
+
+    function isImportant(log) {
+        const t = (log.type || '').toString().toLowerCase();
+        const d = (log.details || '').toString().toLowerCase();
+        return (
+            t.includes('error') || t.includes('warn') || t.includes('emergency') ||
+            t.includes('backup') || t.includes('restore') || d.includes('error') || d.includes('warn') || d.includes('emergency')
+        );
+    }
+
+    function applyDebugVisibility() {
+        const cb = document.getElementById('debug-toggle');
+        if (!cb) return;
+        const dbg = !!cb.checked;
+        if (!dbg) {
+            filteredLogs = filteredLogs.filter(isImportant);
+        }
+    }
     
     // Применение фильтров
     async function applyFilter() {
@@ -391,6 +410,7 @@
             }
             
             filteredLogs = await response.json();
+            applyDebugVisibility();
             renderLogs();
             
             if (filteredLogs.length === 0) {
@@ -492,7 +512,8 @@
         dbgCb.type = 'checkbox';
         dbgCb.id = 'debug-toggle';
         const dbgSpan = document.createElement('span');
-        dbgSpan.textContent = 'Режим отладки';
+        dbgSpan.textContent = 'Показывать подробные (DEBUG) сообщения';
+        dbgSpan.title = 'Включает подробный вывод на сервере и в списке ниже. При выключении отображаются только важные предупреждения и ошибки.';
         dbgLabel.appendChild(dbgCb);
         dbgLabel.appendChild(dbgSpan);
         
