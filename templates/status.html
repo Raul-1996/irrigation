@@ -379,7 +379,7 @@
     <div class="info-box" id="hum-box" style="display:none;">
         <strong>Влажность:</strong> <span id="hum-value">—</span>%
     </div>
-    <div class="info-box">
+    <div class="info-box" id="rain-box" style="display:none;">
         <strong>Датчик дождя:</strong> <span id="rain-value">—</span>
     </div>
 </div>
@@ -586,9 +586,16 @@
             hb.style.display = 'inline-block';
             hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(statusData.humidity);
         }
-        // Приводим датчик дождя к двум вариантам: "нет дождя" или "дождь идет"
+        // Отображение датчика дождя: показывать, только если глобально включен
         (function(){
+            const rb = document.getElementById('rain-box');
             const rv = document.getElementById('rain-value');
+            const enabled = !!(statusData && statusData.rain_enabled);
+            if (!enabled) {
+                rb.style.display = 'none';
+                return;
+            }
+            rb.style.display = 'inline-block';
             const s = String(statusData.rain_sensor || '').toLowerCase();
             rv.textContent = (s.indexOf('идёт дожд') !== -1 || s.indexOf('идет дожд') !== -1) ? 'дождь идет' : 'нет дождя';
         })();

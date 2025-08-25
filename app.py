@@ -926,6 +926,16 @@ def api_rain_config():
             'server_id': data.get('server_id')
         }
         ok = db.set_rain_config(cfg)
+        # Если глобально включили датчик дождя — включаем флаг у всех групп (кроме 999)
+        if ok and cfg.get('enabled'):
+            try:
+                for g in (db.get_groups() or []):
+                    gid = int(g.get('id'))
+                    if gid == 999:
+                        continue
+                    db.set_group_use_rain(gid, True)
+            except Exception:
+                pass
         return jsonify({'success': bool(ok)})
     except Exception as e:
         logger.error(f"rain config failed: {e}")
@@ -1948,6 +1958,7 @@ def api_status():
         'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
         'temperature': temperature,
         'humidity': humidity,
+        'rain_enabled': bool(rain_cfg.get('enabled')),
         'rain_sensor': rain_sensor_status,
         'groups': groups_status,
         'emergency_stop': app.config.get('EMERGENCY_STOP', False),
