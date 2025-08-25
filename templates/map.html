@@ -116,9 +116,18 @@ document.getElementById('mapFile').addEventListener('change', async (e) => {
 });
 
 document.addEventListener('DOMContentLoaded', ()=>{
-  // Пробуем получить роль для определения прав (если есть лёгкий эндпоинт)
-  try { fetch('/api/auth/status').then(r=>r.json()).then(_=>{ window.AUTH_ROLE = (window.AUTH_ROLE||sessionStorage.getItem('role')||''); loadMap(); }); }
-  catch(e){ loadMap(); }
+  // Получаем роль: показываем крестики только админу
+  fetch('/api/auth/status').then(r=>r.json()).then(st=>{
+    if (st && st.role) {
+      window.AUTH_ROLE = st.role;
+    } else {
+      window.AUTH_ROLE = sessionStorage.getItem('role') || 'guest';
+    }
+    loadMap();
+  }).catch(()=>{
+    window.AUTH_ROLE = sessionStorage.getItem('role') || 'guest';
+    loadMap();
+  });
 });
 </script>
 {% endblock %}

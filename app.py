@@ -809,7 +809,10 @@ MAP_FOLDER = MAP_DIR  # использовать новый каталог media
 
 @app.route('/api/auth/status')
 def api_auth_status():
-    return jsonify({'authenticated': bool(session.get('logged_in')) or bool(app.config.get('TESTING'))})
+    return jsonify({
+        'authenticated': bool(session.get('logged_in')) or bool(app.config.get('TESTING')),
+        'role': session.get('role', 'guest')
+    })
 
 
 @app.route('/logout', methods=['GET'])
