@@ -640,7 +640,13 @@
             if (group.status === 'watering' && group.current_zone) {
                 extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
-                extraText = `До ${group.postpone_until}`;
+                const pu = String(group.postpone_until);
+                const reason = String(group.postpone_reason || '').toLowerCase();
+                if (reason === 'emergency' || pu.trim().toLowerCase().startsWith('до ')) {
+                    extraText = pu;
+                } else {
+                    extraText = `До ${pu}`;
+                }
             } else if (group.status === 'error' && group.error_message) {
                 extraText = String(group.error_message);
             }
@@ -708,7 +714,13 @@
             if (group.status === 'watering' && group.current_zone) {
                 extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
-                extraText2 = `До ${group.postpone_until}`;
+                const pu2 = String(group.postpone_until);
+                const reason2 = String(group.postpone_reason || '').toLowerCase();
+                if (reason2 === 'emergency' || pu2.trim().toLowerCase().startsWith('до ')) {
+                    extraText2 = pu2;
+                } else {
+                    extraText2 = `До ${pu2}`;
+                }
             } else if (group.status === 'error' && group.error_message) {
                 extraText2 = String(group.error_message);
             }
