@@ -38,6 +38,8 @@
   .caret::before { content: '▸'; display:inline-block; margin-right:.25rem; }
   .caret.open::before { content: '▾'; }
   .badge { display:inline-block; padding:.15rem .45rem; border-radius:10px; background:#e9ecef; color:#333; font-size:.75rem; }
+  /* Номер сервера в таблице — контрастный на темном фоне */
+  .server-id { color: var(--text-color); font-weight: 700; }
 </style>
 {% endblock %}
 
@@ -128,7 +130,7 @@
       (res.servers || []).forEach(s => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td><span class="status-dot bad" data-id="${s.id}" title="offline"></span>${s.id}</td>
+          <td><span class="status-dot bad" data-id="${s.id}" title="offline"></span><span class="server-id">${s.id}</span></td>
           <td><input value="${s.name || ''}" oninput="this.dataset.v=this.value"></td>
           <td><input value="${s.host || ''}" oninput="this.dataset.v=this.value"></td>
           <td><input type="number" value="${s.port || 1883}" oninput="this.dataset.v=this.value"></td>
