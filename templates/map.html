@@ -123,9 +123,22 @@ document.addEventListener('DOMContentLoaded', ()=>{
     } else {
       window.AUTH_ROLE = sessionStorage.getItem('role') || 'guest';
     }
+    // Скрыть загрузку карт для не-админов
+    try {
+      const upload = document.querySelector('.upload-area');
+      if (upload) upload.style.display = (window.AUTH_ROLE === 'admin' ? 'flex' : 'none');
+      const input = document.getElementById('mapFile');
+      if (input) input.disabled = (window.AUTH_ROLE !== 'admin');
+    } catch(e) {}
     loadMap();
   }).catch(()=>{
     window.AUTH_ROLE = sessionStorage.getItem('role') || 'guest';
+    try {
+      const upload = document.querySelector('.upload-area');
+      if (upload) upload.style.display = (window.AUTH_ROLE === 'admin' ? 'flex' : 'none');
+      const input = document.getElementById('mapFile');
+      if (input) input.disabled = (window.AUTH_ROLE !== 'admin');
+    } catch(e) {}
     loadMap();
   });
 });
