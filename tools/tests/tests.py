@@ -383,6 +383,12 @@ class TestIrrigationSystem(unittest.TestCase):
         self.assertGreater(len(groups), 0)
         group_id = groups[0]['id']
         
+        # Гарантируем, что в выбранной группе есть хотя бы одна зона
+        zones = self.db.get_zones() or []
+        if not any(int(z.get('group_id') or 0) == int(group_id) for z in zones):
+            created = self.db.create_zone({'name': 'Зона для postpone', 'icon': '🌿', 'duration': 10, 'group_id': group_id})
+            self.assertIsNotNone(created)
+        
         # Тест отложенного полива
         postpone_data = {
             'group_id': group_id,
@@ -398,6 +404,22 @@ class TestIrrigationSystem(unittest.TestCase):
         result = json.loads(response.data)
         self.assertTrue(result['success'])
         self.assertIn('Полив отложен на 3 дней', result['message'])
+        # Проверяем, что все зоны группы немедленно остановлены и сброшено время старта
+        zones = self.db.get_zones()
+        group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
+        self.assertGreater(len(group_zones), 0)
+        for z in group_zones:
+            self.assertEqual(z.get('state'), 'off')
+            self.assertIsNone(z.get('watering_start_time'))
+
+        # Ручной запуск зоны возможен при отложенном поливе (это не аварийная остановка)
+        zone_id = group_zones[0]['id']
+        r = self.client.post(f'/api/zones/{zone_id}/start')
+        self.assertEqual(r.status_code, 200)
+        data = json.loads(r.data)
+        self.assertTrue(data.get('success'))
+        z_after = self.db.get_zone(zone_id)
+        self.assertEqual(z_after.get('state'), 'on')
         
         # Тест отмены отложенного полива
         cancel_data = {
@@ -499,6 +521,20 @@ class TestIrrigationSystem(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         r = self.client.post(f'/api/zones/{zone_id}/start')
         self.assertEqual(r.status_code, 400)
+        r = self.client.post('/api/emergency-resume')
+        self.assertEqual(r.status_code, 200)
+
+    def test_emergency_stop_blocks_manual_start(self):
+        """Проверка, что при аварийной остановке ручной запуск запрещен"""
+        zone = self.ensure_zone()
+        zone_id = zone['id']
+        # Включаем аварийную остановку
+        r = self.client.post('/api/emergency-stop')
+        self.assertEqual(r.status_code, 200)
+        # Попытка запуска зоны должна вернуть 400
+        r = self.client.post(f'/api/zones/{zone_id}/start')
+        self.assertEqual(r.status_code, 400)
+        # Снимаем аварийную остановку
         r = self.client.post('/api/emergency-resume')
         self.assertEqual(r.status_code, 200)
 
