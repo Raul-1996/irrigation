@@ -258,12 +258,15 @@ class WebInterfaceTest(unittest.TestCase):
         """Тест получения информации о фотографии зоны"""
         print("🧪 Тест получения информации о фотографии зоны...")
         base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
-        # ensure base use in this test as well
-        response = requests.get(f'{base}/api/zones')
-        zones = response.json()
-        zone_id = zones[0]['id'] if zones else None
-        if zone_id is None:
-            self.skipTest('Нет зон для проверки')
+        gids = [gr['id'] for gr in requests.get(f'{base}/api/groups').json() if gr.get('name')=='ТЕСТ']
+        gid = gids[0] if gids else None
+        if gid is None:
+            cg = requests.post(f'{base}/api/groups', json={'name':'ТЕСТ'})
+            try: gid = cg.json().get('id')
+            except Exception: pass
+        create = requests.post(f'{base}/api/zones', json={'name':'Tmp Z','duration':5,'group':gid or 998})
+        self.assertIn(create.status_code, (200,201))
+        cz = create.json(); zone_id = (cz.get('id') or (cz.get('zone') or {}).get('id'))
         response = requests.get(f'{base}/api/zones/{zone_id}/photo')
         self.assertEqual(response.status_code, 200)
         result = response.json()
