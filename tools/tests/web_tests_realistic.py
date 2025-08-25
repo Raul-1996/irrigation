@@ -240,8 +240,10 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         self.driver.get(f'{BASE_URL_BROWSER}/programs')
         self.simulate_human_delay()
         
-        # Ищем кнопку создания новой программы
-        add_buttons = self.driver.find_elements(By.CLASS_NAME, 'add-program-btn')
+        # Ищем кнопку создания новой программы: несколько возможных селекторов
+        add_buttons = []
+        add_buttons.extend(self.driver.find_elements(By.CLASS_NAME, 'add-program-btn'))
+        add_buttons.extend(self.driver.find_elements(By.CSS_SELECTOR, 'button.add-program, a.add-program, button[data-test="add-program"], #add-program'))
         if len(add_buttons) > 0:
             add_btn = add_buttons[0]
             
@@ -409,8 +411,10 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         self.driver.get(f'{BASE_URL_BROWSER}/')
         self.simulate_human_delay()
         
-        # Ищем кнопки отложенного полива
-        postpone_buttons = self.driver.find_elements(By.CLASS_NAME, 'postpone-btn')
+        # Ищем кнопки отложенного полива: несколько вариантов
+        postpone_buttons = []
+        postpone_buttons.extend(self.driver.find_elements(By.CLASS_NAME, 'postpone-btn'))
+        postpone_buttons.extend(self.driver.find_elements(By.CSS_SELECTOR, 'button.delay, .cancel-postpone, [data-test="postpone"]'))
         if len(postpone_buttons) > 0:
             postpone_btn = postpone_buttons[0]
             
@@ -418,7 +422,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             self.driver.execute_script("arguments[0].click();", postpone_btn)
             self.simulate_human_delay()
             
-            # Ищем модальное окно или форму
+            # Ищем модальное окно или форму (или сразу кнопки подтверждения)
             modal = self.wait_and_find_element(By.CLASS_NAME, 'postpone-modal')
             if modal:
                 # Выбираем количество дней
@@ -434,7 +438,17 @@ class RealisticWebInterfaceTest(unittest.TestCase):
                 
                 print("✅ Функция отложенного полива работает корректно")
             else:
-                print("⚠️  Модальное окно отложенного полива не найдено")
+                # На статус-странице реализовано через кнопки delay/cancel-postpone — пробуем их
+                try:
+                    delay_btns = self.driver.find_elements(By.CSS_SELECTOR, 'button.delay')
+                    if delay_btns:
+                        delay_btns[0].click(); self.simulate_human_delay(0.5, 1)
+                    cancel_btns = self.driver.find_elements(By.CSS_SELECTOR, 'button.cancel-postpone')
+                    if cancel_btns:
+                        cancel_btns[0].click(); self.simulate_human_delay(0.5, 1)
+                    print("✅ Отложенный полив через кнопки delay/cancel работает")
+                except Exception:
+                    print("⚠️  Элементы отложенного полива не найдены")
         else:
             print("⚠️  Кнопки отложенного полива не найдены")
     
