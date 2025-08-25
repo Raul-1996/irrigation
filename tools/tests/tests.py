@@ -232,10 +232,8 @@ class TestIrrigationSystem(unittest.TestCase):
     
     def test_postpone_operations(self):
         """Тест операций отложенного полива"""
-        # Получаем первую зону
-        zones = self.db.get_zones()
-        self.assertGreater(len(zones), 0)
-        zone = zones[0]
+        # Гарантируем наличие зоны
+        zone = self.ensure_zone()
         
         # Тест установки отложенного полива
         postpone_date = (datetime.now() + timedelta(days=2)).strftime('%Y-%m-%d 23:59')
