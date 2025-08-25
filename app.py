@@ -1992,14 +1992,17 @@ def api_env_config():
             except Exception:
                 pass
             return jsonify({'success': True})
-        # Валидация: если включены датчики temp/hum — их topic обязателен
+        # Валидация: если включены датчики temp/hum — их topic обязателен (копим все ошибки сразу)
         try:
             temp_cfg = (data.get('temp') or {})
             hum_cfg = (data.get('hum') or {})
+            errors = {}
             if bool(temp_cfg.get('enabled')) and not str(temp_cfg.get('topic') or '').strip():
-                return jsonify({'success': False, 'message': 'Требуется MQTT-топик для датчика температуры'}), 400
+                errors['temp_topic'] = 'Требуется MQTT-топик для датчика температуры'
             if bool(hum_cfg.get('enabled')) and not str(hum_cfg.get('topic') or '').strip():
-                return jsonify({'success': False, 'message': 'Требуется MQTT-топик для датчика влажности'}), 400
+                errors['hum_topic'] = 'Требуется MQTT-топик для датчика влажности'
+            if errors:
+                return jsonify({'success': False, 'errors': errors}), 400
         except Exception:
             pass
         ok = db.set_env_config(data)

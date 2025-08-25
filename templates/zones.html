@@ -1338,7 +1338,19 @@
             if (data && data.success) {
                 showNotification('Настройки датчиков среды сохранены', 'success');
             } else {
-                showNotification('Не удалось сохранить настройки датчиков', 'error');
+                // Подсветим оба поля, если есть ошибки
+                if (data && data.errors) {
+                    if (data.errors.temp_topic) {
+                        tempTopicInput.style.border = '2px solid #f44336';
+                    }
+                    if (data.errors.hum_topic) {
+                        humTopicInput.style.border = '2px solid #f44336';
+                    }
+                    const msg = [data.errors.temp_topic, data.errors.hum_topic].filter(Boolean).join('. ');
+                    showNotification(msg || 'Не удалось сохранить настройки датчиков', 'error');
+                } else {
+                    showNotification('Не удалось сохранить настройки датчиков', 'error');
+                }
             }
         } catch (e) {
             showNotification('Ошибка сохранения настроек датчиков', 'error');
