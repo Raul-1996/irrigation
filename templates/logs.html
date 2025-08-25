@@ -513,6 +513,7 @@
         dbgCb.id = 'debug-toggle';
         const dbgSpan = document.createElement('span');
         dbgSpan.textContent = 'Показывать подробные (DEBUG) сообщения';
+        dbgSpan.style.color = '#333';
         dbgSpan.title = 'Включает подробный вывод на сервере и в списке ниже. При выключении отображаются только важные предупреждения и ошибки.';
         dbgLabel.appendChild(dbgCb);
         dbgLabel.appendChild(dbgSpan);
