@@ -19,9 +19,8 @@ if [ ! -d "venv" ]; then
   exit 1
 fi
 source venv/bin/activate
-# Сделаем вывод чище: приглушим лишние предупреждения
+# Сделаем вывод чище: приглушим лишние предупреждения только для pytest
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
-export PYTHONWARNINGS="ignore::DeprecationWarning,ignore::urllib3.exceptions.NotOpenSSLWarning,ignore:Unknown pytest.mark:pytest.PytestUnknownMarkWarning"
 
 # Проверка веб-сервера
 BASE_URL="http://127.0.0.1:8080"
@@ -72,7 +71,10 @@ echo "✅ MQTT брокер доступен"
 echo "================================================"
 echo "🧪 Запуск pytest-набора (unit/API)"
 set +e
-pytest -q --disable-warnings -r a
+pytest -q -r a \
+  -W ignore::DeprecationWarning \
+  -W ignore::urllib3.exceptions.NotOpenSSLWarning \
+  -W ignore::pytest.PytestUnknownMarkWarning
 PYTEST_RC=$?
 set -e
 
