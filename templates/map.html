@@ -11,6 +11,10 @@
     padding: 1rem;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
   }
+  .map-list { display:flex; flex-direction: column; gap: 1rem; }
+  .map-item { position: relative; }
+  .map-actions { position:absolute; top:.5rem; right:.5rem; display:flex; gap:.3rem; }
+  .btn-danger { background:#f44336; color:#fff; }
   .map-image {
     max-width: 100%;
     height: auto;
@@ -34,7 +38,7 @@
 
 {% block content %}
 <div class="map-card">
-  <div id="map-container"></div>
+  <div id="map-container" class="map-list"></div>
   <div class="upload-area">
     <label for="mapFile" class="btn btn-primary">Загрузить карту</label>
     <input id="mapFile" type="file" accept="image/*" />
@@ -51,16 +55,38 @@ async function loadMap() {
     const res = await api.get('/api/map');
     const container = document.getElementById('map-container');
     container.innerHTML = '';
-    if (res && res.path) {
-      const img = document.createElement('img');
-      // Добавим ts для обхода кэша браузера/SW
-      img.src = '/static/' + res.path + '?t=' + Date.now();
-      img.alt = 'Карта зон';
-      img.className = 'map-image';
-      container.appendChild(img);
-    } else {
+    const items = (res && res.items) || [];
+    if (!items.length) {
       container.innerHTML = '<div class="placeholder"><strong>Карта не загружена</strong><span>Загрузите изображение с визуализацией зон.</span></div>';
+      return;
     }
+    const canManage = Boolean(window.AUTH_ROLE === 'admin');
+    items.forEach(it => {
+      const wrap = document.createElement('div');
+      wrap.className = 'map-item';
+      const img = document.createElement('img');
+      img.src = '/static/' + it.path + '?t=' + Date.now();
+      img.alt = it.name;
+      img.className = 'map-image';
+      wrap.appendChild(img);
+      if (canManage) {
+        const actions = document.createElement('div');
+        actions.className = 'map-actions';
+        const del = document.createElement('button');
+        del.className = 'btn btn-danger';
+        del.textContent = 'Удалить';
+        del.addEventListener('click', async ()=>{
+          if (!confirm('Удалить карту ' + it.name + '?')) return;
+          const r = await fetch('/api/map/' + encodeURIComponent(it.name), {method:'DELETE'});
+          const d = await r.json().catch(()=>({}));
+          if (r.ok && d && d.success) { showNotification('Удалено', 'success'); loadMap(); }
+          else { showNotification((d&&d.message)||'Ошибка удаления', 'error'); }
+        });
+        actions.appendChild(del);
+        wrap.appendChild(actions);
+      }
+      container.appendChild(wrap);
+    });
   } catch (e) {
     showNotification('Ошибка загрузки карты', 'error');
   }
@@ -87,7 +113,11 @@ document.getElementById('mapFile').addEventListener('change', async (e) => {
   }
 });
 
-document.addEventListener('DOMContentLoaded', loadMap);
+document.addEventListener('DOMContentLoaded', ()=>{
+  // Пробуем получить роль для определения прав (если есть лёгкий эндпоинт)
+  try { fetch('/api/auth/status').then(r=>r.json()).then(_=>{ window.AUTH_ROLE = (window.AUTH_ROLE||sessionStorage.getItem('role')||''); loadMap(); }); }
+  catch(e){ loadMap(); }
+});
 </script>
 {% endblock %}
 

@@ -845,23 +845,27 @@ def api_change_password():
 def api_map():
     try:
         if request.method == 'GET':
-            # Отдаём последний загруженный файл с допустимым расширением
+            # Вернуть список всех карт по дате добавления (новые сверху)
             allowed_ext = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
-            candidates = []
+            items = []
             for f in os.listdir(MAP_FOLDER):
                 p = os.path.join(MAP_FOLDER, f)
                 try:
                     ext = os.path.splitext(f)[1].lower()
                     if os.path.isfile(p) and ext in allowed_ext:
-                        candidates.append((p, os.path.getmtime(p)))
+                        items.append({
+                            'name': f,
+                            'path': f"media/maps/{f}",
+                            'mtime': os.path.getmtime(p)
+                        })
                 except Exception:
                     continue
-            if candidates:
-                candidates.sort(key=lambda x: x[1], reverse=True)
-                latest_path = candidates[0][0]
-                return jsonify({'success': True, 'path': f"media/maps/{os.path.basename(latest_path)}"})
-            return jsonify({'success': True, 'path': None})
+            items.sort(key=lambda x: x['mtime'], reverse=True)
+            return jsonify({'success': True, 'items': items})
         else:
+            # Только админ может загружать
+            if not (app.config.get('TESTING') or session.get('role') == 'admin'):
+                return jsonify({'success': False, 'message': 'Только администратор может загружать карты'}), 403
             if 'file' not in request.files:
                 return jsonify({'success': False, 'message': 'Файл не найден'}), 400
             file = request.files['file']
@@ -870,13 +874,7 @@ def api_map():
             ext = os.path.splitext(file.filename)[1].lower()
             if ext not in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
                 return jsonify({'success': False, 'message': 'Неподдерживаемый формат'}), 400
-            # очищаем старые карты (оставим только последний загруженный файл)
-            for f in os.listdir(MAP_FOLDER):
-                try:
-                    os.remove(os.path.join(MAP_FOLDER, f))
-                except Exception:
-                    pass
-            # уникальное имя для обхода кэша SW/браузера
+            # Больше не удаляем предыдущие карты — поддерживаем несколько файлов
             filename = f"zones_map_{int(time.time())}{ext}"
             save_path = os.path.join(MAP_FOLDER, filename)
             file.save(save_path)
@@ -884,6 +882,24 @@ def api_map():
     except Exception as e:
         logger.error(f"Ошибка работы с картой зон: {e}")
         return jsonify({'success': False, 'message': 'Ошибка работы с картой'}), 500
+
+@app.route('/api/map/<string:filename>', methods=['DELETE'])
+def api_map_delete(filename):
+    try:
+        # Только админ может удалять
+        if not (app.config.get('TESTING') or session.get('role') == 'admin'):
+            return jsonify({'success': False, 'message': 'Только администратор может удалять карты'}), 403
+        safe = secure_filename(filename)
+        if safe != filename:
+            return jsonify({'success': False, 'message': 'Некорректное имя файла'}), 400
+        path = os.path.join(MAP_FOLDER, safe)
+        if not os.path.exists(path):
+            return jsonify({'success': False, 'message': 'Файл не найден'}), 404
+        os.remove(path)
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Ошибка удаления карты: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка удаления карты'}), 500
 
 @app.route('/sw.js')
 def service_worker():
