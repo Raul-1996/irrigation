@@ -1,5 +1,8 @@
 import os
 import sys
+import sqlite3
+import json
+import tempfile
 import pytest
 
 os.environ.setdefault("TESTING", "1")
@@ -10,22 +13,53 @@ _ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir, os.pardir))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from app import app  # noqa: E402
-from database import db  # noqa: E402
-import sqlite3
-import json
+import app as app_module  # noqa: E402
+import database as database_module  # noqa: E402
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _isolate_test_database(tmp_path_factory):
+    """Route pytest to a temporary DB to protect the live configuration."""
+    # Choose a temp DB path unless TEST_DB_PATH is provided
+    test_db_path = os.environ.get('TEST_DB_PATH')
+    if not test_db_path:
+        tmpdir = tmp_path_factory.mktemp('pytest_db')
+        test_db_path = str(tmpdir / 'irrigation_test.db')
+
+    # Point global DB to temp path and init
+    try:
+        database_module.db.db_path = test_db_path
+        database_module.db.init_database()
+    except Exception:
+        from database import IrrigationDB  # local import to avoid circulars
+        test_db = IrrigationDB(db_path=test_db_path)
+        test_db.init_database()
+        database_module.db = test_db
+
+    # Ensure Flask app uses same DB
+    app_module.app.config.update(TESTING=True)
+    app_module.db = database_module.db
+
+    # Protect against accidental writes to a file named exactly 'irrigation.db'
+    os.environ.setdefault('WB_PROTECT_LIVE', '1')
+
+    yield
 
 def _reset_seed_data():
-    # Drop and recreate DB schema with desired defaults
-    conn = sqlite3.connect('irrigation.db')
+    # Seed ONLY the test DB referenced by database_module.db
+    target_path = getattr(database_module.db, 'db_path', 'irrigation.db')
+    if os.environ.get('WB_PROTECT_LIVE', '1') == '1' and os.path.basename(target_path) == 'irrigation.db':
+        # Skip seeding when DB path looks like a live DB
+        return
+    conn = sqlite3.connect(target_path)
     c = conn.cursor()
     for tbl in ['zones','groups','programs','logs','water_usage','mqtt_servers','settings']:
         try:
             c.execute(f'DELETE FROM {tbl}')
         except Exception:
             pass
-    # One group
-    c.execute("INSERT INTO groups(id,name) VALUES(1,'носос 1')")
+    # One group (normalized name)
+    c.execute("INSERT INTO groups(id,name) VALUES(1,'Насос-1')")
     # MQTT server
     c.execute("INSERT INTO mqtt_servers(id,name,host,port,enabled) VALUES(1,'local','127.0.0.1',1883,1)")
     # 30 zones, duration 1, topics 101..105/K1..K6
@@ -53,12 +87,12 @@ def _reset_seed_data():
 @pytest.fixture(autouse=True)
 def ensure_db():
     # Force initialization by accessing DB
-    db.get_zones()
+    database_module.db.get_zones()
     _reset_seed_data()
     yield
 
 @pytest.fixture()
 def client():
-    app.config.update(TESTING=True)
-    with app.test_client() as c:
+    app_module.app.config.update(TESTING=True)
+    with app_module.app.test_client() as c:
         yield c
