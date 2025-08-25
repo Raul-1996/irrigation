@@ -44,7 +44,7 @@ ECHO_SUPPRESS_WINDOW = float(os.getenv("EMULATOR_ECHO_SUPPRESS_WINDOW", "0.10"))
 HTTP_HOST = os.getenv("EMULATOR_HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("EMULATOR_HTTP_PORT", "5055"))
 MSW_AUTO_ENABLED = (os.getenv("EMULATOR_MSW_AUTO_ENABLED", "1") == "1")
-MSW_AUTO_INTERVAL_SECONDS = float(os.getenv("EMULATOR_MSW_AUTO_INTERVAL", "2.0"))
+MSW_AUTO_INTERVAL_SECONDS = float(os.getenv("EMULATOR_MSW_AUTO_INTERVAL", "60.0"))
 
 
 def build_relay_topics(device_ids: List[str], num_channels: int) -> List[str]:
