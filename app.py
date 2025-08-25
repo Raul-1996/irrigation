@@ -31,6 +31,8 @@ from werkzeug.security import check_password_hash
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Не прокидываем в root, чтобы потоковые хендлеры stdout/stderr не падали при закрытии пайпов в тестах
+logger.propagate = False
 try:
     from logging.handlers import RotatingFileHandler
     log_dir = os.path.join(os.getcwd(), 'backups')
@@ -78,6 +80,32 @@ def _parse_dt(s: str):
         except Exception:
             continue
     return None
+
+# === Централизованная конфигурация уровня логов ===
+def _apply_runtime_log_level():
+    try:
+        is_debug = db.get_logging_debug()
+        level = logging.DEBUG if is_debug else logging.WARNING
+        root = logging.getLogger()
+        root.setLevel(level)
+        for lg_name in ('app', __name__, 'apscheduler', 'werkzeug', 'database', 'irrigation_scheduler'):
+            lg = logging.getLogger(lg_name)
+            lg.setLevel(level if lg_name in ('app', __name__, 'database', 'irrigation_scheduler') else (logging.ERROR if not is_debug else logging.INFO))
+    except Exception:
+        pass
+
+@app.route('/api/logging/debug', methods=['GET', 'POST'])
+def api_logging_debug_toggle():
+    try:
+        if request.method == 'POST':
+            payload = request.get_json(force=True, silent=True) or {}
+            enable = bool(payload.get('enabled'))
+            db.set_logging_debug(enable)
+            _apply_runtime_log_level()
+        return jsonify({'debug': db.get_logging_debug()})
+    except Exception as e:
+        logger.error(f"api_logging_debug_toggle error: {e}")
+        return jsonify({'debug': db.get_logging_debug()}), 500
 
 def allowed_file(filename):
     return '.' in filename and \

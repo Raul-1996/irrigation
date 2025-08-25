@@ -10,6 +10,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# В тестах отключаем распространение в root, чтобы не писать в закрытый stdout из фоновых потоков
+logger.propagate = False
 
 class IrrigationDB:
     def __init__(self, db_path: str = 'irrigation.db'):
@@ -648,6 +650,14 @@ class IrrigationDB:
             logger.error(f"Ошибка записи settings[{key}]: {e}")
             return False
 
+    # ===== Логирование: флаг debug =====
+    def get_logging_debug(self) -> bool:
+        val = self.get_setting_value('logging.debug')
+        return str(val or '0') in ('1','true','True')
+
+    def set_logging_debug(self, enabled: bool) -> bool:
+        return self.set_setting_value('logging.debug', '1' if enabled else '0')
+
     def get_rain_config(self) -> Dict[str, Any]:
         """Глобальная конфигурация датчика дождя."""
         enabled = self.get_setting_value('rain.enabled')
@@ -980,7 +990,22 @@ class IrrigationDB:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_path = os.path.join(self.backup_dir, f'irrigation_backup_{timestamp}.db')
             
-            shutil.copy2(self.db_path, backup_path)
+            # В режиме WAL прямое копирование файла .db может не включать данные из -wal.
+            # Используем SQLite backup API, чтобы получить консистентную копию.
+            try:
+                with sqlite3.connect(self.db_path) as src_conn:
+                    with sqlite3.connect(backup_path) as dst_conn:
+                        src_conn.backup(dst_conn)
+                # По возможности попросим чекпоинт (не критично для копии, но уменьшит артефакты у исходной БД)
+                try:
+                    with sqlite3.connect(self.db_path) as c:
+                        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        c.commit()
+                except Exception:
+                    pass
+            except Exception:
+                # Fallback на физическое копирование, если backup API недоступен
+                shutil.copy2(self.db_path, backup_path)
             
             # Удаляем старые резервные копии (оставляем последние 7)
             self._cleanup_old_backups()

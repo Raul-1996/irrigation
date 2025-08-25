@@ -482,7 +482,35 @@
             resetBtn.style.background = '#6c757d';
         });
         
+        // Добавляем переключатель Debug
+        const dbgLabel = document.createElement('label');
+        dbgLabel.style.marginLeft = 'auto';
+        dbgLabel.style.display = 'flex';
+        dbgLabel.style.alignItems = 'center';
+        dbgLabel.style.gap = '0.4rem';
+        const dbgCb = document.createElement('input');
+        dbgCb.type = 'checkbox';
+        dbgCb.id = 'debug-toggle';
+        const dbgSpan = document.createElement('span');
+        dbgSpan.textContent = 'Режим отладки';
+        dbgLabel.appendChild(dbgCb);
+        dbgLabel.appendChild(dbgSpan);
+        
+        filterButtons.appendChild(dbgLabel);
         filterButtons.insertBefore(resetBtn, filterButtons.firstChild);
+        
+        // Инициализируем состояние переключателя
+        fetch('/api/logging/debug').then(r=>r.json()).then(st=>{
+            if (st && typeof st.debug !== 'undefined') {
+                dbgCb.checked = !!st.debug;
+            }
+        }).catch(()=>{});
+        dbgCb.addEventListener('change', async ()=>{
+            try {
+                await fetch('/api/logging/debug', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: dbgCb.checked})});
+                setTimeout(()=>applyFilter(), 150);
+            } catch(e){}
+        });
     });
 </script>
 {% endblock %}
