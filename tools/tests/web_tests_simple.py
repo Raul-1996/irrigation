@@ -213,8 +213,18 @@ class WebInterfaceTest(unittest.TestCase):
     def test_09_postpone_api(self):
         """Тест API отложенного полива"""
         print("🧪 Тест API отложенного полива...")
+        # Выбираем доступную группу динамически (избегаем 999)
+        groups = requests.get('http://localhost:8080/api/groups').json()
+        group_id = None
+        for g in groups or []:
+            if int(g.get('id')) != 999:
+                group_id = g.get('id')
+                break
+        if group_id is None and groups:
+            group_id = groups[0].get('id')
+        self.assertIsNotNone(group_id)
         postpone_data = {
-            'group_id': 1,
+            'group_id': group_id,
             'days': 1,
             'action': 'postpone'
         }
