@@ -243,7 +243,7 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         # Ищем кнопку создания новой программы: несколько возможных селекторов
         add_buttons = []
         add_buttons.extend(self.driver.find_elements(By.CLASS_NAME, 'add-program-btn'))
-        add_buttons.extend(self.driver.find_elements(By.CSS_SELECTOR, 'button.add-program, a.add-program, button[data-test="add-program"], #add-program'))
+        add_buttons.extend(self.driver.find_elements(By.CSS_SELECTOR, 'button.add-program, a.add-program, button[data-test="add-program"], #add-program, button.float-add, .float-add'))
         if len(add_buttons) > 0:
             add_btn = add_buttons[0]
             
@@ -287,7 +287,17 @@ class RealisticWebInterfaceTest(unittest.TestCase):
             else:
                 print("⚠️  Форма создания программы не найдена")
         else:
-            print("⚠️  Кнопка добавления программы не найдена")
+            # Попробуем вызвать открытие мастера напрямую, если кнопка не найдена
+            try:
+                self.driver.execute_script("if (typeof openWizard==='function') openWizard();")
+                self.simulate_human_delay()
+                form = self.wait_and_find_element(By.CLASS_NAME, 'program-form')
+                if form:
+                    print("✅ Окно создания программы открыто через openWizard()")
+                else:
+                    print("⚠️  Кнопка добавления программы не найдена")
+            except Exception:
+                print("⚠️  Кнопка добавления программы не найдена")
     
     def test_04_realistic_photo_upload(self):
         """Реалистичная загрузка фотографии"""

@@ -26,6 +26,12 @@ level_name = os.getenv('SCHEDULER_LOG_LEVEL', 'INFO').upper()
 level = getattr(logging, level_name, logging.INFO)
 logging.basicConfig(level=level)
 logger = logging.getLogger(__name__)
+# Урезаем болтливость APScheduler, чтобы в тестах и проде не было лишних сообщений
+try:
+    aps_logger = logging.getLogger('apscheduler')
+    aps_logger.setLevel(logging.ERROR)
+except Exception:
+    pass
 
 
 class IrrigationScheduler:
