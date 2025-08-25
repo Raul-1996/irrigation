@@ -114,7 +114,8 @@ class WebInterfaceTest(unittest.TestCase):
     def test_03_zones_api(self):
         """Тест API зон"""
         print("🧪 Тест API зон...")
-        response = requests.get('http://localhost:8080/api/zones')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/zones')
         self.assertEqual(response.status_code, 200)
         zones = response.json()
         self.assertIsInstance(zones, list)
@@ -124,7 +125,8 @@ class WebInterfaceTest(unittest.TestCase):
     def test_04_groups_api(self):
         """Тест API групп"""
         print("🧪 Тест API групп...")
-        response = requests.get('http://localhost:8080/api/groups')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/groups')
         self.assertEqual(response.status_code, 200)
         groups = response.json()
         self.assertIsInstance(groups, list)
@@ -134,7 +136,8 @@ class WebInterfaceTest(unittest.TestCase):
     def test_05_programs_api(self):
         """Тест API программ"""
         print("🧪 Тест API программ...")
-        response = requests.get('http://localhost:8080/api/programs')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/programs')
         self.assertEqual(response.status_code, 200)
         programs = response.json()
         self.assertIsInstance(programs, list)
@@ -153,25 +156,27 @@ class WebInterfaceTest(unittest.TestCase):
             'client_id': 'cid',
             'enabled': True
         }
-        r = requests.post('http://localhost:8080/api/mqtt/servers', json=payload)
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        r = requests.post(f'{base}/api/mqtt/servers', json=payload)
         self.assertIn(r.status_code, (201, 400))
         if r.status_code == 201:
             sid = r.json()['server']['id']
             # get
-            g = requests.get(f'http://localhost:8080/api/mqtt/servers/{sid}')
+            g = requests.get(f'{base}/api/mqtt/servers/{sid}')
             self.assertEqual(g.status_code, 200)
             # update
-            u = requests.put(f'http://localhost:8080/api/mqtt/servers/{sid}', json={'name': 'WB UI 2'})
+            u = requests.put(f'{base}/api/mqtt/servers/{sid}', json={'name': 'WB UI 2'})
             self.assertEqual(u.status_code, 200)
             # delete
-            d = requests.delete(f'http://localhost:8080/api/mqtt/servers/{sid}')
+            d = requests.delete(f'{base}/api/mqtt/servers/{sid}')
             self.assertIn(d.status_code, (204, 400))
         print("✅ API MQTT servers CRUD работает корректно")
     
     def test_06_logs_api(self):
         """Тест API логов"""
         print("🧪 Тест API логов...")
-        response = requests.get('http://localhost:8080/api/logs')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/logs')
         self.assertEqual(response.status_code, 200)
         logs = response.json()
         self.assertIsInstance(logs, list)
@@ -180,7 +185,8 @@ class WebInterfaceTest(unittest.TestCase):
     def test_07_water_api(self):
         """Тест API воды"""
         print("🧪 Тест API воды...")
-        response = requests.get('http://localhost:8080/api/water')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/water')
         self.assertEqual(response.status_code, 200)
         water_data = response.json()
         self.assertIsInstance(water_data, dict)
@@ -189,32 +195,30 @@ class WebInterfaceTest(unittest.TestCase):
     def test_08_zone_update(self):
         """Тест обновления зоны"""
         print("🧪 Тест обновления зоны...")
-        # Получаем первую зону
-        response = requests.get('http://localhost:8080/api/zones')
-        zones = response.json()
-        zone_id = zones[0]['id']
-        
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        # Создаем временную зону
+        create = requests.post(f'{base}/api/zones', json={'name':'Tmp Z','duration':5,'group':999})
+        self.assertIn(create.status_code, (200,201))
+        cz = create.json(); zone_id = (cz.get('id') or (cz.get('zone') or {}).get('id'))
+        self.assertIsNotNone(zone_id)
         # Обновляем зону
-        update_data = {
-            'name': 'Тестовая зона',
-            'duration': 15,
-            'icon': '🌱'
-        }
-        response = requests.put(f'http://localhost:8080/api/zones/{zone_id}', 
-                              json=update_data)
+        update_data = { 'name': 'Тестовая зона', 'duration': 15, 'icon': '🌱' }
+        response = requests.put(f'{base}/api/zones/{zone_id}', json=update_data)
         self.assertEqual(response.status_code, 200)
-        
         # Проверяем обновление
-        response = requests.get(f'http://localhost:8080/api/zones/{zone_id}')
+        response = requests.get(f'{base}/api/zones/{zone_id}')
         updated_zone = response.json()
         self.assertEqual(updated_zone['name'], 'Тестовая зона')
         print("✅ Обновление зоны работает корректно")
+        # Удаляем временную зону
+        requests.delete(f'{base}/api/zones/{zone_id}')
     
     def test_09_postpone_api(self):
         """Тест API отложенного полива"""
         print("🧪 Тест API отложенного полива...")
         # Выбираем доступную группу динамически (избегаем 999)
-        groups = requests.get('http://localhost:8080/api/groups').json()
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        groups = requests.get(f'{base}/api/groups').json()
         group_id = None
         for g in groups or []:
             if int(g.get('id')) != 999:
@@ -228,7 +232,7 @@ class WebInterfaceTest(unittest.TestCase):
             'days': 1,
             'action': 'postpone'
         }
-        response = requests.post('http://localhost:8080/api/postpone', 
+        response = requests.post(f'{base}/api/postpone', 
                                json=postpone_data)
         self.assertEqual(response.status_code, 200)
         result = response.json()
@@ -238,63 +242,61 @@ class WebInterfaceTest(unittest.TestCase):
     def test_10_zone_photo_upload(self):
         """Тест загрузки фотографии зоны"""
         print("🧪 Тест загрузки фотографии зоны...")
-        # Получаем первую зону
-        response = requests.get('http://localhost:8080/api/zones')
-        zones = response.json()
-        zone_id = zones[0]['id']
-        
-        # Загружаем фотографию
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        create = requests.post(f'{base}/api/zones', json={'name':'Tmp Z','duration':5,'group':999})
+        self.assertIn(create.status_code, (200,201))
+        cz = create.json(); zone_id = (cz.get('id') or (cz.get('zone') or {}).get('id'))
         files = {'photo': ('test.jpg', self.test_image_data, 'image/jpeg')}
-        response = requests.post(f'http://localhost:8080/api/zones/{zone_id}/photo', 
-                               files=files)
+        response = requests.post(f'{base}/api/zones/{zone_id}/photo', files=files)
         self.assertEqual(response.status_code, 200)
         result = response.json()
         self.assertTrue(result['success'])
         print("✅ Загрузка фотографии зоны работает корректно")
+        requests.delete(f'{base}/api/zones/{zone_id}')
     
     def test_11_zone_photo_get(self):
         """Тест получения информации о фотографии зоны"""
         print("🧪 Тест получения информации о фотографии зоны...")
-        # Получаем первую зону
-        response = requests.get('http://localhost:8080/api/zones')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        # ensure base use in this test as well
+        response = requests.get(f'{base}/api/zones')
         zones = response.json()
-        zone_id = zones[0]['id']
-        
-        # Получаем информацию о фотографии
-        response = requests.get(f'http://localhost:8080/api/zones/{zone_id}/photo')
+        zone_id = zones[0]['id'] if zones else None
+        if zone_id is None:
+            self.skipTest('Нет зон для проверки')
+        response = requests.get(f'{base}/api/zones/{zone_id}/photo')
         self.assertEqual(response.status_code, 200)
         result = response.json()
         self.assertTrue(result['success'])
         print("✅ Получение информации о фотографии работает корректно")
+        requests.delete(f'{base}/api/zones/{zone_id}')
     
     def test_12_zone_start_stop(self):
         """Тест запуска и остановки зоны"""
         print("🧪 Тест запуска и остановки зоны...")
-        # Получаем первую зону
-        response = requests.get('http://localhost:8080/api/zones')
-        zones = response.json()
-        zone_id = zones[0]['id']
-        
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        create = requests.post(f'{base}/api/zones', json={'name':'Tmp Z','duration':1,'group':999})
+        self.assertIn(create.status_code, (200,201))
+        cz = create.json(); zone_id = (cz.get('id') or (cz.get('zone') or {}).get('id'))
         # Запускаем зону
-        response = requests.post(f'http://localhost:8080/api/zones/{zone_id}/start')
+        response = requests.post(f'{base}/api/zones/{zone_id}/start')
         self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertTrue(result['success'])
-        
+        result = response.json(); self.assertTrue(result['success'])
         # Останавливаем зону
-        response = requests.post(f'http://localhost:8080/api/zones/{zone_id}/stop')
+        response = requests.post(f'{base}/api/zones/{zone_id}/stop')
         self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertTrue(result['success'])
+        result = response.json(); self.assertTrue(result['success'])
         print("✅ Запуск и остановка зоны работает корректно")
+        requests.delete(f'{base}/api/zones/{zone_id}')
     
     def test_13_pages_accessibility(self):
         """Тест доступности всех страниц"""
         print("🧪 Тест доступности всех страниц...")
         pages = ['/', '/login', '/zones', '/programs', '/logs', '/water']
         
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
         for page in pages:
-            response = requests.get(f'http://localhost:8080{page}')
+            response = requests.get(f'{base}{page}')
             self.assertEqual(response.status_code, 200)
             self.assertIn('WB-Irrigation', response.text)
             print(f"✅ Страница {page} доступна")
@@ -302,31 +304,34 @@ class WebInterfaceTest(unittest.TestCase):
     def test_13b_login_logout(self):
         """Тест логина и логаута"""
         # login page GET
-        resp = requests.get('http://localhost:8080/login')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        resp = requests.get(f'{base}/login')
         self.assertEqual(resp.status_code, 200)
         # API login
-        resp = requests.post('http://localhost:8080/api/login', json={'password': '1234'})
+        resp = requests.post(f'{base}/api/login', json={'password': '1234'})
         self.assertIn(resp.status_code, (200, 401))
         # logout redirect
-        resp = requests.get('http://localhost:8080/logout', allow_redirects=False)
+        resp = requests.get(f'{base}/logout', allow_redirects=False)
         self.assertIn(resp.status_code, (302, 303))
     
     def test_14_error_handling(self):
         """Тест обработки ошибок"""
         print("🧪 Тест обработки ошибок...")
         # Тест несуществующей зоны
-        response = requests.get('http://localhost:8080/api/zones/999999')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/zones/999999')
         self.assertEqual(response.status_code, 404)
         
         # Тест несуществующей страницы
-        response = requests.get('http://localhost:8080/nonexistent')
+        response = requests.get(f'{base}/nonexistent')
         self.assertEqual(response.status_code, 404)
         print("✅ Обработка ошибок работает корректно")
     
     def test_15_water_usage_page(self):
         """Тест страницы расхода воды"""
         print("🧪 Тест страницы расхода воды...")
-        response = requests.get('http://localhost:8080/water')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/water')
         self.assertEqual(response.status_code, 200)
         self.assertIn('Расход воды', response.text)
         print("✅ Страница расхода воды работает корректно")

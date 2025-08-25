@@ -98,10 +98,14 @@ def main():
     )
     test_results.append(("Проверка импортов", success, output))
 
-    # 7. Загрузка тестовых изображений в живой сервер (если доступен)
+    # 7. Загрузка тестовых изображений в живой сервер (по явному флагу)
     try:
         import requests
         base = os.environ.get('WB_BASE_URL', 'http://127.0.0.1:8080')
+        allow_uploads = os.environ.get('WB_ALLOW_UPLOADS', '0') == '1'
+        if not allow_uploads:
+            print('ℹ️  Пропускаем загрузку изображений (WB_ALLOW_UPLOADS != 1)')
+            raise Exception('skip-uploads')
         # map image
         images_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'images'))
         def pick(first_names):
@@ -130,7 +134,8 @@ def main():
             except Exception:
                 print('ℹ️ ', zid, inf.status_code)
     except Exception as e:
-        print('⚠️  Не удалось загрузить тестовые изображения на живой сервер:', e)
+        if str(e) != 'skip-uploads':
+            print('⚠️  Не удалось загрузить тестовые изображения на живой сервер:', e)
     
     # Создание отчета
     print(f"\n{'='*80}")
