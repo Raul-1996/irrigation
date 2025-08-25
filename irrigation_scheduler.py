@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import logging
 from database import IrrigationDB
+from utils import normalize_topic
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -138,7 +139,7 @@ class IrrigationScheduler:
                 topic = (zone.get('topic') or '').strip() if zone else ''
                 sid = zone.get('mqtt_server_id') if zone else None
                 if mqtt and topic and sid:
-                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    t = normalize_topic(topic)
                     server = self.db.get_mqtt_server(int(sid))
                     if server:
                         logger.info(f"SCHED auto-stop publish OFF zone={zone_id} topic={t}")
@@ -201,7 +202,7 @@ class IrrigationScheduler:
                             topic = (gz.get('topic') or '').strip()
                             sid = gz.get('mqtt_server_id')
                             if mqtt and topic and sid:
-                                t = topic if str(topic).startswith('/') else '/' + str(topic)
+                                t = normalize_topic(topic)
                                 server = self.db.get_mqtt_server(int(sid))
                                 if server:
                                     logger.info(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
@@ -228,7 +229,7 @@ class IrrigationScheduler:
                         topic = (zone.get('topic') or '').strip()
                         sid = zone.get('mqtt_server_id')
                         if mqtt and topic and sid:
-                            t = topic if str(topic).startswith('/') else '/' + str(topic)
+                            t = normalize_topic(topic)
                             server = self.db.get_mqtt_server(int(sid))
                             if server:
                                 logger.info(f"SCHED publish ON zone={zone_id} topic={t}")
@@ -280,7 +281,7 @@ class IrrigationScheduler:
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
                     if mqtt and topic and sid:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        t = normalize_topic(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
                             logger.info(f"SCHED publish OFF zone={zone_id} topic={t}")
@@ -495,7 +496,7 @@ class IrrigationScheduler:
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
                     if mqtt and topic and sid:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        t = normalize_topic(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
                             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)

@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, request, send_file, redirect,
 from datetime import datetime, timedelta
 import json
 from database import db
+from utils import normalize_topic
 import os
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageOps
@@ -338,7 +339,7 @@ class RainMonitor:
                     sid = z.get('mqtt_server_id')
                     topic = (z.get('topic') or '').strip()
                     if mqtt and sid and topic:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        t = normalize_topic(topic)
                         server = db.get_mqtt_server(int(sid))
                         if server:
                             _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
@@ -522,7 +523,7 @@ def _init_scheduler_before_request():
                 try:
                     sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                     if mqtt and sid and topic:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        t = normalize_topic(topic)
                         server = db.get_mqtt_server(int(sid))
                         if server:
                             _publish_mqtt_value(server, t, '0')
@@ -672,7 +673,7 @@ def _get_or_create_mqtt_client(server: dict):
 
 def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.5) -> bool:
     try:
-        t = topic if str(topic).startswith('/') else '/' + str(topic)
+        t = normalize_topic(topic)
         sid = int(server.get('id')) if server.get('id') else None
         key = (sid or 0, t)
         now = time.time()
@@ -721,7 +722,7 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
             try:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                 if mqtt and sid and topic:
-                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    t = normalize_topic(topic)
                     server = db.get_mqtt_server(int(sid))
                     if server:
                         _publish_mqtt_value(server, t, '0')
@@ -1633,7 +1634,7 @@ def api_mqtt_scan_sse(server_id: int):
                         payload = msg.payload.decode('utf-8', errors='ignore')
                     except Exception:
                         payload = str(msg.payload)
-                    data = json.dumps({'topic': topic if str(topic).startswith('/') else '/' + str(topic), 'payload': payload})
+                    data = json.dumps({'topic': normalize_topic(topic), 'payload': payload})
                     try:
                         msg_queue.put_nowait(data)
                     except queue.Full:
@@ -2115,7 +2116,7 @@ def api_stop_group(group_id):
                 sid = zone.get('mqtt_server_id')
                 topic = (zone.get('topic') or '').strip()
                 if mqtt and sid and topic:
-                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    t = normalize_topic(topic)
                     server = db.get_mqtt_server(int(sid))
                     if server:
                         _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
@@ -2184,7 +2185,7 @@ def api_start_zone_exclusive(group_id, zone_id):
                     sid = z.get('mqtt_server_id')
                     topic = (z.get('topic') or '').strip()
                     if mqtt and sid and topic:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        t = normalize_topic(topic)
                         server = db.get_mqtt_server(int(sid))
                         if server:
                             _publish_mqtt_value(server, t, '1')
@@ -2197,7 +2198,7 @@ def api_start_zone_exclusive(group_id, zone_id):
                     sid = z.get('mqtt_server_id')
                     topic = (z.get('topic') or '').strip()
                     if mqtt and sid and topic:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
+                        t = normalize_topic(topic)
                         server = db.get_mqtt_server(int(sid))
                         if server:
                             _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
@@ -2539,7 +2540,7 @@ def start_zone(zone_id):
             sid = zone.get('mqtt_server_id')
             topic = (zone.get('topic') or '').strip()
             if mqtt and sid and topic:
-                t = topic if str(topic).startswith('/') else '/' + str(topic)
+                t = normalize_topic(topic)
                 server = db.get_mqtt_server(int(sid))
                 if server:
                     _publish_mqtt_value(server, t, '1')
@@ -2820,7 +2821,7 @@ def api_zone_mqtt_start(zone_id: int):
                     if osid and otopic:
                         server_o = db.get_mqtt_server(int(osid))
                         if server_o:
-                            t_o = otopic if str(otopic).startswith('/') else '/' + str(otopic)
+                            t_o = normalize_topic(otopic)
                             _publish_mqtt_value(server_o, t_o, '0')
                 except Exception:
                     logger.exception("Ошибка публикации MQTT '0' при MQTT-старте: выключение соседей")
@@ -2843,7 +2844,7 @@ def api_zone_mqtt_start(zone_id: int):
         pass
     sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
     if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
-    t = topic if str(topic).startswith('/') else '/' + str(topic)
+    t = normalize_topic(topic)
     try:
         server = db.get_mqtt_server(int(sid))
         if not server:
@@ -2876,7 +2877,7 @@ def api_zone_mqtt_stop(zone_id: int):
     if not z: return jsonify({'success': False}), 404
     sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
     if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
-    t = topic if str(topic).startswith('/') else '/' + str(topic)
+    t = normalize_topic(topic)
     try:
         server = db.get_mqtt_server(int(sid))
         if not server:

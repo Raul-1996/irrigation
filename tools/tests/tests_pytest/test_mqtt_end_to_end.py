@@ -42,7 +42,8 @@ class MqttSniffer:
             payload = msg.payload.decode('utf-8', 'ignore').strip()
         except Exception:
             payload = str(msg.payload)
-        self.events.put((str(topic if str(topic).startswith('/') else '/' + str(topic)), payload))
+        from utils import normalize_topic
+        self.events.put((normalize_topic(topic), payload))
 
     def start(self):
         self.client.connect(self.host, self.port, 5)

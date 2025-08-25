@@ -29,7 +29,7 @@ class IrrigationDB:
     def init_database(self):
         """Инициализация базы данных"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 # PRAGMA
                 try:
                     conn.execute('PRAGMA journal_mode=WAL')
@@ -331,7 +331,7 @@ class IrrigationDB:
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name 
@@ -352,7 +352,7 @@ class IrrigationDB:
     def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
         """Получить зону по ID"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name 
@@ -373,7 +373,7 @@ class IrrigationDB:
     def create_zone(self, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Создать новую зону"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 # Берём topic как есть, без какой-либо нормализации
                 topic = (zone_data.get('topic') or '').strip()
                 zid_explicit = None
@@ -422,7 +422,7 @@ class IrrigationDB:
     def update_zone(self, zone_id: int, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Обновить зону"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 # Получаем текущие данные зоны
                 current_zone = self.get_zone(zone_id)
                 if not current_zone:
@@ -523,7 +523,7 @@ class IrrigationDB:
     def delete_zone(self, zone_id: int) -> bool:
         """Удалить зону"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.execute('DELETE FROM zones WHERE id = ?', (zone_id,))
                 conn.commit()
                 return True
@@ -534,7 +534,7 @@ class IrrigationDB:
     def get_groups(self) -> List[Dict[str, Any]]:
         """Получить все группы"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT g.*, COUNT(z.id) as zone_count
@@ -551,7 +551,7 @@ class IrrigationDB:
     def create_group(self, name: str) -> Optional[Dict[str, Any]]:
         """Создать новую группу"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 cursor = conn.execute('INSERT INTO groups (name) VALUES (?)', (name,))
                 new_id = cursor.lastrowid
                 conn.commit()
@@ -569,7 +569,7 @@ class IrrigationDB:
         try:
             if group_id == 999:
                 return False
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 # Проверяем, есть ли зоны в группе
                 cursor = conn.execute('SELECT COUNT(*) FROM zones WHERE group_id = ?', (group_id,))
                 cnt = cursor.fetchone()[0]
@@ -586,7 +586,7 @@ class IrrigationDB:
     def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
         """Получить зоны по группе"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name 
