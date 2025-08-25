@@ -2087,6 +2087,34 @@ def api_postpone():
             # Фиксируем причину: ручная приостановка пользователем
             db.update_zone_postpone(zone['id'], postpone_until, 'manual')
         
+        # По требованию: немедленно остановить полив всех зон группы,
+        # но не блокировать ручной запуск (НЕ аварийная остановка)
+        try:
+            for zone in group_zones:
+                try:
+                    if (zone.get('state') == 'on') or zone.get('watering_start_time'):
+                        db.update_zone(zone['id'], {'state': 'off', 'watering_start_time': None})
+                        # Публикуем OFF в MQTT, если настроен сервер и топик
+                        sid = zone.get('mqtt_server_id')
+                        topic = (zone.get('topic') or '').strip()
+                        if mqtt and sid and topic:
+                            t = normalize_topic(topic)
+                            server = db.get_mqtt_server(int(sid))
+                            if server:
+                                _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
+                except Exception:
+                    logger.exception("Ошибка остановки зоны при установке отложенного полива")
+            # Отменяем активные задания планировщика для группы (будущие и текущие)
+            try:
+                scheduler = get_scheduler()
+                if scheduler:
+                    scheduler.cancel_group_jobs(group_id)
+            except Exception:
+                logger.exception("Ошибка отмены заданий планировщика при отложенном поливе группы")
+        except Exception:
+            # Не прерываем выполнение общей операции postpone, только логируем
+            logger.exception("Ошибка массовой остановки зон при отложенном поливе группы")
+        
         db.add_log('postpone_set', json.dumps({
             "group": group_id, 
             "days": days, 
