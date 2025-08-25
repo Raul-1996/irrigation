@@ -1828,6 +1828,57 @@ def api_status():
     temperature = None if not temp_enabled else (env_monitor.temp_value if env_monitor.temp_value is not None else 'нет данных')
     humidity = None if not hum_enabled else (env_monitor.hum_value if env_monitor.hum_value is not None else 'нет данных')
 
+    # MQTT servers/config/connectivity quick summary for UI banners
+    try:
+        servers = db.get_mqtt_servers()
+    except Exception:
+        servers = []
+    mqtt_servers_count = len(servers)
+    enabled_servers = [s for s in servers if int(s.get('enabled') or 0) == 1]
+    mqtt_enabled_count = len(enabled_servers)
+    mqtt_connected = False
+    # Best-effort connectivity check: try to connect to any enabled server (fallback: any server)
+    try:
+        if mqtt_servers_count > 0 and mqtt is not None:
+            candidates = enabled_servers if mqtt_enabled_count > 0 else servers
+            for s in candidates:
+                try:
+                    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(s.get('client_id') or None))
+                    if s.get('username'):
+                        client.username_pw_set(s.get('username'), s.get('password') or None)
+                    # keepalive is small; connect will raise fast if host unreachable
+                    client.connect(s.get('host') or '127.0.0.1', int(s.get('port') or 1883), 3)
+                    mqtt_connected = True
+                    try:
+                        client.disconnect()
+                    except Exception:
+                        pass
+                    break
+                except Exception:
+                    mqtt_connected = False
+        # Warn-level logs for missing servers or no connectivity
+        if mqtt_servers_count == 0:
+            try:
+                logger.warning('MQTT: нет ни одного сервера в настройках')
+            except Exception:
+                pass
+            try:
+                db.add_log('mqtt_warn', 'нет ни одного сервера в настройках')
+            except Exception:
+                pass
+        elif not mqtt_connected:
+            try:
+                logger.warning('MQTT: нет связи ни с одним сервером')
+            except Exception:
+                pass
+            try:
+                db.add_log('mqtt_warn', 'нет связи ни с одним MQTT сервером')
+            except Exception:
+                pass
+    except Exception:
+        # Silent: do not break status endpoint on MQTT check errors
+        pass
+
     try:
         logger.info('api_status: temp=%s hum=%s temp_enabled=%s hum_enabled=%s', temperature, humidity, temp_enabled, hum_enabled)
     except Exception:
@@ -1838,7 +1889,11 @@ def api_status():
         'humidity': humidity,
         'rain_sensor': rain_sensor_status,
         'groups': groups_status,
-        'emergency_stop': app.config.get('EMERGENCY_STOP', False)
+        'emergency_stop': app.config.get('EMERGENCY_STOP', False),
+        # MQTT quick status for UI
+        'mqtt_servers_count': mqtt_servers_count,
+        'mqtt_enabled_count': mqtt_enabled_count,
+        'mqtt_connected': mqtt_connected
     })
 @app.route('/api/env', methods=['GET','POST'])
 def api_env_config():

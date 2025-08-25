@@ -27,6 +27,7 @@
     .connection-status.show {
         display: block;
     }
+    .connection-status.warn { background: #ff9800; }
     
     .legend {
         background: white;
@@ -363,10 +364,10 @@
 {% endblock %}
 
 {% block content %}
-<!-- Индикатор связи с сервером -->
-<div id="connection-status" class="connection-status">
-    ⚠️ Нет связи с сервером. Проверьте подключение.
-</div>
+<!-- Индикаторы статусов соединений -->
+<div id="connection-status" class="connection-status">⚠️ Нет связи с сервером. Проверьте подключение.</div>
+<div id="mqtt-no-servers" class="connection-status warn">⚠️ Нет ни одного MQTT сервера. Проверьте настройки.</div>
+<div id="mqtt-no-connection" class="connection-status warn">⚠️ Нет связи с MQTT сервером. Проверьте подключение.</div>
 
 <div class="top-bar">
     <div class="info-box">
@@ -457,6 +458,8 @@
     let statusData = null;
     let zonesData = [];
     let connectionError = false;
+    let mqttNoServers = false;
+    let mqttNoConnection = false;
     let envProbeTimer = null;
     let envProbeAttempts = 0;
     
@@ -473,6 +476,7 @@
             statusData = await api.get('/api/status');
             updateStatusDisplay();
             hideConnectionError();
+            updateMqttWarnings();
         } catch (error) {
             console.error('Ошибка загрузки статуса:', error);
             showConnectionError();
@@ -484,6 +488,7 @@
             zonesData = await api.get('/api/zones');
             await updateZonesTable();
             hideConnectionError();
+            // leave MQTT banners controlled by status endpoint only
         } catch (error) {
             console.error('Ошибка загрузки зон:', error);
             showConnectionError();
@@ -502,6 +507,19 @@
             connectionError = false;
             document.getElementById('connection-status').classList.remove('show');
         }
+    }
+
+    function updateMqttWarnings() {
+        try {
+            const noServers = !statusData || !Number(statusData.mqtt_servers_count || 0);
+            const notConnected = !noServers && (statusData && statusData.mqtt_connected === false);
+            const elNoServers = document.getElementById('mqtt-no-servers');
+            const elNoConn = document.getElementById('mqtt-no-connection');
+            if (noServers && !mqttNoServers) { mqttNoServers = true; elNoServers.classList.add('show'); }
+            if (!noServers && mqttNoServers) { mqttNoServers = false; elNoServers.classList.remove('show'); }
+            if (notConnected && !mqttNoConnection) { mqttNoConnection = true; elNoConn.classList.add('show'); }
+            if (!notConnected && mqttNoConnection) { mqttNoConnection = false; elNoConn.classList.remove('show'); }
+        } catch (e) {}
     }
     
     function formatSeconds(total) {
