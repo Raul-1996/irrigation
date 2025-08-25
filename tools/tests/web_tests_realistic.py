@@ -244,6 +244,11 @@ class RealisticWebInterfaceTest(unittest.TestCase):
         add_buttons = []
         add_buttons.extend(self.driver.find_elements(By.CLASS_NAME, 'add-program-btn'))
         add_buttons.extend(self.driver.find_elements(By.CSS_SELECTOR, 'button.add-program, a.add-program, button[data-test="add-program"], #add-program, button.float-add, .float-add'))
+        if not add_buttons:
+            # Явное ожидание появления кнопки
+            candidate = self.wait_and_find_element(By.CSS_SELECTOR, 'button.float-add, .float-add, button.add-program, a.add-program, button[data-test="add-program"], #add-program')
+            if candidate:
+                add_buttons = [candidate]
         if len(add_buttons) > 0:
             add_btn = add_buttons[0]
             
