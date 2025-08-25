@@ -19,10 +19,14 @@
     width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center;
     font-size:22px; line-height:1;
     background:#fff; color:#f44336; border:2px solid #f44336;
-    transition: background-color .2s ease, color .2s ease, border-color .2s ease;
+    /* Дополнительная красная окантовка, чтобы не сливалась на белом */
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px #f44336;
+    transition: background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease;
   }
   .btn-delete-circle:hover {
     background:#f44336; color:#fff; border-color:#f44336;
+    /* Инвертируем окантовку при ховере */
+    box-shadow: 0 0 0 2px #f44336, 0 0 0 4px #fff;
   }
   .map-image {
     max-width: 100%;
