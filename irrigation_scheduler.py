@@ -381,7 +381,13 @@ class IrrigationScheduler:
                 early = 0
             if early > 15:
                 early = 15
-            run_at = datetime.now() + timedelta(minutes=int(duration_minutes)) - timedelta(seconds=early)
+            # В тестовом режиме ускоряем автостоп до секунд, чтобы не было «хвостов» после тестов
+            if os.getenv('TESTING') == '1':
+                total_seconds = min(6, max(1, int(duration_minutes)))
+                early = 0
+                run_at = datetime.now() + timedelta(seconds=total_seconds)
+            else:
+                run_at = datetime.now() + timedelta(minutes=int(duration_minutes)) - timedelta(seconds=early)
             # Гарантируем, что время в будущем (минимум +1 сек)
             now = datetime.now()
             if run_at <= now:
