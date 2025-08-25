@@ -46,6 +46,25 @@ class TestIrrigationSystem(unittest.TestCase):
         # Также заменяем глобальную переменную db в app.py
         import app as app_module
         app_module.db = self.db
+        # Если база пустая, инициализируем минимальными данными (как в pytest-наборе)
+        try:
+            if not (self.db.get_zones() or []):
+                # 30 зон в группе 1 с длительностью 1 минута
+                for zid in range(1, 31):
+                    self.db.create_zone({
+                        'id': zid,
+                        'name': f'Зона {zid}',
+                        'icon': '🌿',
+                        'duration': 1,
+                        'group': 1,
+                        'group_id': 1
+                    })
+                # Две программы со всеми зонами, дни 0-6
+                all_z = list(range(1, 31))
+                self.db.create_program({'name': 'Утренний', 'time': '04:00', 'days': [0,1,2,3,4,5,6], 'zones': all_z})
+                self.db.create_program({'name': 'Вечерний', 'time': '20:00', 'days': [0,1,2,3,4,5,6], 'zones': all_z})
+        except Exception:
+            pass
         # Гарантируем, что в тестовой БД нет активных зон
         for z in self.db.get_zones() or []:
             try:
