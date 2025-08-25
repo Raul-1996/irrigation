@@ -1274,6 +1274,14 @@
             const topic = document.getElementById('rain-topic').value;
             const rs = document.getElementById('rain-server');
             const server_id = rs && rs.value ? parseInt(rs.value) : null;
+            // Клиентская валидация
+            const rainTopicInput = document.getElementById('rain-topic');
+            rainTopicInput.style.border = '';
+            if (enabled && !String(topic).trim()) {
+                rainTopicInput.style.border = '2px solid #f44336';
+                showNotification('Укажите MQTT-топик для датчика дождя', 'error');
+                return;
+            }
             const resp = await fetch('/api/rain', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled, type, topic, server_id})});
             const data = await resp.json();
             if (data && data.success) {
@@ -1310,6 +1318,21 @@
                 server_id: (document.getElementById('env-hum-server').value || '') ? parseInt(document.getElementById('env-hum-server').value) : null,
                 topic: document.getElementById('env-hum-topic').value,
             };
+            // Клиентская валидация
+            const tempTopicInput = document.getElementById('env-temp-topic');
+            const humTopicInput = document.getElementById('env-hum-topic');
+            tempTopicInput.style.border = '';
+            humTopicInput.style.border = '';
+            if (temp.enabled && !String(temp.topic).trim()) {
+                tempTopicInput.style.border = '2px solid #f44336';
+                showNotification('Укажите MQTT-топик для датчика температуры', 'error');
+                return;
+            }
+            if (hum.enabled && !String(hum.topic).trim()) {
+                humTopicInput.style.border = '2px solid #f44336';
+                showNotification('Укажите MQTT-топик для датчика влажности', 'error');
+                return;
+            }
             const resp = await fetch('/api/env', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ temp, hum })});
             const data = await resp.json();
             if (data && data.success) {

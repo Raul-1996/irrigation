@@ -925,6 +925,9 @@ def api_rain_config():
             'type': data.get('type') if data.get('type') in ('NO', 'NC') else 'NO',
             'server_id': data.get('server_id')
         }
+        # Валидация: если включено — topic обязателен
+        if cfg['enabled'] and not cfg['topic']:
+            return jsonify({'success': False, 'message': 'Требуется MQTT-топик для датчика дождя'}), 400
         ok = db.set_rain_config(cfg)
         # Если глобально включили датчик дождя — включаем флаг у всех групп (кроме 999)
         if ok and cfg.get('enabled'):
@@ -1989,6 +1992,16 @@ def api_env_config():
             except Exception:
                 pass
             return jsonify({'success': True})
+        # Валидация: если включены датчики temp/hum — их topic обязателен
+        try:
+            temp_cfg = (data.get('temp') or {})
+            hum_cfg = (data.get('hum') or {})
+            if bool(temp_cfg.get('enabled')) and not str(temp_cfg.get('topic') or '').strip():
+                return jsonify({'success': False, 'message': 'Требуется MQTT-топик для датчика температуры'}), 400
+            if bool(hum_cfg.get('enabled')) and not str(hum_cfg.get('topic') or '').strip():
+                return jsonify({'success': False, 'message': 'Требуется MQTT-топик для датчика влажности'}), 400
+        except Exception:
+            pass
         ok = db.set_env_config(data)
         # Apply new config immediately
         try:
