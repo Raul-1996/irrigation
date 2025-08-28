@@ -124,6 +124,7 @@ class IrrigationDB:
                 self._migrate_add_zones_indexes(conn)
                 self._migrate_add_group_rain_flag(conn)
                 self._migrate_add_watering_start_source(conn)
+                self._migrate_add_mqtt_tls_options(conn)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -327,6 +328,27 @@ class IrrigationDB:
             conn.commit()
         except Exception as e:
             logger.error(f"Ошибка миграции индексов zones: {e}")
+
+    def _migrate_add_mqtt_tls_options(self, conn):
+        """Миграция: TLS-поля для mqtt_servers."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(mqtt_servers)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'tls_enabled' not in columns:
+                conn.execute('ALTER TABLE mqtt_servers ADD COLUMN tls_enabled INTEGER DEFAULT 0')
+            if 'tls_ca_path' not in columns:
+                conn.execute('ALTER TABLE mqtt_servers ADD COLUMN tls_ca_path TEXT')
+            if 'tls_cert_path' not in columns:
+                conn.execute('ALTER TABLE mqtt_servers ADD COLUMN tls_cert_path TEXT')
+            if 'tls_key_path' not in columns:
+                conn.execute('ALTER TABLE mqtt_servers ADD COLUMN tls_key_path TEXT')
+            if 'tls_insecure' not in columns:
+                conn.execute('ALTER TABLE mqtt_servers ADD COLUMN tls_insecure INTEGER DEFAULT 0')
+            if 'tls_version' not in columns:
+                conn.execute('ALTER TABLE mqtt_servers ADD COLUMN tls_version TEXT')
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка миграции mqtt_tls_options: {e}")
 
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
@@ -889,8 +911,9 @@ class IrrigationDB:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cur = conn.execute('''
-                    INSERT INTO mqtt_servers (name, host, port, username, password, client_id, enabled)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO mqtt_servers (name, host, port, username, password, client_id, enabled,
+                                              tls_enabled, tls_ca_path, tls_cert_path, tls_key_path, tls_insecure, tls_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     data.get('name', 'MQTT'),
                     data.get('host', 'localhost'),
@@ -898,7 +921,13 @@ class IrrigationDB:
                     data.get('username'),
                     data.get('password'),
                     data.get('client_id'),
-                    1 if data.get('enabled', True) else 0
+                    1 if data.get('enabled', True) else 0,
+                    1 if data.get('tls_enabled') else 0,
+                    data.get('tls_ca_path'),
+                    data.get('tls_cert_path'),
+                    data.get('tls_key_path'),
+                    1 if data.get('tls_insecure') else 0,
+                    data.get('tls_version')
                 ))
                 server_id = cur.lastrowid
                 conn.commit()
@@ -923,7 +952,9 @@ class IrrigationDB:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('''
                     UPDATE mqtt_servers
-                    SET name = ?, host = ?, port = ?, username = ?, password = ?, client_id = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+                    SET name = ?, host = ?, port = ?, username = ?, password = ?, client_id = ?, enabled = ?,
+                        tls_enabled = ?, tls_ca_path = ?, tls_cert_path = ?, tls_key_path = ?, tls_insecure = ?, tls_version = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 ''', (
                     data.get('name', 'MQTT'),
@@ -933,6 +964,12 @@ class IrrigationDB:
                     data.get('password'),
                     data.get('client_id'),
                     1 if data.get('enabled', True) else 0,
+                    1 if data.get('tls_enabled') else 0,
+                    data.get('tls_ca_path'),
+                    data.get('tls_cert_path'),
+                    data.get('tls_key_path'),
+                    1 if data.get('tls_insecure') else 0,
+                    data.get('tls_version'),
                     server_id
                 ))
                 conn.commit()

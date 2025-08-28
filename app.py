@@ -3056,30 +3056,38 @@ def _probe_env_values(cfg: dict) -> None:
                 cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                 if server.get('username'):
                     cl.username_pw_set(server.get('username'), server.get('password') or None)
-                cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                done = {'v': False}
-                def _on(c,u,m):
+                # TLS options
+                try:
+                    if int(server.get('tls_enabled') or 0) == 1:
+                        import ssl
+                        ca = server.get('tls_ca_path') or None
+                        cert = server.get('tls_cert_path') or None
+                        key = server.get('tls_key_path') or None
+                        tls_ver = (server.get('tls_version') or '').upper().strip()
+                        version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ('', 'TLS', 'TLS_CLIENT') else ssl.PROTOCOL_TLS
+                        cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
+                        if int(server.get('tls_insecure') or 0) == 1:
+                            cl.tls_insecure_set(True)
+                except Exception:
+                    logger.exception('MQTT TLS setup failed')
+                host = server.get('host') or '127.0.0.1'
+                port = int(server.get('port') or 1883)
+                try:
+                    cl.connect(host, port, 30)
+                except Exception:
+                    # не кэшируем неудачное подключение
+                    return None
+                def _on_disconnect(c, u, rc, properties=None):
                     try:
-                        s = (m.payload.decode('utf-8','ignore') or '').strip().replace(',', '.')
-                        v = round(float(s))
-                        if kind=='temp':
-                            env_monitor.temp_value = v
-                        else:
-                            env_monitor.hum_value = v
-                        logger.info('EnvProbe: got %s=%s from topic=%s', kind, v, getattr(m, 'topic', topic))
+                        with _MQTT_CLIENTS_LOCK:
+                            if _MQTT_CLIENTS.get(sid) is c:
+                                _MQTT_CLIENTS.pop(sid, None)
                     except Exception:
-                        logger.exception('EnvProbe: parse failed kind=%s', kind)
-                    finally:
-                        done['v'] = True
-                cl.on_message = _on
-                cl.subscribe(topic, qos=0)
-                cl.loop_start()
-                # wait brief time
-                import time as _t
-                _t.sleep(0.3)
-                cl.loop_stop(); cl.disconnect()
+                        pass
+                cl.on_disconnect = _on_disconnect
+                _MQTT_CLIENTS[sid] = cl
             except Exception:
-                logger.exception('EnvProbe: failed sid=%s topic=%s kind=%s', sid, topic, kind)
+                return None
     except Exception:
         logger.exception('EnvProbe: outer failed')
 
