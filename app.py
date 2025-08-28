@@ -97,6 +97,9 @@ ZONE_MEDIA_SUBDIR = 'zones'
 MAP_MEDIA_SUBDIR = 'maps'
 UPLOAD_FOLDER = os.path.join(MEDIA_ROOT, ZONE_MEDIA_SUBDIR)
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+ALLOWED_MIME_TYPES = {
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp'
+}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 # Создаем папки для медиа
@@ -152,8 +155,7 @@ def api_logging_debug_toggle():
         return jsonify({'debug': db.get_logging_debug()}), 500
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def compress_image(image_data, max_size=(800, 600), quality=85):
     """Сжатие изображения"""
@@ -903,6 +905,10 @@ def api_map():
             ext = os.path.splitext(file.filename)[1].lower()
             if ext not in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
                 return jsonify({'success': False, 'message': 'Неподдерживаемый формат'}), 400
+            # MIME-проверка загружаемой карты
+            m = request.files.get('file')
+            if not m or (getattr(m, 'mimetype', None) not in ALLOWED_MIME_TYPES):
+                return jsonify({'success': False, 'message': 'Неподдерживаемый тип содержимого'}), 400
             # Больше не удаляем предыдущие карты — поддерживаем несколько файлов
             filename = f"zones_map_{int(time.time())}{ext}"
             save_path = os.path.join(MAP_FOLDER, filename)
@@ -2363,6 +2369,13 @@ def upload_zone_photo(zone_id):
         
         if not allowed_file(file.filename):
             return jsonify({'success': False, 'message': 'Неподдерживаемый формат файла'}), 400
+        # MIME-проверка
+        try:
+            mime = file.mimetype
+        except Exception:
+            mime = None
+        if not mime or mime not in ALLOWED_MIME_TYPES:
+            return jsonify({'success': False, 'message': 'Неподдерживаемый тип содержимого'}), 400
         
         # Читаем файл
         file_data = file.read()
@@ -2376,8 +2389,12 @@ def upload_zone_photo(zone_id):
             out_bytes = file_data
             out_ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
         else:
-            # единый размер, например 800x600 (Landscape). Для вертикальных — кроп по центру
-            out_bytes, out_ext = normalize_image(file_data, target_size=(800, 600), fmt='WEBP', quality=90)
+            try:
+                out_bytes, out_ext = normalize_image(file_data, target_size=(800, 600), fmt='WEBP', quality=90)
+            except Exception:
+                logger.exception('normalize_image failed, storing original bytes')
+                out_bytes = file_data
+                out_ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
         
         # Перемещаем старый файл в OLD
         try:
