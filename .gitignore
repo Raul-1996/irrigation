@@ -155,3 +155,22 @@ uploads/
 venv/
 env/
 .venv/
+
+# WB-Irrigation runtime artifacts
+backups/
+server.out
+server.pid
+emulator.out
+emulator.pid
+irrigation.db*
+static/media/**
+!static/media/.gitkeep
+static/media/maps/**
+!static/media/maps/.gitkeep
+static/media/zones/**
+!static/media/zones/.gitkeep
+static/photos/**
+!static/photos/.gitkeep
+ui_demo_screens/
+*.out
+*.pid
