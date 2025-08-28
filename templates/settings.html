@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Настройки{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Смена пароля</h2>
+  <form id="pwd-form" onsubmit="return changePwd(event)">
+    <div class="form-row">
+      <label>Текущий пароль</label>
+      <input type="password" id="old_password" minlength="0" maxlength="32" required>
+    </div>
+    <div class="form-row">
+      <label>Новый пароль</label>
+      <input type="password" id="new_password" minlength="4" maxlength="32" required>
+    </div>
+    <div class="form-row">
+      <label>Повтор нового пароля</label>
+      <input type="password" id="new_password2" minlength="4" maxlength="32" required>
+    </div>
+    <button type="submit">Сменить пароль</button>
+  </form>
+  <div id="pwd-msg" style="margin-top:8px;"></div>
+  <script>
+  async function changePwd(e){
+    e.preventDefault();
+    const old_password = document.getElementById('old_password').value;
+    const new_password = document.getElementById('new_password').value;
+    const new_password2 = document.getElementById('new_password2').value;
+    const msg = document.getElementById('pwd-msg');
+    msg.textContent = '';
+    if(new_password !== new_password2){ msg.textContent = 'Пароли не совпадают'; msg.style.color = 'red'; return false; }
+    if(new_password.length < 4 || new_password.length > 32){ msg.textContent = 'Пароль 4..32 символа'; msg.style.color = 'red'; return false; }
+    try{
+      const r = await fetch('/api/password', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({old_password, new_password})});
+      const j = await r.json();
+      if(j && j.success){ msg.textContent = 'Пароль обновлён'; msg.style.color = 'green'; document.getElementById('pwd-form').reset(); }
+      else{ msg.textContent = (j && j.message) || 'Ошибка'; msg.style.color = 'red'; }
+    }catch(err){ msg.textContent = 'Ошибка сети'; msg.style.color = 'red'; }
+    return false;
+  }
+  </script>
+</div>
+{% endblock %}
+
+

@@ -27,6 +27,7 @@ from routes.zones import zones_bp
 from routes.programs import programs_bp
 from routes.groups import groups_bp
 from routes.auth import auth_bp
+from routes.settings import settings_bp
 from werkzeug.security import check_password_hash
 
 # Настройка логирования
@@ -647,6 +648,7 @@ app.register_blueprint(zones_bp)
 app.register_blueprint(programs_bp)
 app.register_blueprint(groups_bp)
 app.register_blueprint(auth_bp)
+app.register_blueprint(settings_bp)
 try:
     from routes.mqtt import mqtt_bp
     app.register_blueprint(mqtt_bp)
@@ -899,6 +901,8 @@ def api_change_password():
         data = request.get_json() or {}
         old_password = data.get('old_password', '')
         new_password = data.get('new_password', '')
+        if len(new_password) < 4 or len(new_password) > 32:
+            return jsonify({'success': False, 'message': 'Пароль должен быть 4..32 символа'}), 400
         if not new_password:
             return jsonify({'success': False, 'message': 'Новый пароль обязателен'}), 400
         stored_hash = db.get_password_hash()
