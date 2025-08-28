@@ -128,6 +128,16 @@ def _apply_runtime_log_level():
     except Exception:
         pass
 
+# Сессионные куки: безопасность по умолчанию
+try:
+    app.config.setdefault('SESSION_COOKIE_SAMESITE', 'Lax')
+    app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
+    # В проде имеет смысл включить Secure
+    if not Config.TESTING:
+        app.config.setdefault('SESSION_COOKIE_SECURE', False)
+except Exception:
+    pass
+
 @app.route('/api/logging/debug', methods=['GET', 'POST'])
 def api_logging_debug_toggle():
     try:
