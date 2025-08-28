@@ -571,9 +571,10 @@ def _init_scheduler_before_request():
             except Exception:
                 pass
             if request.path.startswith('/api/'):
-                allowed = {'/api/login', '/api/password', '/api/status', '/health'}
+                allowed = {'/api/login', '/api/password', '/api/status', '/health', '/api/env'}
                 if session.get('role') != 'admin':
-                    if request.path not in allowed:
+                    pth = request.path
+                    if pth not in allowed and not pth.startswith('/api/mqtt/'):
                         return jsonify({'success': False, 'message': 'auth required', 'error_code': 'UNAUTHENTICATED'}), 401
                 if session.get('role') == 'admin' and request.method in ['POST','PUT','DELETE']:
                     try:

@@ -1,44 +1,109 @@
 {% extends "base.html" %}
 {% block title %}Настройки{% endblock %}
+{% block page_title %}Смена пароля{% endblock %}
+{% block extra_css %}
+<style>
+  .settings-page{max-width:560px; margin:0 auto; padding:10px 12px}
+  .settings-card{background:#fff; border:1px solid var(--border-color, #e5e7eb); border-radius:12px; box-shadow:0 6px 18px rgba(0,0,0,.06); padding:14px}
+  @media (prefers-color-scheme: dark){ .settings-card{ background:#161a1e; border-color:#2a2f36; box-shadow:0 6px 18px rgba(0,0,0,.35) } }
+  .settings-note{margin:4px 0 10px; color:#6b7280; font-size:12px}
+  @media (prefers-color-scheme: dark){ .settings-note{ color:#9ca3af } }
+  .settings-form{display:grid; gap:8px}
+  .settings-row{display:grid; gap:4px}
+  .settings-row label{font-size:13px; font-weight:600}
+  .settings-input{position:relative}
+  .settings-input input[type="password"], .settings-input input[type="text"]{
+    width:100%; padding:9px 36px 9px 10px; border-radius:10px;
+    border:1px solid var(--border-color, #e5e7eb); background:transparent; color:inherit; font-size:14px; outline:none;
+  }
+  .settings-input input:focus{border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+  .settings-toggle{
+    position:absolute; right:6px; top:50%; transform:translateY(-50%);
+    background:transparent; border:0; cursor:pointer; padding:4px 6px; color:#9ca3af; border-radius:8px;
+  }
+  .settings-toggle:hover{background:rgba(0,0,0,.05)}
+  @media (prefers-color-scheme: dark){ .settings-toggle:hover{background:rgba(255,255,255,.06)} }
+  .settings-actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:6px}
+  .settings-btn{appearance:none; border:1px solid transparent; background:#2563eb; color:#fff; border-radius:10px; padding:9px 12px; font-weight:700; cursor:pointer}
+  .settings-btn:disabled{opacity:.6; cursor:not-allowed}
+  .settings-msg{min-height:1.2em; font-size:12px; margin-top:2px}
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="card">
-  <h2>Смена пароля</h2>
-  <form id="pwd-form" onsubmit="return changePwd(event)">
-    <div class="form-row">
-      <label>Текущий пароль</label>
-      <input type="password" id="old_password" minlength="0" maxlength="32" required>
-    </div>
-    <div class="form-row">
-      <label>Новый пароль</label>
-      <input type="password" id="new_password" minlength="4" maxlength="32" required>
-    </div>
-    <div class="form-row">
-      <label>Повтор нового пароля</label>
-      <input type="password" id="new_password2" minlength="4" maxlength="32" required>
-    </div>
-    <button type="submit">Сменить пароль</button>
-  </form>
-  <div id="pwd-msg" style="margin-top:8px;"></div>
-  <script>
-  async function changePwd(e){
+<div class="settings-page">
+  <div class="settings-card">
+    <p class="settings-note">Минимальная длина — 4 символа.</p>
+    <form id="pwd-form" class="settings-form" autocomplete="off">
+      <div class="settings-row">
+        <label for="old_password">Текущий пароль</label>
+        <div class="settings-input">
+          <input type="password" id="old_password" name="old_password" minlength="4" maxlength="32" required autocomplete="current-password">
+          <button type="button" class="settings-toggle" data-target="#old_password" aria-label="Показать/скрыть">👁️</button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="new_password">Новый пароль</label>
+        <div class="settings-input">
+          <input type="password" id="new_password" name="new_password" minlength="4" maxlength="32" required autocomplete="new-password">
+          <button type="button" class="settings-toggle" data-target="#new_password" aria-label="Показать/скрыть">👁️</button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="new_password2">Повторите пароль</label>
+        <div class="settings-input">
+          <input type="password" id="new_password2" name="new_password2" minlength="4" maxlength="32" autocomplete="new-password">
+          <button type="button" class="settings-toggle" data-target="#new_password2" aria-label="Показать/скрыть">👁️</button>
+        </div>
+        <div class="settings-note">Поле для контроля. Проверка при отправке — только на длину (≥ 4).</div>
+      </div>
+      <div class="settings-actions">
+        <button type="submit" id="submit-btn" class="settings-btn">
+          <span class="spinner" style="display:none">⏳</span>
+          <span class="label">Сменить пароль</span>
+        </button>
+      </div>
+      <div class="settings-msg" id="form-msg"></div>
+    </form>
+  </div>
+</div>
+<script>
+  document.querySelectorAll('.settings-toggle').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const target = document.querySelector(btn.dataset.target);
+      if (!target) return;
+      target.type = target.type === 'password' ? 'text' : 'password';
+    });
+  });
+  document.getElementById('pwd-form').addEventListener('submit', async (e)=>{
     e.preventDefault();
+    const btn = document.getElementById('submit-btn');
+    const msg = document.getElementById('form-msg');
     const old_password = document.getElementById('old_password').value;
     const new_password = document.getElementById('new_password').value;
-    const new_password2 = document.getElementById('new_password2').value;
-    const msg = document.getElementById('pwd-msg');
     msg.textContent = '';
-    if(new_password !== new_password2){ msg.textContent = 'Пароли не совпадают'; msg.style.color = 'red'; return false; }
-    if(new_password.length < 4 || new_password.length > 32){ msg.textContent = 'Пароль 4..32 символа'; msg.style.color = 'red'; return false; }
+    if (new_password.length < 4){ msg.textContent = 'Пароль должен быть не короче 4 символов.'; msg.style.color = '#e11d48'; return; }
+    btn.disabled = true;
+    btn.querySelector('.spinner').style.display = 'inline';
+    btn.querySelector('.label').textContent = 'Сохраняем...';
     try{
-      const r = await fetch('/api/password', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({old_password, new_password})});
-      const j = await r.json();
-      if(j && j.success){ msg.textContent = 'Пароль обновлён'; msg.style.color = 'green'; document.getElementById('pwd-form').reset(); }
-      else{ msg.textContent = (j && j.message) || 'Ошибка'; msg.style.color = 'red'; }
-    }catch(err){ msg.textContent = 'Ошибка сети'; msg.style.color = 'red'; }
-    return false;
-  }
-  </script>
-</div>
+      const res = await fetch('/api/password', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ old_password, new_password })});
+      let body = {};
+      try{ body = await res.json(); }catch(_){ body = {}; }
+      if (res.ok && (body.success === undefined || body.success === true)){
+        msg.textContent = 'Пароль обновлён.'; msg.style.color = '#15803d';
+        e.target.reset();
+      }else{
+        msg.textContent = (body.message || body.error || 'Ошибка'); msg.style.color = '#e11d48';
+      }
+    }catch(_){ msg.textContent = 'Ошибка сети'; msg.style.color = '#e11d48'; }
+    finally{
+      btn.disabled = false;
+      btn.querySelector('.spinner').style.display = 'none';
+      btn.querySelector('.label').textContent = 'Сменить пароль';
+    }
+  });
+</script>
 {% endblock %}
 
 
