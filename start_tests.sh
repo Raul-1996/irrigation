@@ -44,6 +44,29 @@ if [ "$CODE" != "200" ]; then
 fi
 echo "✅ Веб-сервер доступен"
 
+# Дополнительно: health-check с порогом времени ответа
+echo "🩺 Проверка /health"
+START_TS=$(python3 - <<'PY'
+import time; print(int(time.time()*1000))
+PY
+)
+HC_CODE=$(curl -s -o /dev/null -m 3 -w "%{http_code}" "$BASE_URL/health" || true)
+END_TS=$(python3 - <<'PY'
+import time; print(int(time.time()*1000))
+PY
+)
+ELAPSED=$((END_TS-START_TS))
+if [ "$HC_CODE" != "200" ]; then
+  echo "❌ Health check не прошёл (код: $HC_CODE)"
+  exit 1
+fi
+THRESHOLD=1500
+if [ $ELAPSED -gt $THRESHOLD ]; then
+  echo "⚠️  Health check медленный: ${ELAPSED}ms (> ${THRESHOLD}ms)"
+else
+  echo "✅ Health OK за ${ELAPSED}ms"
+fi
+
 # Проверка MQTT брокера
 MQTT_HOST="127.0.0.1"
 MQTT_PORT=1883
