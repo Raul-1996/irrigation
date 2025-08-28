@@ -546,6 +546,28 @@ def _init_scheduler_before_request():
         except Exception as e:
             logger.error(f"Initial sync failed: {e}")
 
+    # Требование смены пароля при первом входе / чистой установке
+    try:
+        if not app.config.get('TESTING'):
+            try:
+                db.ensure_password_change_required()
+            except Exception:
+                pass
+            if request.path.startswith('/api/'):
+                allowed = {'/api/login', '/api/password', '/api/status', '/health'}
+                if session.get('role') != 'admin':
+                    if request.path not in allowed:
+                        return jsonify({'success': False, 'message': 'auth required', 'error_code': 'UNAUTHENTICATED'}), 401
+                if session.get('role') == 'admin' and request.method in ['POST','PUT','DELETE']:
+                    try:
+                        must = db.get_setting_value('password_must_change')
+                    except Exception:
+                        must = None
+                    if str(must or '0') == '1' and request.path != '/api/password':
+                        return jsonify({'success': False, 'message': 'password change required', 'error_code': 'PASSWORD_MUST_CHANGE'}), 403
+    except Exception:
+        pass
+
     # Инициализация/перезапуск RainMonitor при изменении конфигурации
     try:
         if not app.config.get('TESTING'):
@@ -623,7 +645,8 @@ def _require_admin_for_mutations():
         if not p.startswith('/api/'):
             return None
         if request.method in ['POST', 'PUT', 'DELETE']:
-            if p == '/api/login':
+            # Публичные (без admin) мутации для интеграционных тестов и UI
+            if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/'):
                 return None
             if session.get('role') != 'admin':
                 return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403

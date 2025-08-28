@@ -657,6 +657,27 @@ class IrrigationDB:
             logger.error(f"Ошибка записи settings[{key}]: {e}")
             return False
 
+    def ensure_password_change_required(self) -> None:
+        """Если пароль используется дефолтный (1234) либо пароль ещё не меняли, выставить флаг обязательной смены."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
+                row = cur.fetchone()
+                if not row:
+                    # Нет пароля — требуем смену
+                    conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', ('password_must_change', '1'))
+                else:
+                    # Если в базе ещё дефолтный хэш (грубая эвристика: допускаем, что 1234 был записан),
+                    # всё равно форсируем смену при первом входе
+                    cur2 = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_must_change',))
+                    row2 = cur2.fetchone()
+                    if not row2:
+                        conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', ('password_must_change', '1'))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка установки флага обязательной смены пароля: {e}")
+
     # ===== Логирование: флаг debug =====
     def get_logging_debug(self) -> bool:
         val = self.get_setting_value('logging.debug')
@@ -1282,6 +1303,10 @@ class IrrigationDB:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
                     'password_hash', generate_password_hash(new_password, method='pbkdf2:sha256')
+                ))
+                # Сбрасываем флаг обязательной смены пароля
+                conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
+                    'password_must_change', '0'
                 ))
                 conn.commit()
                 return True
