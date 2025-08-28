@@ -32,6 +32,20 @@ from werkzeug.security import check_password_hash
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class _PIIFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = str(record.getMessage())
+            # Маскируем password=..., "password":"...", Authorization: Bearer ...
+            for key in ("password", "old_password", "new_password"):
+                msg = msg.replace(f'"{key}":"', f'"{key}":"***').replace(f"{key}=", f"{key}=***")
+            if 'Authorization' in msg:
+                msg = msg.replace('Authorization', 'Authorization: ***')
+            record.msg = msg
+        except Exception:
+            pass
+        return True
 # Не прокидываем в root в режиме тестов, чтобы потоковые хендлеры stdout/stderr не падали при закрытии пайпов
 try:
     import builtins as _bi
@@ -59,6 +73,7 @@ def _ensure_console_handler():
             root.addHandler(sh)
         sh.setLevel(root.level)
         sh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        sh.addFilter(_PIIFilter())
         # Приводим werkzeug к нашему форматтеру
         wlg = logging.getLogger('werkzeug')
         for h in (wlg.handlers or []):
@@ -74,6 +89,7 @@ try:
     fh.setLevel(logging.INFO)
     fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
     fh.setFormatter(fmt)
+    fh.addFilter(_PIIFilter())
     logger.addHandler(fh)
     # Отдельный логгер для импорт/экспорт операций
     imp_logger = logging.getLogger('import_export')
