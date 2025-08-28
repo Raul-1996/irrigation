@@ -1170,6 +1170,16 @@ def api_zone(zone_id):
     
     elif request.method == 'PUT':
         data = request.get_json() or {}
+        # Простая валидация
+        try:
+            if 'duration' in data:
+                d = int(data['duration'])
+                if d < 1 or d > 3600:
+                    return jsonify({'success': False, 'message': 'duration must be 1..3600'}), 400
+            if 'name' in data and (not str(data['name']).strip()):
+                return jsonify({'success': False, 'message': 'name must be non-empty'}), 400
+        except Exception:
+            return jsonify({'success': False, 'message': 'invalid zone payload'}), 400
         try:
             is_csv = (request.headers.get('X-Import-Op') == 'csv') or (request.args.get('source') == 'csv')
         except Exception:
@@ -1204,6 +1214,16 @@ def api_zone(zone_id):
 @app.route('/api/zones', methods=['POST'])
 def api_create_zone():
     data = request.get_json() or {}
+    # Простая валидация
+    try:
+        name = str(data.get('name') or 'Зона').strip()
+        duration = int(data.get('duration') or 10)
+        if duration < 1 or duration > 3600:
+            return jsonify({'success': False, 'message': 'duration must be 1..3600'}), 400
+        if not name:
+            return jsonify({'success': False, 'message': 'name must be non-empty'}), 400
+    except Exception:
+        return jsonify({'success': False, 'message': 'invalid zone payload'}), 400
     try:
         is_csv = (request.headers.get('X-Import-Op') == 'csv') or (request.args.get('source') == 'csv')
     except Exception:
