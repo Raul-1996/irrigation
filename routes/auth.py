@@ -1,4 +1,5 @@
 from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for
+import time
 from flask_wtf.csrf import CSRFProtect
 from services.auth_service import verify_password
 
@@ -19,7 +20,16 @@ def login_page():
 def api_login():
     data = request.get_json() or {}
     password = data.get('password', '')
-    
+    # Простейший rate limit по IP/сеансу: не чаще 1 попытки в 2 секунды
+    try:
+        now = time.time()
+        last = session.get('_last_login_try', 0)
+        if (now - float(last)) < 2.0:
+            return jsonify({'success': False, 'message': 'Слишком часто. Повторите позже.'}), 429
+        session['_last_login_try'] = now
+    except Exception:
+        pass
+
     success, role = verify_password(password)
     
     if success:
