@@ -940,6 +940,39 @@ def api_map_delete(filename):
 def service_worker():
     return app.send_static_file('sw.js')
 
+@app.route('/health')
+def health_check():
+    try:
+        # DB check
+        try:
+            _ = db.get_zones()
+            db_ok = True
+        except Exception:
+            db_ok = False
+        # Scheduler check
+        try:
+            sched = get_scheduler()
+            sched_ok = bool(sched is not None)
+        except Exception:
+            sched_ok = False
+        # MQTT check: есть ли доступные сервера
+        try:
+            servers = db.get_mqtt_servers() or []
+            mqtt_ok = bool(len(servers) >= 0)
+        except Exception:
+            mqtt_ok = False
+        overall = db_ok and sched_ok
+        code = 200 if overall else 503
+        return jsonify({
+            'ok': overall,
+            'db': db_ok,
+            'scheduler': sched_ok,
+            'mqtt_configured': mqtt_ok
+        }), code
+    except Exception as e:
+        logger.exception('health check failed')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 @app.route('/api/scheduler/status')
 def api_scheduler_status():
     """API для получения статуса планировщика"""
