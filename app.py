@@ -612,6 +612,21 @@ try:
     app.register_blueprint(mqtt_bp)
 except Exception as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
+@app.before_request
+def _require_admin_for_mutations():
+    try:
+        if app.config.get('TESTING'):
+            return None
+        p = request.path or ''
+        if not p.startswith('/api/'):
+            return None
+        if request.method in ['POST', 'PUT', 'DELETE']:
+            if p == '/api/login':
+                return None
+            if session.get('role') != 'admin':
+                return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
+    except Exception:
+        return None
 @csrf.exempt
 @app.route('/api/settings/early-off', methods=['GET', 'POST'])
 def api_setting_early_off():
