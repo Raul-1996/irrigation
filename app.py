@@ -785,6 +785,20 @@ def _get_or_create_mqtt_client(server: dict):
                 cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                 if server.get('username'):
                     cl.username_pw_set(server.get('username'), server.get('password') or None)
+                # TLS options (если включены)
+                try:
+                    if int(server.get('tls_enabled') or 0) == 1:
+                        import ssl
+                        ca = server.get('tls_ca_path') or None
+                        cert = server.get('tls_cert_path') or None
+                        key = server.get('tls_key_path') or None
+                        tls_ver = (server.get('tls_version') or '').upper().strip()
+                        version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ('', 'TLS', 'TLS_CLIENT') else ssl.PROTOCOL_TLS
+                        cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
+                        if int(server.get('tls_insecure') or 0) == 1:
+                            cl.tls_insecure_set(True)
+                except Exception:
+                    logger.exception('MQTT TLS setup failed for publisher')
                 host = server.get('host') or '127.0.0.1'
                 port = int(server.get('port') or 1883)
                 try:
@@ -792,6 +806,10 @@ def _get_or_create_mqtt_client(server: dict):
                 except Exception:
                     # не кэшируем неудачное подключение
                     return None
+                try:
+                    cl.reconnect_delay_set(min_delay=1, max_delay=4)
+                except Exception:
+                    pass
                 def _on_disconnect(c, u, rc, properties=None):
                     try:
                         with _MQTT_CLIENTS_LOCK:
@@ -800,6 +818,11 @@ def _get_or_create_mqtt_client(server: dict):
                     except Exception:
                         pass
                 cl.on_disconnect = _on_disconnect
+                # запускаем сетевой цикл, чтобы publish действительно уходил
+                try:
+                    cl.loop_start()
+                except Exception:
+                    pass
                 _MQTT_CLIENTS[sid] = cl
             except Exception:
                 return None
@@ -823,13 +846,27 @@ def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: 
             logger.warning("MQTT publish: client unavailable, dropping message")
             return False
         try:
-            cl.publish(t, payload=value, qos=0, retain=False)
+            res = cl.publish(t, payload=value, qos=0, retain=False)
+            try:
+                rc = getattr(res, 'rc', 0)
+            except Exception:
+                rc = 0
+            if rc != 0:
+                logger.warning(f"MQTT publish initial rc={rc}, try reconnect")
+                raise RuntimeError('publish_failed')
         except Exception:
             # Попробуем один раз пересоздать клиента и отправить
             cl = _get_or_create_mqtt_client(server)
             if cl is None:
                 return False
-            cl.publish(t, payload=value, qos=0, retain=False)
+            res = cl.publish(t, payload=value, qos=0, retain=False)
+            try:
+                rc = getattr(res, 'rc', 0)
+            except Exception:
+                rc = 0
+            if rc != 0:
+                logger.warning(f"MQTT publish retry rc={rc}")
+                return False
         return True
     except Exception:
         logger.exception("MQTT publish failed")
