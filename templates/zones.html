@@ -1663,50 +1663,72 @@
                     break;
             }
             
-            // Применяем изменения ко всем выбранным зонам
-            for (const zoneId of selectedZones) {
-                const zone = zonesData.find(z => z.id === zoneId);
-                if (zone) {
+            // Действия, требующие специальных API
+            if (action === 'delete' || action === 'delphoto') {
+                for (const zoneId of selectedZones) {
                     if (action === 'delete') {
                         await api.delete(`/api/zones/${zoneId}`);
-                        continue;
-                    }
-                    if (action === 'delphoto') {
+                    } else {
                         await api.delete(`/api/zones/${zoneId}/photo`);
-                        continue;
                     }
-                    
-                    const updatedZone = { ...zone };
-                    switch (action) {
-                        case 'group':
-                            updatedZone.group_id = parseInt(value);
-                            break;
-                        case 'icon':
-                            updatedZone.icon = value;
-                            break;
-                        case 'duration':
-                            // Проверка конфликтов как и раньше
-                            try {
-                                const conflict = await api.post('/api/zones/check-duration-conflicts', { zone_id: zoneId, new_duration: parseInt(value) });
-                                if (conflict && conflict.has_conflicts) {
-                                    showNotification(`Конфликт с программами для зоны ${zoneId}. Изменение пропущено`, 'warning');
-                                    continue;
-                                }
-                            } catch (err) {
-                                console.error('Ошибка проверки конфликтов (bulk):', err);
-                            }
-                            updatedZone.duration = parseInt(value);
-                            break;
-                        case 'mqtt':
-                            updatedZone.mqtt_server_id = parseInt(value);
-                            break;
-                    }
-                    await api.put(`/api/zones/${zoneId}`, updatedZone);
                 }
+                showNotification(`Изменения применены к ${selectedZones.length} зонам`, 'success');
+                await loadData();
+                return;
             }
-            
-            showNotification(`Изменения применены к ${selectedZones.length} зонам`, 'success');
-            await loadData();
+
+            // Массовое изменение длительности: сначала одна bulk-проверка конфликтов,
+            // затем одна транзакционная запись только для зон без конфликтов
+            if (action === 'duration') {
+                const payload = { changes: selectedZones.map(zid => ({ zone_id: zid, new_duration: parseInt(value) })) };
+                let check = null;
+                try {
+                    const r = await fetch('/api/zones/check-duration-conflicts-bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    check = await r.json();
+                } catch(e) { check = null; }
+                const results = (check && check.results) || {};
+                const conflicted = [];
+                const okIds = [];
+                for (const zid of selectedZones) {
+                    const zr = results[String(zid)];
+                    if (zr && zr.has_conflicts) conflicted.push(zid); else okIds.push(zid);
+                }
+                if (conflicted.length > 0) {
+                    showNotification(`Конфликты у зон: ${conflicted.join(', ')} — они пропущены`, 'warning');
+                }
+                if (okIds.length > 0) {
+                    const zonesPayload = okIds.map(id => ({ id, duration: parseInt(value) }));
+                    const resp = await fetch('/api/zones/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zones: zonesPayload }) });
+                    const j = await resp.json();
+                    if (!j || !j.success) {
+                        showNotification('Ошибка применения изменений', 'error');
+                    } else {
+                        showNotification(`Обновлено ${j.updated}, создано ${j.created}, ошибок ${j.failed}`, 'success');
+                    }
+                }
+                await loadData();
+                return;
+            }
+
+            // Остальные массовые операции оформляем одним импортом
+            let zonesPayload = [];
+            if (action === 'group') {
+                zonesPayload = selectedZones.map(id => ({ id, group_id: parseInt(value) }));
+            } else if (action === 'icon') {
+                zonesPayload = selectedZones.map(id => ({ id, icon: value }));
+            } else if (action === 'mqtt') {
+                zonesPayload = selectedZones.map(id => ({ id, mqtt_server_id: parseInt(value) }));
+            }
+            if (zonesPayload.length > 0) {
+                const resp = await fetch('/api/zones/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zones: zonesPayload }) });
+                const j = await resp.json();
+                if (!j || !j.success) {
+                    showNotification('Ошибка применения изменений', 'error');
+                } else {
+                    showNotification(`Обновлено ${j.updated}, создано ${j.created}, ошибок ${j.failed}`, 'success');
+                }
+                await loadData();
+            }
             
         } catch (error) {
             console.error('Ошибка массового действия:', error);
