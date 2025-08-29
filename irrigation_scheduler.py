@@ -18,6 +18,10 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import os
 try:
+    from zoneinfo import ZoneInfo  # py3.9+
+except Exception:
+    ZoneInfo = None
+try:
     import paho.mqtt.client as mqtt
 except Exception:
     mqtt = None
@@ -49,7 +53,21 @@ class IrrigationScheduler:
 
     def __init__(self, db: IrrigationDB):
         self.db = db
-        self.scheduler = BackgroundScheduler()
+        # Явно задаём таймзону для надёжности (иначе возможен UTC на некоторых системах)
+        tz = None
+        try:
+            tzname = os.getenv('WB_TZ') or os.getenv('TZ')
+            if not tzname:
+                try:
+                    with open('/etc/timezone', 'r') as f:
+                        tzname = f.read().strip()
+                except Exception:
+                    tzname = None
+            if ZoneInfo and tzname:
+                tz = ZoneInfo(tzname)
+        except Exception:
+            tz = None
+        self.scheduler = BackgroundScheduler(timezone=tz) if tz else BackgroundScheduler()
         self.active_zones: Dict[int, datetime] = {}
         self.program_jobs: Dict[int, List[str]] = {}  # program_id -> list(job_id)
         self.is_running = False
@@ -60,7 +78,10 @@ class IrrigationScheduler:
             return
         self.scheduler.start()
         self.is_running = True
-        logger.info("Планировщик полива (APScheduler) запущен")
+        try:
+            logger.info("Планировщик полива (APScheduler) запущен, timezone=%s", str(getattr(self.scheduler, 'timezone', 'default')))
+        except Exception:
+            logger.info("Планировщик полива (APScheduler) запущен")
         # Плановый джоб: регулярная очистка истекших отложек
         try:
             self.schedule_postpone_sweeper()
