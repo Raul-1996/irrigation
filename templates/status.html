@@ -201,6 +201,8 @@
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin-top: 1rem;
     }
+    /* Временно скрываем колонку "Последний полив" на всех устройствах */
+    .col-last-watering { display: none !important; }
     .zones-header {
         display: flex;
         justify-content: space-between;
@@ -430,7 +432,7 @@
                 <th>Тип</th>
                 <th>Время</th>
                 <th>Группа</th>
-                <th class="hide-mobile">Последний полив</th>
+                <th class="hide-mobile col-last-watering">Последний полив</th>
                 <th class="hide-mobile">Следующий полив</th>
                 <th class="hide-mobile">Фото</th>
             </tr>
@@ -818,7 +820,7 @@
                 <td>${zone.icon}</td>
                 <td>${zone.duration} мин</td>
                 <td>${groupNameById[zone.group_id] || zone.group_id}</td>
-                <td class="hide-mobile">30.04 ${String(zone.id % 24).padStart(2, '0')}:00</td>
+                <td class="hide-mobile col-last-watering">—</td>
                 <td>${nextWatering}</td>
                 <td>
                     <div class="zone-photo">
