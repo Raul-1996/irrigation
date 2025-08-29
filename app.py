@@ -595,6 +595,9 @@ def _init_scheduler_before_request():
             except Exception:
                 pass
             if request.path.startswith('/api/'):
+                # Всегда разрешаем GET для гостей/пользователей
+                if request.method == 'GET':
+                    return None
                 allowed = {'/api/login', '/api/password', '/api/status', '/health', '/api/env'}
                 if session.get('role') != 'admin':
                     pth = request.path
