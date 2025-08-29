@@ -177,6 +177,11 @@ class IrrigationScheduler:
                 'watering_start_time': None,
                 'last_watering_time': last_time
             })
+            try:
+                from app import dlog
+                dlog("auto-stop zone=%s", zone_id)
+            except Exception:
+                pass
             zone = self.db.get_zone(zone_id)
             if zone:
                 self.db.add_log('zone_auto_stop', f'Зона {zone_id} ({zone["name"]}) автоматически остановлена')

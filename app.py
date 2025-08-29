@@ -118,7 +118,7 @@ try:
             try:
                 _tz_time.tzset()
             except Exception:
-                pass
+                logger.exception('manual-start: failed to clear group schedules')
 except Exception:
     pass
 
@@ -265,7 +265,7 @@ def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WE
         try:
             img = ImageOps.exif_transpose(img)
         except Exception:
-            pass
+            logger.exception('manual-start: db.update_zone failed')
         if img.mode in ('RGBA', 'LA', 'P'):
             img = img.convert('RGB')
         # масштабирование/приведение размера
@@ -326,7 +326,7 @@ class RainMonitor:
                 self.client.loop_stop()
                 self.client.disconnect()
         except Exception:
-            pass
+            logger.exception('manual-start: schedule_zone_stop failed')
         self.client = None
 
     def start(self, cfg: dict):
