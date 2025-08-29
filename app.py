@@ -1460,7 +1460,7 @@ def api_zones_next_watering_bulk():
         # Для каждой программы найдём ближайшее будущее время старта
         from datetime import datetime as _dt
         now = _dt.now()
-        next_start_per_program = {}
+        prog_info = {}
         for pm in offset_map_per_program:
             p = pm['prog']
             try:
@@ -1469,6 +1469,25 @@ def api_zones_next_watering_bulk():
                 hh, mm = 0, 0
             best = None
             days = p.get('days') or []
+            # Рассчитываем старт именно сегодня (если день совпадает)
+            today_start = None
+            if now.weekday() in days:
+                today_start = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            # Суммарная длительность программы в минутах
+            try:
+                zones_list = p.get('zones') or []
+                total_prog_min = sum(int(duration_by_zone.get(int(zid), 0)) for zid in zones_list)
+            except Exception:
+                total_prog_min = 0
+            # Прогресс текущего дня
+            in_progress = False
+            elapsed_min = 0
+            if today_start and today_start <= now and total_prog_min > 0:
+                today_end = today_start + timedelta(minutes=total_prog_min)
+                if now < today_end:
+                    in_progress = True
+                    elapsed_min = int((now - today_start).total_seconds() // 60)
+            # Поиск следующего старта в будущем (на случай, если текущий уже идёт/прошёл)
             for off in range(0, 14):
                 d = now + timedelta(days=off)
                 if d.weekday() in days:
@@ -1477,7 +1496,12 @@ def api_zones_next_watering_bulk():
                         continue
                     best = cand
                     break
-            next_start_per_program[p.get('id')] = best
+            prog_info[p.get('id')] = {
+                'next_start': best,
+                'today_start': today_start,
+                'in_progress': in_progress,
+                'elapsed_min': elapsed_min
+            }
         # Соберём ответы по зонам
         items = []
         for zid in zone_ids:
@@ -1486,19 +1510,26 @@ def api_zones_next_watering_bulk():
                 p = pm['prog']; offsets = pm['offsets']
                 if zid not in offsets:
                     continue
-                start_dt = next_start_per_program.get(p.get('id'))
-                if not start_dt:
-                    continue
-                cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
-                # Если зона уже поливается, не переносим сразу на следующий день для отображения в UI
-                try:
-                    zinfo = next((zz for zz in all_zones if int(zz.get('id')) == int(zid)), None)
-                    if not (zinfo and str(zinfo.get('state')) == 'on' and zinfo.get('watering_start_time')):
-                        if cand <= now:
+                pinfo = prog_info.get(p.get('id')) or {}
+                # Если программа уже идёт сегодня, и эта зона ещё не дошла по очереди — показываем сегодня
+                if pinfo.get('in_progress') and pinfo.get('today_start'):
+                    off_min = int(offsets.get(zid, 0))
+                    if off_min >= int(pinfo.get('elapsed_min') or 0):
+                        cand = pinfo['today_start'] + timedelta(minutes=off_min)
+                    else:
+                        # уже прошла — переносим на следующий запуск программы
+                        start_dt = pinfo.get('next_start')
+                        if not start_dt:
                             continue
-                except Exception:
-                    if cand <= now:
+                        cand = start_dt + timedelta(minutes=off_min)
+                else:
+                    start_dt = pinfo.get('next_start')
+                    if not start_dt:
                         continue
+                    cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
+                # Защита от прошедшего времени (редкий случай)
+                if cand <= now:
+                    continue
                 if best_dt is None or cand < best_dt:
                     best_dt = cand
             items.append({
