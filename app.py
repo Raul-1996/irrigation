@@ -3087,12 +3087,14 @@ def api_zone_watering_time(zone_id):
     try:
         zone = db.get_zone(zone_id)
         if not zone:
-            return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
+            resp = jsonify({'success': False, 'message': 'Зона не найдена'})
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp, 404
         
         total_duration = int(zone.get('duration') or 0)
         start_str = zone.get('watering_start_time')
         if zone.get('state') != 'on' or not start_str:
-            return jsonify({
+            resp = jsonify({
                 'success': True,
                 'zone_id': zone_id,
                 'is_watering': False,
@@ -3103,13 +3105,15 @@ def api_zone_watering_time(zone_id):
                 'remaining_seconds': 0,
                 'total_seconds': total_duration * 60
             })
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
         
         try:
             start_dt = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
         except Exception:
             # Если форматбитый — очищаем и возвращаем нули
             db.update_zone(zone_id, {'watering_start_time': None})
-            return jsonify({
+            resp = jsonify({
                 'success': True,
                 'zone_id': zone_id,
                 'is_watering': False,
@@ -3120,6 +3124,8 @@ def api_zone_watering_time(zone_id):
                 'remaining_seconds': 0,
                 'total_seconds': total_duration * 60
             })
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
         
         now = datetime.now()
         elapsed_seconds = max(0, int((now - start_dt).total_seconds()))
@@ -3127,7 +3133,7 @@ def api_zone_watering_time(zone_id):
         if elapsed_seconds >= total_seconds:
             # Автостоп
             db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
-            return jsonify({
+            resp = jsonify({
                 'success': True,
                 'zone_id': zone_id,
                 'is_watering': False,
@@ -3138,11 +3144,13 @@ def api_zone_watering_time(zone_id):
                 'remaining_seconds': 0,
                 'total_seconds': total_seconds
             })
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
         remaining_seconds = max(0, total_seconds - elapsed_seconds)
         # Для обратной совместимости оставляем минутные поля (целые минуты)
         elapsed_min = int(elapsed_seconds // 60)
         remaining_min = int(remaining_seconds // 60)
-        return jsonify({
+        resp = jsonify({
             'success': True,
             'zone_id': zone_id,
             'is_watering': True,
@@ -3153,9 +3161,13 @@ def api_zone_watering_time(zone_id):
             'remaining_seconds': remaining_seconds,
             'total_seconds': total_seconds
         })
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
     except Exception as e:
         logger.error(f"Ошибка получения времени полива зоны {zone_id}: {e}")
-        return jsonify({'success': False, 'message': 'Ошибка получения времени полива'}), 500
+        resp = jsonify({'success': False, 'message': 'Ошибка получения времени полива'})
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 500
 
 @app.route('/api/mqtt/zones-sse')
 def api_mqtt_zones_sse():

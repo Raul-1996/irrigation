@@ -624,7 +624,7 @@
         const span = document.getElementById(`group-timer-${group.id}`);
         if (!span) return;
         try {
-            const res = await fetch(`/api/zones/${group.current_zone}/watering-time`);
+            const res = await fetch(`/api/zones/${group.current_zone}/watering-time?ts=${Date.now()}`, { cache: 'no-store' });
             const data = await res.json();
             if (data && data.success && data.is_watering) {
                 span.dataset.remainingSeconds = String(data.remaining_seconds ?? (data.remaining_time * 60));
