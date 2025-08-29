@@ -11,8 +11,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException
 
-BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
-BASE_URL_BROWSER = os.environ.get('TEST_BASE_URL_BROWSER', os.environ.get('TEST_BASE_URL', BASE_URL_HOST)).rstrip('/')
+WB_BASE = os.environ.get('WB_BASE_URL')
+if WB_BASE:
+    BASE_URL_HOST = WB_BASE.rstrip('/')
+    BASE_URL_BROWSER = WB_BASE.rstrip('/')
+else:
+    BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
+    BASE_URL_BROWSER = os.environ.get('TEST_BASE_URL_BROWSER', os.environ.get('TEST_BASE_URL', BASE_URL_HOST)).rstrip('/')
 
 class WebAuthAndProgramsTest(unittest.TestCase):
     @classmethod
@@ -39,10 +44,13 @@ class WebAuthAndProgramsTest(unittest.TestCase):
             print(f"⚠️  Не удалось инициализировать браузер {browser}: {e}")
             cls.driver = None
 
-        env = os.environ.copy()
-        env['TESTING'] = '1'
-        cls.app_process = subprocess.Popen(['python', 'run.py'], env=env)
-        time.sleep(3)
+        # Не запускаем локальный сервер, если WB_BASE_URL задан (работаем с удалённым)
+        cls.app_process = None
+        if not WB_BASE:
+            env = os.environ.copy()
+            env['TESTING'] = '1'
+            cls.app_process = subprocess.Popen(['python', 'run.py'], env=env)
+            time.sleep(3)
 
     @classmethod
     def tearDownClass(cls):

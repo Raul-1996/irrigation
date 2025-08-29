@@ -23,9 +23,14 @@ import subprocess
 import requests
 import json
 
-# Адрес для внутренних запросов (host) и адрес, который будет открывать браузер внутри Docker
-BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
-BASE_URL_BROWSER = os.environ.get('TEST_BASE_URL_BROWSER', os.environ.get('TEST_BASE_URL', BASE_URL_HOST)).rstrip('/')
+# Адреса: если задан WB_BASE_URL — используем его для всех запросов и браузера
+WB_BASE = os.environ.get('WB_BASE_URL')
+if WB_BASE:
+    BASE_URL_HOST = WB_BASE.rstrip('/')
+    BASE_URL_BROWSER = WB_BASE.rstrip('/')
+else:
+    BASE_URL_HOST = os.environ.get('TEST_BASE_URL_HOST', 'http://localhost:8080').rstrip('/')
+    BASE_URL_BROWSER = os.environ.get('TEST_BASE_URL_BROWSER', os.environ.get('TEST_BASE_URL', BASE_URL_HOST)).rstrip('/')
 
 class WebInterfaceTest(unittest.TestCase):
     """Тесты веб-интерфейса WB-Irrigation"""
@@ -72,11 +77,10 @@ class WebInterfaceTest(unittest.TestCase):
         except Exception:
             pass
         
-        # Запуск Flask приложения в отдельном потоке
+        # Если WB_BASE_URL задан — не запускаем локальный Flask, работаем с удалённым
         cls.app_process = None
-        cls.start_flask_app()
-        
-        # Ждем запуска приложения
+        if not WB_BASE:
+            cls.start_flask_app()
         cls.wait_for_app_startup()
         
         # Создаем тестовое изображение

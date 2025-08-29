@@ -27,12 +27,29 @@ class WebInterfaceTest(unittest.TestCase):
         cls.test_backup_dir = tempfile.mkdtemp()
         cls.test_photos_dir = tempfile.mkdtemp()
         
-        # Запуск Flask приложения в отдельном потоке
-        cls.app_process = None
-        cls.start_flask_app()
-        
-        # Ждем запуска приложения
-        cls.wait_for_app_startup()
+        # Режим удалённого сервера: если WB_BASE_URL задан — не запускаем локальное приложение
+        cls.base_url = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        cls.remote_mode = (cls.base_url not in ('http://localhost:8080', 'http://127.0.0.1:8080'))
+        cls.session = requests.Session()
+
+        if cls.remote_mode:
+            # Логин для получения admin-сессии (если включена авторизация)
+            try:
+                pwd = os.environ.get('WB_PASSWORD', '1234')
+                cls.session.post(f"{cls.base_url}/api/login", json={'password': pwd}, timeout=5)
+                # Подменим requests.* на сессионные вызовы, чтобы не менять остальной код
+                requests.get = cls.session.get
+                requests.post = cls.session.post
+                requests.put = cls.session.put
+                requests.delete = cls.session.delete
+            except Exception:
+                pass
+        else:
+            # Запуск Flask приложения в отдельном потоке
+            cls.app_process = None
+            cls.start_flask_app()
+            # Ждем запуска приложения
+            cls.wait_for_app_startup()
         
         # Создаем тестовое изображение
         cls.create_test_image()
@@ -74,7 +91,8 @@ class WebInterfaceTest(unittest.TestCase):
         max_attempts = 30
         for attempt in range(max_attempts):
             try:
-                response = requests.get('http://localhost:8080/api/status', timeout=1)
+                base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+                response = requests.get(f'{base}/api/status', timeout=1)
                 if response.status_code == 200:
                     print(f"✅ Приложение запущено на попытке {attempt + 1}")
                     return
@@ -96,7 +114,8 @@ class WebInterfaceTest(unittest.TestCase):
     def test_01_home_page(self):
         """Тест главной страницы"""
         print("🧪 Тест главной страницы...")
-        response = requests.get('http://localhost:8080/')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/')
         self.assertEqual(response.status_code, 200)
         self.assertIn('WB-Irrigation', response.text)
         print("✅ Главная страница загружается корректно")
@@ -104,7 +123,8 @@ class WebInterfaceTest(unittest.TestCase):
     def test_02_status_api(self):
         """Тест API статуса"""
         print("🧪 Тест API статуса...")
-        response = requests.get('http://localhost:8080/api/status')
+        base = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
+        response = requests.get(f'{base}/api/status')
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn('datetime', data)
