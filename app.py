@@ -3195,7 +3195,12 @@ def api_zone_mqtt_stop(zone_id: int):
             return jsonify({'success': False, 'message': 'MQTT server not found'}), 400
         logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
         _publish_mqtt_value(server, t, '0')
-        return jsonify({'success': True})
+        try:
+            # Немедленно отражаем остановку в БД, чтобы UI увидел состояние и таймер сбросился
+            db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
+        except Exception:
+            pass
+        return jsonify({'success': True, 'message': 'Зона остановлена'})
     except Exception as e:
         logger.error(f"MQTT publish stop failed: {e}")
         return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500

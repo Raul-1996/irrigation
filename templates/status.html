@@ -1026,13 +1026,15 @@
             if (!zone) return;
             const url = currentState === 'on' ? `/api/zones/${zoneId}/mqtt/stop` : `/api/zones/${zoneId}/mqtt/start`;
             const res = await fetch(url, { method: 'POST' });
-            const data = await res.json();
-            if (data && data.success) {
-                showNotification(data.message, 'success');
+            let data = null;
+            try { data = await res.json(); } catch(e) { data = null; }
+            if (res.ok && data && data.success) {
+                showNotification(data.message || (currentState==='on'?'Зона остановлена':'Зона запущена'), 'success');
                 await loadStatusData();
                 await loadZonesData();
             } else {
-                showNotification(data.message || 'Ошибка запуска зоны', 'error');
+                const msg = (data && data.message) ? data.message : (currentState==='on'?'Ошибка остановки зоны':'Ошибка запуска зоны');
+                showNotification(msg, 'error');
             }
         } catch (error) {
             showNotification('Ошибка управления зоной', 'error');
