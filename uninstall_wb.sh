@@ -1,5 +1,5 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Uninstaller for Wirenboard deployment created by install_wb.sh
 
@@ -8,7 +8,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 APP_ROOT="/opt/wb-irrigation"
 
 require_root() {
-  if [ "${EUID}" -ne 0 ]; then
+  if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root (sudo -i)" >&2
     exit 1
   fi

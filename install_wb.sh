@@ -1,5 +1,5 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Simple idempotent installer for Wirenboard without Docker.
 # Installs into /opt/wb-irrigation/irrigation and creates a systemd service.
@@ -11,7 +11,7 @@ SERVICE_NAME="wb-irrigation"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 require_root() {
-  if [ "${EUID}" -ne 0 ]; then
+  if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root (sudo -i)" >&2
     exit 1
   fi
