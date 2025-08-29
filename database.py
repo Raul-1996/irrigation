@@ -104,6 +104,16 @@ class IrrigationDB:
                         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
+                # Отмена текущего запуска программ (разовая, по дате)
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS program_cancellations (
+                        program_id INTEGER NOT NULL,
+                        run_date TEXT NOT NULL,
+                        group_id INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (program_id, run_date, group_id)
+                    )
+                ''')
                 
                 # Создание индексов
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_zones_group ON zones(group_id)')
@@ -1007,6 +1017,33 @@ class IrrigationDB:
                 self.set_group_scheduled_starts(group_id, schedule)
         except Exception as e:
             logger.error(f"Ошибка перестройки расписания группы {group_id}: {e}")
+    
+    # ==== Program cancellations (per date) ====
+    def cancel_program_run_for_group(self, program_id: int, run_date: str, group_id: int) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT OR REPLACE INTO program_cancellations(program_id, run_date, group_id)
+                    VALUES (?, ?, ?)
+                ''', (int(program_id), str(run_date), int(group_id)))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка записи отмены программы {program_id} на {run_date} для группы {group_id}: {e}")
+            return False
+
+    def is_program_run_cancelled_for_group(self, program_id: int, run_date: str, group_id: int) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('''
+                    SELECT 1 FROM program_cancellations
+                    WHERE program_id = ? AND run_date = ? AND group_id = ? LIMIT 1
+                ''', (int(program_id), str(run_date), int(group_id)))
+                return cur.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Ошибка чтения отмены программы {program_id} на {run_date} для группы {group_id}: {e}")
+            return False
     
     def update_group(self, group_id: int, name: str) -> bool:
         """Обновить название группы"""

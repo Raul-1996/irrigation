@@ -1527,6 +1527,25 @@ def api_zones_next_watering_bulk():
                     if not start_dt:
                         continue
                     cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
+                    # Если текущая программа для группы ранее отменена — переносим на следующий день программы
+                    try:
+                        zinfo = next((zz for zz in all_zones if int(zz.get('id')) == int(zid)), None)
+                        gid = int(zinfo.get('group_id') or 0) if zinfo else 0
+                        if gid and p.get('id') is not None and pinfo.get('today_start'):
+                            run_date = pinfo['today_start'].strftime('%Y-%m-%d')
+                            if db.is_program_run_cancelled_for_group(int(p.get('id')), run_date, gid):
+                                # найти следующий день из дней программы
+                                hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
+                                ns = None
+                                for off in range(1, 15):
+                                    d = now + timedelta(days=off)
+                                    if d.weekday() in (p.get('days') or []):
+                                        ns = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                                        break
+                                if ns:
+                                    cand = ns + timedelta(minutes=int(offsets.get(zid, 0)))
+                    except Exception:
+                        pass
                 # Защита от прошедшего времени (редкий случай)
                 if cand <= now:
                     continue
@@ -2734,6 +2753,23 @@ def api_stop_group(group_id):
             pass
 
         db.add_log('group_stop', json.dumps({"group": group_id}))
+        # Отметим отмену текущего запуска программы для этой группы (если таковая есть прямо сейчас)
+        try:
+            programs = db.get_programs() or []
+            now = datetime.now()
+            today = now.strftime('%Y-%m-%d')
+            for p in programs:
+                # Если сегодня день программы и время уже настало — считаем сегодняшнюю попытку отмененной
+                try:
+                    if now.weekday() in (p.get('days') or []):
+                        hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
+                        start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                        if start_today <= now:
+                            db.cancel_program_run_for_group(int(p.get('id')), today, int(group_id))
+                except Exception:
+                    continue
+        except Exception:
+            pass
         return jsonify({"success": True, "message": f"Группа {group_id} остановлена"})
     except Exception as e:
         logger.error(f"Ошибка остановки группы {group_id}: {e}")
