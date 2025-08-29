@@ -714,8 +714,21 @@ def _require_admin_for_mutations():
         if request.method in ['POST', 'PUT', 'DELETE']:
             if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/') or p == '/api/password':
                 return None
+            # Разрешаем действия со страницы "Статус" для гостя/пользователя
+            def _is_status_action(path: str) -> bool:
+                try:
+                    if path in ('/api/emergency-stop', '/api/emergency-resume', '/api/postpone'):
+                        return True
+                    if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop')):
+                        return True
+                    if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
+                        return True
+                except Exception:
+                    pass
+                return False
             if session.get('role') != 'admin':
-                return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
+                if not _is_status_action(p):
+                    return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
     except Exception:
         return None
 @csrf.exempt
