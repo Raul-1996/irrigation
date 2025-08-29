@@ -525,7 +525,10 @@
                     const ind = row.querySelector('.indicator');
                     if (ind){ ind.classList.remove('on','off'); ind.classList.add(zone.state); }
                     const btn = row.querySelector('.zone-start-btn');
-                    if (btn){ btn.textContent = zone.state==='on'?'⏹':'▶'; }
+                    if (btn){
+                        btn.textContent = zone.state==='on'?'⏹':'▶';
+                        btn.setAttribute('onclick', statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`);
+                    }
                     const groupCell = row.querySelector('td:nth-child(7)');
                     if (groupCell){ groupCell.textContent = groupNameById[zone.group_id] || zone.group_id; }
                     const nextCell = row.querySelector('td:nth-child(9)');
@@ -1128,7 +1131,10 @@
                                     const ind = row.querySelector('.indicator');
                                     if (ind){ ind.classList.remove('on','off'); ind.classList.add(data.state); }
                                     const btn = row.querySelector('.zone-start-btn');
-                                    if (btn){ btn.textContent = data.state==='on'?'⏹':'▶'; }
+                                    if (btn){
+                                        btn.textContent = data.state==='on'?'⏹':'▶';
+                                        btn.setAttribute('onclick', statusData && statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${data.zone_id}, '${data.state}')`);
+                                    }
                                 }
                             });
                         }

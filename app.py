@@ -2507,6 +2507,11 @@ def api_start_zone_exclusive(group_id, zone_id):
         try:
             scheduler = get_scheduler()
             if scheduler:
+                # Немедленно запускаем обратный отсчет для UI: записываем старт
+                try:
+                    db.update_zone(zone_id, {'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                except Exception:
+                    pass
                 scheduler.schedule_zone_stop(zone_id, int([z for z in group_zones if z['id']==zone_id][0]['duration']))
         except Exception:
             pass
