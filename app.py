@@ -598,10 +598,27 @@ def _init_scheduler_before_request():
                 # Всегда разрешаем GET для гостей/пользователей
                 if request.method == 'GET':
                     return None
-                allowed = {'/api/login', '/api/password', '/api/status', '/health', '/api/env'}
+                # Разрешаем гостю/user выполнять действия со страницы Статус
+                pth = request.path or ''
+                allowed_public_posts = {
+                    '/api/login', '/api/password', '/api/status', '/health', '/api/env',
+                    '/api/emergency-stop', '/api/emergency-resume', '/api/postpone'
+                }
+                def _is_status_action(path: str) -> bool:
+                    try:
+                        if path in allowed_public_posts:
+                            return True
+                        if path.startswith('/api/mqtt/'):
+                            return True
+                        if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop')):
+                            return True
+                        if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
+                            return True
+                    except Exception:
+                        pass
+                    return False
                 if session.get('role') != 'admin':
-                    pth = request.path
-                    if pth not in allowed and not pth.startswith('/api/mqtt/'):
+                    if not _is_status_action(pth):
                         return jsonify({'success': False, 'message': 'auth required', 'error_code': 'UNAUTHENTICATED'}), 401
                 if session.get('role') == 'admin' and request.method in ['POST','PUT','DELETE']:
                     try:
