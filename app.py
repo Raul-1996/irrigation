@@ -199,6 +199,23 @@ try:
 except Exception:
     pass
 
+# ===== Debug logging helpers controlled from Settings =====
+def _is_debug_logging_enabled() -> bool:
+    try:
+        return bool(db.get_logging_debug())
+    except Exception:
+        return False
+
+def dlog(msg: str, *args) -> None:
+    if _is_debug_logging_enabled():
+        try:
+            logger.info("DBG: " + msg, *args)
+        except Exception:
+            try:
+                logger.info("DBG: %s", msg)
+            except Exception:
+                pass
+
 @app.route('/api/logging/debug', methods=['GET', 'POST'])
 def api_logging_debug_toggle():
     try:
@@ -3421,6 +3438,7 @@ def api_zone_mqtt_start(zone_id: int):
                 'scheduled_start_time': None,
                 'watering_start_source': 'manual'
             })
+            dlog("manual-start zone=%s time=%s group=%s", zone_id, start_ts, z.get('group_id'))
             # При ручном старте зоны — отменим очередь группы и очистим плановые старты
             try:
                 gid = int(z.get('group_id') or 0)
@@ -3440,7 +3458,7 @@ def api_zone_mqtt_start(zone_id: int):
                 pass
         except Exception:
             pass
-        logger.info(f"HTTP publish ON zone={zone_id} topic={t}")
+        dlog("publish ON zone=%s topic=%s", zone_id, t)
         _publish_mqtt_value(server, t, '1')
         try:
             scheduler = get_scheduler()
@@ -3448,6 +3466,7 @@ def api_zone_mqtt_start(zone_id: int):
                 duration_min = int(z.get('duration') or 0)
                 if duration_min > 0:
                     scheduler.schedule_zone_stop(zone_id, duration_min)
+                    dlog("schedule auto-stop zone=%s after=%s min", zone_id, duration_min)
         except Exception:
             pass
         return jsonify({'success': True, 'message': 'Зона запущена'})

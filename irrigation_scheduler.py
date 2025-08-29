@@ -485,6 +485,11 @@ class IrrigationScheduler:
                 replace_existing=False,
                 misfire_grace_time=120,
             )
+            try:
+                from app import dlog
+                dlog("group-seq start group=%s zones=%s", group_id, zone_ids)
+            except Exception:
+                pass
             logger.info(f"Группа {group_id}: последовательный полив запущен для зон {zone_ids}")
             return True
         except Exception as e:
@@ -553,6 +558,11 @@ class IrrigationScheduler:
                 remaining = max(0, total_seconds - early)
                 while remaining > 0:
                     if cancel_event and cancel_event.is_set():
+                        try:
+                            from app import dlog
+                            dlog("group-seq cancel tick group=%s zone=%s remaining=%s", group_id, zone_id, remaining)
+                        except Exception:
+                            pass
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")
                         break
                     time.sleep(1)
