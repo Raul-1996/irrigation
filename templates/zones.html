@@ -1209,7 +1209,7 @@
             const selector = document.getElementById(selectorId);
             if (selector) {
                 selector.innerHTML = groupsData.map(group => {
-                    if (selectorId === 'bulkGroup' && group.id === 999) return '';
+                    // В массовых действиях тоже показываем группу 999 (БЕЗ ПОЛИВА)
                     return `<option value="${group.id}">${group.id===999?'БЕЗ ПОЛИВА':group.name}</option>`;
                 }).join('');
             }
