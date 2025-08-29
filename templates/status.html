@@ -795,6 +795,7 @@
         
         const nextWateringData = await Promise.all(nextWateringPromises);
         
+        const frag = document.createDocumentFragment();
         filteredZones.forEach(zone => {
             let nextWatering = '—';
             if (statusData.emergency_stop) {
@@ -830,8 +831,11 @@
                 </td>
             `;
             
-            tbody.appendChild(tr);
+            frag.appendChild(tr);
         });
+        tbody.appendChild(frag);
+        // Signal render complete for perf
+        try{ window.dispatchEvent(new CustomEvent('zones-rendered')); }catch(e){}
     }
     
     // Обработчики действий

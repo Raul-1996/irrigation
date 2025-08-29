@@ -562,16 +562,24 @@
           const done = performance.now();
           try{
             if (url.includes('/api/status')) { statusDone = true; marks.statusMs = Math.round(done - t0); }
-            if (url.includes('/api/zones')) { zonesDone = true; marks.zonesMs = Math.round(done - t0); }
-            if (isStatus && statusDone && zonesDone && !marks.allDone){
-              marks.allDone = Math.round(done - t0);
-              console.log('[Perf] Status page: status=',marks.statusMs,'ms zones=',marks.zonesMs,'ms all=',marks.allDone,'ms');
-              const footer = document.getElementById('footer-time');
-              if (footer){ footer.textContent += ` | ⏱ ${marks.allDone}ms (статус ${marks.statusMs} / зоны ${marks.zonesMs})`; }
-            }
+            if (url.includes('/api/zones')) { zonesDone = true; marks.zonesFetchMs = Math.round(done - t0); }
           }catch(e){}
           return resp;
         }
+
+        // Wait for client to signal that rows are rendered
+        window.addEventListener('zones-rendered', (ev)=>{
+          try{
+            const done = performance.now();
+            marks.rowsMs = Math.round(done - t0);
+            if (isStatus && statusDone && zonesDone && !marks.allDone){
+              marks.allDone = marks.rowsMs;
+              console.log('[Perf] Status page: status=',marks.statusMs,'ms zonesFetch=',marks.zonesFetchMs,'ms rowsRendered=',marks.rowsMs,'ms');
+              const footer = document.getElementById('footer-time');
+              if (footer){ footer.textContent += ` | ⏱ ${marks.rowsMs}ms (статус ${marks.statusMs} / зоны ${marks.zonesFetchMs})`; }
+            }
+          }catch(e){}
+        });
       } catch(e) {}
     })();
     </script>
