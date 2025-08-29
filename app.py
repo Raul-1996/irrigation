@@ -3421,6 +3421,16 @@ def api_zone_mqtt_start(zone_id: int):
                 'scheduled_start_time': None,
                 'watering_start_source': 'manual'
             })
+            # При ручном старте зоны — отменим очередь группы и очистим плановые старты
+            try:
+                gid = int(z.get('group_id') or 0)
+                if gid:
+                    sched = get_scheduler()
+                    if sched:
+                        sched.cancel_group_jobs(gid)
+                    db.clear_group_scheduled_starts(gid)
+            except Exception:
+                pass
         except Exception:
             pass
         logger.info(f"HTTP publish ON zone={zone_id} topic={t}")
