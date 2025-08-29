@@ -3218,11 +3218,28 @@ def api_mqtt_zones_sse():
                         if new_state == 'on':
                             if not z.get('watering_start_time'):
                                 updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            # Обновим планировщик: если зона неожиданно ВКЛ, запланируем автостоп
+                            try:
+                                sched = get_scheduler()
+                                if sched:
+                                    dur = int(z.get('duration') or 0)
+                                    if dur > 0:
+                                        sched.cancel_zone_jobs(int(zone_id))
+                                        sched.schedule_zone_stop(int(zone_id), dur)
+                            except Exception:
+                                pass
                         else:
                             # record last_watering_time
                             if z.get('watering_start_time'):
                                 updates['last_watering_time'] = z.get('watering_start_time')
                             updates['watering_start_time'] = None
+                            # Если зона вручную выключена (MQTT=0), отменим её автостоп в планировщике
+                            try:
+                                sched = get_scheduler()
+                                if sched:
+                                    sched.cancel_zone_jobs(int(zone_id))
+                            except Exception:
+                                pass
                         db.update_zone(zone_id, updates)
                         try:
                             logger.info(f"DB state update from MQTT zone={zone_id} -> {new_state}")

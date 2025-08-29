@@ -643,6 +643,23 @@ class IrrigationScheduler:
         except Exception as e:
             logger.error(f"Ошибка отмены задач группы {group_id}: {e}")
 
+    def cancel_zone_jobs(self, zone_id: int):
+        """Отменяет все задачи автоостановки для зоны и убирает её из active_zones."""
+        try:
+            job_ids_to_remove = []
+            for job in self.scheduler.get_jobs():
+                if job.id.startswith(f"zone_stop_{int(zone_id)}_"):
+                    job_ids_to_remove.append(job.id)
+            for job_id in job_ids_to_remove:
+                try:
+                    self.scheduler.remove_job(job_id)
+                except Exception:
+                    pass
+            self.active_zones.pop(int(zone_id), None)
+            logger.info(f"Отменены задачи автоостановки для зоны {zone_id}")
+        except Exception as e:
+            logger.error(f"Ошибка отмены задач зоны {zone_id}: {e}")
+
     def load_programs(self):
         try:
             programs = self.db.get_programs()
