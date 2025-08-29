@@ -53,6 +53,29 @@ python run.py
 python tools/tests/tests.py
 ```
 
+### 🧰 Wirenboard (установка без Docker)
+
+#### Быстрая установка как systemd-сервис
+```bash
+# На устройстве Wirenboard под root
+cd /opt && mkdir -p wb-irrigation && cd wb-irrigation
+if [ -d irrigation ]; then cd irrigation && git pull --rebase; else git clone https://github.com/Raul-1996/irrigation.git && cd irrigation; fi
+chmod +x install_wb.sh uninstall_wb.sh
+./install_wb.sh
+# Открыть http://<ip-wirenboard>:8080
+```
+
+#### Быстрое удаление (чистое)
+```bash
+cd /opt/wb-irrigation/irrigation || true
+chmod +x uninstall_wb.sh
+./uninstall_wb.sh
+```
+
+Примечания:
+- Скрипт установки кладёт всё в каталог `/opt/wb-irrigation/irrigation`, создаёт `venv`, устанавливает зависимости, подготавливает БД и настраивает `systemd`-юнит `wb-irrigation`.
+- Удаление останавливает и отключает сервис, удаляет юнит и весь каталог `/opt/wb-irrigation` без остатка.
+
 ### 🪟 Windows
 
 #### Автоматическая установка (рекомендуется)
