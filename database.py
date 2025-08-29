@@ -546,6 +546,145 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка обновления зоны {zone_id}: {e}")
             return None
+
+    def bulk_update_zones(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Пакетное обновление зон в одной транзакции.
+
+        updates: [{ 'id': int, <fields...> }]
+        Возвращает: { updated: int, failed: [zone_id, ...] }
+        """
+        updated = 0
+        failed: List[int] = []
+        if not updates:
+            return { 'updated': 0, 'failed': [] }
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                for upd in updates:
+                    try:
+                        zone_id = int(upd.get('id'))
+                    except Exception:
+                        continue
+                    # Получим текущие поля для корректного апдейта
+                    cur = conn.execute('SELECT * FROM zones WHERE id = ?', (zone_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        failed.append(zone_id)
+                        continue
+                    current = dict(zip([d[0] for d in cur.description], row))
+                    merged = current.copy()
+                    merged.update(upd)
+                    fields = []
+                    params = []
+                    def add(field: str, value):
+                        fields.append(f"{field} = ?"); params.append(value)
+                    if 'name' in merged: add('name', merged['name'])
+                    if 'icon' in merged: add('icon', merged['icon'])
+                    if 'duration' in merged: add('duration', int(merged['duration']))
+                    if ('group_id' in merged) or ('group' in merged):
+                        add('group_id', int(merged.get('group_id', merged.get('group', 1))))
+                    if 'topic' in merged: add('topic', (merged.get('topic') or '').strip())
+                    if 'state' in merged: add('state', merged['state'])
+                    if 'postpone_until' in merged: add('postpone_until', merged['postpone_until'])
+                    if 'postpone_reason' in merged: add('postpone_reason', merged['postpone_reason'])
+                    if 'photo_path' in merged: add('photo_path', merged['photo_path'])
+                    if 'watering_start_time' in merged: add('watering_start_time', merged['watering_start_time'])
+                    if 'scheduled_start_time' in merged: add('scheduled_start_time', merged['scheduled_start_time'])
+                    if 'last_watering_time' in merged: add('last_watering_time', merged['last_watering_time'])
+                    if 'mqtt_server_id' in merged: add('mqtt_server_id', merged.get('mqtt_server_id'))
+                    fields.append('updated_at = CURRENT_TIMESTAMP')
+                    params.append(zone_id)
+                    sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ?"
+                    try:
+                        conn.execute(sql, params)
+                        updated += 1
+                    except Exception:
+                        failed.append(zone_id)
+                conn.commit()
+            return { 'updated': updated, 'failed': failed }
+        except Exception as e:
+            logger.error(f"Ошибка bulk-обновления зон: {e}")
+            return { 'updated': updated, 'failed': failed or [] }
+
+    def bulk_upsert_zones(self, zones: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Импорт зон: upsert множества зон в одной транзакции.
+
+        zones: [{ id?, name, icon, duration, group_id, topic, mqtt_server_id, state? }]
+        Если id указан и зона существует — обновляем только переданные поля.
+        Если id указан и зона не существует — вставляем с явным id.
+        Если id не указан — создаём новую зону.
+        Возвращает: { created: int, updated: int, failed: int }
+        """
+        created = 0
+        updated = 0
+        failed = 0
+        if not zones:
+            return { 'created': 0, 'updated': 0, 'failed': 0 }
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as conn:
+                for z in zones:
+                    try:
+                        zid = int(z['id']) if z.get('id') is not None else None
+                    except Exception:
+                        zid = None
+                    try:
+                        if zid is not None:
+                            cur = conn.execute('SELECT id FROM zones WHERE id = ?', (zid,))
+                            row = cur.fetchone()
+                            if row:
+                                # update existing with provided fields only
+                                fields = []
+                                params = []
+                                def add(field: str, value):
+                                    fields.append(f"{field} = ?"); params.append(value)
+                                if 'name' in z: add('name', z['name'])
+                                if 'icon' in z: add('icon', z['icon'])
+                                if 'duration' in z: add('duration', int(z['duration']))
+                                if ('group_id' in z) or ('group' in z):
+                                    add('group_id', int(z.get('group_id', z.get('group', 1))))
+                                if 'topic' in z: add('topic', (z.get('topic') or '').strip())
+                                if 'state' in z: add('state', z['state'])
+                                if 'mqtt_server_id' in z: add('mqtt_server_id', z.get('mqtt_server_id'))
+                                fields.append('updated_at = CURRENT_TIMESTAMP')
+                                params.append(zid)
+                                if fields:
+                                    conn.execute(f"UPDATE zones SET {', '.join(fields)} WHERE id = ?", params)
+                                    updated += 1
+                            else:
+                                # insert with explicit id
+                                conn.execute('''
+                                    INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                ''', (
+                                    zid,
+                                    z.get('name') or 'Зона',
+                                    z.get('icon') or '🌿',
+                                    int(z.get('duration') or 10),
+                                    int(z.get('group_id', z.get('group', 1))),
+                                    (z.get('topic') or '').strip(),
+                                    z.get('mqtt_server_id')
+                                ))
+                                created += 1
+                        else:
+                            # insert without explicit id
+                            conn.execute('''
+                                INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            ''', (
+                                z.get('name') or 'Зона',
+                                z.get('icon') or '🌿',
+                                int(z.get('duration') or 10),
+                                int(z.get('group_id', z.get('group', 1))),
+                                (z.get('topic') or '').strip(),
+                                z.get('mqtt_server_id')
+                            ))
+                            created += 1
+                    except Exception:
+                        failed += 1
+                conn.commit()
+            return { 'created': created, 'updated': updated, 'failed': failed }
+        except Exception as e:
+            logger.error(f"Ошибка bulk-импорта зон: {e}")
+            return { 'created': created, 'updated': updated, 'failed': (failed or 0) }
     
     def delete_zone(self, zone_id: int) -> bool:
         """Удалить зону"""

@@ -1320,6 +1320,29 @@ def api_create_zone():
             pass
     return ('Error creating zone', 400)
 
+@csrf.exempt
+@app.route('/api/zones/import', methods=['POST'])
+def api_import_zones_bulk():
+    """Импорт/массовое применение изменений зон в одной транзакции.
+
+    Формат: { zones: [ { id?, name?, icon?, duration?, group_id?, topic?, mqtt_server_id?, state? }, ... ] }
+    Возвращает: { success, created, updated, failed }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        zones = body.get('zones') or []
+        if not isinstance(zones, list) or not zones:
+            return jsonify({'success': False, 'message': 'Нет данных для импорта'}), 400
+        stats = db.bulk_upsert_zones(zones)
+        try:
+            db.add_log('zones_import', json.dumps({'counts': stats}))
+        except Exception:
+            pass
+        return jsonify({'success': True, **stats})
+    except Exception as e:
+        logger.error(f"Ошибка импорта зон: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка импорта'}), 500
+
 @app.route('/api/groups')
 def api_groups():
     groups = db.get_groups()
@@ -1661,6 +1684,112 @@ def api_check_zone_duration_conflicts():
 
     except Exception as e:
         logger.error(f"Ошибка проверки конфликтов длительности зоны: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка проверки конфликтов'}), 500
+
+
+@app.route('/api/zones/check-duration-conflicts-bulk', methods=['POST'])
+def api_check_zone_duration_conflicts_bulk():
+    """Пакетная проверка конфликтов длительностей для нескольких зон.
+
+    Принимает JSON: { "changes": [{"zone_id": int, "new_duration": int}, ...] }
+    Возвращает: { success, results: { zone_id: { has_conflicts, conflicts: [...] } } }
+    """
+    try:
+        payload = request.get_json() or {}
+        changes = payload.get('changes') or []
+        # Валидация
+        normalized = []
+        for ch in changes:
+            try:
+                zid = int(ch.get('zone_id'))
+                dur = int(ch.get('new_duration'))
+                normalized.append((zid, dur))
+            except Exception:
+                continue
+        if not normalized:
+            return jsonify({'success': False, 'message': 'Нет валидных изменений'}), 400
+
+        # Кэшируем необходимые данные один раз
+        all_programs = db.get_programs()
+        # Кэш зон: длительности и групповые принадлежности
+        zones_cache = { z['id']: z for z in db.get_zones() }
+
+        def get_zone_group(zid: int):
+            z = zones_cache.get(zid)
+            return z['group_id'] if z else None
+
+        def get_zone_duration(zid: int):
+            z = zones_cache.get(zid)
+            if not z: return 0
+            try:
+                return int(z.get('duration') or 0)
+            except Exception:
+                return 0
+
+        results = {}
+
+        # Для каждого изменения считаем конфликты, переиспользуя кэши
+        for (zone_id, new_duration) in normalized:
+            conflicts = []
+            # Ищем программы, где участвует эта зона
+            for program in all_programs:
+                prog_days = program['days'] if isinstance(program['days'], list) else json.loads(program['days'])
+                prog_zones = program['zones'] if isinstance(program['zones'], list) else json.loads(program['zones'])
+                if zone_id not in prog_zones:
+                    continue
+                try:
+                    p_hour, p_min = map(int, program['time'].split(':'))
+                except Exception:
+                    continue
+                start_a = p_hour * 60 + p_min
+                # Суммарная длительность программы, учитывая новое значение только для текущей зоны
+                total_duration_a = 0
+                for zid in prog_zones:
+                    total_duration_a += new_duration if zid == zone_id else get_zone_duration(zid)
+                end_a = start_a + total_duration_a
+                groups_a = set(filter(lambda g: g is not None, [get_zone_group(zid) for zid in prog_zones]))
+
+                for other in all_programs:
+                    if other['id'] == program['id']:
+                        continue
+                    other_days = other['days'] if isinstance(other['days'], list) else json.loads(other['days'])
+                    if not (set(prog_days) & set(other_days)):
+                        continue
+                    other_zones = other['zones'] if isinstance(other['zones'], list) else json.loads(other['zones'])
+                    common_zones = set(prog_zones) & set(other_zones)
+                    groups_b = set(filter(lambda g: g is not None, [get_zone_group(zid) for zid in other_zones]))
+                    if not common_zones and not (groups_a & groups_b):
+                        continue
+                    try:
+                        oh, om = map(int, other['time'].split(':'))
+                    except Exception:
+                        continue
+                    start_b = oh * 60 + om
+                    total_duration_b = 0
+                    for zid in other_zones:
+                        total_duration_b += get_zone_duration(zid)
+                    end_b = start_b + total_duration_b
+                    if start_a < end_b and end_a > start_b:
+                        conflicts.append({
+                            'checked_program_id': program['id'],
+                            'checked_program_name': program['name'],
+                            'checked_program_time': program['time'],
+                            'other_program_id': other['id'],
+                            'other_program_name': other['name'],
+                            'other_program_time': other['time'],
+                            'common_zones': list(common_zones),
+                            'common_groups': list(groups_a & groups_b),
+                            'overlap_start': max(start_a, start_b),
+                            'overlap_end': min(end_a, end_b)
+                        })
+            results[str(zone_id)] = {
+                'has_conflicts': len(conflicts) > 0,
+                'conflicts': conflicts
+            }
+
+        return jsonify({'success': True, 'results': results})
+    except Exception as e:
+        logger.error(f"Ошибка bulk-проверки конфликтов длительности зон: {e}")
         return jsonify({'success': False, 'message': 'Ошибка проверки конфликтов'}), 500
 
 # ===== MQTT Servers API =====
