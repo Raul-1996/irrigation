@@ -3263,6 +3263,8 @@ def api_mqtt_zones_sse():
                         if new_state == 'on':
                             if not z.get('watering_start_time'):
                                 updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                # если пришёл ON по MQTT, считаем это ручным запуском
+                                updates['watering_start_source'] = 'manual'
                             # Обновим планировщик: если зона неожиданно ВКЛ, запланируем автостоп
                             try:
                                 sched = get_scheduler()
