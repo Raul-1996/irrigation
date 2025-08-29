@@ -650,9 +650,14 @@ class IrrigationScheduler:
                 except Exception:
                     pass
 
-            # Ставим флаг отмены для уже запущенной последовательности
+            # Ставим флаг отмены для уже запущенной последовательности и очищаем флаг
             if group_id in self.group_cancel_events:
                 self.group_cancel_events[group_id].set()
+                try:
+                    # Сразу сбрасываем, чтобы повторная остановка не требовала ожидания
+                    self.group_cancel_events[group_id].clear()
+                except Exception:
+                    pass
 
             # Перестраиваем расписание группы на ближайшую программу
             try:

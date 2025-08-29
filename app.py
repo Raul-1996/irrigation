@@ -2639,6 +2639,11 @@ def api_stop_group(group_id):
         scheduler = get_scheduler()
         if scheduler:
             scheduler.cancel_group_jobs(group_id)
+            try:
+                # Дополнительно очищаем scheduled_start_time в БД, чтобы не было «хвостов»
+                db.clear_group_scheduled_starts(group_id)
+            except Exception:
+                pass
  
         # Чистим плановые старты группы
         try:
@@ -3407,15 +3412,19 @@ def api_zone_mqtt_start(zone_id: int):
         server = db.get_mqtt_server(int(sid))
         if not server:
             return jsonify({'success': False, 'message': 'MQTT server not found'}), 400
-        logger.info(f"HTTP publish ON zone={zone_id} topic={t}")
-        _publish_mqtt_value(server, t, '1')
-        # Фиксируем старт зоны и планируем автостоп
+        # Сначала фиксируем старт в БД, чтобы MQTT-SSE не перезаписал источник 'manual'
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
-            # Явный UI-запуск: источник 'manual'
-            db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'scheduled_start_time': None, 'watering_start_source': 'manual'})
+            db.update_zone(zone_id, {
+                'state': 'on',
+                'watering_start_time': start_ts,
+                'scheduled_start_time': None,
+                'watering_start_source': 'manual'
+            })
         except Exception:
             pass
+        logger.info(f"HTTP publish ON zone={zone_id} topic={t}")
+        _publish_mqtt_value(server, t, '1')
         try:
             scheduler = get_scheduler()
             if scheduler:
