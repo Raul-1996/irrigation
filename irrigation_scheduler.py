@@ -164,12 +164,8 @@ class IrrigationScheduler:
                     server = self.db.get_mqtt_server(int(sid))
                     if server:
                         logger.info(f"SCHED auto-stop publish OFF zone={zone_id} topic={t}")
-                        cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                        if server.get('username'):
-                            cl.username_pw_set(server.get('username'), server.get('password') or None)
-                        cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                        cl.publish(t, payload='0', qos=0, retain=False)
-                        cl.disconnect()
+                        from app import _publish_mqtt_value as _pub
+                        _pub(server, t, '0', min_interval_sec=0.0)
             except Exception:
                 pass
             self.db.update_zone(zone_id, {
@@ -232,12 +228,8 @@ class IrrigationScheduler:
                                 server = self.db.get_mqtt_server(int(sid))
                                 if server:
                                     logger.info(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
-                                    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                                    if server.get('username'):
-                                        cl.username_pw_set(server.get('username'), server.get('password') or None)
-                                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                                    cl.publish(t, payload='0', qos=0, retain=False)
-                                    cl.disconnect()
+                                    from app import _publish_mqtt_value as _pub
+                                    _pub(server, t, '0', min_interval_sec=0.0)
                         except Exception:
                             pass
                         try:
@@ -259,12 +251,8 @@ class IrrigationScheduler:
                             server = self.db.get_mqtt_server(int(sid))
                             if server:
                                 logger.info(f"SCHED publish ON zone={zone_id} topic={t}")
-                                cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                                if server.get('username'):
-                                    cl.username_pw_set(server.get('username'), server.get('password') or None)
-                                cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                                cl.publish(t, payload='1', qos=0, retain=False)
-                                cl.disconnect()
+                                from app import _publish_mqtt_value as _pub
+                                _pub(server, t, '1', min_interval_sec=0.0)
                     except Exception:
                         pass
                     end_time = datetime.now() + timedelta(minutes=duration)
@@ -311,12 +299,8 @@ class IrrigationScheduler:
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
                             logger.info(f"SCHED publish OFF zone={zone_id} topic={t}")
-                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                            if server.get('username'):
-                                cl.username_pw_set(server.get('username'), server.get('password') or None)
-                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                            cl.publish(t, payload='0', qos=0, retain=False)
-                            cl.disconnect()
+                            from app import _publish_mqtt_value as _pub
+                            _pub(server, t, '0', min_interval_sec=0.0)
                 except Exception:
                     pass
                 self._stop_zone(zone_id)
@@ -530,12 +514,8 @@ class IrrigationScheduler:
                         t = normalize_topic(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
-                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                            if server.get('username'):
-                                cl.username_pw_set(server.get('username'), server.get('password') or None)
-                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                            cl.publish(t, payload='1', qos=0, retain=False)
-                            cl.disconnect()
+                            from app import _publish_mqtt_value as _pub
+                            _pub(server, t, '1', min_interval_sec=0.0)
                 except Exception:
                     pass
                 try:
@@ -580,12 +560,8 @@ class IrrigationScheduler:
                         t = topic if str(topic).startswith('/') else '/' + str(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
-                            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                            if server.get('username'):
-                                cl.username_pw_set(server.get('username'), server.get('password') or None)
-                            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                            cl.publish(t, payload='0', qos=0, retain=False)
-                            cl.disconnect()
+                            from app import _publish_mqtt_value as _pub
+                            _pub(server, t, '0', min_interval_sec=0.0)
                 except Exception:
                     pass
                 self._stop_zone(zone_id)

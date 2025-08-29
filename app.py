@@ -2783,15 +2783,11 @@ def api_emergency_stop():
                 sid = zone.get('mqtt_server_id')
                 topic = (zone.get('topic') or '').strip()
                 if mqtt and sid and topic:
-                    t = topic if str(topic).startswith('/') else '/' + str(topic)
+                    t = normalize_topic(topic)
                     server = db.get_mqtt_server(int(sid))
                     if server:
-                        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                        if server.get('username'):
-                            client.username_pw_set(server.get('username'), server.get('password') or None)
-                        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                        client.publish(t, payload='0', qos=0, retain=False)
-                        client.disconnect()
+                        # Используем унифицированную публикацию с дублем в /on
+                        _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
             except Exception:
                 logger.exception("Ошибка публикации MQTT '0' при аварийной остановке")
 
@@ -3478,6 +3474,15 @@ def api_zone_mqtt_start(zone_id: int):
                 if duration_min > 0:
                     scheduler.schedule_zone_stop(zone_id, duration_min)
                     dlog("schedule auto-stop zone=%s after=%s min", zone_id, duration_min)
+                    # Страховочный OFF почти в момент автостопа, чтобы /on тоже сбросился
+                    try:
+                        server2 = db.get_mqtt_server(int(sid))
+                        if server2:
+                            from apscheduler.triggers.date import DateTrigger as _DT
+                            run_at = datetime.now() + timedelta(seconds=max(1, duration_min*60 - 1))
+                            scheduler.scheduler.add_job(lambda: _publish_mqtt_value(server2, t, '0', min_interval_sec=0.0), _DT(run_date=run_at))
+                    except Exception:
+                        pass
         except Exception:
             pass
         return jsonify({'success': True, 'message': 'Зона запущена'})
