@@ -3428,6 +3428,13 @@ def api_zone_mqtt_start(zone_id: int):
                     sched = get_scheduler()
                     if sched:
                         sched.cancel_group_jobs(gid)
+                        # И дополнительно удалим незапущенные задания последовательности, которые могли появиться чуть позже
+                        try:
+                            for job in sched.scheduler.get_jobs():
+                                if job.id.startswith(f"group_seq_{gid}_"):
+                                    sched.scheduler.remove_job(job.id)
+                        except Exception:
+                            pass
                     db.clear_group_scheduled_starts(gid)
             except Exception:
                 pass
