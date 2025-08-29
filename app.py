@@ -104,6 +104,24 @@ try:
 except Exception:
     pass
 
+# Устанавливаем TZ процесса по системной таймзоне, чтобы логи и планировщик работали в локальном времени
+try:
+    import time as _tz_time
+    if not os.getenv('TZ'):
+        try:
+            with open('/etc/timezone', 'r') as _f:
+                _tzname = _f.read().strip()
+        except Exception:
+            _tzname = None
+        if _tzname:
+            os.environ['TZ'] = _tzname
+            try:
+                _tz_time.tzset()
+            except Exception:
+                pass
+except Exception:
+    pass
+
 app = Flask(__name__)
 app.config.from_object(Config)
 app.db = db  # Добавляем атрибут db для тестов
@@ -1444,8 +1462,15 @@ def api_zones_next_watering_bulk():
                 if not start_dt:
                     continue
                 cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
-                if cand <= now:
-                    continue
+                # Если зона уже поливается, не переносим сразу на следующий день для отображения в UI
+                try:
+                    zinfo = next((zz for zz in all_zones if int(zz.get('id')) == int(zid)), None)
+                    if not (zinfo and str(zinfo.get('state')) == 'on' and zinfo.get('watering_start_time')):
+                        if cand <= now:
+                            continue
+                except Exception:
+                    if cand <= now:
+                        continue
                 if best_dt is None or cand < best_dt:
                     best_dt = cand
             items.append({
