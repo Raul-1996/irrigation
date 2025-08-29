@@ -31,12 +31,13 @@ class WebInterfaceTest(unittest.TestCase):
         cls.base_url = os.environ.get('WB_BASE_URL', 'http://localhost:8080')
         cls.remote_mode = (cls.base_url not in ('http://localhost:8080', 'http://127.0.0.1:8080'))
         cls.session = requests.Session()
+        cls.app_process = None
 
         if cls.remote_mode:
             # Логин для получения admin-сессии (если включена авторизация)
             try:
                 pwd = os.environ.get('WB_PASSWORD', '1234')
-                cls.session.post(f"{cls.base_url}/api/login", json={'password': pwd}, timeout=5)
+                cls.session.post(f"{cls.base_url}/api/login", json={'password': pwd}, timeout=8)
                 # Подменим requests.* на сессионные вызовы, чтобы не менять остальной код
                 requests.get = cls.session.get
                 requests.post = cls.session.post
