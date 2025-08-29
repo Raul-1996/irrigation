@@ -108,6 +108,11 @@ app = Flask(__name__)
 app.config.from_object(Config)
 app.db = db  # Добавляем атрибут db для тестов
 csrf = CSRFProtect(app)
+# Долгое кеширование статики (ускоряет первую загрузку)
+try:
+    app.config.setdefault('SEND_FILE_MAX_AGE_DEFAULT', 60 * 60 * 24 * 7)
+except Exception:
+    pass
 @app.before_request
 def _perf_start_timer():
     try:

@@ -491,7 +491,71 @@
     async function loadZonesData() {
         try {
             zonesData = await api.get('/api/zones');
-            await updateZonesTable();
+            // Инкрементальное обновление: если строка уже есть — меняем только изменившиеся поля
+            const tbody = document.getElementById('zones-table-body');
+            const existingRows = {};
+            tbody.querySelectorAll('tr').forEach(row=>{
+                const idCell = row.querySelector('td:nth-child(2)');
+                if (idCell) existingRows[idCell.textContent.trim()] = row;
+            });
+            const groups = await api.get('/api/groups');
+            const groupNameById = {}; groups.forEach(g=>{ groupNameById[g.id]=g.name; });
+            const filteredZones = zonesData.filter(z=>z.group_id !== 999);
+            // Получаем batch next-watering
+            let nextMap = {};
+            try{
+                const resp = await fetch('/api/zones/next-watering-bulk',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({zone_ids: filteredZones.map(z=>z.id)})});
+                const bulk = await resp.json();
+                (bulk.items||[]).forEach(it=>{ nextMap[it.zone_id]= it.next_datetime || (it.next_watering==='Никогда'?'Никогда': null); });
+            }catch(e){}
+            // Обновляем/создаём строки
+            const frag = document.createDocumentFragment();
+            filteredZones.forEach(zone=>{
+                const rowId = String(zone.id);
+                const row = existingRows[rowId];
+                const nextText = (function(){
+                    if (statusData.emergency_stop) return 'До отмены аварии';
+                    const v = nextMap[zone.id];
+                    if (!v) return '—';
+                    if (v==='Никогда') return 'Никогда';
+                    return String(v).replace('T',' ').slice(0,16);
+                })();
+                if (row){
+                    // только изменившиеся поля
+                    const ind = row.querySelector('.indicator');
+                    if (ind){ ind.classList.remove('on','off'); ind.classList.add(zone.state); }
+                    const btn = row.querySelector('.zone-start-btn');
+                    if (btn){ btn.textContent = zone.state==='on'?'⏹':'▶'; }
+                    const groupCell = row.querySelector('td:nth-child(7)');
+                    if (groupCell){ groupCell.textContent = groupNameById[zone.group_id] || zone.group_id; }
+                    const nextCell = row.querySelector('td:nth-child(9)');
+                    if (nextCell){ nextCell.textContent = nextText; }
+                } else {
+                    // создаём новую строку (редкий случай)
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><span class="indicator ${zone.state}"></span></td>
+                        <td>${zone.id}</td>
+                        <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
+                        <td>${zone.name}</td>
+                        <td>${zone.icon}</td>
+                        <td>${zone.duration} мин</td>
+                        <td>${groupNameById[zone.group_id] || zone.group_id}</td>
+                        <td class="hide-mobile col-last-watering">—</td>
+                        <td class="col-next" data-label="Следующий полив">${nextText}</td>
+                        <td class="col-photo" data-label="Фото">
+                            <div class="zone-photo">
+                                ${zone.photo_path ? 
+                                    `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
+                                    `<div class="no-photo" title="Нет фото">📷</div>`
+                                }
+                            </div>
+                        </td>`;
+                    frag.appendChild(tr);
+                }
+            });
+            if (frag.childNodes.length) tbody.appendChild(frag);
+            document.getElementById('zones-count').textContent = filteredZones.length;
             hideConnectionError();
             // leave MQTT banners controlled by status endpoint only
         } catch (error) {
