@@ -1287,21 +1287,68 @@ def api_zones_next_watering_bulk():
     try:
         data = request.get_json(silent=True) or {}
         zone_ids = data.get('zone_ids')
-        items = []
-        # Если список не передан, используем все зоны, исключая 999 (БЕЗ ПОЛИВА)
+        # Загрузим все зоны (для длительностей), а также программы один раз
+        all_zones = db.get_zones() or []
         if not zone_ids:
-            zones = db.get_zones() or []
-            zone_ids = [int(z.get('id')) for z in zones if int(z.get('group_id') or z.get('group') or 0) != 999]
-        for zid in zone_ids:
+            zone_ids = [int(z.get('id')) for z in all_zones if int(z.get('group_id') or z.get('group') or 0) != 999]
+        zone_ids = [int(z) for z in zone_ids]
+        duration_by_zone = {int(z['id']): int(z.get('duration') or 0) for z in all_zones}
+        programs = db.get_programs() or []
+        # Для каждой программы посчитаем смещения зон (накопительная длительность)
+        offset_map_per_program = []  # list of dicts {zone_id: offset_minutes}
+        for p in programs:
             try:
-                nxt = db.compute_next_run_for_zone(int(zid))
-                items.append({
-                    'zone_id': int(zid),
-                    'next_datetime': nxt,
-                    'next_watering': 'Никогда' if not nxt else nxt
-                })
+                zones_list = sorted([int(x) for x in (p.get('zones') or [])])
             except Exception:
-                items.append({'zone_id': int(zid), 'next_datetime': None, 'next_watering': None})
+                zones_list = []
+            offsets = {}
+            cum = 0
+            for zid in zones_list:
+                offsets[zid] = cum
+                cum += int(duration_by_zone.get(zid, 0))
+            offset_map_per_program.append({'prog': p, 'offsets': offsets})
+        # Для каждой программы найдём ближайшее будущее время старта
+        from datetime import datetime as _dt
+        now = _dt.now()
+        next_start_per_program = {}
+        for pm in offset_map_per_program:
+            p = pm['prog']
+            try:
+                hh, mm = [int(x) for x in str(p.get('time') or '00:00').split(':', 1)]
+            except Exception:
+                hh, mm = 0, 0
+            best = None
+            days = p.get('days') or []
+            for off in range(0, 14):
+                d = now + timedelta(days=off)
+                if d.weekday() in days:
+                    cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if cand <= now:
+                        continue
+                    best = cand
+                    break
+            next_start_per_program[p.get('id')] = best
+        # Соберём ответы по зонам
+        items = []
+        for zid in zone_ids:
+            best_dt = None
+            for pm in offset_map_per_program:
+                p = pm['prog']; offsets = pm['offsets']
+                if zid not in offsets:
+                    continue
+                start_dt = next_start_per_program.get(p.get('id'))
+                if not start_dt:
+                    continue
+                cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
+                if cand <= now:
+                    continue
+                if best_dt is None or cand < best_dt:
+                    best_dt = cand
+            items.append({
+                'zone_id': int(zid),
+                'next_datetime': best_dt.strftime('%Y-%m-%d %H:%M:%S') if best_dt else None,
+                'next_watering': 'Никогда' if best_dt is None else best_dt.strftime('%Y-%m-%d %H:%M:%S')
+            })
         return jsonify({'success': True, 'items': items})
     except Exception as e:
         logger.error(f"bulk next-watering failed: {e}")
