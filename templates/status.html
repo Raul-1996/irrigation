@@ -781,19 +781,18 @@
         const groupNameById = {};
         groups.forEach(g => { groupNameById[g.id] = g.name; });
 
-        // Загружаем время следующего полива для всех зон
-        const nextWateringPromises = filteredZones.map(async (zone) => {
-            try {
-                const response = await fetch(`/api/zones/${zone.id}/next-watering`);
-                const data = await response.json();
-                return { zone_id: zone.id, next_watering: data.next_watering, next_datetime: data.next_datetime };
-            } catch (error) {
-                console.error(`Ошибка получения времени полива для зоны ${zone.id}:`, error);
-                return { zone_id: zone.id, next_watering: 'Ошибка' };
-            }
-        });
-        
-        const nextWateringData = await Promise.all(nextWateringPromises);
+        // Загружаем следующий полив одним батчем (значительно быстрее на WB)
+        let nextWateringData = [];
+        try {
+            const response = await fetch('/api/zones/next-watering-bulk', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ zone_ids: filteredZones.map(z=>z.id) })
+            });
+            const bulk = await response.json();
+            nextWateringData = (bulk && bulk.items) ? bulk.items : [];
+        } catch (e) {
+            nextWateringData = [];
+        }
         
         const frag = document.createDocumentFragment();
         filteredZones.forEach(zone => {

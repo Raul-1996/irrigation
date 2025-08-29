@@ -1282,6 +1282,32 @@ def api_groups():
     return jsonify(groups)
 
 @csrf.exempt
+@app.route('/api/zones/next-watering-bulk', methods=['POST'])
+def api_zones_next_watering_bulk():
+    try:
+        data = request.get_json(silent=True) or {}
+        zone_ids = data.get('zone_ids')
+        items = []
+        # Если список не передан, используем все зоны, исключая 999 (БЕЗ ПОЛИВА)
+        if not zone_ids:
+            zones = db.get_zones() or []
+            zone_ids = [int(z.get('id')) for z in zones if int(z.get('group_id') or z.get('group') or 0) != 999]
+        for zid in zone_ids:
+            try:
+                nxt = db.compute_next_run_for_zone(int(zid))
+                items.append({
+                    'zone_id': int(zid),
+                    'next_datetime': nxt,
+                    'next_watering': 'Никогда' if not nxt else nxt
+                })
+            except Exception:
+                items.append({'zone_id': int(zid), 'next_datetime': None, 'next_watering': None})
+        return jsonify({'success': True, 'items': items})
+    except Exception as e:
+        logger.error(f"bulk next-watering failed: {e}")
+        return jsonify({'success': False}), 500
+
+@csrf.exempt
 @app.route('/api/groups/<int:group_id>', methods=['PUT'])
 def api_update_group(group_id):
     data = request.get_json() or {}
