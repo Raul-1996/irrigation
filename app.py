@@ -2082,6 +2082,28 @@ def api_mqtt_probe(server_id: int):
         logger.error(f"MQTT probe error: {e}")
         return jsonify({'success': False, 'message': 'probe failed', 'items': [], 'events': [str(e)]}), 200
 
+# Diagnostics: list scheduler jobs and next runs
+@app.route('/api/scheduler/jobs')
+def api_scheduler_jobs():
+    try:
+        sched = get_scheduler()
+        if not sched:
+            return jsonify({'success': False, 'message': 'scheduler not running', 'jobs': []}), 200
+        jobs = []
+        for j in sched.scheduler.get_jobs():
+            try:
+                jobs.append({
+                    'id': j.id,
+                    'next_run_time': None if j.next_run_time is None else j.next_run_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'name': getattr(j, 'name', ''),
+                })
+            except Exception:
+                continue
+        return jsonify({'success': True, 'jobs': jobs})
+    except Exception as e:
+        logger.error(f"scheduler jobs list failed: {e}")
+        return jsonify({'success': False, 'jobs': []}), 200
+
 # Quick connection status check
 @app.route('/api/mqtt/<int:server_id>/status', methods=['GET'])
 def api_mqtt_status(server_id: int):
