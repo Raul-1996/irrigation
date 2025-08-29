@@ -547,6 +547,12 @@ def _init_scheduler_before_request():
     # Default role is "user" (no password)
     if 'role' not in session:
         session['role'] = 'guest'
+    # Не блокировать /api/login тяжёлыми инициализациями
+    try:
+        if (request.path or '') == '/api/login':
+            return None
+    except Exception:
+        pass
     if not _SCHEDULER_INIT_DONE and not app.config.get('TESTING'):
         try:
             init_scheduler(db)

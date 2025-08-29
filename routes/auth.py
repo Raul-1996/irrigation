@@ -18,8 +18,8 @@ def login_page():
 
 @auth_bp.route('/api/login', methods=['POST'])
 def api_login():
-    data = request.get_json() or {}
-    password = data.get('password', '')
+    data = request.get_json(silent=True) or {}
+    password = (data.get('password') or '').strip()
     # Простейший rate limit по IP/сеансу: не чаще 1 попытки в 2 секунды
     try:
         now = time.time()
