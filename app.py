@@ -902,6 +902,17 @@ def _publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: 
             if rc != 0:
                 logger.warning(f"MQTT publish retry rc={rc}")
                 return False
+        # Костыль для WB: продублируем в управляющий топик '/on'
+        try:
+            t_on = t + '/on'
+            on_key = (sid or 0, t_on)
+            with _TOPIC_LOCK:
+                last2 = _TOPIC_LAST_SEND.get(on_key)
+                if not (last2 and last2[0] == value and (time.time() - last2[1]) < min_interval_sec):
+                    _TOPIC_LAST_SEND[on_key] = (value, time.time())
+                    cl.publish(t_on, payload=value, qos=0, retain=False)
+        except Exception:
+            pass
         return True
     except Exception:
         logger.exception("MQTT publish failed")
