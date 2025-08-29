@@ -306,6 +306,9 @@
         .zones-table { font-size: 0.75rem; min-width: 640px; }
         .zones-table th, .zones-table td { padding: 0.3rem 0.2rem; }
         .emergency { width: 100%; margin: 0.5rem 0; }
+        /* Подписи в ячейках на узких экранах для ясности */
+        .zones-table td.col-next::before,
+        .zones-table td.col-photo::before { content: attr(data-label) ": "; font-weight: 600; color: #666; margin-right: 4px; }
     }
 
     /* Модальное окно для просмотра фотографий */
@@ -433,8 +436,8 @@
                 <th>Время</th>
                 <th>Группа</th>
                 <th class="hide-mobile col-last-watering">Последний полив</th>
-                <th class="hide-mobile">Следующий полив</th>
-                <th class="hide-mobile">Фото</th>
+                <th>Следующий полив</th>
+                <th>Фото</th>
             </tr>
         </thead>
         <tbody id="zones-table-body">
@@ -821,8 +824,8 @@
                 <td>${zone.duration} мин</td>
                 <td>${groupNameById[zone.group_id] || zone.group_id}</td>
                 <td class="hide-mobile col-last-watering">—</td>
-                <td>${nextWatering}</td>
-                <td>
+                <td class="col-next" data-label="Следующий полив">${nextWatering}</td>
+                <td class="col-photo" data-label="Фото">
                     <div class="zone-photo">
                         ${zone.photo_path ? 
                             `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
