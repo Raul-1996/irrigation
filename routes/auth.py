@@ -2,7 +2,6 @@ from flask import Blueprint, render_template, request, jsonify, session, redirec
 import time
 from flask_wtf.csrf import CSRFProtect
 from services.auth_service import verify_password
-from app import csrf
 
 auth_bp = Blueprint('auth_bp', __name__)
 
@@ -17,7 +16,6 @@ def login_page():
     return render_template('login.html')
 
 
-@csrf.exempt
 @auth_bp.route('/api/login', methods=['POST'])
 def api_login():
     data = request.get_json() or {}

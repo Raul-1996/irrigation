@@ -543,5 +543,37 @@
     </script>
     
     {% block extra_js %}{% endblock %}
+    <script>
+    // Real user timing for Chrome (from navigation start to content complete state on Status page)
+    (function(){
+      try {
+        const t0 = performance.now();
+        const isStatus = location.pathname === '/' || document.title.indexOf('Статус') !== -1;
+        let zonesDone = false;
+        let statusDone = false;
+        const marks = { navStart: performance.timing?.navigationStart || Date.now() };
+        document.addEventListener('DOMContentLoaded', ()=>{ marks.domContentLoaded = performance.now(); });
+        // Hook fetch to detect /api/status and /api/zones completions
+        const _fetch = window.fetch;
+        window.fetch = async function(input, init){
+          const url = (typeof input === 'string') ? input : (input?.url || '');
+          const started = performance.now();
+          const resp = await _fetch(input, init);
+          const done = performance.now();
+          try{
+            if (url.includes('/api/status')) { statusDone = true; marks.statusMs = Math.round(done - t0); }
+            if (url.includes('/api/zones')) { zonesDone = true; marks.zonesMs = Math.round(done - t0); }
+            if (isStatus && statusDone && zonesDone && !marks.allDone){
+              marks.allDone = Math.round(done - t0);
+              console.log('[Perf] Status page: status=',marks.statusMs,'ms zones=',marks.zonesMs,'ms all=',marks.allDone,'ms');
+              const footer = document.getElementById('footer-time');
+              if (footer){ footer.textContent += ` | ⏱ ${marks.allDone}ms (статус ${marks.statusMs} / зоны ${marks.zonesMs})`; }
+            }
+          }catch(e){}
+          return resp;
+        }
+      } catch(e) {}
+    })();
+    </script>
 </body>
 </html>
