@@ -2178,6 +2178,26 @@ def api_water():
         logger.error(f"Ошибка получения данных о воде: {e}")
         return jsonify({'error': 'Ошибка получения данных о воде'}), 500
 
+@app.route('/api/server-time')
+def api_server_time():
+    try:
+        now = datetime.now()
+        try:
+            tzname = time.tzname[0] if time.tzname else ''
+        except Exception:
+            tzname = ''
+        payload = {
+            'now_iso': now.strftime('%Y-%m-%d %H:%M:%S'),
+            'epoch_ms': int(time.time() * 1000),
+            'tz': tzname
+        }
+        resp = jsonify(payload)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    except Exception as e:
+        logger.error(f"server-time failed: {e}")
+        return jsonify({'now_iso': None, 'epoch_ms': int(time.time()*1000)}), 200
+
 @app.route('/api/status')
 def api_status():
     rain_cfg = db.get_rain_config()

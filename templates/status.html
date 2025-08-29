@@ -469,7 +469,15 @@
     let envProbeAttempts = 0;
     
     // Функция обновления времени
-    function updateDateTime() {
+    async function updateDateTime() {
+        try {
+            const r = await fetch('/api/server-time?ts=' + Date.now(), { cache: 'no-store' });
+            const j = await r.json();
+            if (j && j.now_iso) {
+                document.getElementById('datetime').textContent = j.now_iso.replace('T',' ');
+                return;
+            }
+        } catch (e) {}
         const now = new Date();
         const dateStr = now.toLocaleDateString('ru-RU');
         const timeStr = now.toLocaleTimeString('ru-RU');
