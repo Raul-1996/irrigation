@@ -29,9 +29,9 @@ def verify_password(password: str) -> tuple[bool, str]:
     try:
         if stored_hash and check_password_hash(stored_hash, password):
             # Normalize hash strength for weak CPUs (e.g., Wirenboard)
-            if ':sha256:' in stored_hash and 'pbkdf2' in stored_hash and '260000' in stored_hash:
+            if ':sha256:' in stored_hash and 'pbkdf2' in stored_hash and ('260000' in stored_hash or '200000' in stored_hash or '180000' in stored_hash):
                 try:
-                    new_hash = generate_password_hash(password, method='pbkdf2:sha256:120000')
+                    new_hash = generate_password_hash(password, method='pbkdf2:sha256:90000')
                     db.set_setting_value('password_hash', new_hash)
                 except Exception:
                     pass

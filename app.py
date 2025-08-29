@@ -16,6 +16,7 @@ try:
 except Exception:
     mqtt = None
 from flask import Response, stream_with_context
+import time as _perf_time
 import threading
 import queue
 import time
@@ -107,6 +108,23 @@ app = Flask(__name__)
 app.config.from_object(Config)
 app.db = db  # Добавляем атрибут db для тестов
 csrf = CSRFProtect(app)
+@app.before_request
+def _perf_start_timer():
+    try:
+        request._started_at = _perf_time.time()
+    except Exception:
+        pass
+
+@app.after_request
+def _perf_add_server_timing(resp: Response):
+    try:
+        t0 = getattr(request, '_started_at', None)
+        if t0 is not None:
+            dur_ms = int((_perf_time.time() - t0) * 1000)
+            resp.headers['Server-Timing'] = f"app;dur={dur_ms}"
+    except Exception:
+        pass
+    return resp
 
 # Настройки хранения медиафайлов
 MEDIA_ROOT = 'static/media'
@@ -663,9 +681,12 @@ def _require_admin_for_mutations():
         p = request.path or ''
         if not p.startswith('/api/'):
             return None
+        # Разрешаем все GET-запросы для гостей/пользователей (чтение публичных данных)
+        if request.method == 'GET':
+            return None
+        # Мутации — только для админа, кроме разрешённых
         if request.method in ['POST', 'PUT', 'DELETE']:
-            # Публичные (без admin) мутации для интеграционных тестов и UI
-            if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/'):
+            if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/') or p == '/api/password':
                 return None
             if session.get('role') != 'admin':
                 return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403

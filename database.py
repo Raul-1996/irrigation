@@ -37,6 +37,8 @@ class IrrigationDB:
                     # Persistent, low-risk performance tweaks for embedded devices
                     conn.execute('PRAGMA synchronous=NORMAL')
                     conn.execute('PRAGMA wal_autocheckpoint=1000')
+                    conn.execute('PRAGMA cache_size=-4000')
+                    conn.execute('PRAGMA temp_store=MEMORY')
                 except Exception:
                     pass
                 # Создание таблиц
