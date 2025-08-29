@@ -13,7 +13,6 @@ def map_page():
 @files_bp.route('/water')
 @user_required
 def water_page():
-    # Страница удалена из MVP
-    return render_template('404.html'), 404
+    return render_template('water.html')
 
 
