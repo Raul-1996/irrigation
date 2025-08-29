@@ -106,10 +106,12 @@ def test_e2e_mqtt_commands(client):
     z2 = 2
     t2 = build_topic(z2)
     client.post(f"/api/zones/{z2}/mqtt/start")
+    time.sleep(5)
     time.sleep(0.3)
     ev = sniffer.drain()
     assert (t2, '1') in ev, f"zone {z2} start missing in {ev}"
     client.post(f"/api/zones/{z2}/mqtt/stop")
+    time.sleep(5)
     time.sleep(0.3)
     ev = sniffer.drain()
     assert (t2, '0') in ev, f"zone {z2} stop missing in {ev}"

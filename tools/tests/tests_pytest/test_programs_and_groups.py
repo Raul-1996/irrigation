@@ -23,6 +23,7 @@ def test_programs_list(client):
 
 def test_group_sequence_start_and_stop(client):
     s = client.post('/api/groups/1/start-from-first')
+    import time; time.sleep(5)
     # 200/400/500 acceptable in TESTING
     assert s.status_code in (200, 400, 500)
     st = client.post('/api/groups/1/stop')

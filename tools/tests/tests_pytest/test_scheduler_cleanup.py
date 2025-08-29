@@ -39,6 +39,7 @@ def test_scheduler_cancel_group_jobs(client):
     assert groups, 'No groups'
     gid = next((g['id'] for g in groups if int(g['id']) != 999), groups[0]['id'])
     client.post(f'/api/groups/{gid}/start-from-first')
+    import time; time.sleep(5)
 
     # Give a short time to enqueue jobs
     time.sleep(0.1)

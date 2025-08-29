@@ -35,6 +35,7 @@ def test_zone_start_stop_cycle(client):
 
 def test_group_stop_cancels_sequence(client):
     s = client.post("/api/groups/1/start-from-first")
+    import time; time.sleep(5)
     # In TESTING scheduler may be unavailable -> accept 200/400/500
     assert s.status_code in (200, 400, 500)
     st = client.post("/api/groups/1/stop")

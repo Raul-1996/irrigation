@@ -17,8 +17,10 @@ def test_zone_mqtt_endpoints_exist(client):
         client.put(f"/api/zones/{zid}", json={'mqtt_server_id': 1, 'topic': build_topic(zid)})
     # endpoints should exist and return 200/400 depending on broker
     r1 = client.post('/api/zones/1/mqtt/start')
+    time.sleep(5)
     assert r1.status_code in (200, 400, 500)
     r2 = client.post('/api/zones/1/mqtt/stop')
+    time.sleep(5)
     assert r2.status_code in (200, 400, 500)
 
 
@@ -45,10 +47,12 @@ def test_zone_mqtt_topic_toggles_when_called(client):
     cl.loop_start()
     time.sleep(0.5)
     client.post('/api/zones/1/mqtt/start')
+    time.sleep(5)
     t0 = time.time()
     while time.time()-t0 < 5 and '1' not in seen:
         time.sleep(0.2)
     client.post('/api/zones/1/mqtt/stop')
+    time.sleep(5)
     t1 = time.time()
     while time.time()-t1 < 5 and '0' not in seen:
         time.sleep(0.2)
