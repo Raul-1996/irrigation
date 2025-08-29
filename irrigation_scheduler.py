@@ -197,6 +197,15 @@ class IrrigationScheduler:
 
                 # Если для группы зоны установлена отмена, пропускаем её
                 group_id = int(zone.get('group_id') or 0)
+                # Проверяем отмену текущего запуска программы для этой группы на сегодня
+                try:
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    from database import db as _db
+                    if _db.is_program_run_cancelled_for_group(int(program_id), today, int(group_id)):
+                        logger.info(f"Программа {program_id}: отменена для группы {group_id} на {today}, зона {zone_id} пропущена")
+                        continue
+                except Exception:
+                    pass
                 cancel_event = self.group_cancel_events.get(group_id)
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Программа {program_id}: группа {group_id} отменена, зона {zone_id} пропущена")
@@ -370,7 +379,7 @@ class IrrigationScheduler:
                     args=[program_id, zones, program_data['name']],
                     id=f"program_{program_id}_d{day}",
                     replace_existing=True,
-                    misfire_grace_time=300,
+                    misfire_grace_time=3600,
                 )
                 job_ids.append(job.id)
 
@@ -682,6 +691,61 @@ class IrrigationScheduler:
         except Exception as e:
             logger.error(f"Ошибка загрузки программ: {e}")
 
+    def recover_missed_runs(self) -> None:
+        """Догоняем пропущенный старт сегодняшней программы, если сервис перезапустился между стартом и окончанием."""
+        try:
+            programs = self.db.get_programs()
+            now = datetime.now()
+            zones_all = self.db.get_zones()
+            zones_by_id = {int(z['id']): z for z in zones_all}
+            for p in programs:
+                try:
+                    days = p.get('days') or []
+                    if now.weekday() not in days:
+                        continue
+                    time_str = p.get('time') or '00:00'
+                    hh, mm = map(int, time_str.split(':', 1))
+                    start_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if now < start_dt:
+                        continue
+                    zones = sorted([int(z) for z in (p.get('zones') or [])])
+                    if not zones:
+                        continue
+                    # Если какая-то зона уже включена — программа идёт
+                    if any((zones_by_id.get(zid) or {}).get('state') == 'on' for zid in zones):
+                        continue
+                    durations = [int((zones_by_id.get(zid) or {}).get('duration') or 0) for zid in zones]
+                    total_min = sum(durations)
+                    if now >= start_dt + timedelta(minutes=total_min):
+                        continue
+                    # Индекс первой незавершённой зоны согласно прошедшему времени
+                    elapsed_min = int((now - start_dt).total_seconds() // 60)
+                    cumulative = 0
+                    start_idx = 0
+                    for idx, dur in enumerate(durations):
+                        if elapsed_min >= cumulative + dur:
+                            cumulative += dur
+                            start_idx = idx + 1
+                        else:
+                            start_idx = idx
+                            break
+                    if start_idx >= len(zones):
+                        continue
+                    # Запускаем остаток зон сейчас
+                    self.scheduler.add_job(
+                        self._run_program_threaded,
+                        DateTrigger(run_date=datetime.now()),
+                        args=[int(p['id']), zones[start_idx:], str(p.get('name') or f'program_{p.get("id")}') + ' (recovered)'],
+                        id=f"program_{int(p['id'])}_recover_{int(time.time())}",
+                        replace_existing=False,
+                        misfire_grace_time=300,
+                    )
+                    logger.info(f"Recovery: программа {p['id']} — запущены оставшиеся зоны с индекса {start_idx}")
+                except Exception as e:
+                    logger.error(f"Ошибка recovery для программы {p.get('id')}: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка recover_missed_runs: {e}")
+
 
 # Глобальный экземпляр планировщика
 scheduler: Optional[IrrigationScheduler] = None
@@ -698,6 +762,13 @@ def init_scheduler(db: IrrigationDB):
         except Exception:
             pass
         scheduler.load_programs()
+        # После загрузки программ попробуем сделать recovery пропущенных запусков
+        try:
+            # Локально объявим метод, чтобы не ломать существующие импорты, если его нет
+            if hasattr(scheduler, 'recover_missed_runs'):
+                scheduler.recover_missed_runs()
+        except Exception:
+            pass
     return scheduler
 
 
