@@ -894,6 +894,7 @@ def api_logout():
 
 
 @csrf.exempt
+@csrf.exempt
 @app.route('/api/password', methods=['POST'])
 def api_change_password():
     try:

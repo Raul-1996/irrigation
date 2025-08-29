@@ -34,6 +34,9 @@ class IrrigationDB:
                 try:
                     conn.execute('PRAGMA journal_mode=WAL')
                     conn.execute('PRAGMA foreign_keys=ON')
+                    # Persistent, low-risk performance tweaks for embedded devices
+                    conn.execute('PRAGMA synchronous=NORMAL')
+                    conn.execute('PRAGMA wal_autocheckpoint=1000')
                 except Exception:
                     pass
                 # Создание таблиц
@@ -157,9 +160,9 @@ class IrrigationDB:
                 
                 # Без предзаполнения зон/программ/логов — чистая база по умолчанию
                 conn.commit()
-                # Пароль по умолчанию 1234
+                # Пароль по умолчанию 1234 (умеренные итерации для слабого CPU)
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
-                    'password_hash', generate_password_hash('1234', method='pbkdf2:sha256')
+                    'password_hash', generate_password_hash('1234', method='pbkdf2:sha256:120000')
                 ))
                 conn.commit()
                 logger.info("Начальные данные вставлены: группы 1 (Насос-1) и 999 (БЕЗ ПОЛИВА)")
