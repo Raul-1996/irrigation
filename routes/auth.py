@@ -21,12 +21,13 @@ def api_login():
     data = request.get_json(silent=True) or {}
     password = (data.get('password') or '').strip()
     # Простейший rate limit по IP/сеансу: не чаще 1 попытки в 2 секунды
+    # Минимальный rate-limit без задержек
     try:
         now = time.time()
-        last = session.get('_last_login_try', 0)
-        if (now - float(last)) < 2.0:
-            return jsonify({'success': False, 'message': 'Слишком часто. Повторите позже.'}), 429
+        last = float(session.get('_last_login_try', 0))
         session['_last_login_try'] = now
+        if (now - last) < 0.5:
+            return jsonify({'success': False, 'message': 'Слишком часто. Повторите позже.'}), 429
     except Exception:
         pass
 
