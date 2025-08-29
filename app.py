@@ -2363,7 +2363,12 @@ def api_status():
             if status == 'watering' and current_zone:
                 cz = next((z for z in group_zones if int(z['id']) == int(current_zone)), None)
                 if cz:
-                    current_zone_source = cz.get('watering_start_source')
+                    src = (cz.get('watering_start_source') or '').strip().lower()
+                    if src in ('manual', 'schedule', 'remote'):
+                        current_zone_source = src
+                    else:
+                        # Если явного источника нет, но зона включена — считаем, что это удалённый запуск (MQTT вне UI)
+                        current_zone_source = 'remote'
         except Exception:
             pass
 

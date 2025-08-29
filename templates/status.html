@@ -611,8 +611,10 @@
 
     function getStatusText(group) {
         if (group.status === 'watering' && group.current_zone) {
-            const isManual = String(group.current_zone_source || '').toLowerCase() === 'manual';
-            return `Полив - активно поливается(${isManual ? 'запущено вручную' : 'по расписанию'})`;
+            const src = String(group.current_zone_source || '').toLowerCase();
+            if (src === 'manual') return 'Полив - активно поливается(запущено вручную)';
+            if (src === 'remote') return 'Полив - активно поливается(запущено удаленно)';
+            return 'Полив - активно поливается(по расписанию)';
         }
         switch (group.status) {
             case 'waiting': return 'Ожидание - готов к поливу';
