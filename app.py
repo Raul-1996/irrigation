@@ -178,6 +178,29 @@ try:
     app.config.setdefault('SEND_FILE_MAX_AGE_DEFAULT', 60 * 60 * 24 * 7)
 except Exception:
     pass
+
+# Версия приложения: автоматически инкрементируем меньшую часть как количество коммитов
+def _compute_app_version() -> str:
+    try:
+        import subprocess
+        cnt = subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=os.getcwd())
+        minor = int((cnt or b'0').decode('utf-8').strip() or '0')
+    except Exception:
+        minor = 0
+    major = 1
+    return f"{major},{minor}"
+
+try:
+    APP_VERSION = _compute_app_version()
+except Exception:
+    APP_VERSION = '1,0'
+
+@app.context_processor
+def _inject_app_version():
+    try:
+        return {'app_version': APP_VERSION}
+    except Exception:
+        return {'app_version': '1,0'}
 @app.before_request
 def _perf_start_timer():
     try:
