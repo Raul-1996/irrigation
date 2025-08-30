@@ -93,6 +93,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
         if cl is None:
             logger.warning("MQTT publish: client unavailable, dropping message")
             return False
+        # Publish to base topic
         try:
             res = cl.publish(t, payload=value, qos=0, retain=retain)
             try:
@@ -109,10 +110,29 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                     return False
                 res2 = cl2.publish(t, payload=value, qos=0, retain=retain)
                 rc2 = getattr(res2, 'rc', 0)
-                return rc2 == 0
+                if rc2 != 0:
+                    return False
             except Exception:
                 logger.exception('MQTT publish failed on retry')
                 return False
+
+        # Also publish to the control topic '/on' for Wirenboard compatibility
+        try:
+            t_on = t + '/on'
+            on_key = (sid or 0, t_on)
+            now2 = time.time()
+            with _TOPIC_LOCK:
+                last2 = _TOPIC_LAST_SEND.get(on_key)
+                if last2 and last2[0] == value and (now2 - last2[1]) < min_interval_sec:
+                    return True
+                _TOPIC_LAST_SEND[on_key] = (value, now2)
+            logger.debug(f"MQTT publish topic={t_on} value={value}")
+            res_on = cl.publish(t_on, payload=value, qos=0, retain=retain)
+            # Ignore rc here; some brokers may not acknowledge the duplicate fast
+        except Exception:
+            # Soft-fail for '/on' duplication
+            pass
+
         return True
     except Exception:
         logger.exception('publish_mqtt_value failed')
