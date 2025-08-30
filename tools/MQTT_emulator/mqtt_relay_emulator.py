@@ -44,7 +44,8 @@ ECHO_SUPPRESS_WINDOW = float(os.getenv("EMULATOR_ECHO_SUPPRESS_WINDOW", "0.10"))
 HTTP_HOST = os.getenv("EMULATOR_HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("EMULATOR_HTTP_PORT", "5055"))
 MSW_AUTO_ENABLED = (os.getenv("EMULATOR_MSW_AUTO_ENABLED", "1") == "1")
-MSW_AUTO_INTERVAL_SECONDS = float(os.getenv("EMULATOR_MSW_AUTO_INTERVAL", "60.0"))
+# Autopublish interval for MSW sensors (min 30s)
+MSW_AUTO_INTERVAL_SECONDS = float(os.getenv("EMULATOR_MSW_AUTO_INTERVAL", "30.0"))
 
 
 def build_relay_topics(device_ids: List[str], num_channels: int) -> List[str]:
@@ -700,12 +701,21 @@ def start_msw_autopublish_thread():
                 t_str = f"{cur_t:.2f}"
                 h_str = f"{cur_h:.2f}"
 
-                # Publish via controller path (so device echo applies uniformly)
-                publish_command(MSW_TEMPERATURE_TOPIC, t_str)
-                publish_command(MSW_HUMIDITY_TOPIC, h_str)
+                # Publish directly from the device client to avoid duplicate echo messages
+                try:
+                    device_client.publish(MSW_TEMPERATURE_TOPIC, payload=t_str, qos=0, retain=False)
+                    apply_local_state_raw(MSW_TEMPERATURE_TOPIC, t_str)
+                except Exception as exc:
+                    log_event(f"msw-auto: publish temp error {exc}")
+                try:
+                    device_client.publish(MSW_HUMIDITY_TOPIC, payload=h_str, qos=0, retain=False)
+                    apply_local_state_raw(MSW_HUMIDITY_TOPIC, h_str)
+                except Exception as exc:
+                    log_event(f"msw-auto: publish hum error {exc}")
             except Exception as exc:
                 log_event(f"msw-auto: error {exc}")
-            time.sleep(max(0.2, MSW_AUTO_INTERVAL_SECONDS))
+            # Enforce a minimum interval of 30 seconds to reduce message noise
+            time.sleep(max(30.0, MSW_AUTO_INTERVAL_SECONDS))
     threading.Thread(target=_loop, daemon=True).start()
 
 
