@@ -294,6 +294,7 @@
             logsData = await api.get('/api/logs');
             filteredLogs = [...logsData];
             updateEventTypeOptions();
+            applyDebugVisibility();
             renderLogs();
         } catch (error) {
             console.error('Ошибка загрузки логов:', error);
@@ -381,7 +382,14 @@
         );
     }
 
-    function applyDebugVisibility() { /* no-op: больше не скрываем события по умолчанию */ }
+    function applyDebugVisibility() {
+        const cb = document.getElementById('debug-toggle');
+        if (!cb) return;
+        const dbg = !!cb.checked;
+        if (!dbg) {
+            filteredLogs = filteredLogs.filter(isImportant);
+        }
+    }
     
     // Применение фильтров
     async function applyFilter() {
@@ -402,6 +410,7 @@
             }
             
             filteredLogs = await response.json();
+            applyDebugVisibility();
             renderLogs();
             
             if (filteredLogs.length === 0) {

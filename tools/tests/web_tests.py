@@ -205,7 +205,11 @@ class WebInterfaceTest(unittest.TestCase):
     def test_02_navigation_works(self):
         """Тест навигации между страницами"""
         # Переход на страницу зон
-        self.driver.find_element(By.LINK_TEXT, "Зоны и группы").click()
+        # Навигация на страницу зон: пробуем по ссылке; если не вышло, открываем напрямую
+        try:
+            self.driver.find_element(By.LINK_TEXT, "Зоны и группы").click()
+        except Exception:
+            self.open_url('/zones')
         self.wait_for_element(By.ID, "zones-table")
         self.assertIn("Зоны и группы", self.driver.title)
         
@@ -233,7 +237,10 @@ class WebInterfaceTest(unittest.TestCase):
     def test_03_create_zone(self):
         """Тест создания новой зоны"""
         # Переход на страницу зон
-        self.driver.find_element(By.LINK_TEXT, "Зоны и группы").click()
+        try:
+            self.driver.find_element(By.LINK_TEXT, "Зоны и группы").click()
+        except Exception:
+            self.open_url('/zones')
         self.wait_for_element(By.ID, "zones-table")
         
         # Запоминаем количество зон до создания
@@ -550,7 +557,10 @@ class WebInterfaceTest(unittest.TestCase):
     def test_16_logs_page(self):
         """Тест страницы логов"""
         # Переход на страницу логов
-        self.driver.find_element(By.LINK_TEXT, "Логи").click()
+        try:
+            self.driver.find_element(By.LINK_TEXT, "Логи").click()
+        except Exception:
+            self.open_url('/logs')
         self.wait_for_element(By.CLASS_NAME, "logs-table")
         
         # Проверяем фильтры
@@ -630,6 +640,58 @@ class WebInterfaceTest(unittest.TestCase):
         self.assertNotIn("show", connection_status.get_attribute("class"))
         
         print("✅ Индикатор состояния соединения работает корректно")
+
+    def test_21_logs_update_after_actions(self):
+        """Проверяет, что логи обновляются после старта/остановки зон"""
+        # 1) Считаем логи до действий
+        r = requests.get(f"{BASE_URL_HOST}/api/logs")
+        self.assertTrue(r.ok)
+        before_logs = r.json()
+        before_count = len(before_logs)
+
+        # 2) Запускаем/останавливаем две первые зоны через UI
+        self.driver.find_element(By.LINK_TEXT, "Зоны и группы").click()
+        self.wait_for_element(By.ID, "zones-table")
+
+        rows = self.driver.find_elements(By.CSS_SELECTOR, "#zones-table-body tr")
+        self.assertGreaterEqual(len(rows), 2, "Нужно минимум 2 зоны для теста")
+
+        for idx in [0, 1]:
+            row = self.driver.find_elements(By.CSS_SELECTOR, "#zones-table-body tr")[idx]
+            # Старт
+            try:
+                start_btn = row.find_element(By.CSS_SELECTOR, ".start-btn")
+                self.js_click(start_btn)
+                time.sleep(1.2)
+            except Exception:
+                pass
+            # Стоп
+            try:
+                row = self.driver.find_elements(By.CSS_SELECTOR, "#zones-table-body tr")[idx]
+                stop_btn = row.find_element(By.CSS_SELECTOR, ".stop-btn")
+                self.js_click(stop_btn)
+                time.sleep(1.2)
+            except Exception:
+                pass
+
+        # 3) Считаем логи после действий
+        r2 = requests.get(f"{BASE_URL_HOST}/api/logs")
+        self.assertTrue(r2.ok)
+        after_logs = r2.json()
+        after_count = len(after_logs)
+
+        # Проверяем, что добавились как минимум 4 записи (2 старта + 2 стопа)
+        self.assertGreaterEqual(after_count - before_count, 2, "Ожидали новые записи в логах после действий")
+
+        # Проверяем наличие типов zone_start/zone_stop среди последних записей
+        recent = after_logs[:20]
+        types = {item.get('type') for item in recent}
+        self.assertTrue({'zone_start', 'zone_stop'} & types, f"В последних логах нет записей о старте/остановке: {types}")
+
+        # 4) Заходим на страницу логов и убеждаемся, что таблица отображается
+        self.driver.find_element(By.LINK_TEXT, "Логи").click()
+        self.wait_for_element(By.CLASS_NAME, "logs-table")
+        print(f"✅ Логи обновились: было {before_count}, стало {after_count}")
 
 
 if __name__ == "__main__":

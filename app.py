@@ -692,10 +692,11 @@ def _init_scheduler_before_request():
         # или оба клиента отсутствуют (например, предыдущий старт не удался).
         try:
             logger.info(
-                "EnvMonitor check: started=%s cfg_sig=%s esig=%s temp_client=%s hum_client=%s",
-                _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG, esig,
-                'ok' if getattr(env_monitor, 'temp_client', None) else 'none',
-                'ok' if getattr(env_monitor, 'hum_client', None) else 'none',
+                "EnvMonitor check: started=%s cfg_sig=%s esig=%s temp_client=%s hum_client=%s" % (
+                    _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG, esig,
+                    'ok' if getattr(env_monitor, 'temp_client', None) else 'none',
+                    'ok' if getattr(env_monitor, 'hum_client', None) else 'none',
+                )
             )
         except Exception:
             pass
@@ -708,9 +709,13 @@ def _init_scheduler_before_request():
             need_start = no_clients
         try:
             logger.info(
-                "EnvMonitor decision: need_start=%s reason=%s",
-                need_start,
-                ('cfg_changed' if esig != _ENV_MONITOR_CFG_SIG else ('no_clients' if (getattr(env_monitor, 'temp_client', None) is None and getattr(env_monitor, 'hum_client', None) is None) else ('not_started' if not _ENV_MONITOR_STARTED else 'none')))
+                "EnvMonitor decision: need_start=%s reason=%s" % (
+                    need_start,
+                    ('cfg_changed' if esig != _ENV_MONITOR_CFG_SIG else (
+                        'no_clients' if (getattr(env_monitor, 'temp_client', None) is None and getattr(env_monitor, 'hum_client', None) is None)
+                        else ('not_started' if not _ENV_MONITOR_STARTED else 'none')
+                    ))
+                )
             )
         except Exception:
             pass
@@ -3537,6 +3542,15 @@ def api_zone_mqtt_start(zone_id: int):
                 'watering_start_source': 'manual'
             })
             dlog("manual-start zone=%s time=%s group=%s", zone_id, start_ts, z.get('group_id'))
+            try:
+                db.add_log('zone_start', json.dumps({
+                    'zone': int(zone_id),
+                    'group': int(z.get('group_id') or 0),
+                    'source': 'manual',
+                    'duration': int(z.get('duration') or 0)
+                }))
+            except Exception:
+                pass
             # При ручном старте зоны — отменим очередь группы и очистим плановые старты
             try:
                 gid = int(z.get('group_id') or 0)
@@ -3598,6 +3612,14 @@ def api_zone_mqtt_stop(zone_id: int):
         try:
             # Немедленно отражаем остановку в БД, чтобы UI увидел состояние и таймер сбросился
             db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
+            try:
+                db.add_log('zone_stop', json.dumps({
+                    'zone': int(zone_id),
+                    'group': int(z.get('group_id') or 0),
+                    'source': 'manual'
+                }))
+            except Exception:
+                pass
         except Exception:
             pass
         return jsonify({'success': True, 'message': 'Зона остановлена'})

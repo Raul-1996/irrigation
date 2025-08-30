@@ -174,3 +174,6 @@ static/photos/**
 ui_demo_screens/
 *.out
 *.pid
+
+# Ignore build/export tarballs
+wb_irrigation_*.tar
