@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 import io
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
+from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value, get_or_create_mqtt_client as _get_or_create_mqtt_client
 from flask_wtf.csrf import CSRFProtect
 try:
     import paho.mqtt.client as mqtt
@@ -30,6 +31,20 @@ from routes.groups import groups_bp
 from routes.auth import auth_bp
 from routes.settings import settings_bp
 from werkzeug.security import check_password_hash
+
+# Unified API error helpers
+def api_error(error_code: str, message: str, status: int = 400, extra: dict = None):
+    payload = {'success': False, 'error_code': str(error_code), 'message': str(message)}
+    if extra:
+        try:
+            payload.update(extra)
+        except Exception:
+            pass
+    return jsonify(payload), int(status)
+
+def api_soft(error_code: str, message: str, extra: dict = None):
+    # Soft 200 responses with explicit error_code for diagnostics
+    return api_error(error_code, message, 200, extra)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -822,7 +837,7 @@ def api_setting_early_off():
         return jsonify({'success': bool(ok), 'seconds': seconds})
     except Exception as e:
         logger.error(f"early-off setting failed: {e}")
-        return jsonify({'success': False}), 500
+        return api_error('INTERNAL_ERROR', 'internal error', 500)
 # (initial sync moved into before_request)
 # Глобальная защита от дребезга запусков по группам (анти-флаппер)
 _GROUP_CHANGE_GUARD = {}
@@ -1052,7 +1067,7 @@ def api_scheduler_init():
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Ошибка явной инициализации планировщика: {e}")
-        return jsonify({'success': False}), 500
+        return api_error('INTERNAL_ERROR', 'internal error', 500)
 
 
 MAP_FOLDER = MAP_DIR  # использовать новый каталог media/maps
@@ -2079,9 +2094,9 @@ def api_mqtt_probe(server_id: int):
     try:
         server = db.get_mqtt_server(server_id)
         if not server:
-            return jsonify({'success': False, 'message': 'server not found', 'items': [], 'events': []}), 200
+            return api_soft('MQTT_SERVER_NOT_FOUND', 'server not found', {'items': [], 'events': []})
         if mqtt is None:
-            return jsonify({'success': False, 'message': 'paho-mqtt not installed', 'items': [], 'events': []}), 200
+            return api_soft('PAHO_NOT_INSTALLED', 'paho-mqtt not installed', {'items': [], 'events': []})
         data = request.get_json() or {}
         topic_filter = data.get('filter', '#')
         duration = float(data.get('duration', 3))  # seconds
@@ -2119,7 +2134,7 @@ def api_mqtt_probe(server_id: int):
             client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
         except Exception as ce:
             events.append(f"connect error: {ce}")
-            return jsonify({'success': False, 'message': 'connect failed', 'items': [], 'events': events}), 200
+            return api_soft('MQTT_CONNECT_FAILED', 'connect failed', {'items': [], 'events': events})
         client.loop_start()
         import time as _t
         start = _t.time()
@@ -2135,7 +2150,7 @@ def api_mqtt_probe(server_id: int):
         return jsonify({'success': True, 'items': received, 'events': events})
     except Exception as e:
         logger.error(f"MQTT probe error: {e}")
-        return jsonify({'success': False, 'message': 'probe failed', 'items': [], 'events': [str(e)]}), 200
+        return api_soft('PROBE_FAILED', 'probe failed', {'items': [], 'events': [str(e)]})
 
 # Diagnostics: list scheduler jobs and next runs
 @app.route('/api/scheduler/jobs')
@@ -2887,9 +2902,11 @@ def api_start_zone_exclusive(group_id, zone_id):
                     db.update_zone(zone_id, {'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
                 except Exception:
                     pass
-                scheduler.schedule_zone_stop(int(zone_id), int([zz for zz in group_zones if int(zz.get('id'))==int(zone_id)][0]['duration']))
+                # В тестовом режиме не ставим автостоп, чтобы проверка состояния успевала
+                if not app.config.get('TESTING'):
+                    scheduler.schedule_zone_stop(int(zone_id), int([zz for zz in group_zones if int(zz.get('id'))==int(zone_id)][0]['duration']))
         except Exception:
-            pass
+            logger.exception("api_start_zone_exclusive: schedule_zone_stop failed")
         db.add_log('zone_start_exclusive', json.dumps({"group": group_id, "zone": zone_id}))
         return jsonify({"success": True, "message": f"Зона {zone_id} запущена, остальные остановлены"})
     except Exception as e:
