@@ -189,6 +189,10 @@ class IrrigationScheduler:
         """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler"""
         try:
             logger.info(f"Запуск программы {program_id} ({program_name})")
+            try:
+                self.db.add_log('program_start', json.dumps({'program_id': program_id, 'program_name': program_name}))
+            except Exception:
+                pass
             for i, zone_id in enumerate(zones):
                 zone = self.db.get_zone(zone_id)
                 if not zone:
@@ -332,6 +336,10 @@ class IrrigationScheduler:
                     continue
 
             logger.info(f"Программа {program_id} ({program_name}) завершена")
+            try:
+                self.db.add_log('program_finish', json.dumps({'program_id': program_id, 'program_name': program_name}))
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
 

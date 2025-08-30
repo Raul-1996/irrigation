@@ -3194,8 +3194,9 @@ def start_zone(zone_id):
 
         db.add_log('zone_start', json.dumps({
             "zone": zone_id,
-            "name": zone['name'],
-            "duration": zone['duration']
+            "group": group_id,
+            "source": "manual",
+            "duration": int(zone['duration'])
         }))
         
         return jsonify({
@@ -3235,7 +3236,8 @@ def stop_zone(zone_id):
 
         db.add_log('zone_stop', json.dumps({
             "zone": zone_id,
-            "name": zone['name']
+            "group": group_id,
+            "source": "manual"
         }))
         
         return jsonify({
