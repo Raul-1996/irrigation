@@ -155,24 +155,17 @@ class IrrigationScheduler:
             last_time = None
             if zone and zone.get('watering_start_time'):
                 last_time = zone['watering_start_time']
-            # Публикуем MQTT OFF для зоны, если сконфигурирован — это важно для автостопа после ручного запуска
+            # Централизованный OFF для автостопа
             try:
-                topic = (zone.get('topic') or '').strip() if zone else ''
-                sid = zone.get('mqtt_server_id') if zone else None
-                if mqtt and topic and sid:
-                    t = normalize_topic(topic)
-                    server = self.db.get_mqtt_server(int(sid))
-                    if server:
-                        logger.info(f"SCHED auto-stop publish OFF zone={zone_id} topic={t}")
-                        from app import _publish_mqtt_value as _pub
-                        _pub(server, t, '0', min_interval_sec=0.0)
+                from services.zone_control import stop_zone as _stop_zone_central
+                _stop_zone_central(zone_id, reason='auto_stop')
             except Exception:
-                pass
-            self.db.update_zone(zone_id, {
-                'state': 'off',
-                'watering_start_time': None,
-                'last_watering_time': last_time
-            })
+                # Fallback на локальный апдейт, если контроллер недоступен
+                self.db.update_zone(zone_id, {
+                    'state': 'off',
+                    'watering_start_time': None,
+                    'last_watering_time': last_time
+                })
             try:
                 from app import dlog
                 dlog("auto-stop zone=%s", zone_id)
@@ -569,19 +562,13 @@ class IrrigationScheduler:
                         break
                     time.sleep(1)
                     remaining -= 1
-                # MQTT publish OFF и останавливаем зону
+                # Централизованный OFF и снятие активности
                 try:
-                    topic = (zone.get('topic') or '').strip()
-                    sid = zone.get('mqtt_server_id')
-                    if mqtt and topic and sid:
-                        t = topic if str(topic).startswith('/') else '/' + str(topic)
-                        server = self.db.get_mqtt_server(int(sid))
-                        if server:
-                            from app import _publish_mqtt_value as _pub
-                            _pub(server, t, '0', min_interval_sec=0.0)
+                    from services.zone_control import stop_zone as _stop_zone_central
+                    _stop_zone_central(zone_id, reason='group_sequence')
                 except Exception:
-                    pass
-                self._stop_zone(zone_id)
+                    self._stop_zone(zone_id)
+                self.active_zones.pop(zone_id, None)
                 # Добираем ранние секунды, чтобы следующий старт был вовремя
                 if early > 0 and not (cancel_event and cancel_event.is_set()):
                     time.sleep(early)

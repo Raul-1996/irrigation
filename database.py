@@ -147,6 +147,7 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'groups_add_use_rain', self._migrate_add_group_rain_flag)
                 self._apply_named_migration(conn, 'zones_add_watering_start_source', self._migrate_add_watering_start_source)
                 self._apply_named_migration(conn, 'mqtt_add_tls_options', self._migrate_add_mqtt_tls_options)
+                self._apply_named_migration(conn, 'zones_add_control_fields', self._migrate_add_zone_control_fields)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -384,6 +385,24 @@ class IrrigationDB:
             conn.commit()
         except Exception as e:
             logger.error(f"Ошибка миграции mqtt_tls_options: {e}")
+
+    def _migrate_add_zone_control_fields(self, conn):
+        """Добавить технические поля управления зоной: planned_end_time, sequence_id, command_id, version."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'planned_end_time' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN planned_end_time TEXT')
+            if 'sequence_id' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN sequence_id TEXT')
+            if 'command_id' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN command_id TEXT')
+            if 'version' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN version INTEGER DEFAULT 0')
+            conn.commit()
+            logger.info('Добавлены поля planned_end_time, sequence_id, command_id, version в zones')
+        except Exception as e:
+            logger.error(f"Ошибка миграции zone_control_fields: {e}")
 
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
