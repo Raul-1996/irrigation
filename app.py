@@ -2748,6 +2748,12 @@ def api_stop_group(group_id):
                 db.clear_group_scheduled_starts(group_id)
             except Exception:
                 pass
+        try:
+            # Немедленный централизованный OFF всех зон в группе
+            from services.zone_control import stop_all_in_group
+            stop_all_in_group(group_id, reason='group_stop')
+        except Exception:
+            logger.exception('group stop: stop_all_in_group failed')
  
         # Чистим плановые старты группы
         try:
