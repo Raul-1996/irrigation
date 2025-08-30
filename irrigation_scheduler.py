@@ -240,7 +240,7 @@ class IrrigationScheduler:
                                 t = normalize_topic(topic)
                                 server = self.db.get_mqtt_server(int(sid))
                                 if server:
-                                    logger.info(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
+                                    logger.debug(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
                                     from app import _publish_mqtt_value as _pub
                                     _pub(server, t, '0', min_interval_sec=0.0)
                         except Exception:
@@ -263,7 +263,7 @@ class IrrigationScheduler:
                             t = normalize_topic(topic)
                             server = self.db.get_mqtt_server(int(sid))
                             if server:
-                                logger.info(f"SCHED publish ON zone={zone_id} topic={t}")
+                                logger.debug(f"SCHED publish ON zone={zone_id} topic={t}")
                                 from app import _publish_mqtt_value as _pub
                                 _pub(server, t, '1', min_interval_sec=0.0)
                     except Exception:
@@ -311,7 +311,7 @@ class IrrigationScheduler:
                         t = normalize_topic(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
-                            logger.info(f"SCHED publish OFF zone={zone_id} topic={t}")
+                            logger.debug(f"SCHED publish OFF zone={zone_id} topic={t}")
                             from app import _publish_mqtt_value as _pub
                             _pub(server, t, '0', min_interval_sec=0.0)
                 except Exception:
