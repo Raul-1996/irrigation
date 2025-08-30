@@ -198,9 +198,10 @@ except Exception:
 @app.context_processor
 def _inject_app_version():
     try:
-        return {'app_version': APP_VERSION}
+        sys_name = db.get_setting_value('system_name') or ''
+        return {'app_version': APP_VERSION, 'system_name': sys_name}
     except Exception:
-        return {'app_version': '1,0'}
+        return {'app_version': '1,0', 'system_name': ''}
 @app.before_request
 def _perf_start_timer():
     try:
@@ -861,6 +862,25 @@ def api_setting_early_off():
         return jsonify({'success': bool(ok), 'seconds': seconds})
     except Exception as e:
         logger.error(f"early-off setting failed: {e}")
+        return api_error('INTERNAL_ERROR', 'internal error', 500)
+
+# Название системы (system_name): текстовая метка, показывается в UI
+@csrf.exempt
+@app.route('/api/settings/system-name', methods=['GET', 'POST'])
+def api_setting_system_name():
+    try:
+        if request.method == 'GET':
+            name = db.get_setting_value('system_name') or ''
+            return jsonify({'success': True, 'name': name})
+        # POST: только админ (в тестах разрешаем)
+        if not (app.config.get('TESTING') or session.get('role') == 'admin'):
+            return jsonify({'success': False, 'message': 'admin required'}), 403
+        data = request.get_json(silent=True) or {}
+        name = (data.get('name') or '').strip()
+        ok = db.set_setting_value('system_name', name if name else None)
+        return jsonify({'success': bool(ok), 'name': name})
+    except Exception as e:
+        logger.error(f"system-name setting failed: {e}")
         return api_error('INTERNAL_ERROR', 'internal error', 500)
 # (initial sync moved into before_request)
 # Глобальная защита от дребезга запусков по группам (анти-флаппер)

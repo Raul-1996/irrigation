@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Настройки{% endblock %}
-{% block page_title %}Смена пароля{% endblock %}
+{% block page_title %}Настройки{% endblock %}
 {% block extra_css %}
 <style>
   .settings-page{max-width:560px; margin:0 auto; padding:10px 12px}
@@ -33,7 +33,20 @@
 {% block content %}
 <div class="settings-page">
   <div class="settings-card">
-    <p class="settings-note">Минимальная длина — 4 символа.</p>
+    <p class="settings-note">Здесь вы можете настроить название системы и сменить пароль администратора.</p>
+    <form id="sys-form" class="settings-form" autocomplete="off" style="margin-bottom:10px">
+      <div class="settings-row">
+        <label for="system_name">Название системы</label>
+        <div class="settings-input">
+          <input type="text" id="system_name" name="system_name" maxlength="64" placeholder="Например: Дом Эмилии" value="{{ system_name or '' }}">
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button type="button" id="sys-save" class="settings-btn">Сохранить название</button>
+      </div>
+      <div class="settings-msg" id="sys-msg"></div>
+    </form>
+    <p class="settings-note">Минимальная длина пароля — 4 символа.</p>
     <form id="pwd-form" class="settings-form" autocomplete="off">
       <div class="settings-row">
         <label for="old_password">Текущий пароль</label>
@@ -102,6 +115,28 @@
       btn.querySelector('.spinner').style.display = 'none';
       btn.querySelector('.label').textContent = 'Сменить пароль';
     }
+  });
+  // Save system name
+  document.getElementById('sys-save').addEventListener('click', async ()=>{
+    const input = document.getElementById('system_name');
+    const msg = document.getElementById('sys-msg');
+    msg.textContent = '';
+    try{
+      const res = await fetch('/api/settings/system-name', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: input.value||'' }) });
+      const body = await res.json().catch(()=>({}));
+      if (res.ok && body.success){
+        msg.textContent = 'Название сохранено.'; msg.style.color = '#15803d';
+        // Обновим заголовок без перезагрузки страницы
+        const logo = document.querySelector('.logo');
+        if (logo){
+          let extra = logo.querySelector('div');
+          if (!extra){ extra = document.createElement('div'); extra.style.fontSize='0.9rem'; extra.style.opacity='0.85'; extra.style.marginLeft='8px'; extra.style.whiteSpace='nowrap'; logo.appendChild(extra); }
+          extra.textContent = input.value ? `— ${input.value}` : '';
+        }
+      }else{
+        msg.textContent = (body.message || 'Не удалось сохранить'); msg.style.color = '#e11d48';
+      }
+    }catch(_){ msg.textContent = 'Ошибка сети'; msg.style.color = '#e11d48'; }
   });
 </script>
 {% endblock %}

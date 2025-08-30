@@ -336,6 +336,9 @@
                     <span class="logo-icon">💧</span>
                     <span class="logo-text">WB-Irrigation</span>
                 </a>
+                {% if system_name %}
+                <div style="font-size:0.9rem; opacity:0.85; margin-left:8px; white-space:nowrap;">— {{ system_name }}</div>
+                {% endif %}
             </div>
             <nav>
                 <a href="/" class="{% if request.endpoint == 'index' or request.endpoint == 'status' %}active{% endif %}">Статус</a>
