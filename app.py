@@ -202,6 +202,18 @@ def _inject_app_version():
         return {'app_version': APP_VERSION, 'system_name': sys_name}
     except Exception:
         return {'app_version': '1,0', 'system_name': ''}
+
+# Быстрая асинхронная публикация MQTT, чтобы не блокировать HTTP-ответ
+def _publish_mqtt_async(server: dict, topic: str, value: str, min_interval_sec: float = 0.0) -> None:
+    try:
+        def _run():
+            try:
+                _publish_mqtt_value(server, topic, value, min_interval_sec=min_interval_sec)
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        pass
 @app.before_request
 def _perf_start_timer():
     try:
@@ -3170,7 +3182,7 @@ def start_zone(zone_id):
                 t = normalize_topic(topic)
                 server = db.get_mqtt_server(int(sid))
                 if server:
-                    _publish_mqtt_value(server, t, '1')
+                    _publish_mqtt_async(server, t, '1')
         except Exception:
             logger.exception("Ошибка публикации MQTT '1' при ручном запуске зоны")
 
@@ -3551,7 +3563,7 @@ def api_zone_mqtt_start(zone_id: int):
         except Exception:
             logger.exception("api_zone_mqtt_start: db.update_zone ON failed")
         dlog("publish ON zone=%s topic=%s", zone_id, t)
-        _publish_mqtt_value(server, t, '1')
+        _publish_mqtt_async(server, t, '1')
         try:
             scheduler = get_scheduler()
             if scheduler:
