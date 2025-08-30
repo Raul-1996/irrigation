@@ -60,6 +60,14 @@ def test_map_upload_and_get(client):
         except Exception:
             pass
     assert r.status_code in (200, 400)
+    # Если загрузка прошла успешно — удалим карту
+    if r.status_code == 200:
+        j = r.get_json() or {}
+        path = j.get('path') or ''
+        fname = path.split('/')[-1] if path else ''
+        if fname:
+            d = client.delete(f'/api/map/{fname}')
+            assert d.status_code in (200, 404)
 
 
 def test_backup_api(client):

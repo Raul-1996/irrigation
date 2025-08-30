@@ -327,6 +327,17 @@ class TestIrrigationSystem(unittest.TestCase):
         data = json.loads(resp.data)
         self.assertTrue(data['success'])
         self.assertIn('path', data)
+        # Удаляем загруженную карту, чтобы не засорять каталог после тестов
+        try:
+            path = data.get('path') or ''  # e.g., 'media/maps/filename.png'
+            fname = path.split('/')[-1] if path else ''
+            if fname:
+                d = self.client.delete(f'/api/map/{fname}')
+                # допускаем 200 OK
+                self.assertEqual(d.status_code, 200)
+        except Exception:
+            # Не проваливаем тест из-за ошибки очистки
+            pass
     
     def test_api_zone_crud(self):
         """Тест CRUD операций с зонами через API"""
