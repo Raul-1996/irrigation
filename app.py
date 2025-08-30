@@ -188,7 +188,7 @@ def _compute_app_version() -> str:
     except Exception:
         minor = 0
     major = 1
-    return f"{major},{minor}"
+    return f"{major}.{minor}"
 
 try:
     APP_VERSION = _compute_app_version()
@@ -2802,33 +2802,37 @@ def api_start_zone_exclusive(group_id, zone_id):
         zones = db.get_zones()
         group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
         start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Сначала мгновенно обновим БД для целевой зоны
         for z in group_zones:
             if int(z.get('id')) == int(zone_id):
                 db.update_zone(z['id'], {'state': 'on', 'watering_start_time': start_ts})
-                # MQTT publish ON для выбранной зоны
+                target_zone = z
+                break
+        else:
+            target_zone = None
+        # Параллельно отправим OFF для соседей и ON для целевой зоны, не блокируя HTTP
+        for z in group_zones:
+            sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+            if not (sid and topic):
+                continue
+            server = db.get_mqtt_server(int(sid))
+            if not server:
+                continue
+            t = normalize_topic(topic)
+            if int(z.get('id')) == int(zone_id):
                 try:
-                    sid = z.get('mqtt_server_id')
-                    topic = (z.get('topic') or '').strip()
-                    if mqtt and sid and topic:
-                        t = normalize_topic(topic)
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            _publish_mqtt_value(server, t, '1')
+                    _publish_mqtt_async(server, t, '1')
                 except Exception:
-                    logger.exception("Ошибка публикации MQTT '1' при эксклюзивном запуске зоны")
+                    pass
             else:
-                # БЕЗУСЛОВНО выключаем остальных (и MQTT OFF, и БД OFF)
-                db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
                 try:
-                    sid = z.get('mqtt_server_id')
-                    topic = (z.get('topic') or '').strip()
-                    if mqtt and sid and topic:
-                        t = normalize_topic(topic)
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
+                    db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
                 except Exception:
-                    logger.exception("Ошибка публикации MQTT '0' при эксклюзивном запуске зоны")
+                    pass
+                try:
+                    _publish_mqtt_async(server, t, '0')
+                except Exception:
+                    pass
         # Очистим плановые старты у «соседей» по группе
         try:
             db.clear_scheduled_for_zone_group_peers(int(zone_id), int(group_id))
@@ -3212,10 +3216,14 @@ def stop_zone(zone_id):
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
-        
         # Очищаем время начала полива и фиксируем last_watering_time
         last_time = zone.get('watering_start_time')
         db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
+        # Пометим зону как недавно остановленную
+        try:
+            _mark_zone_stopped(int(zone_id))
+        except Exception:
+            pass
         # Публикуем MQTT OFF, если у зоны настроен MQTT
         try:
             sid = zone.get('mqtt_server_id')
@@ -3227,7 +3235,6 @@ def stop_zone(zone_id):
                     _publish_mqtt_value(server, t, '0')
         except Exception:
             logger.exception("Ошибка публикации MQTT '0' при ручной остановке зоны")
-
         try:
             db.add_log('zone_stop', json.dumps({
                 "zone": int(zone_id),
@@ -3236,14 +3243,12 @@ def stop_zone(zone_id):
             }))
         except Exception:
             pass
-        
         return jsonify({
             'success': True,
             'message': f'Зона {zone_id} остановлена',
             'zone_id': zone_id,
             'state': 'off'
         })
-        
     except Exception as e:
         logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка остановки зоны'}), 500
@@ -3374,6 +3379,19 @@ def api_mqtt_zones_sse():
                             _publish_mqtt_value(server, t, '0')
                     except Exception:
                         pass
+                # Если недавно была ручная остановка этой зоны — игнорируем мгновенный ON и дублируем OFF
+                try:
+                    for zone_id in list(server_topics.get(sid, {}).get(t, []) or []):
+                        if new_state == 'on' and _recently_stopped(int(zone_id), window_sec=5):
+                            new_state = 'off'
+                            try:
+                                server2 = db.get_mqtt_server(int(sid))
+                                if server2:
+                                    _publish_mqtt_value(server2, t, '0')
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
                 try:
                     logger.info(f"MQTT RX sid={sid} topic={t} payload={payload} -> state={new_state} zones={zone_ids}")
                 except Exception:
@@ -3693,6 +3711,25 @@ def _probe_env_values(cfg: dict) -> None:
                 return None
     except Exception:
         logger.exception('EnvProbe: outer failed')
+
+# Анти-ре-старт: запоминаем ручные остановки, чтобы игнорировать мгновенные ON
+_LAST_MANUAL_STOP: dict[int, float] = {}
+_LAST_STOP_LOCK = threading.Lock()
+
+def _mark_zone_stopped(zone_id: int) -> None:
+    try:
+        with _LAST_STOP_LOCK:
+            _LAST_MANUAL_STOP[int(zone_id)] = time.time()
+    except Exception:
+        pass
+
+def _recently_stopped(zone_id: int, window_sec: int = 5) -> bool:
+    try:
+        with _LAST_STOP_LOCK:
+            ts = _LAST_MANUAL_STOP.get(int(zone_id))
+        return (ts is not None) and ((time.time() - ts) < max(0, int(window_sec)))
+    except Exception:
+        return False
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива
