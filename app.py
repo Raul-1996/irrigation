@@ -3480,6 +3480,15 @@ def api_zone_mqtt_start(zone_id: int):
     try:
         gid = int(z.get('group_id') or 0)
         if gid and _should_throttle_group(gid):
+            # Но всё равно сразу зафиксируем начало в БД, чтобы UI не ждал
+            try:
+                db.update_zone(zone_id, {
+                    'state': 'on',
+                    'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'watering_start_source': 'manual'
+                })
+            except Exception:
+                pass
             return jsonify({'success': True, 'message': 'Группа уже обрабатывается'})
     except Exception:
         logger.exception("api_zone_mqtt_start: throttle check failed")

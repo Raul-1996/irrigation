@@ -1032,19 +1032,33 @@
     async function startOrStopZone(zoneId, currentState) {
         try {
             // Находим группу зоны
-            const zone = zonesData.find(z => z.id === zoneId);
-            if (!zone) return;
-            const url = currentState === 'on' ? `/api/zones/${zoneId}/mqtt/stop` : `/api/zones/${zoneId}/mqtt/start`;
+            const idx = zonesData.findIndex(z => z.id === zoneId);
+            if (idx < 0) return;
+            const zone = zonesData[idx];
+            const groupId = zone.group_id;
+            const wantOn = currentState !== 'on';
+            // Оптимистическое обновление UI: переключим состояние сразу
+            zonesData[idx].state = wantOn ? 'on' : 'off';
+            if (groupId) {
+                // Обновим карточку группы и строки зон этой группы без полной перезагрузки
+                refreshSingleGroup(groupId);
+                refreshZonesRowsForGroup(groupId);
+            }
+            const url = wantOn ? `/api/zones/${zoneId}/mqtt/start` : `/api/zones/${zoneId}/mqtt/stop`;
             const res = await fetch(url, { method: 'POST' });
             let data = null;
             try { data = await res.json(); } catch(e) { data = null; }
             if (res.ok && data && data.success) {
-                showNotification(data.message || (currentState==='on'?'Зона остановлена':'Зона запущена'), 'success');
-                await loadStatusData();
-                await loadZonesData();
+                showNotification(data.message || (wantOn?'Зона запущена':'Зона остановлена'), 'success');
+                // Подтянем актуальные данные (на случай отказа или корректировок планировщика)
+                loadStatusData();
+                loadZonesData();
             } else {
-                const msg = (data && data.message) ? data.message : (currentState==='on'?'Ошибка остановки зоны':'Ошибка запуска зоны');
+                const msg = (data && data.message) ? data.message : (wantOn?'Ошибка запуска зоны':'Ошибка остановки зоны');
                 showNotification(msg, 'error');
+                // Откат оптимистического состояния
+                zonesData[idx].state = currentState;
+                if (groupId) { refreshSingleGroup(groupId); refreshZonesRowsForGroup(groupId); }
             }
         } catch (error) {
             showNotification('Ошибка управления зоной', 'error');
