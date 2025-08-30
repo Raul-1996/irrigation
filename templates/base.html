@@ -84,7 +84,7 @@
         .logo {
             display: flex;
             flex-direction: column;
-            align-items: flex-start;
+            align-items: center;
             gap: 2px;
             color: white;
         }
@@ -111,7 +111,7 @@
             font-size: 1.3rem;
             font-weight: bold;
         }
-        .logo-subtitle { font-size: 0.9rem; opacity: 0.85; white-space: nowrap; }
+        .logo-subtitle { font-size: 0.9rem; color: #fff; text-align: center; }
         
         /* Navigation */
         nav {
@@ -337,7 +337,7 @@
                     <span class="logo-text">WB-Irrigation</span>
                 </a>
                 {% if system_name %}
-                <div class="logo-subtitle">{{ system_name }}</div>
+                <div class="logo-subtitle">{{ (system_name or '')[:32] }}</div>
                 {% endif %}
             </div>
             <nav>

@@ -490,6 +490,8 @@
             updateStatusDisplay();
             hideConnectionError();
             updateMqttWarnings();
+            // Согласуем таблицу зон с карточками групп (мгновенно)
+            try { reconcileZoneRowsWithGroupStatus(); } catch(e) {}
         } catch (error) {
             console.error('Ошибка загрузки статуса:', error);
             showConnectionError();
@@ -498,36 +500,26 @@
     
     async function loadZonesData() {
         try {
-            zonesData = await api.get('/api/zones');
-            // Инкрементальное обновление: если строка уже есть — меняем только изменившиеся поля
+            // 1) Быстрый рендер зон по /api/zones (напрямую через fetch, без обёртки)
+            let zonesRespJson = [];
+            try {
+                const zr = await fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' });
+                zonesRespJson = await zr.json();
+            } catch (e) {
+                zonesRespJson = [];
+            }
+            zonesData = Array.isArray(zonesRespJson) ? zonesRespJson : [];
             const tbody = document.getElementById('zones-table-body');
             const existingRows = {};
             tbody.querySelectorAll('tr').forEach(row=>{
                 const idCell = row.querySelector('td:nth-child(2)');
                 if (idCell) existingRows[idCell.textContent.trim()] = row;
             });
-            const groups = await api.get('/api/groups');
-            const groupNameById = {}; groups.forEach(g=>{ groupNameById[g.id]=g.name; });
-            const filteredZones = zonesData.filter(z=>z.group_id !== 999);
-            // Получаем batch next-watering
-            let nextMap = {};
-            try{
-                const resp = await fetch('/api/zones/next-watering-bulk',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({zone_ids: filteredZones.map(z=>z.id)})});
-                const bulk = await resp.json();
-                (bulk.items||[]).forEach(it=>{ nextMap[it.zone_id]= it.next_datetime || (it.next_watering==='Никогда'?'Никогда': null); });
-            }catch(e){}
-            // Обновляем/создаём строки
+            const filteredZones = (zonesData || []).filter(z=>z.group_id !== 999);
             const frag = document.createDocumentFragment();
             filteredZones.forEach(zone=>{
                 const rowId = String(zone.id);
                 const row = existingRows[rowId];
-                const nextText = (function(){
-                    if (statusData.emergency_stop) return 'До отмены аварии';
-                    const v = nextMap[zone.id];
-                    if (!v) return '—';
-                    if (v==='Никогда') return 'Никогда';
-                    return String(v).replace('T',' ').slice(0,16);
-                })();
                 if (row){
                     // только изменившиеся поля
                     const ind = row.querySelector('.indicator');
@@ -535,25 +527,28 @@
                     const btn = row.querySelector('.zone-start-btn');
                     if (btn){
                         btn.textContent = zone.state==='on'?'⏹':'▶';
-                        btn.setAttribute('onclick', statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`);
+                        const emergency = !!(statusData && statusData.emergency_stop);
+                        const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
+                        btn.setAttribute('onclick', action);
                     }
-                    const groupCell = row.querySelector('td:nth-child(7)');
-                    if (groupCell){ groupCell.textContent = groupNameById[zone.group_id] || zone.group_id; }
-                    const nextCell = row.querySelector('td:nth-child(9)');
-                    if (nextCell){ nextCell.textContent = nextText; }
+                    if (!row.getAttribute('data-zone-id')) {
+                        try { row.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
+                    }
                 } else {
-                    // создаём новую строку (редкий случай)
+                    // создаём новую строку с placeholders для группы и next
                     const tr = document.createElement('tr');
+                    const emergency = !!(statusData && statusData.emergency_stop);
+                    const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
                     tr.innerHTML = `
                         <td><span class="indicator ${zone.state}"></span></td>
                         <td>${zone.id}</td>
-                        <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
+                        <td><button class="zone-start-btn" onclick="${action}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
                         <td>${zone.name}</td>
                         <td>${zone.icon}</td>
                         <td>${zone.duration} мин</td>
-                        <td>${groupNameById[zone.group_id] || zone.group_id}</td>
+                        <td data-group-id="${zone.group_id}">${zone.group_id}</td>
                         <td class="hide-mobile col-last-watering">—</td>
-                        <td class="col-next" data-label="Следующий полив">${nextText}</td>
+                        <td class="col-next" data-label="Следующий полив">—</td>
                         <td class="col-photo" data-label="Фото">
                             <div class="zone-photo">
                                 ${zone.photo_path ? 
@@ -562,17 +557,95 @@
                                 }
                             </div>
                         </td>`;
+                    try { tr.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
                     frag.appendChild(tr);
                 }
             });
             if (frag.childNodes.length) tbody.appendChild(frag);
             document.getElementById('zones-count').textContent = filteredZones.length;
             hideConnectionError();
-            // leave MQTT banners controlled by status endpoint only
+            // После первичного рендера — синхронизация с актуальным статусом групп
+            try { reconcileZoneRowsWithGroupStatus(); } catch(e) {}
+            // 2) Подгружаем имена групп без блокировки
+            (async()=>{
+                try{
+                    const groups = await api.get('/api/groups');
+                    const nameById = {}; (groups||[]).forEach(g=>{ nameById[g.id]=g.name; });
+                    tbody.querySelectorAll('tr').forEach(row=>{
+                        const cell = row.querySelector('td:nth-child(7)');
+                        if (!cell) return;
+                        const gidAttr = cell.getAttribute('data-group-id');
+                        const gid = gidAttr ? Number(gidAttr) : Number(cell.textContent.trim());
+                        if (nameById[gid]) cell.textContent = nameById[gid];
+                    });
+                }catch(e){}
+            })();
+            // 3) Подгружаем next-watering без блокировки
+            (async()=>{
+                try{
+                    const ids = filteredZones.map(z=>z.id);
+                    if (!ids.length) return;
+                    const resp = await fetch('/api/zones/next-watering-bulk',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({zone_ids: ids})});
+                    if (!resp.ok) return;
+                    const bulk = await resp.json();
+                    const nextMap = {}; (bulk.items||[]).forEach(it=>{ nextMap[it.zone_id]= it.next_datetime || (it.next_watering==='Никогда'?'Никогда': null); });
+                    tbody.querySelectorAll('tr').forEach(row=>{
+                        const idCell = row.querySelector('td:nth-child(2)');
+                        const nextCell = row.querySelector('td:nth-child(9)');
+                        if (!idCell || !nextCell) return;
+                        const zid = Number(idCell.textContent.trim());
+                        if (!(zid in nextMap)) return;
+                        const v = nextMap[zid];
+                        let txt = '—';
+                        if (statusData && statusData.emergency_stop) txt = 'До отмены аварии';
+                        else if (v==='Никогда') txt = 'Никогда';
+                        else if (v) txt = String(v).replace('T',' ').slice(0,16);
+                        nextCell.textContent = txt;
+                    });
+                }catch(e){}
+            })();
         } catch (error) {
             console.error('Ошибка загрузки зон:', error);
             showConnectionError();
         }
+    }
+
+    // Быстрая синхронизация строк зон с текущим статусом групп из statusData
+    function reconcileZoneRowsWithGroupStatus() {
+        try {
+            if (!statusData || !statusData.groups || !statusData.groups.length) return;
+            const wateringByGroup = {};
+            (statusData.groups || []).forEach(g => {
+                if (g && g.status === 'watering' && g.current_zone) {
+                    wateringByGroup[String(g.id)] = Number(g.current_zone);
+                }
+            });
+            const tbody = document.getElementById('zones-table-body');
+            if (!tbody) return;
+            const rows = tbody.querySelectorAll('tr');
+            rows.forEach(row => {
+                try {
+                    const idCell = row.querySelector('td:nth-child(2)');
+                    const grpCell = row.querySelector('td:nth-child(7)');
+                    if (!idCell || !grpCell) return;
+                    const zid = Number(idCell.textContent.trim());
+                    const gidAttr = grpCell.getAttribute('data-group-id');
+                    const gid = gidAttr ? String(Number(gidAttr)) : String(grpCell.textContent.trim());
+                    const runningZoneId = wateringByGroup[gid];
+                    if (typeof runningZoneId === 'undefined') return;
+                    const isOn = (zid === runningZoneId);
+                    const ind = row.querySelector('.indicator');
+                    if (ind) { ind.classList.remove('on','off'); ind.classList.add(isOn ? 'on' : 'off'); }
+                    const btn = row.querySelector('.zone-start-btn');
+                    if (btn) {
+                        btn.textContent = isOn ? '⏹' : '▶';
+                        const emergency = !!(statusData && statusData.emergency_stop);
+                        const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zid + ", '" + (isOn ? 'on' : 'off') + "')");
+                        btn.setAttribute('onclick', action);
+                    }
+                } catch(e) {}
+            });
+        } catch (e) {}
     }
     
     function showConnectionError() {
@@ -1039,6 +1112,33 @@
             const wantOn = currentState !== 'on';
             // Оптимистическое обновление UI: переключим состояние сразу
             zonesData[idx].state = wantOn ? 'on' : 'off';
+            // Мгновенно обновим строку зоны в таблице (индикатор и кнопка)
+            try {
+                const tbody = document.getElementById('zones-table-body');
+                if (tbody) {
+                    let row = tbody.querySelector(`tr[data-zone-id="${zoneId}"]`);
+                    if (!row) {
+                        const rows = tbody.querySelectorAll('tr');
+                        rows.forEach(r => {
+                            const cells = r.querySelectorAll('td');
+                            if (cells.length > 1 && Number(cells[1].textContent.trim()) === zoneId) {
+                                row = r;
+                            }
+                        });
+                    }
+                    if (row) {
+                        const ind = row.querySelector('.indicator');
+                        if (ind) { ind.classList.remove('on','off'); ind.classList.add(wantOn ? 'on' : 'off'); }
+                        const btn = row.querySelector('.zone-start-btn');
+                        if (btn) {
+                            btn.textContent = wantOn ? '⏹' : '▶';
+                            const emergency = !!(statusData && statusData.emergency_stop);
+                            const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zoneId + ", '" + (wantOn ? 'on' : 'off') + "')");
+                            btn.setAttribute('onclick', action);
+                        }
+                    }
+                }
+            } catch (e) {}
             if (groupId) {
                 // Обновим карточку группы и строки зон этой группы без полной перезагрузки
                 refreshSingleGroup(groupId);
@@ -1050,15 +1150,14 @@
             try { data = await res.json(); } catch(e) { data = null; }
             if (res.ok && data && data.success) {
                 showNotification(data.message || (wantOn?'Зона запущена':'Зона остановлена'), 'success');
-                // Подтянем актуальные данные (на случай отказа или корректировок планировщика)
-                // Запросим только конкретную группу для минимизации перерисовок
-                if (groupId) { refreshSingleGroup(groupId); refreshZonesRowsForGroup(groupId); }
+                // Подтянем актуальные данные для всей страницы без полной перезагрузки
+                await refreshAllUI();
             } else {
                 const msg = (data && data.message) ? data.message : (wantOn?'Ошибка запуска зоны':'Ошибка остановки зоны');
                 showNotification(msg, 'error');
                 // Откат оптимистического состояния
                 zonesData[idx].state = currentState;
-                if (groupId) { refreshSingleGroup(groupId); refreshZonesRowsForGroup(groupId); }
+                await refreshAllUI();
             }
         } catch (error) {
             showNotification('Ошибка управления зоной', 'error');
@@ -1101,6 +1200,13 @@
         } catch (error) {
             showNotification('Ошибка возобновления полива', 'error');
         }
+    }
+
+    async function refreshAllUI() {
+        try {
+            await loadStatusData();
+            await loadZonesData();
+        } catch (e) {}
     }
 
     // Модальное окно для просмотра фотографий
@@ -1150,19 +1256,25 @@
                         if (gid) { refreshSingleGroup(gid); }
                         const tbody = document.getElementById('zones-table-body');
                         if (tbody){
-                            const rows = tbody.querySelectorAll('tr');
-                            rows.forEach(row=>{
-                                const cells = row.querySelectorAll('td');
-                                if (cells.length>1 && Number(cells[1].textContent.trim())===data.zone_id){
-                                    const ind = row.querySelector('.indicator');
-                                    if (ind){ ind.classList.remove('on','off'); ind.classList.add(data.state); }
-                                    const btn = row.querySelector('.zone-start-btn');
-                                    if (btn){
-                                        btn.textContent = data.state==='on'?'⏹':'▶';
-                                        btn.setAttribute('onclick', statusData && statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${data.zone_id}, '${data.state}')`);
-                                    }
+                            let row = tbody.querySelector(`tr[data-zone-id="${data.zone_id}"]`);
+                            if (!row) {
+                                const rows = tbody.querySelectorAll('tr');
+                                rows.forEach(r=>{
+                                    const cells = r.querySelectorAll('td');
+                                    if (cells.length>1 && Number(cells[1].textContent.trim())===data.zone_id){ row = r; }
+                                });
+                            }
+                            if (row){
+                                const ind = row.querySelector('.indicator');
+                                if (ind){ ind.classList.remove('on','off'); ind.classList.add(data.state); }
+                                const btn = row.querySelector('.zone-start-btn');
+                                if (btn){
+                                    btn.textContent = data.state==='on'?'⏹':'▶';
+                                    const emergency = !!(statusData && statusData.emergency_stop);
+                                    const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + data.zone_id + ", '" + data.state + "')");
+                                    btn.setAttribute('onclick', action);
                                 }
-                            });
+                            }
                         }
                     }
                 }catch(e){}

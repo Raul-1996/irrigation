@@ -58,6 +58,13 @@ class IrrigationDB:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
+                # Таблица миграций (легковесный трекер применённых миграций)
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS migrations (
+                        name TEXT PRIMARY KEY,
+                        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
                 
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS settings (
@@ -128,18 +135,18 @@ class IrrigationDB:
                 self._insert_initial_data(conn)
                 
                 # Миграции
-                self._migrate_days_format(conn)
-                self._migrate_add_postpone_reason(conn)
-                self._migrate_add_watering_start_time(conn)
-                self._migrate_add_scheduled_start_time(conn)
-                self._migrate_add_last_watering_time(conn)
-                self._migrate_add_mqtt_servers(conn)
-                self._migrate_add_zone_mqtt_server_id(conn)
-                self._migrate_ensure_special_group(conn)
-                self._migrate_add_zones_indexes(conn)
-                self._migrate_add_group_rain_flag(conn)
-                self._migrate_add_watering_start_source(conn)
-                self._migrate_add_mqtt_tls_options(conn)
+                self._apply_named_migration(conn, 'days_format', self._migrate_days_format)
+                self._apply_named_migration(conn, 'zones_add_postpone_reason', self._migrate_add_postpone_reason)
+                self._apply_named_migration(conn, 'zones_add_watering_start_time', self._migrate_add_watering_start_time)
+                self._apply_named_migration(conn, 'zones_add_scheduled_start_time', self._migrate_add_scheduled_start_time)
+                self._apply_named_migration(conn, 'zones_add_last_watering_time', self._migrate_add_last_watering_time)
+                self._apply_named_migration(conn, 'create_mqtt_servers', self._migrate_add_mqtt_servers)
+                self._apply_named_migration(conn, 'zones_add_mqtt_server_id', self._migrate_add_zone_mqtt_server_id)
+                self._apply_named_migration(conn, 'ensure_group_999', self._migrate_ensure_special_group)
+                self._apply_named_migration(conn, 'zones_add_indexes', self._migrate_add_zones_indexes)
+                self._apply_named_migration(conn, 'groups_add_use_rain', self._migrate_add_group_rain_flag)
+                self._apply_named_migration(conn, 'zones_add_watering_start_source', self._migrate_add_watering_start_source)
+                self._apply_named_migration(conn, 'mqtt_add_tls_options', self._migrate_add_mqtt_tls_options)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -181,6 +188,19 @@ class IrrigationDB:
                 
         except Exception as e:
             logger.error(f"Ошибка вставки начальных данных: {e}")
+
+    def _apply_named_migration(self, conn, name: str, func):
+        try:
+            cur = conn.execute('SELECT name FROM migrations WHERE name = ? LIMIT 1', (name,))
+            row = cur.fetchone()
+            if row:
+                return
+            # Выполняем миграцию
+            func(conn)
+            conn.execute('INSERT OR REPLACE INTO migrations(name) VALUES (?)', (name,))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка применения миграции {name}: {e}")
 
     def _migrate_days_format(self, conn):
         """Миграция формата дней программ к 0-6 (0=Пн)"""

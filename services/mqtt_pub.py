@@ -76,7 +76,7 @@ def get_or_create_mqtt_client(server: dict):
         return cl
 
 
-def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.5) -> bool:
+def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.5, retain: bool = False) -> bool:
     try:
         t = normalize_topic(topic)
         sid = int(server.get('id')) if server.get('id') else None
@@ -94,7 +94,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             logger.warning("MQTT publish: client unavailable, dropping message")
             return False
         try:
-            res = cl.publish(t, payload=value, qos=0, retain=False)
+            res = cl.publish(t, payload=value, qos=0, retain=retain)
             try:
                 rc = getattr(res, 'rc', 0)
             except Exception:
@@ -107,7 +107,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 cl2 = get_or_create_mqtt_client(server)
                 if cl2 is None:
                     return False
-                res2 = cl2.publish(t, payload=value, qos=0, retain=False)
+                res2 = cl2.publish(t, payload=value, qos=0, retain=retain)
                 rc2 = getattr(res2, 'rc', 0)
                 return rc2 == 0
             except Exception:

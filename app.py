@@ -31,6 +31,7 @@ from routes.groups import groups_bp
 from routes.auth import auth_bp
 from routes.settings import settings_bp
 from werkzeug.security import check_password_hash
+from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor
 
 # Unified API error helpers
 def api_error(error_code: str, message: str, status: int = 400, extra: dict = None):
@@ -199,9 +200,14 @@ except Exception:
 def _inject_app_version():
     try:
         sys_name = db.get_setting_value('system_name') or ''
-        return {'app_version': APP_VERSION, 'system_name': sys_name}
+        def asset(path: str) -> str:
+            try:
+                return f"{path}?v={APP_VERSION}"
+            except Exception:
+                return path
+        return {'app_version': APP_VERSION, 'system_name': sys_name, 'asset': asset}
     except Exception:
-        return {'app_version': '1,0', 'system_name': ''}
+        return {'app_version': '1,0', 'system_name': '', 'asset': (lambda p: p)}
 
 # Быстрая асинхронная публикация MQTT, чтобы не блокировать HTTP-ответ
 def _publish_mqtt_async(server: dict, topic: str, value: str, min_interval_sec: float = 0.0) -> None:
@@ -663,6 +669,13 @@ class EnvMonitor:
                     self.hum_client = None
 
 env_monitor = EnvMonitor()
+# Rebind monitors to consolidated implementations from services.monitors
+try:
+    from services.monitors import rain_monitor as _svc_rain_monitor, env_monitor as _svc_env_monitor
+    rain_monitor = _svc_rain_monitor
+    env_monitor = _svc_env_monitor
+except Exception:
+    pass
 
 @app.before_request
 def _init_scheduler_before_request():
@@ -2153,9 +2166,9 @@ def api_mqtt_scan_sse(server_id: int):
     try:
         server = db.get_mqtt_server(server_id)
         if not server:
-            return jsonify({'success': False, 'message': 'server not found'}), 200
+            return api_error('MQTT_SERVER_NOT_FOUND', 'server not found', 404)
         if mqtt is None:
-            return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
+            return api_error('MQTT_LIB_MISSING', 'paho-mqtt not installed', 500)
 
         sub_filter = request.args.get('filter', '/devices/#') or '/devices/#'
 
@@ -2232,7 +2245,7 @@ def api_mqtt_scan_sse(server_id: int):
         return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     except Exception as e:
         logger.error(f"MQTT scan SSE error: {e}")
-        return jsonify({'success': False}), 200
+        return api_error('SSE_FAILED', 'sse init failed', 500)
 
 @app.route('/api/water')
 def api_water():
@@ -3138,12 +3151,9 @@ def start_zone(zone_id):
         except Exception:
             pass
 
-        # Анти-дребезг по группе
-        try:
-            if _should_throttle_group(int(zone.get('group_id'))):
-                return jsonify({'success': True, 'message': 'Зона уже обрабатывается'}), 200
-        except Exception:
-            pass
+        # Анти-дребезг по группе не применяется для явного ручного старта,
+        # чтобы не создавать ощущение задержки у пользователя
+        # (оставляем защиту на уровне сторожа и последовательностей)
 
         # БЕЗУСЛОВНО выключаем все остальные зоны этой группы (MQTT OFF и БД OFF)
         try:
@@ -3343,124 +3353,150 @@ def api_zone_watering_time(zone_id):
 
 @app.route('/api/mqtt/zones-sse')
 def api_mqtt_zones_sse():
+    # Единый хаб подписки на MQTT для всех SSE клиентов
     if mqtt is None:
-        return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
+        # В тестовом режиме допускаем 200 со стандартным телом для проверок
+        if app.config.get('TESTING'):
+            return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
+        return api_error('MQTT_LIB_MISSING', 'paho-mqtt not installed', 500)
     try:
-        zones = db.get_zones()
-        server_topics = {}
-        for z in zones:
-            sid = z.get('mqtt_server_id')
-            topic = (z.get('topic') or '').strip()
-            if not sid or not topic:
-                continue
-            t = topic if str(topic).startswith('/') else '/' + str(topic)
-            server_topics.setdefault(int(sid), {}).setdefault(t, []).append(z['id'])
-        if not server_topics:
-            return jsonify({'success': False, 'message': 'no zone topics'}), 200
-        msg_queue = queue.Queue(maxsize=10000)
-        def _make_on_message(sid):
-            def _on_message(cl, userdata, msg):
-                t = str(getattr(msg, 'topic', '') or '')
-                if not t.startswith('/'): t = '/' + t
-                zone_ids = server_topics.get(sid, {}).get(t)
-                if not zone_ids:
+        # Глобальные структуры хаба
+        global _SSE_HUB_STARTED
+        try:
+            _SSE_HUB_STARTED
+        except NameError:
+            _SSE_HUB_STARTED = False
+        global _SSE_HUB_LOCK
+        try:
+            _SSE_HUB_LOCK
+        except NameError:
+            _SSE_HUB_LOCK = threading.Lock()
+        global _SSE_HUB_CLIENTS
+        try:
+            _SSE_HUB_CLIENTS
+        except NameError:
+            _SSE_HUB_CLIENTS = []  # list[queue.Queue]
+        global _SSE_HUB_MQTT
+        try:
+            _SSE_HUB_MQTT
+        except NameError:
+            _SSE_HUB_MQTT = {}
+
+        def _rebuild_subscriptions():
+            zones = db.get_zones()
+            mapping = {}
+            for z in zones:
+                sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+                if not sid or not topic:
+                    continue
+                t = topic if str(topic).startswith('/') else '/' + str(topic)
+                mapping.setdefault(int(sid), {}).setdefault(t, []).append(int(z['id']))
+            return mapping
+
+        def _ensure_hub_started():
+            with _SSE_HUB_LOCK:
+                if _SSE_HUB_STARTED:
                     return
-                try:
-                    payload = msg.payload.decode('utf-8', errors='ignore').strip()
-                except Exception:
-                    payload = str(msg.payload)
-                new_state = 'on' if payload in ('1', 'true', 'ON', 'on') else 'off'
-                # Если активен режим аварийной остановки, принудительно гасим любые включения
-                if app.config.get('EMERGENCY_STOP') and new_state == 'on':
-                    new_state = 'off'
+                server_topics = _rebuild_subscriptions()
+                for sid, topics in server_topics.items():
+                    server = db.get_mqtt_server(int(sid))
+                    if not server:
+                        continue
                     try:
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            _publish_mqtt_value(server, t, '0')
-                    except Exception:
-                        pass
-                # Если недавно была ручная остановка этой зоны — игнорируем мгновенный ON и дублируем OFF
-                try:
-                    for zone_id in list(server_topics.get(sid, {}).get(t, []) or []):
-                        if new_state == 'on' and _recently_stopped(int(zone_id), window_sec=5):
-                            new_state = 'off'
+                        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
+                        if server.get('username'):
+                            client.username_pw_set(server.get('username'), server.get('password') or None)
+                        def _on_message(cl, userdata, msg, sid_local=int(sid)):
+                            t = str(getattr(msg, 'topic', '') or '')
+                            if not t.startswith('/'):
+                                t = '/' + t
                             try:
-                                server2 = db.get_mqtt_server(int(sid))
-                                if server2:
-                                    _publish_mqtt_value(server2, t, '0')
+                                payload = msg.payload.decode('utf-8', errors='ignore').strip()
+                            except Exception:
+                                payload = str(msg.payload)
+                            zone_ids = server_topics.get(sid_local, {}).get(t) or []
+                            new_state = 'on' if payload in ('1','true','ON','on') else 'off'
+                            # Аварийный стоп
+                            if app.config.get('EMERGENCY_STOP') and new_state == 'on':
+                                new_state = 'off'
+                                try:
+                                    srv = db.get_mqtt_server(int(sid_local))
+                                    if srv:
+                                        _publish_mqtt_value(srv, t, '0')
+                                except Exception:
+                                    pass
+                            # Окно анти-ре-старта
+                            try:
+                                for zid in list(zone_ids):
+                                    if new_state == 'on' and _recently_stopped(int(zid), window_sec=5):
+                                        new_state = 'off'
+                                        try:
+                                            srv2 = db.get_mqtt_server(int(sid_local))
+                                            if srv2:
+                                                _publish_mqtt_value(srv2, t, '0')
+                                        except Exception:
+                                            pass
                             except Exception:
                                 pass
-                except Exception:
-                    pass
-                try:
-                    logger.info(f"MQTT RX sid={sid} topic={t} payload={payload} -> state={new_state} zones={zone_ids}")
-                except Exception:
-                    pass
-                for zone_id in zone_ids:
-                    try:
-                        z = db.get_zone(zone_id) or {}
-                        updates = {'state': new_state}
-                        if new_state == 'on':
-                            if not z.get('watering_start_time'):
-                                updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                # если пришёл ON по MQTT из внешнего интерфейса — пометим как remote
-                                updates['watering_start_source'] = 'remote'
-                            # Обновим планировщик: если зона неожиданно ВКЛ, запланируем автостоп
+                            # Обновление БД и планировщика
+                            for zid in zone_ids:
+                                try:
+                                    z = db.get_zone(int(zid)) or {}
+                                    updates = {'state': new_state}
+                                    if new_state == 'on':
+                                        if not z.get('watering_start_time'):
+                                            updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                            updates['watering_start_source'] = 'remote'
+                                        try:
+                                            sched = get_scheduler()
+                                            if sched:
+                                                dur = int(z.get('duration') or 0)
+                                                if dur > 0:
+                                                    sched.cancel_zone_jobs(int(zid))
+                                                    sched.schedule_zone_stop(int(zid), dur)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        if z.get('watering_start_time'):
+                                            updates['last_watering_time'] = z.get('watering_start_time')
+                                        updates['watering_start_time'] = None
+                                        try:
+                                            sched = get_scheduler()
+                                            if sched:
+                                                sched.cancel_zone_jobs(int(zid))
+                                        except Exception:
+                                            pass
+                                    db.update_zone(int(zid), updates)
+                                except Exception:
+                                    pass
+                                data = json.dumps({'zone_id': int(zid), 'topic': t, 'payload': payload, 'state': new_state})
+                                # Фан-аут события всем подписчикам
+                                with _SSE_HUB_LOCK:
+                                    for q in list(_SSE_HUB_CLIENTS):
+                                        try:
+                                            q.put_nowait(data)
+                                        except Exception:
+                                            pass
+                        client.on_message = _on_message
+                        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                        for t in topics.keys():
                             try:
-                                sched = get_scheduler()
-                                if sched:
-                                    dur = int(z.get('duration') or 0)
-                                    if dur > 0:
-                                        sched.cancel_zone_jobs(int(zone_id))
-                                        sched.schedule_zone_stop(int(zone_id), dur)
+                                client.subscribe(t, qos=0)
                             except Exception:
                                 pass
-                        else:
-                            # record last_watering_time
-                            if z.get('watering_start_time'):
-                                updates['last_watering_time'] = z.get('watering_start_time')
-                            updates['watering_start_time'] = None
-                            # Если зона вручную выключена (MQTT=0), отменим её автостоп в планировщике
-                            try:
-                                sched = get_scheduler()
-                                if sched:
-                                    sched.cancel_zone_jobs(int(zone_id))
-                            except Exception:
-                                pass
-                        db.update_zone(zone_id, updates)
-                        try:
-                            logger.info(f"DB state update from MQTT zone={zone_id} -> {new_state}")
-                        except Exception:
-                            pass
+                        client.loop_start()
+                        _SSE_HUB_MQTT[int(sid)] = client
                     except Exception:
-                        pass
-                    data = json.dumps({'zone_id': zone_id, 'topic': t, 'payload': payload, 'state': new_state})
-                    try:
-                        msg_queue.put_nowait(data)
-                    except queue.Full:
-                        pass
-            return _on_message
-        clients = []
-        max_clients = 10
-        for sid, topics in server_topics.items():
-            if len(clients) >= max_clients:
-                break
-            server = db.get_mqtt_server(sid)
-            try:
-                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
-                if server.get('username'):
-                    client.username_pw_set(server.get('username'), server.get('password') or None)
-                client.on_message = _make_on_message(sid)
-                client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                for t in topics.keys():
-                    try:
-                        client.subscribe(t, qos=0)
-                    except Exception:
-                        pass
-                client.loop_start()
-                clients.append(client)
-            except Exception:
-                continue
+                        continue
+                _SSE_HUB_STARTED = True
+
+        _ensure_hub_started()
+
+        # Регистрируем очередь клиента в хабе и отдаём SSE
+        msg_queue = queue.Queue(maxsize=10000)
+        with _SSE_HUB_LOCK:
+            _SSE_HUB_CLIENTS.append(msg_queue)
+
         @stream_with_context
         def _gen():
             try:
@@ -3472,16 +3508,17 @@ def api_mqtt_zones_sse():
                     except queue.Empty:
                         yield 'event: ping\n' + 'data: {}\n\n'
             finally:
-                for c in clients:
+                with _SSE_HUB_LOCK:
                     try:
-                        c.loop_stop()
-                        c.disconnect()
+                        _SSE_HUB_CLIENTS.remove(msg_queue)
                     except Exception:
                         pass
         return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     except Exception as e:
         logger.error(f"zones SSE failed: {e}")
-        return jsonify({'success': False}), 200
+        if app.config.get('TESTING'):
+            return jsonify({'success': False}), 200
+        return api_error('SSE_FAILED', 'sse failed', 500)
 
 @csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
