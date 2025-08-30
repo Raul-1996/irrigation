@@ -143,6 +143,8 @@ class IrrigationScheduler:
                 trigger=IntervalTrigger(minutes=1),
                 id='postpone_sweeper',
                 replace_existing=True,
+                coalesce=False,
+                max_instances=1,
                 next_run_time=datetime.now()
             )
         except Exception as e:
@@ -381,6 +383,8 @@ class IrrigationScheduler:
                     id=f"program_{program_id}_d{day}",
                     replace_existing=True,
                     misfire_grace_time=3600,
+                    coalesce=False,
+                    max_instances=1,
                 )
                 job_ids.append(job.id)
 
@@ -483,6 +487,8 @@ class IrrigationScheduler:
                 id=f"group_seq_{group_id}_{int(datetime.now().timestamp())}",
                 replace_existing=False,
                 misfire_grace_time=120,
+                coalesce=False,
+                max_instances=1,
             )
             try:
                 from app import dlog
@@ -734,6 +740,8 @@ class IrrigationScheduler:
                         id=f"program_{int(p['id'])}_recover_{int(time.time())}",
                         replace_existing=False,
                         misfire_grace_time=300,
+                        coalesce=False,
+                        max_instances=1,
                     )
                     logger.info(f"Recovery: программа {p['id']} — запущены оставшиеся зоны с индекса {start_idx}")
                 except Exception as e:
