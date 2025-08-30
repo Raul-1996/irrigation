@@ -1051,8 +1051,8 @@
             if (res.ok && data && data.success) {
                 showNotification(data.message || (wantOn?'Зона запущена':'Зона остановлена'), 'success');
                 // Подтянем актуальные данные (на случай отказа или корректировок планировщика)
-                loadStatusData();
-                loadZonesData();
+                // Запросим только конкретную группу для минимизации перерисовок
+                if (groupId) { refreshSingleGroup(groupId); refreshZonesRowsForGroup(groupId); }
             } else {
                 const msg = (data && data.message) ? data.message : (wantOn?'Ошибка запуска зоны':'Ошибка остановки зоны');
                 showNotification(msg, 'error');

@@ -3480,13 +3480,19 @@ def api_zone_mqtt_start(zone_id: int):
     try:
         gid = int(z.get('group_id') or 0)
         if gid and _should_throttle_group(gid):
-            # Но всё равно сразу зафиксируем начало в БД, чтобы UI не ждал
+            # Сразу фиксируем старт и отправляем MQTT ON асинхронно, чтобы не ждать окна дросселирования
             try:
                 db.update_zone(zone_id, {
                     'state': 'on',
                     'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'watering_start_source': 'manual'
                 })
+                # Публикуем ON
+                sid2 = z.get('mqtt_server_id'); topic2 = (z.get('topic') or '').strip()
+                if sid2 and topic2:
+                    server2 = db.get_mqtt_server(int(sid2))
+                    if server2:
+                        _publish_mqtt_async(server2, normalize_topic(topic2), '1')
             except Exception:
                 pass
             return jsonify({'success': True, 'message': 'Группа уже обрабатывается'})
