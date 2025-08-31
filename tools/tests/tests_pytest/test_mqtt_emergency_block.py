@@ -4,6 +4,8 @@ import time
 
 def test_emergency_blocks_mqtt_on(client):
     # enable emergency stop
+    import time
+    t0 = time.time()
     client.post('/api/emergency-stop')
     # set zone ON via DB directly to simulate MQTT ON state update path
     zones = db.get_zones()
@@ -14,6 +16,17 @@ def test_emergency_blocks_mqtt_on(client):
     client.post(f'/api/zones/{zid}/stop')
     z = db.get_zone(zid)
     assert z['state'] == 'off'
+    # ensure OFF within 3s window
+    ok = False
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        z = db.get_zone(zid)
+        if z['state'] == 'off':
+            ok = True
+            break
+        time.sleep(0.1)
+    assert ok, 'Emergency stop did not enforce OFF within 3s'
+    assert (time.time() - t0) <= 3.0
     # resume
     client.post('/api/emergency-resume')
 

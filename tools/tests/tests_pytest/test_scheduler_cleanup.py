@@ -38,13 +38,33 @@ def test_scheduler_cancel_group_jobs(client):
     groups = db.get_groups()
     assert groups, 'No groups'
     gid = next((g['id'] for g in groups if int(g['id']) != 999), groups[0]['id'])
+    t_start = time.time()
     client.post(f'/api/groups/{gid}/start-from-first')
-    import time; time.sleep(5)
+    # wait a bit then assert first ON within 3s
+    ok_on = False
+    deadline_on = time.time() + 3.0
+    while time.time() < deadline_on:
+        zlist = db.get_zones()
+        if any(z.get('group_id') == gid and z.get('state') == 'on' for z in zlist):
+            ok_on = True
+            break
+        time.sleep(0.1)
+    assert ok_on, 'First zone did not turn ON within 3s'
 
     # Give a short time to enqueue jobs
     time.sleep(0.1)
-    # Cancel all jobs for the group
+    # Cancel all jobs for the group and ensure OFF within 3s
+    t_cancel = time.time()
     sched.cancel_group_jobs(int(gid))
+    ok_off = False
+    deadline_off = time.time() + 3.0
+    while time.time() < deadline_off:
+        zlist2 = db.get_zones()
+        if all(z.get('state') == 'off' for z in zlist2 if z.get('group_id') == gid):
+            ok_off = True
+            break
+        time.sleep(0.1)
+    assert ok_off, 'Group cancel did not turn OFF zones within 3s'
 
     # Should not raise; active zones for that group should be gone from scheduler map
     active = sched.get_active_zones() or {}

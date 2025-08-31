@@ -547,6 +547,95 @@
     
     {% block extra_js %}{% endblock %}
     <script>
+    // Health panel (press 'h') with jobs, zones and locks snapshot
+    (function(){
+        let panel; let visible = false; let timer = null;
+        function build(){
+            panel = document.createElement('div');
+            panel.style.position='fixed'; panel.style.bottom='10px'; panel.style.right='10px';
+            panel.style.background='rgba(0,0,0,0.85)'; panel.style.color='#fff'; panel.style.padding='10px 12px'; panel.style.borderRadius='8px'; panel.style.fontSize='12px'; panel.style.zIndex='2000';
+            panel.style.maxWidth='480px'; panel.style.width='480px'; panel.style.display='none'; panel.style.maxHeight='60vh'; panel.style.overflow='auto';
+            panel.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;display:flex;align-items:center;gap:8px;">Health <button id="health-refresh" style="margin-left:auto;background:#1976d2;color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;">Refresh</button><button id="health-close" style="background:#555;color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;">×</button></div><div id="health-content" style="white-space:pre-wrap;word-break:break-word;margin:0;font-family:ui-monospace,Menlo,Consolas,monospace;"></div>';
+            document.body.appendChild(panel);
+            panel.querySelector('#health-close').onclick = ()=> setVisible(false);
+            panel.querySelector('#health-refresh').onclick = ()=> refresh(true);
+        }
+        async function cancelJob(id){
+            try{ const r = await fetch(`/api/health/job/${encodeURIComponent(id)}/cancel`, {method:'POST'}); await r.json(); refresh(true);}catch(e){}
+        }
+        async function cancelGroup(id){
+            try{ const r = await fetch(`/api/health/group/${encodeURIComponent(id)}/cancel`, {method:'POST'}); await r.json(); refresh(true);}catch(e){}
+        }
+        function renderJobs(jobs){
+            if (!jobs || !jobs.length) return '-';
+            return jobs.map(j=>{
+                const id = j.id; const nrt = j.next_run_time||'n/a'; const js = j.jobstore||'-'; const trig = j.trigger||'';
+                return `• ${id}\n   next: ${nrt}  store:${js}\n   ${trig}\n   [ cancel ]`;
+            }).join('\n');
+        }
+        function renderZones(zones){
+            if (!zones || !zones.length) return '-';
+            return zones.map(z=>`• Z${z.id} G${z.group_id} ${z.state}/${z.commanded_state} seq=${z.sequence_id||'-'} cmd=${z.command_id||'-'} ver=${z.version||0} end=${z.planned_end_time||'-'}  [ cancel group ]`).join('\n');
+        }
+        function wireActions(d){
+            const root = document.getElementById('health-content');
+            // Attach click handlers using event delegation
+            root.onclick = (ev)=>{
+                const t = ev.target; if (!(t instanceof HTMLElement)) return;
+                if (t.dataset && t.dataset.job){ cancelJob(t.dataset.job); }
+                if (t.dataset && t.dataset.group){ cancelGroup(t.dataset.group); }
+            };
+            // Convert bracketed actions to clickable spans
+            root.innerHTML = root.innerHTML
+                .replace(/\[ cancel \]/g, '<span data-job-action style="color:#ff8080;cursor:pointer;">[ cancel ]</span>')
+                .replace(/\[ cancel group \]/g, '<span data-group-action style="color:#ff8080;cursor:pointer;">[ cancel group ]</span>');
+            // Map actions to ids
+            const lines = root.textContent.split('\n');
+            let html = '';
+            const jobs = d.jobs||[];
+            const zones = d.zones||[];
+            let ji = 0, zi = 0;
+            for (const line of lines){
+                if (line.includes('[ cancel ]')){
+                    const id = (jobs[ji]||{}).id || '';
+                    html += `<div>${line.replace('[ cancel ]', `<span data-job="${(id||'').replace(/"/g,'&quot;') }" style='color:#ff8080;cursor:pointer;'>[ cancel ]</span>`)}</div>`;
+                    ji++;
+                } else if (line.includes('[ cancel group ]')){
+                    const gid = (zones[zi]||{}).group_id || '';
+                    html += `<div>${line.replace('[ cancel group ]', `<span data-group="${gid}" style='color:#ff8080;cursor:pointer;'>[ cancel group ]</span>`)}</div>`;
+                    zi++;
+                } else {
+                    html += `<div>${line}</div>`;
+                }
+            }
+            root.innerHTML = html;
+        }
+        async function refresh(force){
+            if (!panel) return;
+            try{
+                const r = await fetch('/api/health-details?ts=' + Date.now(), {cache:'no-store'});
+                const d = await r.json();
+                const jobsText = renderJobs(d.jobs);
+                const zonesText = renderZones(d.zones);
+                const gl = d.locks && d.locks.groups ? Object.entries(d.locks.groups).map(([k,v])=>`G${k}:${v?'locked':'free'}`).join(' ') : '';
+                const zl = d.locks && d.locks.zones ? Object.entries(d.locks.zones).map(([k,v])=>`Z${k}:${v?'locked':'free'}`).join(' ') : '';
+                const cancels = (d.group_cancels||[]).map(gc=>`G${gc.group_id}:${gc.set?'CANCELLED':''}`).join(' ');
+                const meta = (d.meta_tail||[]).map(m=>`${m.ts} ${m.topic} ${m.payload}`).join('\n');
+                const text = `now: ${d.now}\nScheduler: ${d.scheduler_running?'running':'stopped'}\n\nJobs:\n${jobsText}\n\nZones:\n${zonesText}\n\nLocks:\n${gl}\n${zl}\n\nGroup cancels:\n${cancels||'-'}\n\nMeta (last ${(d.meta_tail||[]).length}):\n${meta||'-'}`;
+                const el = document.getElementById('health-content');
+                el.textContent = text;
+                wireActions(d);
+            }catch(e){ document.getElementById('health-content').textContent = 'error'; }
+        }
+        function setVisible(v){
+            visible = v; if (!panel) build(); panel.style.display = visible?'block':'none';
+            if (timer){ clearInterval(timer); timer=null; }
+            if (visible){ refresh(true); timer = setInterval(refresh, 2500); }
+        }
+        document.addEventListener('keydown', (ev)=>{
+            if (ev.key === 'h' || ev.key === 'H') setVisible(!visible);
+        });
+    })();
     // Real user timing for Chrome (from navigation start to content complete state on Status page)
     (function(){
       try {

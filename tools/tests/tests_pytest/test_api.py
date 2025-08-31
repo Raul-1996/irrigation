@@ -25,12 +25,40 @@ def test_zones_list(client):
 
 
 def test_zone_start_stop_cycle(client):
+    import time
     # stop to ensure clean state
     client.post("/api/zones/1/stop")
+    t0 = time.time()
     r1 = client.post("/api/zones/1/start")
     assert r1.status_code in (200, 400, 404)
+    # verify state flips to on within 3s
+    ok = False
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        z = client.get("/api/zones/1").get_json() or {}
+        if (z.get('state') == 'on'):
+            ok = True
+            break
+        time.sleep(0.1)
+    assert ok, "Zone 1 did not become ON within 3s"
+    started_elapsed = time.time() - t0
+    assert started_elapsed <= 3.0
+
+    t1 = time.time()
     r2 = client.post("/api/zones/1/stop")
     assert r2.status_code in (200, 404)
+    # verify state flips to off within 3s
+    ok2 = False
+    deadline2 = time.time() + 3.0
+    while time.time() < deadline2:
+        z = client.get("/api/zones/1").get_json() or {}
+        if (z.get('state') == 'off'):
+            ok2 = True
+            break
+        time.sleep(0.1)
+    assert ok2, "Zone 1 did not become OFF within 3s"
+    stopped_elapsed = time.time() - t1
+    assert stopped_elapsed <= 3.0
 
 
 def test_group_stop_cancels_sequence(client):

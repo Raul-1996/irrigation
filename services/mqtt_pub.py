@@ -9,6 +9,10 @@ except Exception:
     mqtt = None
 
 from utils import normalize_topic
+try:
+    from database import db as _db
+except Exception:
+    _db = None
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,8 @@ _MQTT_CLIENTS: Dict[int, object] = {}
 _MQTT_CLIENTS_LOCK = threading.Lock()
 _TOPIC_LAST_SEND: Dict[Tuple[int, str], Tuple[str, float]] = {}
 _TOPIC_LOCK = threading.Lock()
+_SERVER_CACHE: Dict[int, Tuple[dict, float]] = {}
+_SERVER_CACHE_TTL = 300.0  # seconds
 
 
 def get_or_create_mqtt_client(server: dict):
@@ -76,10 +82,27 @@ def get_or_create_mqtt_client(server: dict):
         return cl
 
 
-def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.5, retain: bool = False) -> bool:
+def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.2, retain: bool = False,
+                       meta: Optional[Dict[str, str]] = None) -> bool:
     try:
         t = normalize_topic(topic)
         sid = int(server.get('id')) if server.get('id') else None
+        # normalize server via TTL cache
+        if sid is not None and _db is not None:
+            try:
+                now_ts = time.time()
+                cached = _SERVER_CACHE.get(sid)
+                srv = None
+                if cached and (now_ts - cached[1]) < _SERVER_CACHE_TTL:
+                    srv = cached[0]
+                else:
+                    srv = _db.get_mqtt_server(sid)
+                    if srv:
+                        _SERVER_CACHE[sid] = (srv, now_ts)
+                if srv:
+                    server = srv
+            except Exception:
+                pass
         key = (sid or 0, t)
         now = time.time()
         with _TOPIC_LOCK:
@@ -95,7 +118,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             return False
         # Publish to base topic
         try:
-            res = cl.publish(t, payload=value, qos=1, retain=retain)
+            res = cl.publish(t, payload=value, qos=0, retain=retain)
             try:
                 rc = getattr(res, 'rc', 0)
             except Exception:
@@ -127,10 +150,21 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                     return True
                 _TOPIC_LAST_SEND[on_key] = (value, now2)
             logger.debug(f"MQTT publish topic={t_on} value={value}")
-            res_on = cl.publish(t_on, payload=value, qos=1, retain=retain)
+            res_on = cl.publish(t_on, payload=value, qos=0, retain=retain)
             # Ignore rc here; some brokers may not acknowledge the duplicate fast
         except Exception:
             # Soft-fail for '/on' duplication
+            pass
+
+        # Optional: publish meta information to a side topic for diagnostics/idempotence
+        try:
+            if meta:
+                t_meta = t + '/meta'
+                payload_meta = ';'.join([f"{k}={v}" for k, v in meta.items() if v is not None])
+                if payload_meta:
+                    cl.publish(t_meta, payload=payload_meta, qos=0, retain=False)
+        except Exception:
+            # meta is best-effort
             pass
 
         return True
