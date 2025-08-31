@@ -148,6 +148,7 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'zones_add_watering_start_source', self._migrate_add_watering_start_source)
                 self._apply_named_migration(conn, 'mqtt_add_tls_options', self._migrate_add_mqtt_tls_options)
                 self._apply_named_migration(conn, 'zones_add_control_fields', self._migrate_add_zone_control_fields)
+                self._apply_named_migration(conn, 'zones_add_commanded_observed', self._migrate_add_commanded_observed)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -404,6 +405,20 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка миграции zone_control_fields: {e}")
 
+    def _migrate_add_commanded_observed(self, conn):
+        """Добавить commanded_state и observed_state поля для зон."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'commanded_state' not in columns:
+                conn.execute("ALTER TABLE zones ADD COLUMN commanded_state TEXT")
+            if 'observed_state' not in columns:
+                conn.execute("ALTER TABLE zones ADD COLUMN observed_state TEXT")
+            conn.commit()
+            logger.info('Добавлены поля commanded_state, observed_state в zones')
+        except Exception as e:
+            logger.error(f"Ошибка миграции commanded/observed: {e}")
+
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
@@ -595,6 +610,33 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка обновления зоны {zone_id}: {e}")
             return None
+
+    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> bool:
+        """Обновить зону с инкрементом version, защищаясь от гонок (optimistic lock).
+        Возвращает True при успешном обновлении.
+        """
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT version FROM zones WHERE id = ?', (zone_id,))
+                row = cur.fetchone()
+                if not row:
+                    return False
+                old_version = int(row['version'] or 0)
+                fields = []
+                params = []
+                for k, v in updates.items():
+                    fields.append(f"{k} = ?")
+                    params.append(v)
+                fields.append('version = version + 1')
+                params.extend([zone_id, old_version])
+                sql = f"UPDATE zones SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?"
+                cur2 = conn.execute(sql, params)
+                conn.commit()
+                return cur2.rowcount == 1
+        except Exception as e:
+            logger.error(f"Ошибка versioned-обновления зоны {zone_id}: {e}")
+            return False
 
     def bulk_update_zones(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Пакетное обновление зон в одной транзакции.
@@ -926,6 +968,39 @@ class IrrigationDB:
             sid = cfg.get('server_id')
             ok &= self.set_setting_value('rain.server_id', str(int(sid)) if sid is not None else None)
         return bool(ok)
+
+    # ===== Master valve settings =====
+    def get_master_config(self) -> Dict[str, Any]:
+        try:
+            enabled = self.get_setting_value('master.enabled')
+            topic = self.get_setting_value('master.topic') or ''
+            server_id = self.get_setting_value('master.server_id')
+            delay_ms = self.get_setting_value('master.delay_ms')
+            return {
+                'enabled': str(enabled or '0') in ('1','true','True'),
+                'topic': topic,
+                'server_id': int(server_id) if server_id and str(server_id).isdigit() else None,
+                'delay_ms': int(delay_ms) if (delay_ms and str(delay_ms).isdigit()) else 300
+            }
+        except Exception as e:
+            logger.error(f"Ошибка чтения master_config: {e}")
+            return {'enabled': False, 'topic': '', 'server_id': None, 'delay_ms': 300}
+
+    def set_master_config(self, cfg: Dict[str, Any]) -> bool:
+        ok = True
+        try:
+            ok &= self.set_setting_value('master.enabled', '1' if cfg.get('enabled') else '0')
+            if 'topic' in cfg:
+                ok &= self.set_setting_value('master.topic', cfg.get('topic') or '')
+            if 'server_id' in cfg:
+                sid = cfg.get('server_id')
+                ok &= self.set_setting_value('master.server_id', str(int(sid)) if sid is not None else None)
+            if 'delay_ms' in cfg:
+                ok &= self.set_setting_value('master.delay_ms', str(int(cfg.get('delay_ms') or 300)))
+            return bool(ok)
+        except Exception as e:
+            logger.error(f"Ошибка записи master_config: {e}")
+            return False
 
     # ===== Датчики среды (температура/влажность) =====
     def get_env_config(self) -> Dict[str, Any]:
@@ -1456,12 +1531,31 @@ class IrrigationDB:
                 except Exception:
                     norm_days = days
 
+                # Кэшируем длительности и группы заранее для ускорения
+                durations_cache: Dict[int, int] = {}
+                groups_cache: Dict[int, int] = {}
+                try:
+                    curz = conn.execute('SELECT id, duration, group_id FROM zones')
+                    for zid, dur, gid in curz.fetchall():
+                        durations_cache[int(zid)] = int(dur or 0)
+                        groups_cache[int(zid)] = int(gid or 0)
+                except Exception:
+                    pass
+                def _get_dur(zid: int) -> int:
+                    try:
+                        return int(durations_cache.get(int(zid), 0))
+                    except Exception:
+                        return 0
+                def _get_gid(zid: int) -> int:
+                    try:
+                        return int(groups_cache.get(int(zid), 0))
+                    except Exception:
+                        return 0
                 # Получаем суммарную продолжительность полива для выбранных зон
                 # Зоны поливаются последовательно, поэтому суммируем их длительности
                 total_duration = 0
                 for zone_id in zones:
-                    duration = self.get_zone_duration(zone_id)
-                    total_duration += duration
+                    total_duration += _get_dur(int(zone_id))
                 
                 # Время окончания программы
                 program_end_minutes = program_minutes + total_duration
@@ -1480,20 +1574,8 @@ class IrrigationDB:
                     common_zones = set(zones) & set(program_data['zones'])
                     
                     # Проверяем пересечение групп
-                    zones_groups = set()
-                    existing_zones_groups = set()
-                    
-                    # Получаем группы для зон новой программы
-                    for zone_id in zones:
-                        zone = self.get_zone(zone_id)
-                        if zone:
-                            zones_groups.add(zone['group_id'])
-                    
-                    # Получаем группы для зон существующей программы
-                    for zone_id in program_data['zones']:
-                        zone = self.get_zone(zone_id)
-                        if zone:
-                            existing_zones_groups.add(zone['group_id'])
+                    zones_groups = { _get_gid(int(zid)) for zid in zones }
+                    existing_zones_groups = { _get_gid(int(zid)) for zid in program_data['zones'] }
                     
                     # Проверяем пересечение групп
                     common_groups = zones_groups & existing_zones_groups
@@ -1511,10 +1593,7 @@ class IrrigationDB:
                     
                     # Получаем суммарную продолжительность существующей программы
                     # Зоны поливаются последовательно, поэтому суммируем их длительности
-                    existing_total_duration = 0
-                    for zone_id in program_data['zones']:
-                        duration = self.get_zone_duration(zone_id)
-                        existing_total_duration += duration
+                    existing_total_duration = sum(_get_dur(int(zid)) for zid in program_data['zones'])
                     
                     # Время окончания существующей программы
                     existing_end_minutes = existing_minutes + existing_total_duration

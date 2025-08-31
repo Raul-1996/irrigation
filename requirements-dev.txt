@@ -1,0 +1,7 @@
+selenium==4.15.2
+webdriver-manager==4.0.1
+pytest==7.4.3
+pytest-selenium==4.0.1
+SQLAlchemy==1.4.52
+PyJWT==2.8.0
+

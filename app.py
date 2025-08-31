@@ -32,6 +32,8 @@ from routes.auth import auth_bp
 from routes.settings import settings_bp
 from werkzeug.security import check_password_hash
 from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor
+from services.locks import snapshot_all_locks as _locks_snapshot
+from collections import deque
 
 # Unified API error helpers
 def api_error(error_code: str, message: str, status: int = 400, extra: dict = None):
@@ -171,6 +173,8 @@ except Exception:
     pass
 
 app = Flask(__name__)
+# Глобальный буфер последних meta-сообщений для health-панели
+_SSE_META_BUFFER = deque(maxlen=100)
 app.config.from_object(Config)
 app.db = db  # Добавляем атрибут db для тестов
 csrf = CSRFProtect(app)
@@ -194,7 +198,7 @@ def _compute_app_version() -> str:
 try:
     APP_VERSION = _compute_app_version()
 except Exception:
-    APP_VERSION = '1,0'
+    APP_VERSION = '1.0'
 
 @app.context_processor
 def _inject_app_version():
@@ -207,7 +211,124 @@ def _inject_app_version():
                 return path
         return {'app_version': APP_VERSION, 'system_name': sys_name, 'asset': asset}
     except Exception:
-        return {'app_version': '1,0', 'system_name': '', 'asset': (lambda p: p)}
+        return {'app_version': '1.0', 'system_name': '', 'asset': (lambda p: p)}
+
+from services.security import admin_required
+
+@app.route('/api/health-details')
+@admin_required
+def api_health_details():
+    try:
+        sched = get_scheduler()
+        jobs = []
+        if sched is not None and getattr(sched, 'scheduler', None) is not None:
+            try:
+                for j in sched.scheduler.get_jobs():
+                    try:
+                        nrt = getattr(j, 'next_run_time', None)
+                        jid = str(j.id)
+                        jstore = 'default' if jid.startswith('program:') else 'volatile'
+                        trig = str(getattr(j, 'trigger', ''))
+                        jobs.append({
+                            'id': jid,
+                            'name': str(getattr(j, 'name', '')),
+                            'next_run_time': nrt.isoformat() if nrt else None,
+                            'jobstore': jstore,
+                            'trigger': trig,
+                        })
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        zones = []
+        try:
+            for z in db.get_zones():
+                try:
+                    state = str(z.get('state') or '')
+                    cstate = str(z.get('commanded_state') or '')
+                    if state != 'off' or cstate in ('starting', 'on', 'stopping'):
+                        zones.append({
+                            'id': int(z.get('id')),
+                            'group_id': int(z.get('group_id') or 0),
+                            'state': state,
+                            'commanded_state': cstate,
+                            'observed_state': str(z.get('observed_state') or ''),
+                            'sequence_id': z.get('sequence_id'),
+                            'command_id': z.get('command_id'),
+                            'version': z.get('version'),
+                            'planned_end_time': z.get('planned_end_time'),
+                        })
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        locks = _locks_snapshot()
+        group_cancels = []
+        try:
+            if hasattr(sched, 'group_cancel_events'):
+                for gid, ev in (sched.group_cancel_events or {}).items():
+                    try:
+                        group_cancels.append({'group_id': int(gid), 'set': bool(ev.is_set())})
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
+            meta_tail = list(globals().get('_SSE_META_BUFFER', []))
+        except Exception:
+            meta_tail = []
+        payload = {
+            'now': datetime.now().isoformat(timespec='seconds'),
+            'scheduler_running': bool(sched and sched.is_running),
+            'jobs': jobs,
+            'zones': zones,
+            'locks': locks,
+            'group_cancels': group_cancels,
+            'meta_tail': meta_tail,
+        }
+        return jsonify(payload)
+    except Exception as e:
+        logger.exception('health-details failed')
+        return api_error('health_details_failed', f'health details error: {e}', 500)
+
+@app.route('/api/health/job/<path:job_id>/cancel', methods=['POST'])
+@admin_required
+def api_health_cancel_job(job_id):
+    try:
+        sched = get_scheduler()
+        if not sched or not getattr(sched, 'scheduler', None):
+            return api_error('scheduler_unavailable', 'scheduler unavailable', 503)
+        try:
+            sched.scheduler.remove_job(str(job_id))
+            return jsonify({'success': True, 'message': f'job {job_id} removed'})
+        except Exception as e:
+            return api_error('job_remove_failed', f'failed to remove job: {e}', 400)
+    except Exception as e:
+        logger.exception('cancel job failed')
+        return api_error('cancel_job_failed', f'error: {e}', 500)
+
+@app.route('/api/health/group/<int:group_id>/cancel', methods=['POST'])
+@admin_required
+def api_health_cancel_group(group_id):
+    try:
+        sched = get_scheduler()
+        if not sched:
+            return api_error('scheduler_unavailable', 'scheduler unavailable', 503)
+        try:
+            if hasattr(sched, 'group_cancel_events'):
+                import threading as _th
+                ev = sched.group_cancel_events.get(int(group_id)) or _th.Event()
+                ev.set()
+                sched.group_cancel_events[int(group_id)] = ev
+            if hasattr(sched, 'cancel_group_jobs'):
+                sched.cancel_group_jobs(int(group_id))
+        except Exception:
+            logger.exception('group cancel failed')
+            return api_error('group_cancel_failed', 'failed to cancel group jobs', 400)
+        return jsonify({'success': True, 'message': f'group {group_id} cancelled'})
+    except Exception as e:
+        logger.exception('cancel group failed')
+        return api_error('cancel_group_failed', f'error: {e}', 500)
 
 # Быстрая асинхронная публикация MQTT, чтобы не блокировать HTTP-ответ
 def _publish_mqtt_async(server: dict, topic: str, value: str, min_interval_sec: float = 0.0) -> None:
@@ -284,7 +405,9 @@ try:
     app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
     # В проде имеет смысл включить Secure
     if not Config.TESTING:
-        app.config.setdefault('SESSION_COOKIE_SECURE', False)
+        # Не занижаем Secure по умолчанию; пусть по умолчанию будет включён при HTTPS
+        if 'SESSION_COOKIE_SECURE' not in app.config:
+            app.config['SESSION_COOKIE_SECURE'] = bool(os.environ.get('SESSION_COOKIE_SECURE', '0') in ('1','true','True'))
 except Exception:
     pass
 
@@ -703,21 +826,17 @@ def _init_scheduler_before_request():
     # Стартовая синхронизация: единоразово выключаем все зоны и публикуем OFF
     if not _INITIAL_SYNC_DONE and not app.config.get('TESTING'):
         try:
-            zones = db.get_zones()
-            for z in zones:
-                try:
-                    db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
-                except Exception:
-                    pass
-                try:
-                    sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
-                    if mqtt and sid and topic:
-                        t = normalize_topic(topic)
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            _publish_mqtt_value(server, t, '0')
-                except Exception:
-                    pass
+            # Централизованная установка OFF через контроллер
+            try:
+                from services.zone_control import stop_all_in_group as _stop_all
+                groups = db.get_groups() or []
+                for g in groups:
+                    try:
+                        _stop_all(int(g['id']), reason='boot_sync', force=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             _INITIAL_SYNC_DONE = True
             logger.info("Initial sync: all zones set to OFF and MQTT OFF published")
         except Exception as e:
@@ -2560,10 +2679,7 @@ def api_status():
         # Silent: do not break status endpoint on MQTT check errors
         pass
 
-    try:
-        logger.info('api_status: temp=%s hum=%s temp_enabled=%s hum_enabled=%s', temperature, humidity, temp_enabled, hum_enabled)
-    except Exception:
-        pass
+    logger.info(f"api_status: temp={temperature} hum={humidity} temp_enabled={temp_enabled} hum_enabled={hum_enabled}")
     return jsonify({
         'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
         'temperature': temperature,
@@ -2721,39 +2837,22 @@ def api_postpone():
 def api_stop_group(group_id):
     """Остановить все зоны в группе"""
     try:
-        # Останавливаем все зоны в группе (БД и физически через MQTT)
-        zones = db.get_zones()
-        group_zones = [z for z in zones if z['group_id'] == group_id]
-        for zone in group_zones:
-            db.update_zone(zone['id'], {'state': 'off', 'watering_start_time': None})
-            # Публикуем '0' в MQTT-топик зоны, если настроен
-            try:
-                sid = zone.get('mqtt_server_id')
-                topic = (zone.get('topic') or '').strip()
-                if mqtt and sid and topic:
-                    t = normalize_topic(topic)
-                    server = db.get_mqtt_server(int(sid))
-                    if server:
-                        _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
-            except Exception:
-                # Не прерываем цикл при ошибке публикации, просто логируем
-                logger.exception("Ошибка публикации MQTT '0' при остановке группы")
+        # Немедленно и централизованно выключаем все зоны группы
+        try:
+            from services.zone_control import stop_all_in_group as _stop_all
+            _stop_all(int(group_id), reason='group_stop', force=True)
+        except Exception:
+            logger.exception('group stop: stop_all_in_group failed')
         
         # Отменяем все активные задачи планировщика для этой группы и ставим флаг отмены
         scheduler = get_scheduler()
         if scheduler:
-            scheduler.cancel_group_jobs(group_id)
+            scheduler.cancel_group_jobs(int(group_id))
             try:
                 # Дополнительно очищаем scheduled_start_time в БД, чтобы не было «хвостов»
                 db.clear_group_scheduled_starts(group_id)
             except Exception:
                 pass
-        try:
-            # Немедленный централизованный OFF всех зон в группе
-            from services.zone_control import stop_all_in_group
-            stop_all_in_group(group_id, reason='group_stop')
-        except Exception:
-            logger.exception('group stop: stop_all_in_group failed')
  
         # Чистим плановые старты группы
         try:
@@ -2792,6 +2891,11 @@ def api_start_group_from_first(group_id):
     try:
         scheduler = get_scheduler()
         if not scheduler:
+            try:
+                scheduler = init_scheduler(db)
+            except Exception:
+                scheduler = None
+        if not scheduler:
             return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
 
         ok = scheduler.start_group_sequence(group_id)
@@ -2818,40 +2922,27 @@ def api_start_zone_exclusive(group_id, zone_id):
         if not app.config.get('TESTING'):
             if _should_throttle_group(int(group_id)):
                 return jsonify({"success": True, "message": "Группа уже обрабатывается"})
-        zones = db.get_zones()
-        group_zones = [z for z in zones if int(z.get('group_id') or 0) == int(group_id)]
-        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # Сначала мгновенно обновим БД для целевой зоны
-        for z in group_zones:
-            if int(z.get('id')) == int(zone_id):
-                db.update_zone(z['id'], {'state': 'on', 'watering_start_time': start_ts})
-                target_zone = z
-                break
-        else:
-            target_zone = None
-        # Параллельно отправим OFF для соседей и ON для целевой зоны, не блокируя HTTP
-        for z in group_zones:
-            sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
-            if not (sid and topic):
-                continue
-            server = db.get_mqtt_server(int(sid))
-            if not server:
-                continue
-            t = normalize_topic(topic)
-            if int(z.get('id')) == int(zone_id):
-                try:
-                    _publish_mqtt_async(server, t, '1')
-                except Exception:
-                    pass
-            else:
-                try:
-                    db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
-                except Exception:
-                    pass
-                try:
-                    _publish_mqtt_async(server, t, '0')
-                except Exception:
-                    pass
+        # Порядок: cancel → stop_all → start
+        try:
+            scheduler = get_scheduler()
+            if scheduler:
+                scheduler.cancel_group_jobs(int(group_id))
+        except Exception:
+            logger.exception('exclusive start: cancel_group_jobs failed')
+        try:
+            from services.zone_control import stop_all_in_group as _stop_all
+            _stop_all(int(group_id), reason='manual_zone_start_preempt', force=True)
+        except Exception:
+            logger.exception('exclusive start: stop_all_in_group failed')
+        # Централизованная логика: запуск зоны под group-lock
+        try:
+            from services.zone_control import exclusive_start_zone as _exclusive_start
+            ok = _exclusive_start(int(zone_id))
+            if not ok:
+                return jsonify({"success": False, "message": "Не удалось запустить зону"}), 400
+        except Exception as _e:
+            logger.exception('exclusive_start failed')
+            return jsonify({"success": False, "message": "Ошибка запуска зоны"}), 500
         # Очистим плановые старты у «соседей» по группе
         try:
             db.clear_scheduled_for_zone_group_peers(int(zone_id), int(group_id))
@@ -2861,13 +2952,28 @@ def api_start_zone_exclusive(group_id, zone_id):
             scheduler = get_scheduler()
             if scheduler:
                 # Немедленно запускаем обратный отсчет для UI: записываем старт
+                # planned_end_time и автостоп
                 try:
-                    db.update_zone(zone_id, {'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                    zrec = db.get_zone(int(zone_id)) or {}
+                    db.update_zone(int(zone_id), {'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                    dur = int(zrec.get('duration') or 0)
+                    if dur > 0:
+                        from datetime import timedelta
+                        db.update_zone(int(zone_id), {'planned_end_time': (datetime.now() + timedelta(minutes=dur)).strftime('%Y-%m-%d %H:%M:%S')})
                 except Exception:
                     pass
                 # В тестовом режиме не ставим автостоп, чтобы проверка состояния успевала
                 if not app.config.get('TESTING'):
-                    scheduler.schedule_zone_stop(int(zone_id), int([zz for zz in group_zones if int(zz.get('id'))==int(zone_id)][0]['duration']))
+                    try:
+                        dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
+                        if dur > 0:
+                            scheduler.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
+                            try:
+                                scheduler.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
+                            except Exception:
+                                pass
+                    except Exception:
+                        logger.exception('schedule auto-stop failed')
         except Exception:
             logger.exception("api_start_zone_exclusive: schedule_zone_stop failed")
         db.add_log('zone_start_exclusive', json.dumps({"group": group_id, "zone": zone_id}))
@@ -2881,21 +2987,17 @@ def api_start_zone_exclusive(group_id, zone_id):
 def api_emergency_stop():
     """Аварийная остановка всех зон. До отмены полив не возобновляется."""
     try:
-        zones = db.get_zones()
-        # Публикуем '0' во все зоны с MQTT-настройками и выставляем статус в БД
-        for zone in zones:
-            db.update_zone(zone['id'], {'state': 'off'})
-            try:
-                sid = zone.get('mqtt_server_id')
-                topic = (zone.get('topic') or '').strip()
-                if mqtt and sid and topic:
-                    t = normalize_topic(topic)
-                    server = db.get_mqtt_server(int(sid))
-                    if server:
-                        # Используем унифицированную публикацию с дублем в /on
-                        _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
-            except Exception:
-                logger.exception("Ошибка публикации MQTT '0' при аварийной остановке")
+        # Централизованный OFF всех зон
+        try:
+            from services.zone_control import stop_all_in_group as _stop_all
+            groups = db.get_groups() or []
+            for g in groups:
+                try:
+                    _stop_all(int(g['id']), reason='emergency_stop', force=True)
+                except Exception:
+                    logger.exception('emergency stop: stop_all_in_group failed')
+        except Exception:
+            logger.exception('emergency stop: controller unavailable')
 
         # Ставим флаг аварийной остановки
         app.config['EMERGENCY_STOP'] = True
@@ -2905,7 +3007,7 @@ def api_emergency_stop():
         try:
             scheduler = get_scheduler()
             if scheduler:
-                groups = db.get_groups()
+                groups = db.get_groups() or []
                 for g in groups:
                     try:
                         scheduler.cancel_group_jobs(int(g['id']))
@@ -3191,7 +3293,7 @@ def start_zone(zone_id):
             scheduler = get_scheduler()
             if scheduler:
                 # На уровне планировщика ожидание уже укорочено на N секунд (настройка)
-                scheduler.schedule_zone_stop(zone_id, int(zone['duration']))
+                scheduler.schedule_zone_stop(zone_id, int(zone['duration']), command_id=str(int(time.time())))
         except Exception as e:
             logger.error(f"Ошибка планирования остановки зоны {zone_id}: {e}")
         # Публикуем MQTT ON, если у зоны настроен MQTT
@@ -3399,6 +3501,12 @@ def api_mqtt_zones_sse():
                 mapping.setdefault(int(sid), {}).setdefault(t, []).append(int(z['id']))
             return mapping
 
+        # Буфер последних meta-сообщений на сервере (для health-панели)
+        try:
+            global _SSE_META_BUFFER
+        except NameError:
+            _SSE_META_BUFFER = deque(maxlen=100)
+
         def _ensure_hub_started():
             with _SSE_HUB_LOCK:
                 if _SSE_HUB_STARTED:
@@ -3420,6 +3528,13 @@ def api_mqtt_zones_sse():
                                 payload = msg.payload.decode('utf-8', errors='ignore').strip()
                             except Exception:
                                 payload = str(msg.payload)
+                            # Обработка meta-топика: /meta
+                            if t.endswith('/meta'):
+                                try:
+                                    _SSE_META_BUFFER.append({'topic': t, 'payload': payload, 'ts': datetime.now().strftime('%H:%M:%S')})
+                                except Exception:
+                                    pass
+                                return
                             zone_ids = server_topics.get(sid_local, {}).get(t) or []
                             new_state = 'on' if payload in ('1','true','ON','on') else 'off'
                             # Аварийный стоп
@@ -3459,7 +3574,7 @@ def api_mqtt_zones_sse():
                                                 dur = int(z.get('duration') or 0)
                                                 if dur > 0:
                                                     sched.cancel_zone_jobs(int(zid))
-                                                    sched.schedule_zone_stop(int(zid), dur)
+                                                    sched.schedule_zone_stop(int(zid), dur, command_id=str(int(time.time())))
                                         except Exception:
                                             pass
                                     else:
@@ -3472,7 +3587,12 @@ def api_mqtt_zones_sse():
                                                 sched.cancel_zone_jobs(int(zid))
                                         except Exception:
                                             pass
-                                    db.update_zone(int(zid), updates)
+                                    try:
+                                        updates2 = updates.copy()
+                                    except Exception:
+                                        updates2 = dict(updates)
+                                    updates2['observed_state'] = new_state
+                                    db.update_zone(int(zid), updates2)
                                 except Exception:
                                     pass
                                 data = json.dumps({'zone_id': int(zid), 'topic': t, 'payload': payload, 'state': new_state})
@@ -3529,139 +3649,43 @@ def api_mqtt_zones_sse():
 @csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
 def api_zone_mqtt_start(zone_id: int):
-    z = db.get_zone(zone_id)
-    if not z: return jsonify({'success': False}), 404
-    # Если уже включена — не публикуем повторно
     try:
-        if str(z.get('state')) == 'on':
+        z = db.get_zone(zone_id)
+        if not z:
+            return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
+        if app.config.get('EMERGENCY_STOP'):
+            return jsonify({'success': False, 'message': 'Аварийная остановка активна'}), 400
+        if str(z.get('state') or '') == 'on':
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
-    except Exception:
-        logger.exception("api_zone_mqtt_start: state check failed")
-    # Анти-дребезг по группе
-    try:
         gid = int(z.get('group_id') or 0)
-        if gid and _should_throttle_group(gid):
-            # Сразу фиксируем старт и отправляем MQTT ON асинхронно, чтобы не ждать окна дросселирования
-            try:
-                db.update_zone(zone_id, {
-                    'state': 'on',
-                    'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'watering_start_source': 'manual'
-                })
-                # Публикуем ON
-                sid2 = z.get('mqtt_server_id'); topic2 = (z.get('topic') or '').strip()
-                if sid2 and topic2:
-                    server2 = db.get_mqtt_server(int(sid2))
-                    if server2:
-                        _publish_mqtt_async(server2, normalize_topic(topic2), '1')
-            except Exception:
-                pass
-            return jsonify({'success': True, 'message': 'Группа уже обрабатывается'})
-    except Exception:
-        logger.exception("api_zone_mqtt_start: throttle check failed")
-    # Эксклюзивность: БЕЗУСЛОВНО выключаем все остальные зоны в группе (и MQTT OFF, и БД OFF)
-    try:
-        group_id = int(z.get('group_id') or 0)
-        if group_id:
-            group_zones = db.get_zones_by_group(group_id)
-            for other in group_zones:
-                if int(other.get('id')) == int(zone_id):
-                    continue
-                try:
-                    osid = other.get('mqtt_server_id'); otopic = (other.get('topic') or '').strip()
-                    if osid and otopic:
-                        server_o = db.get_mqtt_server(int(osid))
-                        if server_o:
-                            t_o = normalize_topic(otopic)
-                            _publish_mqtt_value(server_o, t_o, '0')
-                except Exception:
-                    logger.exception("Ошибка публикации MQTT '0' при MQTT-старте: выключение соседей")
-                try:
-                    db.update_zone(int(other.get('id')), {
-                        'state': 'off',
-                        'watering_start_time': None,
-                        'last_watering_time': other.get('watering_start_time')
-                    })
-                except Exception:
-                    logger.exception("api_zone_mqtt_start: db.update_zone peer off failed")
-            # Прерываем возможную последовательность/программу этой группы
-            try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    scheduler.cancel_group_jobs(group_id)
-            except Exception:
-                logger.exception("api_zone_mqtt_start: cancel_group_jobs failed")
-    except Exception:
-        logger.exception("api_zone_mqtt_start: exclusive off peers failed")
-    sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
-    if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
-    t = normalize_topic(topic)
-    try:
-        server = db.get_mqtt_server(int(sid))
-        if not server:
-            return jsonify({'success': False, 'message': 'MQTT server not found'}), 400
-        # Сначала фиксируем старт в БД, чтобы MQTT-SSE не перезаписал источник 'manual'
-        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
-            db.update_zone(zone_id, {
-                'state': 'on',
-                'watering_start_time': start_ts,
-                'scheduled_start_time': None,
-                'watering_start_source': 'manual'
-            })
-            dlog("manual-start zone=%s time=%s group=%s", zone_id, start_ts, z.get('group_id'))
-            try:
-                db.add_log('zone_start', json.dumps({
-                    'zone': int(zone_id),
-                    'group': int(z.get('group_id') or 0),
-                    'source': 'manual',
-                    'duration': int(z.get('duration') or 0)
-                }))
-            except Exception:
-                pass
-            # При ручном старте зоны — отменим очередь группы и очистим плановые старты
-            try:
-                gid = int(z.get('group_id') or 0)
-                if gid:
-                    sched = get_scheduler()
-                    if sched:
-                        sched.cancel_group_jobs(gid)
-                        # И дополнительно удалим незапущенные задания последовательности, которые могли появиться чуть позже
-                        try:
-                            for job in sched.scheduler.get_jobs():
-                                if job.id.startswith(f"group_seq_{gid}_"):
-                                    sched.scheduler.remove_job(job.id)
-                        except Exception:
-                            pass
-                    db.clear_group_scheduled_starts(gid)
-            except Exception:
-                pass
+            sched = get_scheduler()
+            if sched:
+                sched.cancel_group_jobs(gid)
         except Exception:
-            logger.exception("api_zone_mqtt_start: db.update_zone ON failed")
-        dlog("publish ON zone=%s topic=%s", zone_id, t)
-        _publish_mqtt_async(server, t, '1')
+            logger.exception('manual mqtt start: cancel_group_jobs failed')
+        # cancel_group_jobs already triggers centralized stop_all_in_group; avoid duplicate stops here to reduce latency
+        from services.zone_control import exclusive_start_zone
+        if not exclusive_start_zone(int(zone_id)):
+            return jsonify({'success': False, 'message': 'Не удалось запустить зону'}), 400
         try:
-            scheduler = get_scheduler()
-            if scheduler:
-                duration_min = int(z.get('duration') or 0)
-                if duration_min > 0:
-                    scheduler.schedule_zone_stop(zone_id, duration_min)
-                    dlog("schedule auto-stop zone=%s after=%s min", zone_id, duration_min)
-                    # Страховочный OFF почти в момент автостопа, чтобы /on тоже сбросился
-                    try:
-                        server2 = db.get_mqtt_server(int(sid))
-                        if server2:
-                            from apscheduler.triggers.date import DateTrigger as _DT
-                            run_at = datetime.now() + timedelta(seconds=max(1, duration_min*60 - 1))
-                            scheduler.scheduler.add_job(lambda: _publish_mqtt_value(server2, t, '0', min_interval_sec=0.0), _DT(run_date=run_at))
-                    except Exception:
-                        pass
+            sched = get_scheduler()
+            if sched and not app.config.get('TESTING'):
+                dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
+                if dur > 0:
+                    sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
+                    from datetime import timedelta
+                    sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
         except Exception:
-            logger.exception("api_zone_mqtt_start: schedule auto-stop failed")
-        return jsonify({'success': True, 'message': 'Зона запущена'})
-    except Exception as e:
-        logger.error(f"MQTT publish start failed: {e}")
-        return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
+            logger.exception('manual mqtt start: schedule auto-stop failed')
+        try:
+            db.add_log('zone_start_manual', json.dumps({'zone': int(zone_id), 'group': gid}))
+        except Exception:
+            pass
+        return jsonify({'success': True, 'message': f'Зона {int(zone_id)} запущена'})
+    except Exception:
+        logger.exception('api_zone_mqtt_start failed')
+        return jsonify({'success': False, 'message': 'Ошибка запуска зоны'}), 500
 
 @csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])

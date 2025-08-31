@@ -1,16 +1,3 @@
-def normalize_topic(topic: str) -> str:
-    try:
-        t = str(topic or '').strip()
-        if not t:
-            return ''
-        if not t.startswith('/'):
-            t = '/' + t
-        # Не используем управляющие суффиксы вида '/on'
-        if t.endswith('/on'):
-            t = t[:-3]
-        return t
-    except Exception:
-        return '/' + str(topic)
 import typing as _t
 
 

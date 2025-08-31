@@ -44,7 +44,10 @@ source venv/bin/activate
 pip install --upgrade pip
 
 # 4. Установка зависимостей
+# Прод: только runtime
 pip install -r requirements.txt
+# Dev/тесты: дополнительно
+pip install -r requirements-dev.txt
 
 # 5. Запуск приложения
 python run.py
@@ -73,8 +76,10 @@ chmod +x uninstall_wb.sh
 ```
 
 Примечания:
-- Скрипт установки кладёт всё в каталог `/opt/wb-irrigation/irrigation`, создаёт `venv`, устанавливает зависимости, подготавливает БД и настраивает `systemd`-юнит `wb-irrigation`.
+- Скрипт установки кладёт всё в каталог `/opt/wb-irrigation/irrigation`, создаёт `venv`, устанавливает зависимости (только `requirements.txt`), подготавливает БД и настраивает `systemd`-юнит `wb-irrigation`.
 - Удаление останавливает и отключает сервис, удаляет юнит и весь каталог `/opt/wb-irrigation` без остатка.
+- На WB уровень логов по умолчанию WARNING; включить подробные логи можно через Настройки.
+- Для HTTPS куки выставьте `SESSION_COOKIE_SECURE=1` в окружении сервиса.
 
 ### 🪟 Windows
 
@@ -102,7 +107,10 @@ venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 
 # 4. Установка зависимостей
+# Прод: только runtime
 pip install -r requirements.txt
+# Dev/тесты: дополнительно
+pip install -r requirements-dev.txt
 
 # 5. Запуск приложения
 python run.py
@@ -470,6 +478,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/path/to/wb-irrigation
+Environment=SESSION_COOKIE_SECURE=1
 ExecStart=/path/to/wb-irrigation/venv/bin/python run.py
 Restart=always
 RestartSec=10
