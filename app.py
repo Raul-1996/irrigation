@@ -857,11 +857,15 @@ def _init_scheduler_before_request():
                 pth = request.path or ''
                 allowed_public_posts = {
                     '/api/login', '/api/password', '/api/status', '/health', '/api/env',
-                    '/api/emergency-stop', '/api/emergency-resume', '/api/postpone'
+                    '/api/emergency-stop', '/api/emergency-resume', '/api/postpone',
+                    '/api/zones/next-watering-bulk'
                 }
                 def _is_status_action(path: str) -> bool:
                     try:
                         if path in allowed_public_posts:
+                            return True
+                        # Разрешаем пользователю получать данные о следующем поливе (bulk)
+                        if path == '/api/zones/next-watering-bulk':
                             return True
                         if path.startswith('/api/mqtt/'):
                             return True
@@ -977,7 +981,10 @@ def _require_admin_for_mutations():
             # Разрешаем действия со страницы "Статус" для гостя/пользователя
             def _is_status_action(path: str) -> bool:
                 try:
-                    if path in ('/api/emergency-stop', '/api/emergency-resume', '/api/postpone'):
+                    if path in ('/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'):
+                        return True
+                    # Разрешаем пользователю получать данные о следующем поливе (bulk)
+                    if path == '/api/zones/next-watering-bulk':
                         return True
                     if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop')):
                         return True
