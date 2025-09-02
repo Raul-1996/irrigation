@@ -115,37 +115,9 @@ class RainMonitor:
                         db.update_zone_postpone(int(z['id']), postpone_until, 'rain')
                     except Exception:
                         pass
-            # 3) Cancel today's scheduled program runs for affected groups
-            try:
-                progs = db.get_programs()
-            except Exception:
-                progs = []
-            today_wd = _dt.now().weekday()
-            today_date = _dt.now().strftime('%Y-%m-%d')
-            for p in progs or []:
-                try:
-                    days = p.get('days') or []
-                    zones_list = p.get('zones') or []
-                except Exception:
-                    days, zones_list = [], []
-                if today_wd not in days:
-                    continue
-                # Determine groups that program affects
-                try:
-                    affected_groups = set()
-                    for z in zones:
-                        try:
-                            if int(z.get('id')) in zones_list and int(z.get('group_id') or 0) in target_groups:
-                                affected_groups.add(int(z.get('group_id') or 0))
-                        except Exception:
-                            continue
-                    for gid in affected_groups:
-                        try:
-                            db.cancel_program_run_for_group(int(p.get('id')), today_date, int(gid))
-                        except Exception:
-                            logger.exception('RainMonitor: cancel_program_run_for_group failed')
-                except Exception:
-                    logger.exception('RainMonitor: computing affected groups failed')
+            # Note: не отменяем сегодняшние запуски программ заранее.
+            # Если дождь начался до времени старта — при отсутствии отложки к моменту старта программа отработает.
+            # Если дождь начался во время выполнения — оставшиеся зоны пропустятся из-за отложки.
             try:
                 db.add_log('rain_postpone', str({'groups': target_groups, 'until': postpone_until}))
             except Exception:
