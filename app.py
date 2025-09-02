@@ -157,18 +157,25 @@ except Exception:
 # Устанавливаем TZ процесса по системной таймзоне, чтобы логи и планировщик работали в локальном времени
 try:
     import time as _tz_time
-    if not os.getenv('TZ'):
+    _tz_env = os.getenv('TZ')
+    if not _tz_env:
         try:
             with open('/etc/timezone', 'r') as _f:
-                _tzname = _f.read().strip()
+                _tz_env = _f.read().strip()
         except Exception:
-            _tzname = None
-        if _tzname:
-            os.environ['TZ'] = _tzname
+            _tz_env = None
+        if _tz_env:
+            os.environ['TZ'] = _tz_env
             try:
                 _tz_time.tzset()
             except Exception:
                 logger.exception('manual-start: failed to clear group schedules')
+    # Синхронизируем TZ для планировщика (использует WB_TZ, затем TZ)
+    try:
+        if os.getenv('WB_TZ') != os.getenv('TZ'):
+            os.environ['WB_TZ'] = os.getenv('TZ') or ''
+    except Exception:
+        pass
 except Exception:
     pass
 
