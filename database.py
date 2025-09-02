@@ -1158,6 +1158,22 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка чтения отмены программы {program_id} на {run_date} для группы {group_id}: {e}")
             return False
+
+    def clear_program_cancellations_for_group_on_date(self, group_id: int, run_date: str) -> bool:
+        """Удалить все отмены программ для указанной группы на указанную дату.
+        Используется для снятия отмен, выставленных дождём, после окончания дождя.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    DELETE FROM program_cancellations
+                    WHERE group_id = ? AND run_date = ?
+                ''', (int(group_id), str(run_date)))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка очистки отмен программ на {run_date} для группы {group_id}: {e}")
+            return False
     
     def update_group(self, group_id: int, name: str) -> bool:
         """Обновить название группы"""

@@ -142,6 +142,17 @@ class RainMonitor:
                         db.update_zone_postpone(int(z['id']), None, None)
                 except Exception:
                     pass
+            # После окончания дождя — уберём отмены программ на сегодня для этих групп, чтобы ближайшие вечерние сработали
+            try:
+                from datetime import datetime as _dt
+                today = _dt.now().strftime('%Y-%m-%d')
+                for gid in target_groups:
+                    try:
+                        db.clear_program_cancellations_for_group_on_date(int(gid), today)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             try:
                 db.add_log('rain_resume', str({'groups': target_groups}))
             except Exception:
