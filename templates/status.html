@@ -306,8 +306,7 @@
         .zones-table { font-size: 0.75rem; min-width: 640px; }
         .zones-table th, .zones-table td { padding: 0.3rem 0.2rem; }
         .emergency { width: 100%; margin: 0.5rem 0; }
-        /* Подписи в ячейках на узких экранах для ясности */
-        .zones-table td.col-next::before,
+        /* Подписи в ячейках на узких экранах для ясности (убираем подпись у "Следующий полив") */
         .zones-table td.col-photo::before { content: attr(data-label) ": "; font-weight: 600; color: #666; margin-right: 4px; }
     }
 
