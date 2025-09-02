@@ -18,6 +18,7 @@ class RainMonitor:
         self.topic: Optional[str] = None
         self.server_id: Optional[int] = None
         self.is_rain: Optional[bool] = None
+        self._cfg: dict | None = None
 
     def start(self, cfg: dict):
         try:
@@ -26,6 +27,8 @@ class RainMonitor:
             server_id = cfg.get('server_id')
             if not enabled or not topic or not server_id or mqtt is None:
                 return
+            # keep config to evaluate NO/NC logic on RX
+            self._cfg = dict(cfg or {})
             self.topic = topic
             self.server_id = int(server_id)
             self._ensure_client()
@@ -63,10 +66,19 @@ class RainMonitor:
 
     def _handle_payload(self, payload: str):
         p = (payload or '').strip().lower()
+        # normalize primitive textual signals to boolean
         val = True if p in ('1', 'true', 'rain', 'yes', 'on') else False if p in ('0', 'false', 'no_rain', 'no', 'off') else None
         if val is None:
             return
-        self.is_rain = bool(val)
+        # Respect sensor type: NC means inverted logical value
+        try:
+            sensor_type = str((self._cfg or {}).get('type') or db.get_rain_config().get('type') or 'NO').upper()
+        except Exception:
+            sensor_type = 'NO'
+        logical_rain = bool(val)
+        if sensor_type == 'NC':
+            logical_rain = not logical_rain
+        self.is_rain = logical_rain
         if self.is_rain:
             self._apply_rain_postpone()
 
