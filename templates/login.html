@@ -3,29 +3,73 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Вход — WB-Irrigation</title>
+    <title>Вход — WB‑Irrigation</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; margin: 0; background: #f5f5f5; }
-        .container { max-width: 380px; margin: 80px auto; background: #fff; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); padding: 24px; }
-        h1 { margin: 0 0 16px; font-size: 20px; text-align: center; }
-        .subtitle { color: #666; font-size: 14px; text-align: center; margin-bottom: 24px; }
-        label { display: block; font-size: 14px; color: #333; margin: 12px 0 6px; }
-        input { width: calc(100% - 28px); padding: 12px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
-        button { width: 100%; margin-top: 16px; padding: 12px 14px; background: #2196f3; border: none; color: #fff; border-radius: 8px; font-size: 15px; cursor: pointer; }
-        button:hover { background: #1976d2; }
-        .error { color: #f44336; font-size: 13px; margin-top: 10px; text-align: center; }
-        .hint { color: #888; font-size: 12px; margin-top: 12px; text-align: center; line-height: 1.4; }
-        .password-hints { margin-top: 16px; padding: 12px; background: #f8f9fa; border-radius: 6px; border-left: 4px solid #2196f3; }
-        .password-hints h4 { margin: 0 0 8px 0; font-size: 13px; color: #333; }
-        .password-hints ul { margin: 0; padding-left: 16px; font-size: 12px; color: #666; }
-        .password-hints li { margin-bottom: 4px; }
+        :root {
+            --bg: #f4f6fb;
+            --card: #ffffff;
+            --text: #1f2937;
+            --muted: #6b7280;
+            --primary: #1976d2;
+            --primary-pressed: #155fa8;
+            --success: #2e7d32;
+            --danger: #d32f2f;
+            --ring: rgba(25,118,210,.25);
+            --border: #d1d5db;
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; background: var(--bg); color: var(--text); }
+        .container { max-width: 380px; margin: 9vh auto; background: var(--card); border-radius: 14px; box-shadow: 0 12px 36px rgba(0,0,0,.08); padding: 26px; }
+        h1 { margin: 0 0 8px; font-size: 22px; text-align: center; font-weight: 700; }
+        .subtitle { color: var(--muted); font-size: 14px; text-align: center; margin-bottom: 22px; }
+        label { display: block; font-size: 14px; color: var(--text); margin: 12px 0 6px; }
+        .input-group { position: relative; }
+        input[type="password"], input[type="text"] {
+            width: 100%;
+            padding: 14px 44px 14px 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 16px;
+            transition: box-shadow .15s ease, border-color .15s ease;
+            background: #fff;
+        }
+        input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 4px var(--ring); }
+        .toggle-visibility {
+            position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+            background: none; border: none; cursor: pointer; color: #455a64; font-size: 13px; padding: 4px 6px; border-radius: 6px;
+        }
+        .toggle-visibility:focus { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+        .caps-warning { display: none; color: #e65100; font-size: 12px; margin-top: 6px; }
+        .btn { width: 100%; margin-top: 14px; padding: 12px 14px; border: none; border-radius: 10px; font-size: 15px; cursor: pointer; }
+        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary:hover { background: var(--primary-pressed); }
+        .btn:disabled { opacity: .7; cursor: default; }
+        .btn-secondary { background: #eef2f7; color: #374151; }
+        .error { color: var(--danger); font-size: 13px; margin-top: 12px; text-align: center; min-height: 1.2em; }
     </style>
     <script>
+        function setLoading(isLoading) {
+            const submitBtn = document.getElementById('submitBtn');
+            if (!submitBtn) return;
+            submitBtn.disabled = isLoading;
+            if (isLoading) {
+                submitBtn.dataset.prev = submitBtn.textContent;
+                submitBtn.textContent = 'Вхожу…';
+            } else {
+                if (submitBtn.dataset.prev) submitBtn.textContent = submitBtn.dataset.prev;
+            }
+        }
         async function onSubmit(event) {
             event.preventDefault();
-            const password = document.getElementById('password').value;
+            const password = document.getElementById('password').value.trim();
             const errorEl = document.getElementById('error');
             errorEl.textContent = '';
+            if (password.length < 4) {
+                errorEl.textContent = 'Минимальная длина пароля — 4 символа.';
+                return;
+            }
+            setLoading(true);
             try {
                 const resp = await fetch('/api/login', {
                     method: 'POST',
@@ -40,27 +84,40 @@
                 errorEl.textContent = (data && data.message) || 'Ошибка входа';
             } catch (e) {
                 errorEl.textContent = 'Ошибка сети';
+            } finally {
+                setLoading(false);
             }
         }
+        function toggleVisibility() {
+            const passwordEl = document.getElementById('password');
+            const toggleBtn = document.getElementById('toggleBtn');
+            const isPwd = passwordEl.type === 'password';
+            passwordEl.type = isPwd ? 'text' : 'password';
+            toggleBtn.textContent = isPwd ? 'Скрыть' : 'Показать';
+            toggleBtn.setAttribute('aria-label', isPwd ? 'Скрыть пароль' : 'Показать пароль');
+            passwordEl.focus();
+        }
+        function handleCaps(e) {
+            const capsEl = document.getElementById('caps');
+            const caps = e.getModifierState && e.getModifierState('CapsLock');
+            capsEl.style.display = caps ? 'block' : 'none';
+        }
     </script>
-</head>
+    </head>
 <body>
     <div class="container">
         <h1>Вход</h1>
-        <div class="subtitle">WB-Irrigation</div>
+        <div class="subtitle">WB‑Irrigation</div>
         <form onsubmit="onSubmit(event)">
             <label for="password">Пароль</label>
-            <input id="password" type="password" placeholder="Введите пароль" autocomplete="current-password" required>
-            <button type="submit">Войти</button>
-            <button type="button" style="background:#4caf50;margin-top:8px;" onclick="window.location.href='/?guest=1'">Продолжить без пароля</button>
-            <div id="error" class="error"></div>
-            <div class="password-hints">
-                <h4>Доступные пароли:</h4>
-                <ul>
-                    <li><strong>1234</strong> — обычный пользователь (статус, расход воды, карта зон)</li>
-                    <li><strong>8888</strong> — администратор (полный доступ)</li>
-                </ul>
+            <div class="input-group">
+                <input id="password" name="password" type="password" placeholder="Введите пароль" autocomplete="current-password" minlength="4" required autofocus onkeyup="handleCaps(event)" />
+                <button type="button" id="toggleBtn" class="toggle-visibility" aria-controls="password" aria-label="Показать пароль" onclick="toggleVisibility()">Показать</button>
             </div>
+            <div id="caps" class="caps-warning">Включён Caps Lock</div>
+            <button type="submit" class="btn btn-primary" id="submitBtn">Войти</button>
+            <button type="button" class="btn btn-secondary" onclick="window.location.href='/?guest=1'">Продолжить без пароля</button>
+            <div id="error" class="error" role="status" aria-live="polite"></div>
         </form>
     </div>
 </body>
