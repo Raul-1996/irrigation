@@ -80,15 +80,34 @@ class RainMonitor:
             logical_rain = not logical_rain
         self.is_rain = logical_rain
         if self.is_rain:
-            self._apply_rain_postpone()
+            self._on_rain_start()
+        else:
+            self._on_rain_stop()
 
-    def _apply_rain_postpone(self):
+    def _on_rain_start(self):
+        """Rain started: for groups using rain sensor
+        - stop ongoing watering
+        - postpone watering until end of day (will be cleared on rain stop)
+        - cancel today's scheduled program runs for those groups
+        """
         try:
             groups = db.get_groups()
             target_groups = [int(g['id']) for g in groups if db.get_group_use_rain(int(g['id'])) and int(g['id']) != 999]
             if not target_groups:
                 return
-            postpone_until = (datetime.now()).strftime('%Y-%m-%d %H:%M:%S')
+            # 1) Stop any watering in affected groups
+            try:
+                from services.zone_control import stop_all_in_group
+                for gid in target_groups:
+                    try:
+                        stop_all_in_group(gid, reason='rain', force=True)
+                    except Exception:
+                        logger.exception('RainMonitor: stop_all_in_group failed')
+            except Exception:
+                logger.exception('RainMonitor: import stop_all_in_group failed')
+            # 2) Set postpone for zones in affected groups (until end of day)
+            from datetime import datetime as _dt
+            postpone_until = _dt.now().strftime('%Y-%m-%d 23:59:59')
             zones = db.get_zones()
             for z in zones:
                 if int(z.get('group_id') or 0) in target_groups:
@@ -96,12 +115,67 @@ class RainMonitor:
                         db.update_zone_postpone(int(z['id']), postpone_until, 'rain')
                     except Exception:
                         pass
+            # 3) Cancel today's scheduled program runs for affected groups
+            try:
+                progs = db.get_programs()
+            except Exception:
+                progs = []
+            today_wd = _dt.now().weekday()
+            today_date = _dt.now().strftime('%Y-%m-%d')
+            for p in progs or []:
+                try:
+                    days = p.get('days') or []
+                    zones_list = p.get('zones') or []
+                except Exception:
+                    days, zones_list = [], []
+                if today_wd not in days:
+                    continue
+                # Determine groups that program affects
+                try:
+                    affected_groups = set()
+                    for z in zones:
+                        try:
+                            if int(z.get('id')) in zones_list and int(z.get('group_id') or 0) in target_groups:
+                                affected_groups.add(int(z.get('group_id') or 0))
+                        except Exception:
+                            continue
+                    for gid in affected_groups:
+                        try:
+                            db.cancel_program_run_for_group(int(p.get('id')), today_date, int(gid))
+                        except Exception:
+                            logger.exception('RainMonitor: cancel_program_run_for_group failed')
+                except Exception:
+                    logger.exception('RainMonitor: computing affected groups failed')
             try:
                 db.add_log('rain_postpone', str({'groups': target_groups, 'until': postpone_until}))
             except Exception:
                 pass
         except Exception:
-            logger.exception('RainMonitor apply_postpone failed')
+            logger.exception('RainMonitor on_rain_start failed')
+
+    def _on_rain_stop(self):
+        """Rain stopped: clear only rain-related postpones for groups using rain sensor."""
+        try:
+            groups = db.get_groups()
+            target_groups = [int(g['id']) for g in groups if db.get_group_use_rain(int(g['id'])) and int(g['id']) != 999]
+            if not target_groups:
+                return
+            zones = db.get_zones()
+            for z in zones:
+                try:
+                    if int(z.get('group_id') or 0) not in target_groups:
+                        continue
+                    # Clear postpone only if it was set due to rain
+                    if (z.get('postpone_reason') or '') == 'rain':
+                        db.update_zone_postpone(int(z['id']), None, None)
+                except Exception:
+                    pass
+            try:
+                db.add_log('rain_resume', str({'groups': target_groups}))
+            except Exception:
+                pass
+        except Exception:
+            logger.exception('RainMonitor on_rain_stop failed')
 
 class EnvMonitor:
     def __init__(self):
