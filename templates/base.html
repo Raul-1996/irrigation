@@ -374,17 +374,32 @@
     <div class="notification-container" id="notification-container"></div>
 
     <script>
-        // Update footer time
-        function updateFooterTime() {
-            const now = new Date();
-            const pad = (n)=> String(n).padStart(2,'0');
-            const timeString = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-            document.getElementById('footer-time').textContent = timeString;
+        // Update footer time from server clock to avoid client TZ drift
+        let _serverNow = null;
+        function _fmt(dt){ const p=n=>String(n).padStart(2,'0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`; }
+        async function syncFooterTimeFromServer(){
+            try{
+                const r = await fetch('/api/server-time?ts=' + Date.now(), { cache: 'no-store' });
+                const j = await r.json();
+                if (j && j.now_iso){
+                    // Parse 'YYYY-MM-DD HH:MM:SS' as local
+                    _serverNow = new Date(j.now_iso.replace(' ','T'));
+                    document.getElementById('footer-time').textContent = _fmt(_serverNow);
+                }
+            }catch(e){
+                // Fallback to client clock once
+                const now = new Date();
+                document.getElementById('footer-time').textContent = _fmt(now);
+            }
         }
-        
-        // Update time every second
-        updateFooterTime();
-        setInterval(updateFooterTime, 1000);
+        function tickFooter(){
+            if (_serverNow){ _serverNow = new Date(_serverNow.getTime() + 1000); document.getElementById('footer-time').textContent = _fmt(_serverNow); }
+            else { syncFooterTimeFromServer(); }
+        }
+        syncFooterTimeFromServer();
+        setInterval(tickFooter, 1000);
+        // Periodic resync to avoid drift (each 60s)
+        setInterval(syncFooterTimeFromServer, 60000);
         
         // API utility functions
         const api = {
