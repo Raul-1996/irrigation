@@ -3663,6 +3663,7 @@ def api_mqtt_zones_sse():
 @csrf.exempt
 @app.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
 def api_zone_mqtt_start(zone_id: int):
+    t0 = time.time()
     try:
         z = db.get_zone(zone_id)
         if not z:
@@ -3672,15 +3673,18 @@ def api_zone_mqtt_start(zone_id: int):
         if str(z.get('state') or '') == 'on':
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
         gid = int(z.get('group_id') or 0)
+        t1 = time.time()
         try:
             sched = get_scheduler()
             if sched:
                 sched.cancel_group_jobs(gid)
         except Exception:
             logger.exception('manual mqtt start: cancel_group_jobs failed')
-        # cancel_group_jobs already triggers centralized stop_all_in_group; avoid duplicate stops here to reduce latency
+        t2 = time.time()
         from services.zone_control import exclusive_start_zone
-        if not exclusive_start_zone(int(zone_id)):
+        ok = exclusive_start_zone(int(zone_id))
+        t3 = time.time()
+        if not ok:
             return jsonify({'success': False, 'message': 'Не удалось запустить зону'}), 400
         try:
             sched = get_scheduler()
@@ -3692,6 +3696,13 @@ def api_zone_mqtt_start(zone_id: int):
                     sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
         except Exception:
             logger.exception('manual mqtt start: schedule auto-stop failed')
+        t4 = time.time()
+        try:
+            db.add_log('diag_manual_start_timing', json.dumps({
+                'zone': int(zone_id), 't_cancel_ms': int((t2-t1)*1000), 't_exclusive_ms': int((t3-t2)*1000), 't_schedule_ms': int((t4-t3)*1000), 't_total_ms': int((t4-t0)*1000)
+            }))
+        except Exception:
+            pass
         try:
             db.add_log('zone_start_manual', json.dumps({'zone': int(zone_id), 'group': gid}))
         except Exception:
