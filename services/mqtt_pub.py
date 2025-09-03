@@ -56,26 +56,31 @@ def get_or_create_mqtt_client(server: dict):
                 host = server.get('host') or '127.0.0.1'
                 port = int(server.get('port') or 1883)
                 try:
-                    cl.connect(host, port, 30)
+                    # быстрый авто-ре-коннект и асинхронное подключение
+                    try:
+                        cl.reconnect_delay_set(min_delay=1, max_delay=5)
+                    except Exception:
+                        pass
+                    try:
+                        cl.max_inflight_messages_set(100)
+                    except Exception:
+                        pass
+                    # запускаем цикл и подключаемся асинхронно, чтобы не блокировать HTTP
+                    try:
+                        cl.loop_start()
+                    except Exception:
+                        pass
+                    cl.connect_async(host, port, 30)
                 except Exception:
                     # не кэшируем неудачное подключение
                     return None
-                try:
-                    cl.reconnect_delay_set(min_delay=1, max_delay=4)
-                except Exception:
-                    pass
                 def _on_disconnect(c, u, rc, properties=None):
+                    # оставляем клиента в кеше: loop_start и reconnect_delay_set обеспечат авто-переподключение
                     try:
-                        with _MQTT_CLIENTS_LOCK:
-                            if _MQTT_CLIENTS.get(sid) is c:
-                                _MQTT_CLIENTS.pop(sid, None)
+                        logger.info("MQTT client disconnected sid=%s rc=%s (auto-reconnect active)", sid, rc)
                     except Exception:
                         pass
                 cl.on_disconnect = _on_disconnect
-                try:
-                    cl.loop_start()
-                except Exception:
-                    pass
                 _MQTT_CLIENTS[sid] = cl
             except Exception:
                 return None
@@ -125,19 +130,14 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 rc = 0
             if rc != 0:
                 logger.warning(f"MQTT publish initial rc={rc}, try reconnect")
-                raise RuntimeError('publish_failed')
+                try:
+                    cl.reconnect()
+                except Exception:
+                    pass
+                res = cl.publish(t, payload=value, qos=0, retain=retain)
         except Exception:
-            try:
-                cl2 = get_or_create_mqtt_client(server)
-                if cl2 is None:
-                    return False
-                res2 = cl2.publish(t, payload=value, qos=1, retain=retain)
-                rc2 = getattr(res2, 'rc', 0)
-                if rc2 != 0:
-                    return False
-            except Exception:
-                logger.exception('MQTT publish failed on retry')
-                return False
+            logger.exception('MQTT publish failed')
+            return False
 
         # Also publish to the control topic '/on' for Wirenboard compatibility
         try:
