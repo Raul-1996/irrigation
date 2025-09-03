@@ -1275,6 +1275,14 @@
                 if (el.closest('.zone-start-btn')) swStart('click .zone-start-btn');
                 if (el.closest('#emergency-btn')) swStart('click #emergency-btn');
                 if (el.closest('#resume-btn')) swStart('click #resume-btn');
+                // Дополнительные кнопки управления
+                if (el.closest('.delay')) {
+                    // Определяем текст кнопки, чтобы различать 1/2/3 дня
+                    const txt = (el.closest('.delay')?.textContent || '').trim();
+                    swStart('click .delay ' + txt);
+                }
+                if (el.closest('.continue-group')) swStart('click .continue-group');
+                if (el.closest('.stop-group')) swStart('click .stop-group');
             }, {capture:true});
             const _fetch = window.fetch;
             window.fetch = async function(input, init){
