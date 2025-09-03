@@ -3706,18 +3706,51 @@ def api_zone_mqtt_start(zone_id: int):
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
         gid = int(z.get('group_id') or 0)
         t1 = time.time()
+        # 1) Быстрый параллельный OFF всех соседних зон группы (без ожиданий планировщика)
         try:
-            sched = get_scheduler()
-            if sched:
-                sched.cancel_group_jobs(gid)
+            zones_all = db.get_zones() or []
+            group_peers = [zz for zz in zones_all if int(zz.get('group_id') or 0) == gid and int(zz.get('id')) != int(zone_id)]
+            import concurrent.futures
+            def _off_peer(peer):
+                try:
+                    sid = peer.get('mqtt_server_id'); topic = (peer.get('topic') or '').strip()
+                    if mqtt and sid and topic:
+                        tpc = normalize_topic(topic)
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, tpc, '0', min_interval_sec=0.0)
+                except Exception:
+                    try: logger.exception('fast OFF peer failed')
+                    except Exception: pass
+                try:
+                    db.update_zone(int(peer['id']), {'state': 'off', 'watering_start_time': None})
+                except Exception:
+                    pass
+            if group_peers:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(group_peers))) as pool:
+                    list(pool.map(_off_peer, group_peers))
         except Exception:
-            logger.exception('manual mqtt start: cancel_group_jobs failed')
+            logger.exception('fast parallel OFF peers failed')
         t2 = time.time()
-        from services.zone_control import exclusive_start_zone
-        ok = exclusive_start_zone(int(zone_id))
+        # 2) Публикация MQTT ON для целевой зоны
+        try:
+            sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+            if mqtt and sid and topic:
+                tpc = normalize_topic(topic)
+                server = db.get_mqtt_server(int(sid))
+                if server:
+                    _publish_mqtt_value(server, tpc, '1', min_interval_sec=0.0)
+        except Exception:
+            logger.exception('fast ON publish failed')
+            return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
         t3 = time.time()
-        if not ok:
-            return jsonify({'success': False, 'message': 'Не удалось запустить зону'}), 400
+        # 3) Обновление БД для целевой зоны
+        try:
+            db.update_zone(int(zone_id), {'state': 'on', 'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'watering_start_source': 'manual', 'commanded_state': 'on'})
+        except Exception:
+            pass
+        t4 = time.time()
+        # 4) Планирование автостопов (может выполняться после ответа, но оставим синхронно для простоты теста)
         try:
             sched = get_scheduler()
             if sched and not app.config.get('TESTING'):
@@ -3728,10 +3761,15 @@ def api_zone_mqtt_start(zone_id: int):
                     sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
         except Exception:
             logger.exception('manual mqtt start: schedule auto-stop failed')
-        t4 = time.time()
+        t5 = time.time()
         try:
             db.add_log('diag_manual_start_timing', json.dumps({
-                'zone': int(zone_id), 't_cancel_ms': int((t2-t1)*1000), 't_exclusive_ms': int((t3-t2)*1000), 't_schedule_ms': int((t4-t3)*1000), 't_total_ms': int((t4-t0)*1000)
+                'zone': int(zone_id),
+                't_fast_off_ms': int((t2-t1)*1000),
+                't_on_publish_ms': int((t3-t2)*1000),
+                't_db_update_ms': int((t4-t3)*1000),
+                't_schedule_ms': int((t5-t4)*1000),
+                't_total_ms': int((t5-t0)*1000)
             }))
         except Exception:
             pass
