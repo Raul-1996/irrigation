@@ -532,6 +532,31 @@ _RAIN_MONITOR_CFG_SIG = None
 _ENV_MONITOR_STARTED = False
 _ENV_MONITOR_CFG_SIG = None
 _ENV_MONITOR_LAST_RESTART = 0.0
+_MQTT_WARMED = False
+
+def _warm_mqtt_clients() -> None:
+    global _MQTT_WARMED
+    if _MQTT_WARMED:
+        return
+    try:
+        servers = db.get_mqtt_servers() or []
+        for s in servers:
+            try:
+                if int(s.get('enabled') or 1) != 1:
+                    continue
+                _get_or_create_mqtt_client(s)
+            except Exception:
+                pass
+        _MQTT_WARMED = True
+        try:
+            logger.info("MQTT clients warmed: %s", len(servers))
+        except Exception:
+            pass
+    except Exception:
+        try:
+            logger.exception('MQTT warm-up failed')
+        except Exception:
+            pass
 
 class RainMonitor:
     def __init__(self):
@@ -956,6 +981,13 @@ def _init_scheduler_before_request():
             _ENV_MONITOR_CFG_SIG = esig
     except Exception:
         logger.exception('EnvMonitor before_request failed')
+
+    # One-time warm-up of MQTT publisher clients to avoid first-use latency
+    try:
+        if not app.config.get('TESTING'):
+            _warm_mqtt_clients()
+    except Exception:
+        pass
 
 
 app.register_blueprint(status_bp)
