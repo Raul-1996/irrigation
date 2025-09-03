@@ -3706,29 +3706,34 @@ def api_zone_mqtt_start(zone_id: int):
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
         gid = int(z.get('group_id') or 0)
         t1 = time.time()
-        # 1) Быстрый параллельный OFF всех соседних зон группы (без ожиданий планировщика)
+        # 1) Быстрый OFF соседей (только реально включённых), запуск в фоне без ожидания
         try:
             zones_all = db.get_zones() or []
-            group_peers = [zz for zz in zones_all if int(zz.get('group_id') or 0) == gid and int(zz.get('id')) != int(zone_id)]
-            import concurrent.futures
-            def _off_peer(peer):
-                try:
-                    sid = peer.get('mqtt_server_id'); topic = (peer.get('topic') or '').strip()
-                    if mqtt and sid and topic:
-                        tpc = normalize_topic(topic)
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            _publish_mqtt_value(server, tpc, '0', min_interval_sec=0.0)
-                except Exception:
-                    try: logger.exception('fast OFF peer failed')
-                    except Exception: pass
-                try:
-                    db.update_zone(int(peer['id']), {'state': 'off', 'watering_start_time': None})
-                except Exception:
-                    pass
-            if group_peers:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(group_peers))) as pool:
-                    list(pool.map(_off_peer, group_peers))
+            peers_on = [zz for zz in zones_all if int(zz.get('group_id') or 0) == gid and int(zz.get('id')) != int(zone_id) and str(zz.get('state') or '').lower() == 'on']
+            if peers_on:
+                import threading, concurrent.futures
+                def _bg_off():
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(peers_on))) as pool:
+                            def _off_peer(peer):
+                                try:
+                                    sid = peer.get('mqtt_server_id'); topic = (peer.get('topic') or '').strip()
+                                    if mqtt and sid and topic:
+                                        tpc = normalize_topic(topic)
+                                        server = db.get_mqtt_server(int(sid))
+                                        if server:
+                                            _publish_mqtt_value(server, tpc, '0', min_interval_sec=0.0)
+                                except Exception:
+                                    pass
+                                try:
+                                    db.update_zone(int(peer['id']), {'state': 'off', 'watering_start_time': None})
+                                except Exception:
+                                    pass
+                            list(pool.map(_off_peer, peers_on))
+                    except Exception:
+                        try: logger.exception('fast OFF peers bg failed')
+                        except Exception: pass
+                threading.Thread(target=_bg_off, daemon=True).start()
         except Exception:
             logger.exception('fast parallel OFF peers failed')
         t2 = time.time()
@@ -3750,18 +3755,25 @@ def api_zone_mqtt_start(zone_id: int):
         except Exception:
             pass
         t4 = time.time()
-        # 4) Планирование автостопов (может выполняться после ответа, но оставим синхронно для простоты теста)
-        try:
-            sched = get_scheduler()
-            if sched and not app.config.get('TESTING'):
-                dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
-                if dur > 0:
-                    sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
-                    from datetime import timedelta
-                    sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
-        except Exception:
-            logger.exception('manual mqtt start: schedule auto-stop failed')
+        # 4) Планирование автостопов — в фоне, чтобы не задерживать ответ
         t5 = time.time()
+        try:
+            import threading
+            def _bg_schedule():
+                try:
+                    sched = get_scheduler()
+                    if sched and not app.config.get('TESTING'):
+                        dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
+                        if dur > 0:
+                            sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
+                            from datetime import timedelta
+                            sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
+                except Exception:
+                    try: logger.exception('manual mqtt start: schedule auto-stop failed')
+                    except Exception: pass
+            threading.Thread(target=_bg_schedule, daemon=True).start()
+        except Exception:
+            pass
         try:
             db.add_log('diag_manual_start_timing', json.dumps({
                 'zone': int(zone_id),
