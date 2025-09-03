@@ -645,6 +645,33 @@
             if (ev.key === 'h' || ev.key === 'H') setVisible(!visible);
         });
     })();
+    // Stopwatch panel (press 's') for UI diagnostics; starts on control button click automatically
+    (function(){
+        let swPanel; let swVisible = false; let marks = []; let t0 = 0;
+        function fmt(ms){ return `${Math.round(ms)}ms`; }
+        function build(){
+            swPanel = document.createElement('div');
+            swPanel.style.position='fixed'; swPanel.style.bottom='10px'; swPanel.style.right='10px';
+            swPanel.style.background='rgba(0,0,0,0.85)'; swPanel.style.color='#fff'; swPanel.style.padding='10px 12px'; swPanel.style.borderRadius='8px'; swPanel.style.fontSize='12px'; swPanel.style.zIndex='2000';
+            swPanel.style.maxWidth='480px'; swPanel.style.width='480px'; swPanel.style.display='none'; swPanel.style.maxHeight='60vh'; swPanel.style.overflow='auto';
+            swPanel.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;display:flex;align-items:center;gap:8px;">Stopwatch <button id="sw-reset" style="margin-left:auto;background:#1976d2;color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;">Reset</button><button id="sw-close" style="background:#555;color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;">×</button></div><div id="sw-content" style="white-space:pre;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;"></div>';
+            document.body.appendChild(swPanel);
+            swPanel.querySelector('#sw-close').onclick = ()=> setVisible(false);
+            swPanel.querySelector('#sw-reset').onclick = ()=> { marks = []; t0 = 0; render(); };
+        }
+        function setVisible(v){ swVisible = v; if (!swPanel) build(); swPanel.style.display = swVisible?'block':'none'; if (swVisible) render(); }
+        function render(){
+            if (!swPanel) return; const el = swPanel.querySelector('#sw-content'); if (!el) return;
+            if (!marks.length){ el.textContent = '—'; return; }
+            let out = ''; let prev = t0; marks.forEach((m,i)=>{ const d = m.t - prev; const tot = m.t - t0; out += `t${i} ${m.label}: ${fmt(tot)} (+${fmt(d)})\n`; prev = m.t; });
+            out += `\nTotal: ${fmt(marks[marks.length-1].t - t0)}`;
+            el.textContent = out;
+        }
+        function start(label){ t0 = performance.now(); marks = [{label: label||'click', t: t0}]; if (swVisible) render(); }
+        function mark(label){ if (!t0) return; marks.push({label: label||'mark', t: performance.now()}); if (swVisible) render(); }
+        window.__sw = { start, mark, show: setVisible };
+        document.addEventListener('keydown', (ev)=>{ if (ev.key === 's' || ev.key === 'S') setVisible(!swVisible); });
+    })();
     // Real user timing for Chrome (from navigation start to content complete state on Status page)
     (function(){
       try {
