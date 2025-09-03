@@ -1304,7 +1304,13 @@ class IrrigationDB:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                query = 'SELECT * FROM logs WHERE 1=1'
+                # В SQLite CURRENT_TIMESTAMP хранится в UTC. Для UI возвращаем локальное время.
+                # Приводим timestamp к локальному в SELECT, остальное оставляем как есть.
+                query = (
+                    "SELECT id, type, details, "
+                    "strftime('%Y-%m-%d %H:%M:%S', timestamp, 'localtime') AS timestamp "
+                    "FROM logs WHERE 1=1"
+                )
                 params = []
                 
                 if event_type:
