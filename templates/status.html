@@ -478,9 +478,9 @@
             }
         } catch (e) {}
         const now = new Date();
-        const dateStr = now.toLocaleDateString('ru-RU');
-        const timeStr = now.toLocaleTimeString('ru-RU');
-        document.getElementById('datetime').textContent = `${dateStr} ${timeStr}`;
+        const pad = (n)=> String(n).padStart(2,'0');
+        const dt = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        document.getElementById('datetime').textContent = dt;
     }
     
     async function loadStatusData() {
@@ -598,7 +598,7 @@
                         let txt = '—';
                         if (statusData && statusData.emergency_stop) txt = 'До отмены аварии';
                         else if (v==='Никогда') txt = 'Никогда';
-                        else if (v) txt = String(v).replace('T',' ').slice(0,16);
+                        else if (v) txt = String(v).replace('T',' ').slice(0,19);
                         nextCell.textContent = txt;
                     });
                 }catch(e){}
@@ -957,7 +957,7 @@
                 const item = nextWateringData.find(x => x.zone_id === zone.id) || {};
                 const nextDT = item.next_datetime;
                 if (nextDT) {
-                    nextWatering = String(nextDT).replace('T',' ').slice(0,16);
+                    nextWatering = String(nextDT).replace('T',' ').slice(0,19);
                 } else if (item.next_watering === 'Никогда') {
                     nextWatering = 'Никогда';
                 }
@@ -1293,7 +1293,7 @@
                     const data = await resp.json();
                     let nextText = '—';
                     if (data && data.next_datetime) {
-                        nextText = String(data.next_datetime).replace('T',' ').slice(0,16);
+                        nextText = String(data.next_datetime).replace('T',' ').slice(0,19);
                     } else if (data && data.next_watering === 'Никогда') {
                         nextText = 'Никогда';
                     }

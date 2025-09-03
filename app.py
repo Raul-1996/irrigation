@@ -2695,7 +2695,7 @@ def api_status():
 
     logger.info(f"api_status: temp={temperature} hum={humidity} temp_enabled={temp_enabled} hum_enabled={hum_enabled}")
     return jsonify({
-        'datetime': datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+        'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'temperature': temperature,
         'humidity': humidity,
         'rain_enabled': bool(rain_cfg.get('enabled')),
@@ -2841,7 +2841,7 @@ def api_postpone():
         return jsonify({
             "success": True, 
             "message": f"Полив отложен на {days} дней",
-            "postpone_until": postpone_date.strftime('%d.%m.%Y %H:%M:%S')
+            "postpone_until": postpone_date.strftime('%Y-%m-%d %H:%M:%S')
         })
     
     return jsonify({"success": False, "message": "Неверное действие"}), 400
