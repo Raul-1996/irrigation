@@ -1265,6 +1265,28 @@
     
     // Инициализация
     document.addEventListener('DOMContentLoaded', () => {
+        // Stopwatch wiring (delegated)
+        try{
+            function swStart(label){ try{ window.__sw && window.__sw.start(label||'click'); }catch(e){} }
+            function swMark(label){ try{ window.__sw && window.__sw.mark(label||'mark'); }catch(e){} }
+            document.addEventListener('click', (ev)=>{
+                const el = ev.target;
+                if (!(el instanceof Element)) return;
+                if (el.closest('.zone-start-btn')) swStart('click .zone-start-btn');
+                if (el.closest('#emergency-btn')) swStart('click #emergency-btn');
+                if (el.closest('#resume-btn')) swStart('click #resume-btn');
+            }, {capture:true});
+            const _fetch = window.fetch;
+            window.fetch = async function(input, init){
+                const url = (typeof input === 'string') ? input : (input && input.url) || '';
+                const isCtl = /\/api\/(zones\/.+\/(mqtt\/)?(start|stop)|groups\/\d+\/(start-from-first|stop)|emergency-(stop|resume)|postpone)/.test(url);
+                if (isCtl) swMark('fetch:start '+url);
+                const resp = await _fetch(input, init);
+                if (isCtl) swMark('fetch:end '+url);
+                return resp;
+            };
+            window.addEventListener('zones-rendered', ()=> swMark('zones-rendered'));
+        }catch(e){}
         // Обновляем время сразу
         updateDateTime();
         
