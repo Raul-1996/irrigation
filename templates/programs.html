@@ -515,6 +515,8 @@
         showStep(1);
         await loadZoneSelector();
         clearFields();
+        // После загрузки селектора навесим обработчики синхронизации чекбоксов
+        wireZoneSelectionHandlers();
     }
     
     async function editProg(id) {
@@ -540,7 +542,12 @@
             document.querySelectorAll('.zone-check').forEach(checkbox => {
                 checkbox.checked = program.zones.includes(parseInt(checkbox.value));
             });
+            // После проставления зон — обновим состояние групп и мастера
+            updateAllGroupCheckboxes();
+            updateMasterCheckbox();
         }, 100);
+        // Навесим обработчики
+        wireZoneSelectionHandlers();
     }
     
     async function deleteProg(id) {
@@ -677,12 +684,79 @@
         document.querySelectorAll('.group-check, .zone-check').forEach(ch => {
             ch.checked = isChecked;
         });
+        // Сбросим промежуточное состояние у групп и пересчитаем мастер
+        document.querySelectorAll('.group-check').forEach(ch=>{ ch.indeterminate = false; });
+        updateMasterCheckbox();
     }
     
     function toggleGroup(group, checkbox) {
         document.querySelectorAll(`.zone-check[data-group='${group}']`).forEach(ch => {
             ch.checked = checkbox.checked;
         });
+        // Группа кликнута пользователем — убираем indeterminate и пересчитываем мастер
+        checkbox.indeterminate = false;
+        updateMasterCheckbox();
+    }
+
+    function updateGroupCheckbox(groupId){
+        const groupCb = document.querySelector(`.group-check[data-group='${groupId}']`);
+        if (!groupCb) return;
+        const zones = document.querySelectorAll(`.zone-check[data-group='${groupId}']`);
+        const total = zones.length;
+        const checked = Array.from(zones).filter(z=>z.checked).length;
+        groupCb.checked = (total>0 && checked === total);
+        groupCb.indeterminate = (checked>0 && checked<total);
+    }
+
+    function updateAllGroupCheckboxes(){
+        document.querySelectorAll('.group-check').forEach(cb=>{
+            const gid = cb.getAttribute('data-group');
+            updateGroupCheckbox(gid);
+        });
+    }
+
+    function updateMasterCheckbox(){
+        const master = document.getElementById('selectAllZones');
+        const zones = document.querySelectorAll('.zone-check');
+        const groups = document.querySelectorAll('.group-check');
+        const totalZ = zones.length;
+        const checkedZ = Array.from(zones).filter(z=>z.checked).length;
+        const totalG = groups.length;
+        const checkedG = Array.from(groups).filter(g=>g.checked).length;
+        master.checked = (totalZ>0 && checkedZ === totalZ && totalG>0 && checkedG === totalG);
+        master.indeterminate = (!master.checked) && ((checkedZ>0 && checkedZ<totalZ) || (checkedG>0 && checkedG<totalG));
+    }
+
+    function wireZoneSelectionHandlers(){
+        // Делегируем клики на контейнер зон
+        const container = document.getElementById('zoneSelector');
+        if (!container) return;
+        container.addEventListener('change', (ev)=>{
+            const t = ev.target;
+            if (!(t instanceof HTMLInputElement)) return;
+            if (t.classList.contains('zone-check')){
+                const gid = t.getAttribute('data-group');
+                updateGroupCheckbox(gid);
+                updateMasterCheckbox();
+            } else if (t.classList.contains('group-check')){
+                const gid = t.getAttribute('data-group');
+                toggleGroup(gid, t);
+                updateGroupCheckbox(gid);
+                updateMasterCheckbox();
+            }
+        });
+        // Также навесим на мастер
+        const master = document.getElementById('selectAllZones');
+        if (master){
+            master.addEventListener('change', (ev)=>{
+                toggleAllZones(ev.target);
+                updateAllGroupCheckboxes();
+                updateMasterCheckbox();
+            });
+        }
+        // Начальная синхронизация
+        updateAllGroupCheckboxes();
+        updateMasterCheckbox();
     }
     
     async function checkConflicts() {
