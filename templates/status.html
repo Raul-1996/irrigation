@@ -775,13 +775,13 @@
             tb.style.display = 'none';
         } else {
             tb.style.display = 'inline-block';
-            tv.textContent = (statusData.temperature === 'нет данных') ? 'нет данных' : String(statusData.temperature);
+            tv.textContent = (statusData.temperature === 'нет данных') ? 'нет данных' : String(Math.round(Number(statusData.temperature)));
         }
         if (statusData.humidity === null || typeof statusData.humidity === 'undefined') {
             hb.style.display = 'none';
         } else {
             hb.style.display = 'inline-block';
-            hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(statusData.humidity);
+            hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(Math.round(Number(statusData.humidity)));
         }
         // Отображение датчика дождя: показывать, только если глобально включен
         (function(){
@@ -808,11 +808,11 @@
                     const val = js && js.values ? js.values : {};
                     if (typeof val.temp !== 'undefined' && val.temp !== null) {
                         tb.style.display = 'inline-block';
-                        tv.textContent = String(val.temp);
+                        tv.textContent = String(Math.round(Number(val.temp)));
                     }
                     if (typeof val.hum !== 'undefined' && val.hum !== null) {
                         hb.style.display = 'inline-block';
-                        hv.textContent = String(val.hum);
+                        hv.textContent = String(Math.round(Number(val.hum)));
                     }
                     if (tv.textContent !== 'нет данных' && hv.textContent !== 'нет данных') {
                         clearInterval(envProbeTimer); envProbeTimer = null;
