@@ -47,6 +47,14 @@ MSW_AUTO_ENABLED = (os.getenv("EMULATOR_MSW_AUTO_ENABLED", "1") == "1")
 # Autopublish interval for MSW sensors (min 30s)
 MSW_AUTO_INTERVAL_SECONDS = float(os.getenv("EMULATOR_MSW_AUTO_INTERVAL", "30.0"))
 
+# Logging controls (can be toggled via HTTP API)
+LOG_RX = (os.getenv("EMULATOR_LOG_RX", "1") == "1")
+LOG_TX = (os.getenv("EMULATOR_LOG_TX", "1") == "1")
+LOG_CONTROLLER = (os.getenv("EMULATOR_LOG_CONTROLLER", "1") == "1")
+LOG_RX_MSW = (os.getenv("EMULATOR_LOG_RX_MSW", "1") == "1")
+LOG_RX_INPUTS = (os.getenv("EMULATOR_LOG_RX_INPUTS", "1") == "1")
+LOG_RX_RELAYS = (os.getenv("EMULATOR_LOG_RX_RELAYS", "1") == "1")
+
 
 def build_relay_topics(device_ids: List[str], num_channels: int) -> List[str]:
     topics: List[str] = []
@@ -151,10 +159,16 @@ def apply_local_state_raw(topic: str, value: str) -> None:
         previous = topic_to_state.get(t, "0")
         changed = (want != previous)
         topic_to_state[t] = want
-    if changed:
-        log_event(f"offline: applied state topic={t} payload={want}")
-    else:
-        log_event(f"offline: state unchanged topic={t} payload={want}")
+    # Respect RX category toggles for offline logs
+    should_log = False
+    if LOG_RX:
+        if (t in RELAY_TOPICS_SET and LOG_RX_RELAYS) or (t in INPUT_SWITCH_TOPICS_SET and LOG_RX_INPUTS) or (t in INPUT_COUNTER_TOPICS_SET and LOG_RX_INPUTS) or (t in MSW_TOPICS_SET and LOG_RX_MSW):
+            should_log = True
+    if should_log:
+        if changed:
+            log_event(f"offline: applied state topic={t} payload={want}")
+        else:
+            log_event(f"offline: state unchanged topic={t} payload={want}")
 
 
 def normalize_topic(t: str) -> str:
@@ -241,7 +255,10 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
         # Unknown topic: store raw
         want = raw
 
-    log_event(f"device: RX topic={topic} payload={raw!r} -> want={want}")
+    # Conditional RX logging by topic class
+    if (topic in RELAY_TOPICS_SET and LOG_RX_RELAYS) or (topic in INPUT_SWITCH_TOPICS_SET and LOG_RX_INPUTS) or (topic in INPUT_COUNTER_TOPICS_SET and LOG_RX_INPUTS) or (topic in MSW_TOPICS_SET and LOG_RX_MSW):
+        if LOG_RX:
+            log_event(f"device: RX topic={topic} payload={raw!r} -> want={want}")
 
     with state_lock:
         previous = topic_to_state.get(topic, "0")
@@ -260,7 +277,8 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
             last_echo_ts[topic] = now
         if ECHO_DELAY_SECONDS > 0:
             time.sleep(ECHO_DELAY_SECONDS)
-        log_event(f"device: TX echo topic={topic} payload={want}")
+        if LOG_TX:
+            log_event(f"device: TX echo topic={topic} payload={want}")
         client.publish(topic, payload=want, qos=0, retain=False)
 
 
@@ -301,12 +319,16 @@ def publish_command(topic: str, value: str) -> None:
     else:
         v = raw
 
-    log_event(f"controller: CMD publish topic={t} payload={v}")
+    if LOG_CONTROLLER:
+        log_event(f"controller: CMD publish topic={t} payload={v}")
     info = None
     try:
         info = controller_client.publish(t, payload=v, qos=0, retain=False)
     except Exception as exc:
         log_event(f"controller: publish error: {exc}")
+    # Mark command origin for diagnostics (emulator controller vs device echo)
+    origin = 'emulator_controller'
+    log_event(f"origin: {origin} topic={t} payload={v}")
     # Fallback: if either client isn't connected, or publish failed, apply state locally
     try:
         dev_connected = bool(getattr(device_client, "is_connected")() if hasattr(device_client, "is_connected") else False)
@@ -319,6 +341,8 @@ def publish_command(topic: str, value: str) -> None:
     publish_failed = (info is None) or (getattr(info, 'rc', 0) != 0)
     if (not dev_connected) or (not ctrl_connected) or publish_failed:
         apply_local_state_raw(t, v)
+        if LOG_CONTROLLER:
+            log_event(f"controller: applied locally topic={t} payload={v}")
 
 # ------------------------------
 # Flask app
@@ -455,6 +479,7 @@ def index():
     .btn { padding: 4px 8px; font-size: 12px; border: 1px solid #ccc; border-radius: 6px; background: #f8f8f8; cursor: pointer; }
     .btn:hover { background: #f0f0f0; }
     .controls { display: flex; gap: 6px; flex-wrap: wrap; }
+    .controls label { display: inline-flex; align-items: center; gap: 4px; }
     .global-controls { display: flex; gap: 8px; margin: 8px 0 14px; }
     .btn.primary { background: #e8f5e9; border-color: #b7e1c1; }
     .btn.danger { background: #fdecea; border-color: #f5c2c7; }
@@ -512,6 +537,22 @@ def index():
           }
         }
       }
+      // Apply log toggle states
+      const lt = (data && data.log_toggles) || {};
+      const map = [
+        ['log-rx','rx'],
+        ['log-tx','tx'],
+        ['log-controller','controller'],
+        ['log-rx-msw','rx_msw'],
+        ['log-rx-inputs','rx_inputs'],
+        ['log-rx-relays','rx_relays'],
+      ];
+      for (const [id, key] of map) {
+        const el = document.getElementById(id);
+        if (el && typeof lt[key] !== 'undefined') {
+          el.checked = !!lt[key];
+        }
+      }
     }
     async function refresh() {
       try { const data = await apiState(); applyState(data); } catch (e) {}
@@ -567,6 +608,34 @@ def index():
       poll(); setInterval(poll, 1000);
       const clearBtn = document.getElementById('logs-clear');
       if (clearBtn) clearBtn.addEventListener('click', async function(){ await fetch('/api/logs/clear', {method:'POST'}); setTimeout(poll, 100); });
+      const copyBtn = document.getElementById('logs-copy');
+      if (copyBtn) copyBtn.addEventListener('click', async function(){
+        try {
+          const box = document.getElementById('logs-box');
+          const text = box ? box.innerText : '';
+          await navigator.clipboard.writeText(text);
+          copyBtn.textContent = 'Скопировано';
+          setTimeout(()=> copyBtn.textContent = 'Копировать', 1500);
+        } catch (e) {
+          alert('Не удалось скопировать в буфер обмена');
+        }
+      });
+
+      // Bind log toggles
+      const bindToggle = (id, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', async function(){
+          const payload = {}; payload[key] = !!el.checked;
+          try { await fetch('/api/logs/toggles', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) }); } catch(e) {}
+        });
+      };
+      bindToggle('log-rx','rx');
+      bindToggle('log-tx','tx');
+      bindToggle('log-controller','controller');
+      bindToggle('log-rx-msw','rx_msw');
+      bindToggle('log-rx-inputs','rx_inputs');
+      bindToggle('log-rx-relays','rx_relays');
     }
     document.addEventListener('DOMContentLoaded', setup);
   </script>
@@ -574,14 +643,25 @@ def index():
 <body>
   <h1>MQTT Эмулятор wb-mr6cv3</h1>
   <div class=\"legend\">Пять устройств: <strong>101–105</strong>, по шесть каналов <strong>K1–K6</strong>. Зелёная лампа — «включено» (1), красная — «выключено» (0).<div class=\"muted\">Брокер: \""" + BROKER_HOST + ":" + str(BROKER_PORT) + "\"</div></div>
-  <div class=\"global-controls\">
+  <div class=\"global-controls\"> 
     <button class=\"btn primary\" id=\"all-on\">Включить все (1)</button>
     <button class=\"btn danger\" id=\"all-off\">Выключить все (0)</button>
   </div>
+  <div class=\"card\" style=\"max-width:980px;margin:12px auto;\"> 
+    <div class=\"device-title\">Логи — фильтры</div>
+    <div class=\"controls\">
+      <label><input type=\"checkbox\" id=\"log-rx\"/> RX</label>
+      <label><input type=\"checkbox\" id=\"log-tx\"/> TX</label>
+      <label><input type=\"checkbox\" id=\"log-controller\"/> Controller</label>
+      <label><input type=\"checkbox\" id=\"log-rx-msw\"/> MSW</label>
+      <label><input type=\"checkbox\" id=\"log-rx-inputs\"/> Inputs</label>
+      <label><input type=\"checkbox\" id=\"log-rx-relays\"/> Relays</label>
+    </div>
+  </div>
   <div class=\"grid\">""" + cards_html + "\n" + inputs_html + "\n" + msw_html + """\n  </div>
-  <div class=\"logs\">
+  <div class=\"logs\"> 
     <div class=\"logs-header\">Логи MQTT
-      <div class=\"logs-actions\"><button class=\"btn\" id=\"logs-clear\">Очистить</button></div>
+      <div class=\"logs-actions\"><button class=\"btn\" id=\"logs-copy\">Копировать</button><button class=\"btn\" id=\"logs-clear\">Очистить</button></div>
     </div>
     <div class=\"logs-body\" id=\"logs-box\"></div>
   </div>
@@ -597,7 +677,15 @@ def index():
 def api_state():
     with state_lock:
         return jsonify({
-            "states": {t: topic_to_state.get(t, "0") for t in ALL_TOPICS}
+            "states": {t: topic_to_state.get(t, "0") for t in ALL_TOPICS},
+            "log_toggles": {
+                "rx": LOG_RX,
+                "tx": LOG_TX,
+                "controller": LOG_CONTROLLER,
+                "rx_msw": LOG_RX_MSW,
+                "rx_inputs": LOG_RX_INPUTS,
+                "rx_relays": LOG_RX_RELAYS,
+            }
         })
 
 
@@ -612,6 +700,29 @@ def api_logs_clear():
     with log_lock:
         log_buffer.clear()
     return jsonify({"ok": True})
+
+
+@app.post("/api/logs/toggles")
+def api_logs_toggles():
+    global LOG_RX, LOG_TX, LOG_CONTROLLER, LOG_RX_MSW, LOG_RX_INPUTS, LOG_RX_RELAYS
+    data = request.get_json(silent=True) or {}
+    def _coerce(v):
+        return bool(v) if isinstance(v, bool) else (str(v).strip() in ("1","true","True","on","ON"))
+    if 'rx' in data: LOG_RX = _coerce(data['rx'])
+    if 'tx' in data: LOG_TX = _coerce(data['tx'])
+    if 'controller' in data: LOG_CONTROLLER = _coerce(data['controller'])
+    if 'rx_msw' in data: LOG_RX_MSW = _coerce(data['rx_msw'])
+    if 'rx_inputs' in data: LOG_RX_INPUTS = _coerce(data['rx_inputs'])
+    if 'rx_relays' in data: LOG_RX_RELAYS = _coerce(data['rx_relays'])
+    return jsonify({
+        "ok": True,
+        "rx": LOG_RX,
+        "tx": LOG_TX,
+        "controller": LOG_CONTROLLER,
+        "rx_msw": LOG_RX_MSW,
+        "rx_inputs": LOG_RX_INPUTS,
+        "rx_relays": LOG_RX_RELAYS,
+    })
 
 
 @app.post("/api/toggle")

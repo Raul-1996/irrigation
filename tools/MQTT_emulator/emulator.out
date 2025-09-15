@@ -1,7 +1,6 @@
+[13:54:39] offline: applied state topic=/devices/wb-msw-v4_107/controls/Temperature payload=23.49
+[13:54:39] offline: applied state topic=/devices/wb-msw-v4_107/controls/Humidity payload=40.00
  * Serving Flask app 'mqtt_relay_emulator'
  * Debug mode: off
-[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
- * Running on all addresses (0.0.0.0)
- * Running on http://127.0.0.1:5055
- * Running on http://192.168.1.230:5055
-[33mPress CTRL+C to quit[0m
+Address already in use
+Port 5055 is in use by another program. Either identify and stop that program, or start the server with a different port.
