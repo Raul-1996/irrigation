@@ -1742,13 +1742,24 @@ def api_zones_next_watering_bulk():
                 if zid not in offsets:
                     continue
                 pinfo = prog_info.get(p.get('id')) or {}
-                # Если программа уже идёт сегодня, и эта зона ещё не дошла по очереди — показываем сегодня
-                if pinfo.get('in_progress') and pinfo.get('today_start'):
+                # Определим отмену сегодняшнего запуска для группы зоны (если today_start есть)
+                cancelled_today = False
+                try:
+                    zinfo = next((zz for zz in all_zones if int(zz.get('id')) == int(zid)), None)
+                    gid = int(zinfo.get('group_id') or 0) if zinfo else 0
+                    if gid and pinfo.get('today_start'):
+                        run_date = pinfo['today_start'].strftime('%Y-%m-%d')
+                        cancelled_today = db.is_program_run_cancelled_for_group(int(p.get('id')), run_date, gid)
+                except Exception:
+                    cancelled_today = False
+
+                if pinfo.get('in_progress') and pinfo.get('today_start') and not cancelled_today:
+                    # Программа идёт, зона ещё не дошла — считаем на сегодня
                     off_min = int(offsets.get(zid, 0))
                     if off_min >= int(pinfo.get('elapsed_min') or 0):
                         cand = pinfo['today_start'] + timedelta(minutes=off_min)
                     else:
-                        # уже прошла — переносим на следующий запуск программы
+                        # Эта зона уже прошла — переносим на следующий запуск программы
                         start_dt = pinfo.get('next_start')
                         if not start_dt:
                             continue
@@ -1760,11 +1771,7 @@ def api_zones_next_watering_bulk():
                     cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
                     # Если текущая программа для группы ранее отменена — переносим на следующий день программы
                     try:
-                        zinfo = next((zz for zz in all_zones if int(zz.get('id')) == int(zid)), None)
-                        gid = int(zinfo.get('group_id') or 0) if zinfo else 0
-                        if gid and p.get('id') is not None and pinfo.get('today_start'):
-                            run_date = pinfo['today_start'].strftime('%Y-%m-%d')
-                            if db.is_program_run_cancelled_for_group(int(p.get('id')), run_date, gid):
+                        if p.get('id') is not None and pinfo.get('today_start') and cancelled_today:
                                 # найти следующий день из дней программы
                                 hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
                                 ns = None
