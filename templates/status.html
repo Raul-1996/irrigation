@@ -181,6 +181,20 @@
         word-break: break-word; /* перенос длинных слов при необходимости */
         overflow-wrap: anywhere;
     }
+    /* То же поведение для кнопки «Продолжить по расписанию» */
+    .btn-group button.cancel-postpone {
+        white-space: normal;
+        text-align: center;
+        line-height: 1.2;
+        height: auto;
+        min-height: 40px;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
     .btn-group button:hover {
         transform: translateY(-1px);
         box-shadow: 0 2px 4px rgba(0,0,0,0.2);
@@ -292,6 +306,19 @@
     }
     /* Исключение для кнопок отложки: перенос текста даже на широких экранах */
     .status-grid .card .btn-group button.delay {
+        white-space: normal;
+        height: auto;
+        min-height: 40px;
+        line-height: 1.2;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    /* И для «Продолжить по расписанию» на десктопе */
+    .status-grid .card .btn-group button.cancel-postpone {
         white-space: normal;
         height: auto;
         min-height: 40px;
