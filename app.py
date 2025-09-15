@@ -869,6 +869,37 @@ def _init_scheduler_before_request():
                         pass
             except Exception:
                 pass
+            # Немедленно закрываем мастер-клапаны (mode-aware, retain), чтобы не ждать отложенного закрытия
+            try:
+                seen = set()
+                for g in (db.get_groups() or []):
+                    try:
+                        if int(g.get('use_master_valve') or 0) != 1:
+                            continue
+                    except Exception:
+                        continue
+                    mtopic = (g.get('master_mqtt_topic') or '').strip()
+                    msid = g.get('master_mqtt_server_id')
+                    if not mtopic or not msid:
+                        continue
+                    key = (int(msid), mtopic)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        server = db.get_mqtt_server(int(msid))
+                        if server:
+                            try:
+                                mode = (g.get('master_mode') or 'NC').strip().upper()
+                            except Exception:
+                                mode = 'NC'
+                            close_val = '1' if mode == 'NO' else '0'
+                            logger.info("Boot initial sync: closing master valve sid=%s topic=%s mode=%s val=%s", msid, mtopic, mode, close_val)
+                            _publish_mqtt_value(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
+                    except Exception:
+                        logger.exception('Boot initial sync: master valve close failed')
+            except Exception:
+                logger.exception('Boot initial sync: master valve sweep failed')
             _INITIAL_SYNC_DONE = True
             logger.info("Initial sync: all zones set to OFF and MQTT OFF published")
         except Exception as e:
@@ -901,7 +932,7 @@ def _init_scheduler_before_request():
                             return True
                         if path.startswith('/api/mqtt/'):
                             return True
-                        if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop')):
+                        if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop') or '/master-valve/' in path):
                             return True
                         if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
                             return True
@@ -1025,7 +1056,7 @@ def _require_admin_for_mutations():
                     # Разрешаем пользователю получать данные о следующем поливе (bulk)
                     if path == '/api/zones/next-watering-bulk':
                         return True
-                    if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop')):
+                    if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop') or '/master-valve/' in path):
                         return True
                     if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
                         return True
@@ -3620,14 +3651,28 @@ def api_mqtt_zones_sse():
 
         def _rebuild_subscriptions():
             zones = db.get_zones()
-            mapping = {}
+            groups = db.get_groups() or []
+            zone_topics = {}
+            mv_topics = {}
             for z in zones:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                 if not sid or not topic:
                     continue
                 t = topic if str(topic).startswith('/') else '/' + str(topic)
-                mapping.setdefault(int(sid), {}).setdefault(t, []).append(int(z['id']))
-            return mapping
+                zone_topics.setdefault(int(sid), {}).setdefault(t, []).append(int(z['id']))
+            for g in groups:
+                try:
+                    if int(g.get('use_master_valve') or 0) != 1:
+                        continue
+                except Exception:
+                    continue
+                mtopic = (g.get('master_mqtt_topic') or '').strip()
+                msid = g.get('master_mqtt_server_id')
+                if not mtopic or not msid:
+                    continue
+                t = mtopic if str(mtopic).startswith('/') else '/' + str(mtopic)
+                mv_topics.setdefault(int(msid), {}).setdefault(t, []).append(int(g.get('id')))
+            return zone_topics, mv_topics
 
         # Буфер последних meta-сообщений на сервере (для health-панели)
         try:
@@ -3636,11 +3681,12 @@ def api_mqtt_zones_sse():
             _SSE_META_BUFFER = deque(maxlen=100)
 
         def _ensure_hub_started():
+            global _SSE_HUB_STARTED, _SSE_HUB_CLIENTS, _SSE_HUB_MQTT, _SSE_META_BUFFER
             with _SSE_HUB_LOCK:
                 if _SSE_HUB_STARTED:
                     return
-                server_topics = _rebuild_subscriptions()
-                for sid, topics in server_topics.items():
+                zone_topics, mv_topics = _rebuild_subscriptions()
+                for sid, topics in zone_topics.items():
                     server = db.get_mqtt_server(int(sid))
                     if not server:
                         continue
@@ -3663,7 +3709,25 @@ def api_mqtt_zones_sse():
                                 except Exception:
                                     pass
                                 return
-                            zone_ids = server_topics.get(sid_local, {}).get(t) or []
+                            zone_ids = zone_topics.get(sid_local, {}).get(t) or []
+                            mv_group_ids = mv_topics.get(sid_local, {}).get(t) or []
+                            # Если это мастер-клапан: шлём отдельное событие и фиксируем наблюдаемое состояние
+                            if mv_group_ids:
+                                mv_state = 'open' if payload in ('1','true','ON','on') else 'closed'
+                                for gid in mv_group_ids:
+                                    try:
+                                        db.update_group_fields(int(gid), {'master_valve_observed': mv_state})
+                                    except Exception:
+                                        pass
+                                    data_mv = json.dumps({'mv_group_id': int(gid), 'mv_state': mv_state})
+                                    with _SSE_HUB_LOCK:
+                                        for q in list(_SSE_HUB_CLIENTS):
+                                            try:
+                                                q.put_nowait(data_mv)
+                                            except Exception:
+                                                pass
+                                # Продолжаем обработку: МК не является зоной
+                                return
                             new_state = 'on' if payload in ('1','true','ON','on') else 'off'
                             # Аварийный стоп
                             if app.config.get('EMERGENCY_STOP') and new_state == 'on':
@@ -3733,9 +3797,16 @@ def api_mqtt_zones_sse():
                                             pass
                         client.on_message = _on_message
                         client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
+                        # Подписываемся на зонные топики
                         for t in topics.keys():
                             try:
                                 client.subscribe(t, qos=0)
+                            except Exception:
+                                pass
+                        # Подписываемся на топики мастер-клапанов этого сервера
+                        for t_mv in mv_topics.get(int(sid), {}).keys():
+                            try:
+                                client.subscribe(t_mv, qos=0)
                             except Exception:
                                 pass
                         client.loop_start()
@@ -3819,8 +3890,30 @@ def api_zone_mqtt_start(zone_id: int):
         except Exception:
             logger.exception('fast parallel OFF peers failed')
         t2 = time.time()
-        # 2) Публикация MQTT ON для целевой зоны
+        # 2) Предварительно открыть мастер-клапан (если включён для группы), затем опубликовать MQTT ON для зоны
         try:
+            # Pre-open master valve for this zone's group (idempotent, mode-aware)
+            try:
+                gid2 = int(z.get('group_id') or 0)
+            except Exception:
+                gid2 = 0
+            if gid2:
+                try:
+                    g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid2), None)
+                except Exception:
+                    g = None
+                if g and int(g.get('use_master_valve') or 0) == 1:
+                    mtopic = (g.get('master_mqtt_topic') or '').strip()
+                    msid = g.get('master_mqtt_server_id')
+                    if mtopic and msid:
+                        server_mv = db.get_mqtt_server(int(msid))
+                        if server_mv:
+                            try:
+                                mode = (g.get('master_mode') or 'NC').strip().upper()
+                            except Exception:
+                                mode = 'NC'
+                            _publish_mqtt_value(server_mv, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0)
+            # Publish zone ON
             sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
             if mqtt and sid and topic:
                 tpc = normalize_topic(topic)
@@ -3880,9 +3973,19 @@ def api_zone_mqtt_start(zone_id: int):
 @app.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
 def api_zone_mqtt_stop(zone_id: int):
     z = db.get_zone(zone_id)
-    if not z: return jsonify({'success': False}), 404
+    if not z:
+        return jsonify({'success': False}), 404
+    # Prefer centralized stop to ensure delayed, mode-aware master valve close
+    try:
+        from services.zone_control import stop_zone as _stop_central
+        if _stop_central(int(zone_id), reason='manual', force=False):
+            return jsonify({'success': True, 'message': 'Зона остановлена'})
+    except Exception:
+        logger.exception('api_zone_mqtt_stop: central stop failed, fallback to direct publish')
+    # Fallback to direct publish if central stop failed for any reason
     sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
-    if not sid or not topic: return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
+    if not sid or not topic:
+        return jsonify({'success': False, 'message': 'No MQTT config for zone'}), 400
     t = normalize_topic(topic)
     try:
         server = db.get_mqtt_server(int(sid))
@@ -3891,16 +3994,7 @@ def api_zone_mqtt_stop(zone_id: int):
         logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
         _publish_mqtt_value(server, t, '0')
         try:
-            # Немедленно отражаем остановку в БД, чтобы UI увидел состояние и таймер сбросился
             db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
-            try:
-                db.add_log('zone_stop', json.dumps({
-                    'zone': int(zone_id),
-                    'group': int(z.get('group_id') or 0),
-                    'source': 'manual'
-                }))
-            except Exception:
-                pass
         except Exception:
             pass
         return jsonify({'success': True, 'message': 'Зона остановлена'})
@@ -4025,11 +4119,13 @@ def api_master_valve_toggle(group_id, action):
         logger.error(f"api_master_valve_toggle failed: {e}")
         return jsonify({"success": False, "message": "Ошибка"}), 500
 
-# Boot-time: ensure all zones and master valves are OFF on controller start
+# Boot-time: ensure all zones and master valves are OFF on controller start (mode-aware)
 try:
     @app.before_first_request
     def _boot_sync_all_outputs_off():
         try:
+            if app.config.get('TESTING'):
+                return
             zones = db.get_zones() or []
             for z in zones:
                 try:
@@ -4059,7 +4155,12 @@ try:
                 try:
                     server = db.get_mqtt_server(int(msid))
                     if server:
-                        _publish_mqtt_value(server, normalize_topic(mtopic), '0', min_interval_sec=0.0, retain=True)
+                        try:
+                            mode = (g.get('master_mode') or 'NC').strip().upper()
+                        except Exception:
+                            mode = 'NC'
+                        close_val = '1' if mode == 'NO' else '0'
+                        _publish_mqtt_value(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
                 except Exception:
                     pass
         except Exception:

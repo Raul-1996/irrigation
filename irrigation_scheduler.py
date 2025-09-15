@@ -665,8 +665,37 @@ class IrrigationScheduler:
                     self.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=duration))
                 except Exception:
                     pass
-                # MQTT publish ON
+                # MQTT publish: pre-open master valve for the group (idempotent), then zone ON
                 try:
+                    # Pre-open MV if configured for this zone's group
+                    try:
+                        gid = int(zone.get('group_id') or 0)
+                    except Exception:
+                        gid = 0
+                    if gid:
+                        try:
+                            groups = self.db.get_groups() or []
+                            g = next((gg for gg in groups if int(gg.get('id')) == gid), None)
+                        except Exception:
+                            g = None
+                        if g:
+                            try:
+                                use_mv = int(g.get('use_master_valve') or 0) == 1
+                            except Exception:
+                                use_mv = False
+                            if use_mv:
+                                mtopic = (g.get('master_mqtt_topic') or '').strip()
+                                msid = g.get('master_mqtt_server_id')
+                                if mtopic and msid:
+                                    mserver = self.db.get_mqtt_server(int(msid))
+                                    if mserver:
+                                        try:
+                                            mode = (g.get('master_mode') or 'NC').strip().upper()
+                                        except Exception:
+                                            mode = 'NC'
+                                        from app import _publish_mqtt_value as _pub
+                                        _pub(mserver, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0)
+                    # Publish zone ON
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
                     if mqtt and topic and sid:

@@ -37,6 +37,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
         z = db.get_zone(zone_id)
         if not z:
             return False
+        # For diagnostics/meta: allow passing through a command id if set by callers in future
+        command_id = None  # type: Optional[str]
         group_id = int(z.get('group_id') or 0)
         # Serialize on group
         with group_lock(group_id):
@@ -52,23 +54,28 @@ def exclusive_start_zone(zone_id: int) -> bool:
                     _versioned_update(zone_id, {'state': 'starting', 'commanded_state': 'on', 'watering_start_time': start_ts})
             try:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+                gid = int(z.get('group_id') or 0)
+                # Pre-open master valve by group (idempotent, mode-aware)
+                if gid and gid != 999:
+                    try:
+                        g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
+                    except Exception:
+                        g = None
+                    if g and int(g.get('use_master_valve') or 0) == 1:
+                        mtopic = (g.get('master_mqtt_topic') or '').strip()
+                        msid = g.get('master_mqtt_server_id')
+                        if mtopic and msid:
+                            mserver = db.get_mqtt_server(int(msid))
+                            if mserver:
+                                try:
+                                    mode = (g.get('master_mode') or 'NC').strip().upper()
+                                except Exception:
+                                    mode = 'NC'
+                                open_val = '0' if mode == 'NO' else '1'
+                                publish_mqtt_value(mserver, normalize_topic(mtopic), open_val, min_interval_sec=0.0)
                 if sid and topic:
                     server = db.get_mqtt_server(int(sid))
                     if server:
-                        # Per-group master valve pre-open (idempotent; also covers peer groups on same topic)
-                        try:
-                            gid = int(z.get('group_id') or 0)
-                            if gid and gid != 999:
-                                g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
-                                if g and int(g.get('use_master_valve') or 0) == 1:
-                                    mtopic = (g.get('master_mqtt_topic') or '').strip()
-                                    msid = g.get('master_mqtt_server_id')
-                                    if mtopic and msid:
-                                        mserver = db.get_mqtt_server(int(msid))
-                                        if mserver:
-                                            publish_mqtt_value(mserver, normalize_topic(mtopic), '1', min_interval_sec=0.0)
-                        except Exception:
-                            logger.exception('master valve pre-open failed')
                         publish_mqtt_value(server, normalize_topic(topic), '1', min_interval_sec=0.0, meta={'cmd': str(command_id) if 'command_id' in locals() and command_id else None, 'ver': str((z.get('version') or 0) + 1)})
                         # transition to on
                         _versioned_update(zone_id, {'state': 'on'})
@@ -171,7 +178,12 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                             if not any_on:
                                                 mserver = db.get_mqtt_server(int(msid))
                                                 if mserver:
-                                                    publish_mqtt_value(mserver, normalize_topic(mtopic), '0', min_interval_sec=0.0, retain=True, meta={'cmd':'master_off'})
+                                                    try:
+                                                        mode = (g.get('master_mode') or 'NC').strip().upper()
+                                                    except Exception:
+                                                        mode = 'NC'
+                                                    close_val = '1' if mode == 'NO' else '0'
+                                                    publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True, meta={'cmd':'master_off'})
                                         except Exception:
                                             logger.exception('master valve delayed close failed')
                                     import threading as _th
