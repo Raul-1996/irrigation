@@ -4104,6 +4104,39 @@ def api_master_valve_toggle(group_id, action):
             return jsonify({"success": False, "message": "MQTT сервер не найден"}), 400
         mode = (g.get('master_mode') or 'NC').upper().strip()
         want_open = str(action).lower() == 'open'
+        # Защита: запрещаем закрывать МК, если в этой группе идёт полив, либо в любой другой группе,
+        # где указан тот же топик мастер-клапана, есть включённые зоны
+        if not want_open:
+            try:
+                t_norm = normalize_topic(topic)
+            except Exception:
+                t_norm = topic if topic.startswith('/') else '/' + str(topic)
+            try:
+                # Соберём id групп, у которых тот же мастер-топик
+                related_group_ids = []
+                for gg in (db.get_groups() or []):
+                    try:
+                        if int(gg.get('use_master_valve') or 0) != 1:
+                            continue
+                    except Exception:
+                        continue
+                    t2 = (gg.get('master_mqtt_topic') or '').strip()
+                    if not t2:
+                        continue
+                    if normalize_topic(t2) == t_norm:
+                        related_group_ids.append(int(gg.get('id')))
+                # Проверим, есть ли включённые зоны в любой из связанных групп
+                if related_group_ids:
+                    for gid2 in related_group_ids:
+                        try:
+                            for z in (db.get_zones_by_group(int(gid2)) or []):
+                                if str(z.get('state') or '').lower() == 'on':
+                                    return jsonify({"success": False, "message": "Нельзя закрыть мастер-клапан: в одной из связанных групп идёт полив"}), 400
+                        except Exception:
+                            pass
+            except Exception:
+                # При ошибке в проверке — безопаснее запретить закрытие
+                return jsonify({"success": False, "message": "Нельзя закрыть мастер-клапан: проверка состояния групп не выполнена"}), 400
         val = ('0' if want_open else '1') if mode == 'NO' else ('1' if want_open else '0')
         try:
             _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0)
