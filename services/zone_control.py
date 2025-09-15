@@ -55,19 +55,18 @@ def exclusive_start_zone(zone_id: int) -> bool:
                 if sid and topic:
                     server = db.get_mqtt_server(int(sid))
                     if server:
-                        # Optional master valve pre-open
+                        # Per-group master valve pre-open (idempotent; also covers peer groups on same topic)
                         try:
-                            mcfg = db.get_master_config()
-                            if mcfg.get('enabled') and mcfg.get('topic') and mcfg.get('server_id'):
-                                mserver = db.get_mqtt_server(int(mcfg['server_id']))
-                                if mserver:
-                                    publish_mqtt_value(mserver, normalize_topic(mcfg['topic']), '1', min_interval_sec=0.0)
-                                    try:
-                                        from app import app as app_module
-                                        if not app_module.config.get('TESTING'):
-                                            time.sleep(max(0.0, float(mcfg.get('delay_ms', 300))/1000.0))
-                                    except Exception:
-                                        pass
+                            gid = int(z.get('group_id') or 0)
+                            if gid and gid != 999:
+                                g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
+                                if g and int(g.get('use_master_valve') or 0) == 1:
+                                    mtopic = (g.get('master_mqtt_topic') or '').strip()
+                                    msid = g.get('master_mqtt_server_id')
+                                    if mtopic and msid:
+                                        mserver = db.get_mqtt_server(int(msid))
+                                        if mserver:
+                                            publish_mqtt_value(mserver, normalize_topic(mtopic), '1', min_interval_sec=0.0)
                         except Exception:
                             logger.exception('master valve pre-open failed')
                         publish_mqtt_value(server, normalize_topic(topic), '1', min_interval_sec=0.0, meta={'cmd': str(command_id) if 'command_id' in locals() and command_id else None, 'ver': str((z.get('version') or 0) + 1)})
@@ -146,24 +145,39 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                 if server:
                     # OFF публикуем с retain=True, чтобы состояние восстанавливалось после перезапуска
                     publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, retain=True, meta={'cmd':'stop','ver':str((z.get('version') or 0) + 1)})
-                    # Optional master valve close if no other ON zones remain in group
+                    # Delayed master valve close (60s) if no zones ON on the same master topic across peer groups
                     try:
-                        mcfg = db.get_master_config()
-                        if mcfg.get('enabled') and mcfg.get('topic') and mcfg.get('server_id'):
-                            # проверим, остались ли включённые зоны в этой группе
-                            gz = db.get_zones_by_group(int(z.get('group_id') or 0))
-                            if not any(str(zz.get('state')) == 'on' for zz in gz):
-                                try:
-                                    from app import app as app_module
-                                    if not app_module.config.get('TESTING'):
-                                        time.sleep(max(0.0, float(mcfg.get('delay_ms', 300))/1000.0))
-                                except Exception:
-                                    pass
-                                mserver = db.get_mqtt_server(int(mcfg['server_id']))
-                                if mserver:
-                                    publish_mqtt_value(mserver, normalize_topic(mcfg['topic']), '0', min_interval_sec=0.0, retain=True, meta={'cmd':'master_off'})
+                        gid = int(z.get('group_id') or 0)
+                        if gid and gid != 999:
+                            g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
+                            if g and int(g.get('use_master_valve') or 0) == 1:
+                                mtopic = (g.get('master_mqtt_topic') or '').strip()
+                                msid = g.get('master_mqtt_server_id')
+                                if mtopic and msid:
+                                    def _delayed_close():
+                                        try:
+                                            time.sleep(60)
+                                            # Check any ON zone in any group sharing this master topic
+                                            any_on = False
+                                            for gg in (db.get_groups() or []):
+                                                if (gg.get('master_mqtt_topic') or '').strip() != mtopic:
+                                                    continue
+                                                for z2 in (db.get_zones_by_group(int(gg.get('id'))) or []):
+                                                    if str(z2.get('state')).lower() == 'on':
+                                                        any_on = True
+                                                        break
+                                                if any_on:
+                                                    break
+                                            if not any_on:
+                                                mserver = db.get_mqtt_server(int(msid))
+                                                if mserver:
+                                                    publish_mqtt_value(mserver, normalize_topic(mtopic), '0', min_interval_sec=0.0, retain=True, meta={'cmd':'master_off'})
+                                        except Exception:
+                                            logger.exception('master valve delayed close failed')
+                                    import threading as _th
+                                    _th.Thread(target=_delayed_close, daemon=True).start()
                     except Exception:
-                        logger.exception('master valve close failed')
+                        logger.exception('master valve close scheduling failed')
         except Exception:
             logger.exception('stop_zone: mqtt off failed')
         # Завершаем переход: stopping -> off

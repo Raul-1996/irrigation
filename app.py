@@ -1091,7 +1091,18 @@ def _should_throttle_group(group_id: int, window_sec: float = 0.8) -> bool:
 def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> None:
     try:
         group_zones = db.get_zones_by_group(group_id)
-        on_zones = [z for z in group_zones if str(z.get('state')) == 'on']
+        # Ignore master valve zone-equivalent if master topic equals a zone topic
+        try:
+            g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(group_id)), None)
+            mv_topic = normalize_topic((g.get('master_mqtt_topic') or '').strip()) if g else ''
+        except Exception:
+            mv_topic = ''
+        def _is_mv_zone(z):
+            try:
+                return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
+            except Exception:
+                return False
+        on_zones = [z for z in group_zones if str(z.get('state')) == 'on' and not _is_mv_zone(z)]
         if len(on_zones) <= 1:
             return
         # Оставляем только одну зону включенной: с самым поздним временем старта, иначе с минимальным id
@@ -1135,7 +1146,18 @@ def _enforce_group_exclusive_all_groups() -> None:
                 continue
             zones_by_group.setdefault(gid, []).append(z)
         for gid, arr in zones_by_group.items():
-            on_list = [z for z in arr if str(z.get('state')) == 'on']
+            # exclude master valve pseudo-zone by topic
+            try:
+                g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(gid)), None)
+                mv_topic = normalize_topic((g.get('master_mqtt_topic') or '').strip()) if g else ''
+            except Exception:
+                mv_topic = ''
+            def _is_mv_zone(z):
+                try:
+                    return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
+                except Exception:
+                    return False
+            on_list = [z for z in arr if str(z.get('state')) == 'on' and not _is_mv_zone(z)]
             if len(on_list) > 1:
                 _force_group_exclusive(gid, 'watchdog')
     except Exception:
