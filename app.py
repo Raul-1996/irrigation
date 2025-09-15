@@ -3029,31 +3029,30 @@ def api_stop_group(group_id):
             except Exception:
                 pass
  
-        # Чистим плановые старты группы
-        try:
-            # Перестраиваем расписание: переносим на следующую программу
-            db.reschedule_group_to_next_program(group_id)
-        except Exception:
-            pass
-
-        db.add_log('group_stop', json.dumps({"group": group_id}))
-        # Отметим отмену текущего запуска программы для этой группы (если таковая есть прямо сейчас)
+        # Отметим отмену ТОЛЬКО текущего (уже начавшегося сегодня) запуска программы для этой группы
         try:
             programs = db.get_programs() or []
             now = datetime.now()
             today = now.strftime('%Y-%m-%d')
             for p in programs:
-                # Если сегодня день программы и время уже настало — считаем сегодняшнюю попытку отмененной
                 try:
-                    if now.weekday() in (p.get('days') or []):
-                        hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
-                        start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                        if start_today <= now:
-                            db.cancel_program_run_for_group(int(p.get('id')), today, int(group_id))
+                    if now.weekday() not in (p.get('days') or []):
+                        continue
+                    hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
+                    start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if start_today <= now:
+                        db.cancel_program_run_for_group(int(p.get('id')), today, int(group_id))
                 except Exception:
                     continue
         except Exception:
             pass
+        # Перестроим расписание группы на ближайшие будущие программы (вечерние/дальнейшие не трогаем)
+        try:
+            db.reschedule_group_to_next_program(group_id)
+        except Exception:
+            pass
+
+        db.add_log('group_stop', json.dumps({"group": group_id}))
         return jsonify({"success": True, "message": f"Группа {group_id} остановлена"})
     except Exception as e:
         logger.error(f"Ошибка остановки группы {group_id}: {e}")
@@ -3858,6 +3857,35 @@ def api_zone_mqtt_start(zone_id: int):
         if str(z.get('state') or '') == 'on':
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
         gid = int(z.get('group_id') or 0)
+        # Если идёт последовательный полив группы (или активны задачи расписания) — отменяем их для этой группы
+        try:
+            if gid:
+                sched = get_scheduler()
+                if sched:
+                    sched.cancel_group_jobs(int(gid))
+                # Также помечаем текущую (уже начавшуюся) программу для этой группы как отменённую, чтобы next-watering сразу смещался
+                try:
+                    programs = db.get_programs() or []
+                    now = datetime.now()
+                    today = now.strftime('%Y-%m-%d')
+                    for p in programs:
+                        try:
+                            # Только если сегодняшнее время программы уже наступило (не трогаем будущие, например вечернюю)
+                            hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
+                        except Exception:
+                            hh, mm = 0, 0
+                        start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                        if start_today <= now:
+                            db.cancel_program_run_for_group(int(p.get('id')), today, int(gid))
+                except Exception:
+                    pass
+                # Перестроим расписание группы на ближайшее будущее
+                try:
+                    db.reschedule_group_to_next_program(int(gid))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         t1 = time.time()
         # 1) Быстрый OFF соседей (только реально включённых), запуск в фоне без ожидания
         try:
