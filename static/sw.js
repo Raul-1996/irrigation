@@ -22,6 +22,12 @@ self.addEventListener('install', event => {
 self.addEventListener('fetch', event => {
     const req = event.request;
     const accept = req.headers.get('accept') || '';
+    const isEventStream = accept.includes('text/event-stream');
+    if (isEventStream) {
+        // Never intercept SSE: stream directly from network
+        event.respondWith(fetch(req, { cache: 'no-store' }));
+        return;
+    }
     const isNavigation = req.mode === 'navigate' || accept.includes('text/html');
     const url = new URL(req.url);
     const isApi = url.pathname.startsWith('/api/');

@@ -193,6 +193,49 @@
         transform: translateY(-1px);
         box-shadow: 0 4px 8px rgba(0,0,0,0.3);
     }
+    /* Грид информации группы: кнопка МК + значения давления/расхода в 2x2 на десктопе */
+    .group-info-grid {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
+        margin-top: 0.4rem;
+    }
+    .group-info-grid .grid-item { 
+        display: flex; 
+        justify-content: center; 
+        align-items: stretch; 
+    }
+    /* Чипы значений — бледный фон, чтобы отличались от кнопок */
+    .info-chip { 
+        background: rgba(255,255,255,0.15);
+        border: 1px solid rgba(255,255,255,0.25);
+        color: #fff;
+        padding: 0.35rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        line-height: 1.2;
+        display: inline-flex;
+        gap: 0.35rem;
+        align-items: center;
+        width: 100%;
+        justify-content: center;
+        box-sizing: border-box;
+    }
+    .info-chip.chip-green { background: #4caf50; color: #fff; border-color: transparent; }
+    .info-chip.chip-red { background: #b71c1c; color: #fff; border-color: transparent; }
+    .info-chip .label { opacity: 0.9; font-weight: 600; }
+    /* Единая высота контролов внутри карточки группы */
+    .status-grid .card .btn-group button { 
+        height: 40px; 
+        padding: 0 0.8rem; 
+        display: inline-flex; 
+        align-items: center; 
+        justify-content: center; 
+        white-space: nowrap; 
+    }
+    .group-info-grid .btn-group { width: 100%; margin: 0; }
+    .info-chip { min-height: 40px; }
     
     .zones-section {
         background: white;
@@ -297,6 +340,16 @@
             font-size: 0.8rem; 
             padding: 0.4rem 0.3rem;
         }
+        /* На мобильных разрешаем перенос и авто-высоту у длинных кнопок */
+        .status-grid .card .btn-group button {
+            white-space: normal;
+            height: auto;
+            min-height: 40px;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            text-align: center;
+        }
         .status-grid { grid-template-columns: 1fr; gap: 0.8rem; }
         .card { min-height: 160px; padding: 0.6rem; }
         .top-bar { flex-direction: column; gap: 0.3rem; }
@@ -308,6 +361,7 @@
         .emergency { width: 100%; margin: 0.5rem 0; }
         /* Подписи в ячейках на узких экранах для ясности (убираем подпись у "Следующий полив") */
         .zones-table td.col-photo::before { content: attr(data-label) ": "; font-weight: 600; color: #666; margin-right: 4px; }
+        .group-info-grid { grid-template-columns: 1fr; }
     }
 
     /* Модальное окно для просмотра фотографий */
@@ -330,8 +384,11 @@
         flex-direction: column;
         align-items: center;
         gap: 12px;
-        max-width: min(90vw, 720px);
-        max-height: 90vh;
+        max-width: min(92vw, 720px);
+        max-height: 85vh;
+        overflow:auto;
+        box-sizing: border-box;
+        margin: 0;
     }
     /* Гарантия вписывания фото в экран смартфона */
     .photo-modal img {
@@ -858,11 +915,34 @@
                     <button class="continue-group" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>
                     <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
                 </div>`;
+            // Optional feature blocks by group flags
+            const mvEnabled = (group.use_master_valve === true) || (group.use_master_valve === 1);
+            const mvState = String(group.master_valve_state || 'unknown');
+            const mvIndicator = mvState === 'open' ? 'Открыт' : (mvState === 'closed' ? 'Закрыт' : '—');
+            const _flag = v => { try { if (v===true||v===1) return true; const s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
+            const pressureOn = _flag(group.use_pressure_sensor);
+            const flowOn = _flag(group.use_water_meter);
+            const gridCells = [];
+            if (mvEnabled) {
+                const mvBtnClass = 'delay';
+                const mvChipClass = mvState==='open' ? 'chip-green' : (mvState==='closed' ? 'chip-red' : '');
+                gridCells.push(`<div class="grid-item"><div class="btn-group"><button id="mv-btn-${group.id}" class="${mvBtnClass}" onclick="toggleMasterValve(${group.id})">${mvState==='open'?'Закрыть мастер-клапан':'Открыть мастер-клапан'}</button></div></div>`);
+                gridCells.push(`<div class="grid-item"><div id="mv-chip-${group.id}" class="info-chip ${mvChipClass}"><span class="label">Мастер-клапан:</span> <span id="mv-state-${group.id}">${mvIndicator}</span></div></div>`);
+            }
+            if (pressureOn) {
+                gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+            }
+            if (flowOn) {
+                gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Расход воды:</span> <span id="flow-${group.id}">${(group.flow_value!=null&&group.flow_value!=='')?group.flow_value:'—'}</span> л/мин</div></div>`);
+            }
+            // pad to keep even number of cells for 2x2 symmetry on desktop
+            const mvBlock = gridCells.length ? `<div class="group-info-grid">${gridCells.join('')}${gridCells.length % 2 ? '<div class="grid-item"></div>' : ''}</div>` : '';
             card.innerHTML = `
                 <div class="group-header">${group.name}</div>
                 <div id="group-status-${group.id}">${statusText}</div>
                 <div class="postpone-until">${extraText}</div>
                 ${groupButtons}
+                ${mvBlock}
             `;
             card.id = `group-card-${group.id}`;
             container.appendChild(card);
@@ -921,6 +1001,9 @@
             } else if (group.status === 'error' && group.error_message) {
                 extraText2 = String(group.error_message);
             }
+            const mvEnabled2 = (group.use_master_valve === true) || (group.use_master_valve === 1); // показываем только если включено для группы
+            const mvState2 = String(group.master_valve_state || 'unknown');
+            const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
@@ -938,6 +1021,27 @@
                 <div class="postpone-until">${extraText2}</div>
                 ${groupButtons}
             `;
+            // Append the same grid as in updateStatusDisplay
+            (function(){
+                const _flag2 = v => { try { if (v===true||v===1) return true; const s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
+                const pressureOn2 = _flag2(group.use_pressure_sensor);
+                const flowOn2 = _flag2(group.use_water_meter);
+                const cells = [];
+                if (mvEnabled2) {
+                    cells.push(`<div class=\"grid-item\"><div class=\"btn-group\"><button class=\"continue-group\" onclick=\"toggleMasterValve(${group.id})\">${mvState2==='open'?'Закрыть мастер-клапан':'Открыть мастер-клапан'}</button></div></div>`);
+                    cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Мастер-клапан:</span> <span id=\"mv-state-${group.id}\">${mvIndicator2}</span></div></div>`);
+                }
+                if (pressureOn2) {
+                    cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                }
+                if (flowOn2) {
+                    cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Расход воды:</span> <span id=\"flow-${group.id}\">${(group.flow_value!=null&&group.flow_value!=='')?group.flow_value:'—'}</span> л/мин</div></div>`);
+                }
+                if (cells.length) {
+                    const pad2 = cells.length % 2 ? '<div class=\"grid-item\"></div>' : '';
+                    card.innerHTML += `<div class=\"group-info-grid\">${cells.join('')}${pad2}</div>`;
+                }
+            })();
             if (group.status === 'watering' && group.current_zone) {
                 initGroupTimer(group);
             }
@@ -1206,6 +1310,48 @@
         }
     }
     
+    // === Master Valve toggle (UI-only; calls placeholder endpoint) ===
+    async function toggleMasterValve(groupId) {
+        try {
+            // UI busy
+            const card = document.getElementById(`group-card-${groupId}`);
+            let btn = null;
+            if (card) {
+                btn = Array.from(card.querySelectorAll('.continue-group')).find(b => /мастер-клапан/i.test(b.textContent||''));
+                if (btn) { btn.disabled = true; btn.setAttribute('aria-busy','true'); }
+            }
+            const span = document.getElementById(`mv-state-${groupId}`);
+            const current = span ? (span.textContent || '').trim().toLowerCase() : '';
+            const wantOpen = current !== 'открыт';
+            const url = wantOpen ? `/api/groups/${groupId}/master-valve/open` : `/api/groups/${groupId}/master-valve/close`;
+            const res = await fetch(url, { method: 'POST' });
+            let data = null; try { data = await res.json(); } catch(e) { data = null; }
+            if (!res.ok || !(data && data.success)) {
+                showNotification((data && data.message) || 'Не удалось выполнить операцию с мастер-клапаном', 'error');
+                return;
+            }
+            // Wait for confirmation by reloading status a few times (2s total)
+            for (let i=0;i<4;i++) {
+                await new Promise(r=>setTimeout(r, 500));
+                try { await refreshSingleGroup(groupId); } catch(e) {}
+                const sp2 = document.getElementById(`mv-state-${groupId}`);
+                if (sp2) {
+                    const txt = (sp2.textContent||'').trim();
+                    if (wantOpen && txt === 'Открыт') break;
+                    if (!wantOpen && txt === 'Закрыт') break;
+                }
+            }
+        } catch (e) {
+            showNotification('Ошибка управления мастер-клапаном', 'error');
+        } finally {
+            const card = document.getElementById(`group-card-${groupId}`);
+            if (card) {
+                const btn = Array.from(card.querySelectorAll('.continue-group')).find(b => /мастер-клапан/i.test(b.textContent||''));
+                if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+            }
+        }
+    }
+    
     async function emergencyStop() {
         if (!confirm('Аварийная остановка всех зон?')) return;
         
@@ -1316,41 +1462,106 @@
         document.getElementById('resume-btn').addEventListener('click', resumeSchedule);
         // Подписка на статусы зон через SSE
         try {
-            const es = new EventSource('/api/mqtt/zones-sse');
-            es.onmessage = (ev)=>{
+            let es; let retry = 0; let reconnectTimer = null;
+            // WebSocket client (primary)
+            let ws; let wsRetry = 0; let wsTimer = null;
+            function connectWS(){
+                try{ if (ws){ ws.close(); } }catch(e){}
                 try{
-                    const data = JSON.parse(ev.data);
-                    const idx = zonesData.findIndex(z=>z.id===data.zone_id);
-                    if (idx>=0){
-                        zonesData[idx].state = data.state;
-                        // Обновим карточку соответствующей группы, чтобы строка "Полив — Зона X" сменилась мгновенно
-                        const gid = zonesData[idx].group_id;
-                        if (gid) { refreshSingleGroup(gid); }
-                        const tbody = document.getElementById('zones-table-body');
-                        if (tbody){
-                            let row = tbody.querySelector(`tr[data-zone-id="${data.zone_id}"]`);
-                            if (!row) {
-                                const rows = tbody.querySelectorAll('tr');
-                                rows.forEach(r=>{
-                                    const cells = r.querySelectorAll('td');
-                                    if (cells.length>1 && Number(cells[1].textContent.trim())===data.zone_id){ row = r; }
-                                });
-                            }
-                            if (row){
-                                const ind = row.querySelector('.indicator');
-                                if (ind){ ind.classList.remove('on','off'); ind.classList.add(data.state); }
-                                const btn = row.querySelector('.zone-start-btn');
-                                if (btn){
-                                    btn.textContent = data.state==='on'?'⏹':'▶';
-                                    const emergency = !!(statusData && statusData.emergency_stop);
-                                    const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + data.zone_id + ", '" + data.state + "')");
-                                    btn.setAttribute('onclick', action);
+                    const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+                    ws = new WebSocket(`${proto}://${location.host}/ws`);
+                    ws.onopen = ()=>{ wsRetry = 0; console.log('WS open'); };
+                    ws.onerror = ()=>{ try{ ws.close(); }catch(e){} };
+                    ws.onclose = ()=>{
+                        const delay = Math.min(10000, 500 * Math.pow(2, Math.min(5, wsRetry++)));
+                        clearTimeout(wsTimer); wsTimer = setTimeout(connectWS, delay);
+                        console.log('WS closed, reconnect in', delay);
+                    };
+                    ws.onmessage = (ev)=>{
+                        try{
+                            const data = JSON.parse(ev.data);
+                            if (typeof data.zone_id !== 'undefined') {
+                                const idx = zonesData.findIndex(z=>z.id===data.zone_id);
+                                if (idx>=0){ zonesData[idx].state = data.state; }
+                                const gid = typeof data.group_id !== 'undefined' ? Number(data.group_id) : (idx>=0 ? zonesData[idx].group_id : null);
+                                if (gid) { refreshSingleGroup(gid); }
+                            } else if (typeof data.mv_group_id !== 'undefined') {
+                                const gid = Number(data.mv_group_id);
+                                const card = document.getElementById(`group-card-${gid}`);
+                                if (card){
+                                    const span = card.querySelector(`#mv-state-${gid}`);
+                                    if (span) span.textContent = (data.mv_state === 'open' ? 'Открыт' : 'Закрыт');
+                                    const chip = card.querySelector(`#mv-chip-${gid}`);
+                                    if (chip){ chip.classList.remove('chip-green','chip-red'); chip.classList.add(data.mv_state==='open' ? 'chip-green' : 'chip-red'); }
+                                    const btn = card.querySelector(`#mv-btn-${gid}`);
+                                    if (btn){ btn.textContent = (data.mv_state === 'open' ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан'); btn.classList.add('delay'); }
+                                }
+                            } else if (typeof data.group_id !== 'undefined') {
+                                // MQTT-агрегат по группе
+                                const gid = Number(data.group_id);
+                                const grp = (statusData && statusData.groups ? statusData.groups : []).find(g => Number(g.id)===gid);
+                                if (grp){
+                                    grp.status = String(data.status||'').toLowerCase();
+                                    grp.current_zone = data.current_zone || null;
+                                    refreshSingleGroup(gid);
                                 }
                             }
-                        }
-                    }
+                        }catch(e){}
+                    };
                 }catch(e){}
-            };
+            }
+            connectWS();
+            function connectSSE(){
+                try { if (es) { try{ es.close(); }catch(e){} } } catch(e){}
+                es = new EventSource('/api/mqtt/zones-sse');
+                es.onopen = ()=>{ retry = 0; console.log('SSE open'); };
+                es.onerror = ()=>{
+                    try{ es.close(); }catch(e){}
+                    const delay = Math.min(10000, 500 * Math.pow(2, Math.min(5, retry++)));
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = setTimeout(connectSSE, delay);
+                    console.log('SSE error, reconnect in', delay);
+                };
+                es.onmessage = (ev)=>{
+                    try{
+                        const data = JSON.parse(ev.data);
+                        if (typeof data.zone_id !== 'undefined') {
+                            const idx = zonesData.findIndex(z=>z.id===data.zone_id);
+                            if (idx>=0){ zonesData[idx].state = data.state; }
+                            const gid = typeof data.group_id !== 'undefined' ? Number(data.group_id) : (idx>=0 ? zonesData[idx].group_id : null);
+                            if (gid) { refreshSingleGroup(gid); }
+                        } else if (typeof data.mv_group_id !== 'undefined') {
+                            const gid = Number(data.mv_group_id);
+                            const card = document.getElementById(`group-card-${gid}`);
+                            if (card){
+                                const span = card.querySelector(`#mv-state-${gid}`);
+                                if (span) span.textContent = (data.mv_state === 'open' ? 'Открыт' : 'Закрыт');
+                                const chip = card.querySelector(`#mv-chip-${gid}`);
+                                if (chip){ chip.classList.remove('chip-green','chip-red'); chip.classList.add(data.mv_state==='open' ? 'chip-green' : 'chip-red'); }
+                                const btn = card.querySelector(`#mv-btn-${gid}`);
+                                if (btn){ btn.textContent = (data.mv_state === 'open' ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан'); btn.classList.add('delay'); }
+                            }
+                        } else if (typeof data.group_id !== 'undefined') {
+                            // MQTT-агрегат по группе
+                            const gid = Number(data.group_id);
+                            const grp = (statusData && statusData.groups ? statusData.groups : []).find(g => Number(g.id)===gid);
+                            if (grp){
+                                grp.status = String(data.status||'').toLowerCase();
+                                grp.current_zone = data.current_zone || null;
+                                refreshSingleGroup(gid);
+                            }
+                        }
+                    }catch(e){}
+                };
+            }
+            connectSSE();
+            document.addEventListener('visibilitychange', ()=>{
+                if (document.visibilityState === 'visible'){
+                    // re-arm SSE if needed
+                    if (!es || es.readyState === EventSource.CLOSED) connectSSE();
+                    try{ if (!ws || ws.readyState === WebSocket.CLOSED) connectWS(); }catch(e){}
+                }
+            });
         } catch (e) {}
     });
 

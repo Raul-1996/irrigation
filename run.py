@@ -4,34 +4,28 @@
 """
 
 import os
-import sys
 from app import app
 
 if __name__ == '__main__':
-    # Проверяем наличие необходимых файлов
-    if not os.path.exists('app.py'):
-        print("Ошибка: файл app.py не найден!")
-        sys.exit(1)
-    
-    if not os.path.exists('templates'):
-        print("Ошибка: папка templates не найдена!")
-        sys.exit(1)
-    
-    print("🚀 Запуск WB-Irrigation...")
-    print("📱 Откройте браузер и перейдите по адресу: http://localhost:8080")
-    print("⏹️  Для остановки нажмите Ctrl+C")
-    print("-" * 50)
-    
+    port = int(os.environ.get('PORT', '8080'))
     try:
-        testing = os.environ.get('TESTING') == '1'
-        app.run(
-            debug=testing,  # в проде без debug
-            host='0.0.0.0',
-            port=8080,
-            use_reloader=False  # отключаем reloader для стабильности
-        )
-    except KeyboardInterrupt:
-        print("\n👋 Приложение остановлено")
-    except Exception as e:
-        print(f"❌ Ошибка запуска: {e}")
-        sys.exit(1)
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
+        import asyncio
+        cfg = Config()
+        cfg.bind = [f"0.0.0.0:{port}"]
+        try:
+            # Flask 2.3+: has asgi_app
+            asgi_app = app.asgi_app  # type: ignore[attr-defined]
+        except Exception:
+            # Wrap WSGI into ASGI for Hypercorn
+            try:
+                from hypercorn.middleware.wsgi import WSGIMiddleware
+            except Exception:
+                from hypercorn.middleware import wsgi as _wsgi
+                WSGIMiddleware = _wsgi.WSGIMiddleware  # type: ignore[attr-defined]
+            asgi_app = WSGIMiddleware(app)
+        asyncio.run(serve(asgi_app, cfg))
+    except Exception:
+        # Fallback to Flask dev server
+        app.run(debug=False, host='0.0.0.0', port=port)

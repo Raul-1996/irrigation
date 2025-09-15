@@ -2641,6 +2641,28 @@ def api_status():
         except Exception:
             pass
 
+        # Доп. поля UI (master/sensors), не вмешиваются в логику полива
+        try:
+            use_master_valve = bool(int(group.get('use_master_valve') or 0))
+        except Exception:
+            use_master_valve = False
+        try:
+            mvo = (group.get('master_valve_observed') or '').strip()
+            master_valve_state = mvo if mvo in ('open','closed') else 'unknown'
+        except Exception:
+            master_valve_state = 'unknown'
+        try:
+            use_pressure_sensor = bool(int(group.get('use_pressure_sensor') or 0))
+        except Exception:
+            use_pressure_sensor = False
+        try:
+            use_water_meter = bool(int(group.get('use_water_meter') or 0))
+        except Exception:
+            use_water_meter = False
+        pressure_unit = (group.get('pressure_unit') or 'bar') if use_pressure_sensor else None
+        pressure_value = None if use_pressure_sensor else None
+        flow_value = None if use_water_meter else None
+
         groups_status.append({
             'id': group_id,
             'name': group['name'],
@@ -2650,7 +2672,14 @@ def api_status():
             'next_start': next_start,
             'postpone_reason': group_postpone_reason,
             'was_postponed': bool(postponed_zones),
-            'current_zone_source': current_zone_source
+            'current_zone_source': current_zone_source,
+            'use_master_valve': use_master_valve,
+            'master_valve_state': master_valve_state,
+            'use_pressure_sensor': use_pressure_sensor,
+            'pressure_value': pressure_value,
+            'pressure_unit': pressure_unit,
+            'use_water_meter': use_water_meter,
+            'flow_value': flow_value
         })
     
     # Статус датчика дождя
@@ -3904,6 +3933,44 @@ def _recently_stopped(zone_id: int, window_sec: int = 5) -> bool:
         return (ts is not None) and ((time.time() - ts) < max(0, int(window_sec)))
     except Exception:
         return False
+
+@csrf.exempt
+@app.route('/api/groups/<int:group_id>/master-valve/<action>', methods=['POST'])
+def api_master_valve_toggle(group_id, action):
+    try:
+        if app.config.get('EMERGENCY_STOP') and str(action).lower() == 'open':
+            return jsonify({"success": False, "message": "Аварийная остановка активна"}), 400
+        g = next((x for x in (db.get_groups() or []) if int(x.get('id')) == int(group_id)), None)
+        if not g:
+            return jsonify({"success": False, "message": "Группа не найдена"}), 404
+        try:
+            if not bool(int(g.get('use_master_valve') or 0)):
+                return jsonify({"success": False, "message": "Мастер-клапан не включён для группы"}), 400
+        except Exception:
+            return jsonify({"success": False, "message": "Мастер-клапан не включён для группы"}), 400
+        topic = (g.get('master_mqtt_topic') or '').strip()
+        server_id = g.get('master_mqtt_server_id')
+        if not topic or not server_id:
+            return jsonify({"success": False, "message": "Не задан MQTT сервер или топик для мастер-клапана"}), 400
+        server = db.get_mqtt_server(int(server_id))
+        if not server:
+            return jsonify({"success": False, "message": "MQTT сервер не найден"}), 400
+        mode = (g.get('master_mode') or 'NC').upper().strip()
+        want_open = str(action).lower() == 'open'
+        val = ('0' if want_open else '1') if mode == 'NO' else ('1' if want_open else '0')
+        try:
+            _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0)
+        except Exception:
+            logger.exception('master valve publish failed')
+            return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
+        try:
+            db.update_group_fields(int(group_id), {'master_valve_observed': ('open' if want_open else 'closed')})
+        except Exception:
+            pass
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"api_master_valve_toggle failed: {e}")
+        return jsonify({"success": False, "message": "Ошибка"}), 500
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива

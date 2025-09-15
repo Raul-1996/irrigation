@@ -399,7 +399,7 @@
     
     .groups-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 240px));
+        grid-template-columns: 1fr;
         gap: 0.6rem;
         justify-content: start;
     }
@@ -410,7 +410,8 @@
         padding: 0.6rem;
         border: 1px solid #e9ecef;
         transition: var(--transition);
-        max-width: 280px;
+        width: 100%;
+        max-width: none;
         min-height: 110px;
     }
     
@@ -452,6 +453,40 @@
         align-items: center;
         font-size: 0.95rem;
     }
+
+    /* Поля мастер-клапана в 2 колонки (адаптивно) */
+    .mv-fields-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 8px;
+    }
+
+    /* Header row alignment inside group card */
+    .group-head-grid {
+        display: grid;
+        grid-template-columns: 1fr 180px;
+        gap: 10px;
+        align-items: center;
+        margin: 6px 10px 8px 10px;
+    }
+    @media (min-width: 768px) {
+        .group-head-grid {
+            grid-template-columns: minmax(240px, 1fr) 160px minmax(320px, 1.2fr);
+        }
+    }
+    .save-badge { font-size: .85rem; color: #666; }
+    .save-badge.saving { color: #607d8b; }
+    .save-badge.saved { color: #2e7d32; }
+    .save-badge.error { color: #c62828; }
+
+    /* Simple switch */
+    .switch { -webkit-appearance: none; appearance: none; width: 44px; min-width: 44px; height: 24px; background: #cfd8dc; border-radius: 9999px; position: relative; outline: none; cursor: pointer; transition: background .2s; display:inline-block; vertical-align: middle; box-sizing: content-box; }
+    .switch:before { content: ''; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; background: #fff; border-radius: 50%; transition: left .2s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+    .switch:checked { background: #2e7d32; }
+    .switch:checked:before { left: calc(100% - 22px); }
+    .switch.blocked-off { background: #d32f2f !important; }
+    .toggle-row { display:flex; align-items:center; gap:8px; min-height: 28px; }
+    .dim { opacity: .6; }
     
     .group-name {
         font-weight: 600;
@@ -513,22 +548,32 @@
     .modal {
         display: none;
         position: fixed;
-        z-index: 1000;
-        left: 0;
-        top: 0;
-        width: 100%;
-        height: 100%;
+        z-index: 4000;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
         background-color: rgba(0,0,0,0.5);
+        justify-content: center; /* center when set to display:flex */
+        align-items: center;     /* center when set to display:flex */
+        padding: 16px;           /* safe gutters on small screens */
+        pointer-events: auto;
+        box-sizing: border-box;
     }
     
     .modal-content {
         background-color: white;
-        margin: 5% auto;
-        padding: 2rem;
+        padding: 1.25rem;
         border-radius: 8px;
-        width: 90%;
-        max-width: 500px;
+        border: 2px solid #42a5f5;
+        /* Center via flex parent (.modal), avoid fixed coords to prevent mobile drift */
         position: relative;
+        width: min(520px, calc(100vw - 32px));
+        max-height: calc(100dvh - 32px);
+        overflow: auto;
+        box-sizing: border-box;
+        z-index: 1;
+        pointer-events: auto;
+        margin: 0; /* ensure proper centering */
     }
     
     .modal-header {
@@ -551,6 +596,9 @@
         font-size: 1.5rem;
         font-weight: bold;
         cursor: pointer;
+        padding: 6px;
+        line-height: 1;
+        z-index: 2;
         transition: var(--transition);
     }
     
@@ -655,6 +703,24 @@
             grid-template-columns: 1fr;
         }
     }
+
+    /* Extra-small phones: prevent overflow */
+    @media (max-width: 600px) {
+        .group-head-grid { grid-template-columns: 1fr; }
+        .modal-content {
+            width: min(420px, calc(100vw - 24px));
+            max-height: calc(100dvh - 24px);
+            border-radius: 10px;
+            padding: 12px;
+        }
+    }
+
+    /* Prevent body scroll when modal open */
+    body.modal-open { overflow: hidden; }
+
+    /* Toggle grid responsive */
+    .toggle-grid { display:grid; grid-template-columns: 1fr; gap:8px; align-items:center; }
+    @media (min-width: 768px) { .toggle-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
 
     .zone-selection {
         display: flex;
@@ -855,53 +921,86 @@
   <hr style="margin:12px 0;">
   <div style="color:#333;">
     <h5 style="margin:0 0 6px 0;">Датчик дождя (глобально)</h5>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <label><input type="checkbox" id="rain-enabled"> Использовать датчик дождя</label>
-      <label>Тип контактов:
-        <select id="rain-type">
-          <option value="NO">NO (нормально разомкнут)</option>
-          <option value="NC">NC (нормально замкнут)</option>
-        </select>
-      </label>
-      <label>MQTT сервер:
-        <select id="rain-server"></select>
-      </label>
-      <label>MQTT топик:
-        <input id="rain-topic" placeholder="/devices/wb-mr6cv3_101/controls/Input 1" style="min-width:280px;">
-      </label>
-      <button class="save-all-btn" onclick="saveRainConfig()">Сохранить датчик дождя</button>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <div class="toggle-row"><input type="checkbox" class="switch" id="rain-enabled" onchange="saveRainConfig()"><label style="margin-left:6px;">Использовать датчик дождя</label></div>
+      <button class="group-edit-btn" onclick="openGlobalRainSettings()">Настройки датчик дождя</button>
     </div>
-    <div class="muted">Значения: true/false. При дожде полив групп, где датчик разрешён, будет остановлен и отложен до конца дня.</div>
+    <div class="muted" style="margin-top:6px;">Значения: true/false. При дожде полив групп, где датчик разрешён, будет остановлен и отложен до конца дня.</div>
+  </div>
+  <!-- Модалка глобального датчика дождя -->
+  <div id="modal-global-rain" class="modal" onclick="if(event.target===this) closeGlobalRainSettings()">
+    <div class="modal-content" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div class="modal-title">Настройки датчика дождя</div>
+        <span class="close" role="button" tabindex="0" aria-label="Закрыть" onclick="closeGlobalRainSettings()">&times;</span>
+      </div>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>Тип контактов</label>
+          <select id="rain-type" onchange="scheduleGlobalRainSave()">
+            <option value="NO">NO (нормально разомкнут)</option>
+            <option value="NC">NC (нормально замкнут)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>MQTT сервер</label>
+          <select id="rain-server" onchange="scheduleGlobalRainSave()"></select>
+        </div>
+        <div class="form-group">
+          <label>MQTT топик</label>
+          <input id="rain-topic" placeholder="/devices/wb-mr6cv3_101/controls/Input 1" oninput="scheduleGlobalRainSave()">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick="closeGlobalRainSettings()">Закрыть</button>
+      </div>
+    </div>
   </div>
   <hr style="margin:12px 0;">
   <div style="color:#333;">
     <h5 style="margin:0 0 6px 0;">Датчики среды</h5>
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-      <label><input type="checkbox" id="env-temp-enabled"> Использовать датчик температуры</label>
-      <label>MQTT сервер:
-        <select id="env-temp-server"></select>
-      </label>
-      <label>Топик температуры:
-        <input id="env-temp-topic" placeholder="/devices/wb-msw-v4_107/controls/Temperature" style="min-width:280px;">
-      </label>
+      <div class="toggle-row"><input type="checkbox" class="switch" id="env-temp-enabled" onchange="saveEnvConfig()"><label style="margin-left:6px;">Использовать датчик температуры</label></div>
+      <div class="toggle-row"><input type="checkbox" class="switch" id="env-hum-enabled" onchange="saveEnvConfig()"><label style="margin-left:6px;">Использовать датчик влажности</label></div>
+      <button class="group-edit-btn" onclick="openGlobalEnvSettings()">Настройки датчиков среды</button>
     </div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:6px;">
-      <label><input type="checkbox" id="env-hum-enabled"> Использовать датчик влажности</label>
-      <label>MQTT сервер:
-        <select id="env-hum-server"></select>
-      </label>
-      <label>Топик влажности:
-        <input id="env-hum-topic" placeholder="/devices/wb-msw-v4_107/controls/Humidity" style="min-width:280px;">
-      </label>
-      <button class="save-all-btn" onclick="saveEnvConfig()">Сохранить датчики среды</button>
+    <div class="muted" style="margin-top:6px;">Значения округляются до целого (арифметически). Если датчик включен, но нет данных, в статусе будет «нет данных». Если датчик отключён — блоки скрываются на статусе.</div>
+  </div>
+  <!-- Модалка глобальных датчиков среды -->
+  <div id="modal-global-env" class="modal" onclick="if(event.target===this) closeGlobalEnvSettings()">
+    <div class="modal-content" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div class="modal-title">Настройки датчиков среды</div>
+        <span class="close" role="button" tabindex="0" aria-label="Закрыть" onclick="closeGlobalEnvSettings()">&times;</span>
+      </div>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>MQTT сервер (температура)</label>
+          <select id="env-temp-server" onchange="scheduleGlobalEnvSave()"></select>
+        </div>
+        <div class="form-group">
+          <label>Топик температуры</label>
+          <input id="env-temp-topic" placeholder="/devices/wb-msw-v4_107/controls/Temperature" oninput="scheduleGlobalEnvSave()">
+        </div>
+        <div class="form-group">
+          <label>MQTT сервер (влажность)</label>
+          <select id="env-hum-server" onchange="scheduleGlobalEnvSave()"></select>
+        </div>
+        <div class="form-group">
+          <label>Топик влажности</label>
+          <input id="env-hum-topic" placeholder="/devices/wb-msw-v4_107/controls/Humidity" oninput="scheduleGlobalEnvSave()">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick="closeGlobalEnvSettings()">Закрыть</button>
+      </div>
     </div>
-    <div class="muted">Значения округляются до целого (арифметически). Если датчик включен, но нет данных, в статусе будет «нет данных». Если датчик отключён — блоки скрываются на статусе.</div>
   </div>
 </div>
 
 <!-- Модальные окна -->
-<div id="zoneModal" class="modal">
-    <div class="modal-content">
+<div id="zoneModal" class="modal" onclick="if(event.target===this) closeZoneModal()">
+    <div class="modal-content" role="dialog" aria-modal="true">
         <div class="modal-header">
             <div class="modal-title">Добавить зону</div>
             <span class="close" onclick="closeZoneModal()">&times;</span>
@@ -958,8 +1057,8 @@
     </div>
 </div>
 
-<div id="groupModal" class="modal">
-    <div class="modal-content">
+<div id="groupModal" class="modal" onclick="if(event.target===this) closeGroupModal()">
+    <div class="modal-content" role="dialog" aria-modal="true">
         <div class="modal-header">
             <div class="modal-title">Редактировать группу</div>
             <span class="close" onclick="closeGroupModal()">&times;</span>
@@ -978,11 +1077,11 @@
 </div>
 
 <!-- Модалка добавления группы -->
-<div id="addGroupModal" class="modal">
-  <div class="modal-content">
+<div id="addGroupModal" class="modal" onclick="if(event.target===this) closeAddGroupModal()">
+  <div class="modal-content" role="dialog" aria-modal="true">
     <div class="modal-header">
       <div class="modal-title">Добавить группу</div>
-      <span class="close" onclick="closeAddGroupModal()">&times;</span>
+      <span class="close" role="button" tabindex="0" aria-label="Закрыть" onclick="closeAddGroupModal()">&times;</span>
     </div>
     <form class="modal-form" id="addGroupForm">
       <div class="form-group">
@@ -1178,19 +1277,129 @@
             card.style.position = 'relative';
             card.innerHTML = `
                 <button class="delete-btn" title="Удалить группу" onclick="deleteGroup(${group.id})">✖</button>
-                <div style="padding:10px 10px 6px 10px;">
+                <div class="group-head-grid">
+                    <div>
+                        <label style="display:block; color:#555; font-weight:500; margin-bottom:4px;">Имя группы</label>
                     <input type="text" class="group-name" value="${group.name}" 
                            oninput="autoSaveGroupName(${group.id}, this.value)"
                            placeholder="Название группы"
-                           style="width: calc(100% - 0px); display:block;">
+                               style="width:100%; height:34px;">
                 </div>
-                <div style="padding:0 10px 6px 10px; color:#333;">Зон: ${group.zone_count || 0}</div>
-                <div style="padding:0 10px 10px 10px;">
-                    <label style="display:flex; gap:8px; align-items:center; color:#222;">
-                        <input type="checkbox" class="group-use-rain" ${group.use_rain_sensor ? 'checked' : ''} onchange="toggleGroupUseRain(${group.id}, this.checked)">
-                        Использовать датчик дождя?
-                    </label>
+                    <div>
+                        <label style="display:block; color:#555; font-weight:500; margin-bottom:4px;">Количество зон</label>
+                        <input type="text" value="${group.zone_count || 0}" readonly aria-readonly style="width:100%; height:34px; background:#f1f3f5; color:#333; border:1px solid #e0e0e0; border-radius:4px; padding: 0 .5rem;">
+                    </div>
+                    <div class="toggle-grid">
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-rain ${(!window.rainConfig || !window.rainConfig.enabled)?'blocked-off':''}" ${(window.rainConfig && window.rainConfig.enabled && group.use_rain_sensor)?'checked':''} ${(!window.rainConfig || !window.rainConfig.enabled)?'data-blocked="1"':''} title="${(!window.rainConfig || !window.rainConfig.enabled)?'Глобальный датчик дождя выключен':'Использовать датчик дождя'}" onchange="toggleGroupUseRain(${group.id}, this.checked)" onclick="if(this.getAttribute('data-blocked')==='1'){ event.preventDefault(); showNotification('Нельзя включить датчик дождя для группы: глобальный датчик дождя выключен', 'warning'); }"><label style="margin-left:6px; color:#222;">Использовать датчик дождя</label></div>
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-mv" ${group.use_master_valve ? 'checked' : ''} onchange="toggleGroupUseMaster(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать мастер клапан</label></div>
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-pressure" ${group.use_pressure_sensor ? 'checked' : ''} onchange="toggleGroupUsePressure(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать датчик давления</label></div>
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-water" ${group.use_water_meter ? 'checked' : ''} onchange="toggleGroupUseWater(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать счётчик воды</label></div>
+                    </div>
                 </div>
+                <div style="padding: 0 10px 10px 10px; display:flex; flex-wrap:wrap; gap:8px;">
+                    <button class="group-edit-btn" onclick="openMasterSettings(${group.id})">Настройки мастер клапана</button>
+                    <button class="group-edit-btn" onclick="openPressureSettings(${group.id})">Настройки датчика давления</button>
+                    <button class="group-edit-btn" onclick="openWaterSettings(${group.id})">Настройки счётчика воды</button>
+                    
+                    <span id="save-badge-${group.id}" class="save-badge" style="margin-left:auto;"></span>
+                </div>
+
+                <div id="modal-master-${group.id}" class="modal" onclick="if(event.target===this) closeMasterSettings(${group.id})">
+                    <div class="modal-content" role="dialog" aria-modal="true">
+                        <div class="modal-header">
+                            <div class="modal-title">Настройки мастер клапана</div>
+                            <span role="button" tabindex="0" aria-label="Закрыть" class="close" onclick="closeMasterSettings(${group.id})">&times;</span>
+                        </div>
+                        <div class="modal-form ${group.use_master_valve ? '' : 'dim'}" aria-hidden="false">
+                            <div class="form-group">
+                                <label>MQTT сервер</label>
+                                <select id="mv-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Топик MQTT мастер-клапана</label>
+                                <input type="text" id="mv-topic-${group.id}" value="${(group.master_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-mr6c_101/controls/K1" oninput="scheduleAutoSave(${group.id})" onblur="saveGroupMasterTopic(${group.id})">
+                            </div>
+                            <div class="form-group">
+                                <label>Режим</label>
+                                <select id="mv-mode-${group.id}" onchange="saveGroupMasterMode(${group.id})">
+                                    <option value="NC" ${((group.master_mode||'NC')==='NC')?'selected':''}>NC (нормально закрыт)</option>
+                                    <option value="NO" ${((group.master_mode||'NC')==='NO')?'selected':''}>NO (нормально открыт)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="modal-actions">
+                            <button type="button" class="btn-secondary" onclick="closeMasterSettings(${group.id})">Закрыть</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="modal-pressure-${group.id}" class="modal" onclick="if(event.target===this) closePressureSettings(${group.id})">
+                    <div class="modal-content" role="dialog" aria-modal="true">
+                        <div class="modal-header">
+                            <div class="modal-title">Настройки датчика давления</div>
+                            <span role="button" tabindex="0" aria-label="Закрыть" class="close" onclick="closePressureSettings(${group.id})">&times;</span>
+                        </div>
+                        <div class="modal-form ${group.use_pressure_sensor ? '' : 'dim'}">
+                            <div class="form-group">
+                                <label>MQTT сервер</label>
+                                <select id="pressure-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Топик MQTT датчика давления</label>
+                                <input type="text" id="pressure-topic-${group.id}" value="${(group.pressure_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-ms_10/controls/pressure" oninput="scheduleAutoSave(${group.id})">
+                            </div>
+                            <div class="form-group">
+                                <label>Единицы измерения</label>
+                                <select id="pressure-unit-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                    <option value="bar" ${(group.pressure_unit||'bar')==='bar'?'selected':''}>Бар</option>
+                                    <option value="kpa" ${(group.pressure_unit||'bar')==='kpa'?'selected':''}>кПа</option>
+                                    <option value="psi" ${(group.pressure_unit||'bar')==='psi'?'selected':''}>PSI</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="modal-actions">
+                            <button type="button" class="btn-secondary" onclick="closePressureSettings(${group.id})">Закрыть</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="modal-water-${group.id}" class="modal" onclick="if(event.target===this) closeWaterSettings(${group.id})">
+                    <div class="modal-content" role="dialog" aria-modal="true">
+                        <div class="modal-header">
+                            <div class="modal-title">Настройки счётчика воды</div>
+                            <span role="button" tabindex="0" aria-label="Закрыть" class="close" onclick="closeWaterSettings(${group.id})">&times;</span>
+                        </div>
+                        <div class="modal-form ${group.use_water_meter ? '' : 'dim'}">
+                            <div class="form-group">
+                                <label>MQTT сервер</label>
+                                <select id="water-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Топик MQTT счётчика воды</label>
+                                <input type="text" id="water-topic-${group.id}" value="${(group.water_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-water/controls/meter" oninput="scheduleAutoSave(${group.id})">
+                            </div>
+                            <div class="form-group">
+                                <label>Величина импульса</label>
+                                <select id="water-pulse-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                    <option value="1l" ${(group.water_pulse_size||'1l')==='1l'?'selected':''}>1 л</option>
+                                    <option value="10l" ${(group.water_pulse_size||'1l')==='10l'?'selected':''}>10 л</option>
+                                    <option value="100l" ${(group.water_pulse_size||'1l')==='100l'?'selected':''}>100 л</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="modal-actions">
+                            <button type="button" class="btn-secondary" onclick="closeWaterSettings(${group.id})">Закрыть</button>
+                        </div>
+                    </div>
+                </div>
+
+
             `;
             container.appendChild(card);
         });
@@ -1264,6 +1473,7 @@
             document.getElementById('rain-topic').value = cfg.topic || '';
             const rs = document.getElementById('rain-server');
             if (rs && cfg.server_id) rs.value = String(cfg.server_id);
+            try{ updateGlobalToggleTitles(); }catch(e){}
         } catch {}
     }
 
@@ -1277,15 +1487,21 @@
             // Клиентская валидация
             const rainTopicInput = document.getElementById('rain-topic');
             rainTopicInput.style.border = '';
-            if (enabled && !String(topic).trim()) {
+            if (enabled && (!server_id || !String(topic).trim())) {
                 rainTopicInput.style.border = '2px solid #f44336';
-                showNotification('Укажите MQTT-топик для датчика дождя', 'error');
+                showNotification('Укажите MQTT сервер и MQTT-топик для датчика дождя', 'error');
+                // Откат тумблера
+                const tgl = document.getElementById('rain-enabled'); if (tgl) tgl.checked = false;
+                try{ updateGlobalToggleTitles(); }catch(e){}
                 return;
             }
             const resp = await fetch('/api/rain', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled, type, topic, server_id})});
             const data = await resp.json();
             if (data && data.success) {
                 showNotification('Конфигурация датчика дождя сохранена', 'success');
+                // Если глобально выключили — запретим переключатели у групп
+                try{ window.rainConfig = window.rainConfig || {}; window.rainConfig.enabled = enabled; renderGroupsGrid(); }catch(e){}
+                try{ updateGlobalToggleTitles(); }catch(e){}
             } else {
                 showNotification('Не удалось сохранить конфигурацию', 'error');
             }
@@ -1303,7 +1519,287 @@
             document.getElementById('env-hum-enabled').checked = !!(cfg.hum && cfg.hum.enabled);
             document.getElementById('env-hum-topic').value = (cfg.hum && cfg.hum.topic) || '';
             if (cfg.hum && cfg.hum.server_id) document.getElementById('env-hum-server').value = String(cfg.hum.server_id);
+            try{ updateGlobalToggleTitles(); }catch(e){}
         } catch {}
+    }
+
+    // === Master Valve handlers (UI only; backend to be added) ===
+    async function toggleGroupUseMaster(groupId, enabled) {
+        try {
+            const topicEl = document.getElementById(`mv-topic-${groupId}`);
+            const modeEl = document.getElementById(`mv-mode-${groupId}`);
+            const serverEl = document.getElementById(`mv-server-${groupId}`);
+            const topic = (topicEl && topicEl.value ? topicEl.value.trim() : '');
+            if (topicEl) topicEl.style.border = '';
+            // Валидация при включении: требуем MQTT сервер и MQTT топик
+            if (enabled) {
+                const serverOk = !!(serverEl && String(serverEl.value||'').trim());
+                const topicOk = !!topic;
+                if (!serverOk || !topicOk) {
+                    if (topicEl && !topicOk) topicEl.style.border = '2px solid #f44336';
+                    // Откат чекбокса
+                    const cb = document.querySelector(`[data-group-id="${groupId}"] .group-use-mv`);
+                    if (cb) cb.checked = false;
+                    showNotification('Укажите MQTT сервер и MQTT-топик для мастер-клапана', 'warning');
+                    return;
+                }
+            }
+            // Save immediately (will be no-op until backend supports fields)
+            const payload = { use_master_valve: !!enabled };
+            if (topic) payload.master_mqtt_topic = topic;
+            if (modeEl && modeEl.value) payload.master_mode = modeEl.value;
+            if (serverEl && serverEl.value) payload.master_mqtt_server_id = parseInt(serverEl.value);
+            const ok = await api.put(`/api/groups/${groupId}`, payload);
+            if (!ok) {
+                showNotification('Не удалось сохранить настройки мастер-клапана', 'error');
+            } else {
+                // update local cache
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) {
+                    groupsData[gi].use_master_valve = !!enabled;
+                    if (topic) groupsData[gi].master_mqtt_topic = topic;
+                    if (modeEl && modeEl.value) groupsData[gi].master_mode = modeEl.value;
+                    if (serverEl && serverEl.value) groupsData[gi].master_mqtt_server_id = parseInt(serverEl.value);
+                }
+                showNotification('Настройки мастер-клапана сохранены', 'success');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения настроек мастер-клапана', 'error');
+        }
+    }
+
+    // === Pressure & Water toggles (UI only; backend to be added) ===
+    async function toggleGroupUsePressure(groupId, enabled){
+        try {
+            // Валидация при включении
+            if (enabled) {
+                const serverEl = document.getElementById(`pressure-server-${groupId}`);
+                const topicEl = document.getElementById(`pressure-topic-${groupId}`);
+                const serverOk = !!(serverEl && String(serverEl.value||'').trim());
+                const topic = (topicEl && topicEl.value ? topicEl.value.trim() : '');
+                if (!serverOk || !topic) {
+                    if (topicEl && !topic) topicEl.style.border = '2px solid #f44336';
+                    const cb = document.querySelector(`[data-group-id="${groupId}"] .group-use-pressure`);
+                    if (cb) cb.checked = false;
+                    showNotification('Укажите MQTT сервер и MQTT-топик для датчика давления', 'warning');
+                    return;
+                }
+            }
+            const ok = await api.put(`/api/groups/${groupId}`, { use_pressure_sensor: !!enabled });
+            if (ok){
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) groupsData[gi].use_pressure_sensor = !!enabled;
+                showNotification('Настройка датчика давления сохранена', 'success');
+            }
+        } catch(e){ showNotification('Ошибка сохранения настройки давления', 'error'); }
+    }
+    async function toggleGroupUseWater(groupId, enabled){
+        try {
+            // Валидация при включении
+            if (enabled) {
+                const serverEl = document.getElementById(`water-server-${groupId}`);
+                const topicEl = document.getElementById(`water-topic-${groupId}`);
+                const serverOk = !!(serverEl && String(serverEl.value||'').trim());
+                const topic = (topicEl && topicEl.value ? topicEl.value.trim() : '');
+                if (!serverOk || !topic) {
+                    if (topicEl && !topic) topicEl.style.border = '2px solid #f44336';
+                    const cb = document.querySelector(`[data-group-id="${groupId}"] .group-use-water`);
+                    if (cb) cb.checked = false;
+                    showNotification('Укажите MQTT сервер и MQTT-топик для счётчика воды', 'warning');
+                    return;
+                }
+            }
+            const ok = await api.put(`/api/groups/${groupId}`, { use_water_meter: !!enabled });
+            if (ok){
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) groupsData[gi].use_water_meter = !!enabled;
+                showNotification('Настройка счётчика воды сохранена', 'success');
+            }
+        } catch(e){ showNotification('Ошибка сохранения настройки счётчика воды', 'error'); }
+    }
+
+    // === Settings modals open/close ===
+    // === Unified modal open/close and sizing (consistent across devices) ===
+    function _calcViewport(){
+        const vv = (window.visualViewport ? { w: window.visualViewport.width, h: window.visualViewport.height } : null);
+        return {
+            w: Math.max(320, Math.min(window.innerWidth || 0, screen.width || Infinity, vv ? vv.w : Infinity)),
+            h: Math.max(320, Math.min(window.innerHeight || 0, screen.height || Infinity, vv ? vv.h : Infinity))
+        };
+    }
+    function _sizeModalContent(modal){
+        try{
+            const c = modal.querySelector('.modal-content'); if (!c) return;
+            const vp = _calcViewport();
+            const maxW = Math.min(520, vp.w - 32);
+            const widthPx = Math.max(280, maxW);
+            const maxH = Math.min(Math.round(vp.h*0.92), vp.h - 32);
+            c.style.margin = '0';
+            c.style.width = widthPx + 'px';
+            c.style.maxWidth = widthPx + 'px';
+            c.style.maxHeight = maxH + 'px';
+        }catch(e){}
+    }
+    function openModalById(id){
+        const m = document.getElementById(id); if (!m) return;
+        // Move modal to body to avoid transformed ancestors affecting fixed positioning (iOS Safari bug)
+        try { if (m.parentElement && m.parentElement !== document.body) { document.body.appendChild(m); } } catch(e){}
+        m.style.display = 'flex';
+        _sizeModalContent(m);
+        // CSS handles viewport centering; no JS overrides to avoid off-screen drift
+    }
+    function closeModalById(id){ const m = document.getElementById(id); if (!m) return; m.style.display='none'; }
+    function recenterOpenModals(){
+        try{
+            document.querySelectorAll('.modal').forEach(m=>{
+                if (m instanceof HTMLElement && getComputedStyle(m).display !== 'none') _sizeModalContent(m);
+                // Positioning handled by CSS (50vw/50dvh)
+            });
+        }catch(e){}
+    }
+    window.addEventListener('resize', recenterOpenModals);
+    window.addEventListener('orientationchange', recenterOpenModals);
+    if (window.visualViewport){ try{ window.visualViewport.addEventListener('resize', recenterOpenModals); }catch(e){} }
+
+    // === Global Rain modal helpers + autosave ===
+    function openGlobalRainSettings(){ openModalById('modal-global-rain'); }
+    function closeGlobalRainSettings(){ closeModalById('modal-global-rain'); }
+    let __rainTimer = null;
+    function scheduleGlobalRainSave(){ if (__rainTimer) clearTimeout(__rainTimer); __rainTimer = setTimeout(saveRainConfig, 400); }
+
+    // === Global Env modal helpers + autosave ===
+    function openGlobalEnvSettings(){ openModalById('modal-global-env'); }
+    function closeGlobalEnvSettings(){ closeModalById('modal-global-env'); }
+    let __envTimer = null;
+    function scheduleGlobalEnvSave(){ if (__envTimer) clearTimeout(__envTimer); __envTimer = setTimeout(saveEnvConfig, 400); }
+
+    // Settings modals using unified helpers
+    function openMasterSettings(groupId){ openModalById(`modal-master-${groupId}`); }
+    function closeMasterSettings(groupId){ closeModalById(`modal-master-${groupId}`); }
+    function openPressureSettings(groupId){ openModalById(`modal-pressure-${groupId}`); }
+    function closePressureSettings(groupId){ closeModalById(`modal-pressure-${groupId}`); }
+    function openWaterSettings(groupId){ openModalById(`modal-water-${groupId}`); }
+    function closeWaterSettings(groupId){ closeModalById(`modal-water-${groupId}`); }
+
+    // Safety: recenter on resize/orientationchange
+    function recenterOpenModals(){
+        try{
+            const opened = document.querySelectorAll('.modal');
+            opened.forEach(el=>{
+                if ((el instanceof HTMLElement) && getComputedStyle(el).display !== 'none'){
+                    // force reflow to ensure flex centering recalculates
+                    el.style.alignItems = 'center';
+                }
+            });
+        }catch(e){}
+    }
+    window.addEventListener('resize', recenterOpenModals);
+    window.addEventListener('orientationchange', recenterOpenModals);
+
+    // === Autosave badge (debounced per group) ===
+    const __saveTimers = {};
+    function scheduleAutoSave(groupId){
+        const badge = document.getElementById(`save-badge-${groupId}`);
+        if (badge){ badge.textContent = 'Сохранение…'; badge.className = 'save-badge saving'; }
+        if (__saveTimers[groupId]) clearTimeout(__saveTimers[groupId]);
+        __saveTimers[groupId] = setTimeout(async ()=>{
+            try{
+                // collect payload from current DOM (all sensors)
+                const mvServerSel = document.getElementById(`mv-server-${groupId}`);
+                const mvServer = mvServerSel ? parseInt(mvServerSel.value) : null;
+                const mvTopic = (document.getElementById(`mv-topic-${groupId}`)||{}).value || '';
+                const mvModeSel = document.getElementById(`mv-mode-${groupId}`);
+                const mvMode = mvModeSel ? mvModeSel.value : 'NC';
+
+                const prServerSel = document.getElementById(`pressure-server-${groupId}`);
+                const prServer = prServerSel ? parseInt(prServerSel.value) : null;
+                const prTopic = (document.getElementById(`pressure-topic-${groupId}`)||{}).value || '';
+                const prUnitSel = document.getElementById(`pressure-unit-${groupId}`);
+                const prUnit = prUnitSel ? prUnitSel.value : 'bar';
+
+                const wServerSel = document.getElementById(`water-server-${groupId}`);
+                const wServer = wServerSel ? parseInt(wServerSel.value) : null;
+                const wTopic = (document.getElementById(`water-topic-${groupId}`)||{}).value || '';
+                const wPulseSel = document.getElementById(`water-pulse-${groupId}`);
+                const wPulse = wPulseSel ? wPulseSel.value : '1l';
+
+                const rainServerSel = document.getElementById(`rain-server-${groupId}`);
+                const rainServer = rainServerSel ? parseInt(rainServerSel.value) : null;
+                const rainTopic = (document.getElementById(`rain-topic-${groupId}`)||{}).value || '';
+
+                const tempServerSel = document.getElementById(`temp-server-${groupId}`);
+                const tempServer = tempServerSel ? parseInt(tempServerSel.value) : null;
+                const tempTopic = (document.getElementById(`temp-topic-${groupId}`)||{}).value || '';
+
+                const humServerSel = document.getElementById(`hum-server-${groupId}`);
+                const humServer = humServerSel ? parseInt(humServerSel.value) : null;
+                const humTopic = (document.getElementById(`hum-topic-${groupId}`)||{}).value || '';
+
+                const payload = {
+                    master_mqtt_topic: mvTopic,
+                    master_mode: mvMode,
+                    master_mqtt_server_id: isNaN(mvServer)? null : mvServer,
+                    pressure_mqtt_topic: prTopic,
+                    pressure_unit: prUnit,
+                    pressure_mqtt_server_id: isNaN(prServer)? null : prServer,
+                    water_mqtt_topic: wTopic,
+                    water_pulse_size: wPulse,
+                    water_mqtt_server_id: isNaN(wServer)? null : wServer,
+                    rain_mqtt_topic: rainTopic,
+                    rain_mqtt_server_id: isNaN(rainServer)? null : rainServer,
+                    temp_mqtt_topic: tempTopic,
+                    temp_mqtt_server_id: isNaN(tempServer)? null : tempServer,
+                    hum_mqtt_topic: humTopic,
+                    hum_mqtt_server_id: isNaN(humServer)? null : humServer
+                };
+                const ok = await api.put(`/api/groups/${groupId}`, payload);
+                if (ok){ if (badge){ badge.textContent='Сохранено'; badge.className='save-badge saved'; setTimeout(()=>{ if (badge) { badge.textContent=''; badge.className='save-badge'; } }, 1200); } }
+                else { if (badge){ badge.textContent='Ошибка'; badge.className='save-badge error'; } }
+            }catch(e){ if (badge){ badge.textContent='Ошибка'; badge.className='save-badge error'; } }
+        }, 450);
+    }
+
+    async function saveGroupMasterTopic(groupId) {
+        try {
+            const topicEl = document.getElementById(`mv-topic-${groupId}`);
+            const modeEl = document.getElementById(`mv-mode-${groupId}`);
+            const topic = (topicEl && topicEl.value ? topicEl.value.trim() : '');
+            if (topicEl) topicEl.style.border = '';
+            const payload = { master_mqtt_topic: topic };
+            if (modeEl && modeEl.value) payload.master_mode = modeEl.value;
+            const ok = await api.put(`/api/groups/${groupId}`, payload);
+            if (!ok) {
+                showNotification('Не удалось сохранить топик мастер-клапана', 'error');
+            } else {
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) { groupsData[gi].master_mqtt_topic = topic; }
+                showNotification('Топик мастер-клапана сохранён', 'success');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения топика мастер-клапана', 'error');
+        }
+    }
+
+    async function saveGroupMasterMode(groupId) {
+        try {
+            const modeEl = document.getElementById(`mv-mode-${groupId}`);
+            const topicEl = document.getElementById(`mv-topic-${groupId}`);
+            const mode = (modeEl && modeEl.value) ? modeEl.value : 'NC';
+            const topic = (topicEl && topicEl.value ? topicEl.value.trim() : '');
+            if (topicEl) topicEl.style.border = '';
+            const payload = { master_mode: mode };
+            if (topic) payload.master_mqtt_topic = topic;
+            const ok = await api.put(`/api/groups/${groupId}`, payload);
+            if (!ok) {
+                showNotification('Не удалось сохранить режим мастер-клапана', 'error');
+            } else {
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) { groupsData[gi].master_mode = mode; }
+                showNotification('Режим мастер-клапана сохранён', 'success');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения режима мастер-клапана', 'error');
+        }
     }
 
     async function saveEnvConfig() {
@@ -1323,20 +1819,25 @@
             const humTopicInput = document.getElementById('env-hum-topic');
             tempTopicInput.style.border = '';
             humTopicInput.style.border = '';
-            if (temp.enabled && !String(temp.topic).trim()) {
+            if (temp.enabled && (!temp.server_id || !String(temp.topic).trim())) {
                 tempTopicInput.style.border = '2px solid #f44336';
-                showNotification('Укажите MQTT-топик для датчика температуры', 'error');
+                showNotification('Укажите MQTT сервер и MQTT-топик для датчика температуры', 'error');
+                const tgl = document.getElementById('env-temp-enabled'); if (tgl) tgl.checked = false;
+                try{ updateGlobalToggleTitles(); }catch(e){}
                 return;
             }
-            if (hum.enabled && !String(hum.topic).trim()) {
+            if (hum.enabled && (!hum.server_id || !String(hum.topic).trim())) {
                 humTopicInput.style.border = '2px solid #f44336';
-                showNotification('Укажите MQTT-топик для датчика влажности', 'error');
+                showNotification('Укажите MQTT сервер и MQTT-топик для датчика влажности', 'error');
+                const tgl = document.getElementById('env-hum-enabled'); if (tgl) tgl.checked = false;
+                try{ updateGlobalToggleTitles(); }catch(e){}
                 return;
             }
             const resp = await fetch('/api/env', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ temp, hum })});
             const data = await resp.json();
             if (data && data.success) {
                 showNotification('Настройки датчиков среды сохранены', 'success');
+                try{ window.envConfig = data.config || window.envConfig || {}; updateGlobalToggleTitles(); }catch(e){}
             } else {
                 // Подсветим оба поля, если есть ошибки
                 if (data && data.errors) {
@@ -1355,6 +1856,33 @@
         } catch (e) {
             showNotification('Ошибка сохранения настроек датчиков', 'error');
         }
+    }
+
+    // === Titles and availability hints for global toggles ===
+    function updateGlobalToggleTitles(){
+        try{
+            // Rain
+            const rainEnabled = document.getElementById('rain-enabled');
+            const rs = document.getElementById('rain-server');
+            const rt = document.getElementById('rain-topic');
+            const hasRainConfig = !!(rs && rs.value) && !!(rt && String(rt.value).trim());
+            if (rainEnabled){
+                rainEnabled.title = hasRainConfig ? '' : 'Укажите MQTT сервер и MQTT топик для датчика дождя';
+            }
+            // Group rain checkboxes already disabled when global off via renderGroupsGrid()
+            // Env temp
+            const tempTgl = document.getElementById('env-temp-enabled');
+            const ts = document.getElementById('env-temp-server');
+            const tt = document.getElementById('env-temp-topic');
+            const hasTempCfg = !!(ts && ts.value) && !!(tt && String(tt.value).trim());
+            if (tempTgl){ tempTgl.title = hasTempCfg ? '' : 'Укажите MQTT сервер и MQTT топик для датчика температуры'; }
+            // Env hum
+            const humTgl = document.getElementById('env-hum-enabled');
+            const hs = document.getElementById('env-hum-server');
+            const ht = document.getElementById('env-hum-topic');
+            const hasHumCfg = !!(hs && hs.value) && !!(ht && String(ht.value).trim());
+            if (humTgl){ humTgl.title = hasHumCfg ? '' : 'Укажите MQTT сервер и MQTT топик для датчика влажности'; }
+        }catch(e){}
     }
 
     async function toggleGroupUseRain(groupId, enabled) {
@@ -1793,34 +2321,26 @@
     }
     
     // Модальные окна для зон и групп
-    function showZoneModal() {
-        document.getElementById('zoneModal').style.display = 'block';
-    }
+    function showZoneModal() { openModalById('zoneModal'); }
     
-    function closeZoneModal() {
-        document.getElementById('zoneModal').style.display = 'none';
-        document.getElementById('zoneForm').reset();
-    }
+    function closeZoneModal() { closeModalById('zoneModal'); const f = document.getElementById('zoneForm'); if (f) f.reset(); }
     
     function editGroup(groupId, groupName) {
         editingGroupId = groupId;
         document.getElementById('groupName').value = groupName;
-        document.getElementById('groupModal').style.display = 'block';
+        openModalById('groupModal');
     }
     
-    function closeGroupModal() {
-        document.getElementById('groupModal').style.display = 'none';
-        editingGroupId = null;
-    }
+    function closeGroupModal() { closeModalById('groupModal'); editingGroupId = null; }
     
     function createGroup() {
         editingGroupId = null;
         document.getElementById('groupName').value = '';
-        document.getElementById('groupModal').style.display = 'block';
+        openModalById('groupModal');
     }
 
-    function showAddGroupModal() { document.getElementById('addGroupModal').style.display = 'block'; }
-    function closeAddGroupModal() { document.getElementById('addGroupModal').style.display = 'none'; document.getElementById('addGroupForm').reset(); }
+    function showAddGroupModal() { openModalById('addGroupModal'); }
+    function closeAddGroupModal() { closeModalById('addGroupModal'); const f = document.getElementById('addGroupForm'); if (f){ f.reset(); } }
     
     // Обработчики форм
     document.getElementById('zoneForm').addEventListener('submit', async (e) => {
@@ -1891,13 +2411,22 @@
     
     // Закрытие модальных окон при клике вне их
     window.onclick = function(event) {
+        try{
         const modals = ['zoneModal', 'groupModal'];
         modals.forEach(modalId => {
             const modal = document.getElementById(modalId);
-            if (event.target === modal) {
+                if (modal && event.target === modal) {
                 modal.style.display = 'none';
             }
         });
+            // Group-level modals (master/pressure/water) close by click on overlay too
+            const master = document.querySelectorAll('[id^="modal-master-"]');
+            master.forEach(m=>{ if (event.target === m) { m.style.display = 'none'; } });
+            const pressure = document.querySelectorAll('[id^="modal-pressure-"]');
+            pressure.forEach(m=>{ if (event.target === m) { m.style.display = 'none'; } });
+            const water = document.querySelectorAll('[id^="modal-water-"]');
+            water.forEach(m=>{ if (event.target === m) { m.style.display = 'none'; } });
+        }catch(e){}
     }
     
     // Инициализация

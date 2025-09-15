@@ -88,7 +88,7 @@ def get_or_create_mqtt_client(server: dict):
 
 
 def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.2, retain: bool = False,
-                       meta: Optional[Dict[str, str]] = None) -> bool:
+                       meta: Optional[Dict[str, str]] = None, qos: int = 0) -> bool:
     try:
         t = normalize_topic(topic)
         sid = int(server.get('id')) if server.get('id') else None
@@ -123,7 +123,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             return False
         # Publish to base topic
         try:
-            res = cl.publish(t, payload=value, qos=0, retain=retain)
+            res = cl.publish(t, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
             try:
                 rc = getattr(res, 'rc', 0)
             except Exception:
@@ -134,7 +134,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                     cl.reconnect()
                 except Exception:
                     pass
-                res = cl.publish(t, payload=value, qos=0, retain=retain)
+                res = cl.publish(t, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
         except Exception:
             logger.exception('MQTT publish failed')
             return False
@@ -150,7 +150,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                     return True
                 _TOPIC_LAST_SEND[on_key] = (value, now2)
             logger.debug(f"MQTT publish topic={t_on} value={value}")
-            res_on = cl.publish(t_on, payload=value, qos=0, retain=retain)
+            res_on = cl.publish(t_on, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
             # Ignore rc here; some brokers may not acknowledge the duplicate fast
         except Exception:
             # Soft-fail for '/on' duplication

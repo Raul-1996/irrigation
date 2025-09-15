@@ -149,6 +149,8 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'mqtt_add_tls_options', self._migrate_add_mqtt_tls_options)
                 self._apply_named_migration(conn, 'zones_add_control_fields', self._migrate_add_zone_control_fields)
                 self._apply_named_migration(conn, 'zones_add_commanded_observed', self._migrate_add_commanded_observed)
+                self._apply_named_migration(conn, 'groups_add_master_and_sensors', self._migrate_add_groups_master_and_sensors)
+                self._apply_named_migration(conn, 'groups_add_master_valve_observed', self._migrate_add_groups_master_valve_observed)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -418,6 +420,42 @@ class IrrigationDB:
             logger.info('Добавлены поля commanded_state, observed_state в zones')
         except Exception as e:
             logger.error(f"Ошибка миграции commanded/observed: {e}")
+
+    def _migrate_add_groups_master_and_sensors(self, conn):
+        """Добавить в таблицу groups поля для мастер-клапана, датчика давления и счётчика воды."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(groups)")
+            columns = [column[1] for column in cursor.fetchall()]
+            def add(col, ddl):
+                if col not in columns:
+                    conn.execute(ddl)
+            add('use_master_valve', 'ALTER TABLE groups ADD COLUMN use_master_valve INTEGER DEFAULT 0')
+            add('master_mqtt_topic', 'ALTER TABLE groups ADD COLUMN master_mqtt_topic TEXT DEFAULT ""')
+            add('master_mode', 'ALTER TABLE groups ADD COLUMN master_mode TEXT DEFAULT "NC"')
+            add('master_mqtt_server_id', 'ALTER TABLE groups ADD COLUMN master_mqtt_server_id INTEGER')
+            add('master_valve_observed', 'ALTER TABLE groups ADD COLUMN master_valve_observed TEXT')
+            add('use_pressure_sensor', 'ALTER TABLE groups ADD COLUMN use_pressure_sensor INTEGER DEFAULT 0')
+            add('pressure_mqtt_topic', 'ALTER TABLE groups ADD COLUMN pressure_mqtt_topic TEXT DEFAULT ""')
+            add('pressure_unit', 'ALTER TABLE groups ADD COLUMN pressure_unit TEXT DEFAULT "bar"')
+            add('pressure_mqtt_server_id', 'ALTER TABLE groups ADD COLUMN pressure_mqtt_server_id INTEGER')
+            add('use_water_meter', 'ALTER TABLE groups ADD COLUMN use_water_meter INTEGER DEFAULT 0')
+            add('water_mqtt_topic', 'ALTER TABLE groups ADD COLUMN water_mqtt_topic TEXT DEFAULT ""')
+            add('water_mqtt_server_id', 'ALTER TABLE groups ADD COLUMN water_mqtt_server_id INTEGER')
+            conn.commit()
+            logger.info('Добавлены поля мастер-клапана и сенсоров в таблицу groups')
+        except Exception as e:
+            logger.error(f"Ошибка миграции groups_add_master_and_sensors: {e}")
+
+    def _migrate_add_groups_master_valve_observed(self, conn):
+        try:
+            cursor = conn.execute("PRAGMA table_info(groups)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'master_valve_observed' not in cols:
+                conn.execute('ALTER TABLE groups ADD COLUMN master_valve_observed TEXT')
+                conn.commit()
+                logger.info('Добавлено поле master_valve_observed в groups')
+        except Exception as e:
+            logger.error(f"Ошибка миграции groups_add_master_valve_observed: {e}")
 
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
@@ -1188,6 +1226,34 @@ class IrrigationDB:
                 return True
         except Exception as e:
             logger.error(f"Ошибка обновления группы {group_id}: {e}")
+            return False
+
+    def update_group_fields(self, group_id: int, updates: Dict[str, Any]) -> bool:
+        """Обновить произвольные поля группы (мастер-клапан, сенсоры)."""
+        if not updates:
+            return False
+        allowed = {
+            'use_master_valve', 'master_mqtt_topic', 'master_mode', 'master_mqtt_server_id',
+            'use_pressure_sensor', 'pressure_mqtt_topic', 'pressure_unit', 'pressure_mqtt_server_id',
+            'use_water_meter', 'water_mqtt_topic', 'water_mqtt_server_id', 'master_valve_observed'
+        }
+        set_parts = []
+        params = []
+        for k, v in updates.items():
+            if k in allowed:
+                set_parts.append(f"{k} = ?")
+                params.append(v)
+        if not set_parts:
+            return False
+        params.append(group_id)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                sql = f"UPDATE groups SET {', '.join(set_parts)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+                conn.execute(sql, tuple(params))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка обновления полей группы {group_id}: {e}")
             return False
     
     def get_programs(self) -> List[Dict[str, Any]]:

@@ -4,3 +4,5 @@ APScheduler==3.10.4
 Flask-WTF==1.2.1
 python-dotenv==1.0.1
 paho-mqtt==2.1.0
+Flask-Sock==0.7.0
+hypercorn==0.14.4
