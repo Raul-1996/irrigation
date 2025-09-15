@@ -1746,6 +1746,48 @@ def api_update_group(group_id):
             updated = updated or ok
         except Exception as e:
             logger.error(f"Ошибка обновления use_rain_sensor группы {group_id}: {e}")
+
+    # Обновление полей мастер-клапана и сенсоров (не затрагивает логику полива)
+    fields_map = {
+        'use_master_valve': ('use_master_valve', lambda v: 1 if v else 0),
+        'master_mqtt_topic': ('master_mqtt_topic', lambda v: (v or '').strip()),
+        'master_mode': ('master_mode', lambda v: (str(v or 'NC')).strip().upper()),
+        'master_mqtt_server_id': ('master_mqtt_server_id', lambda v: int(v) if v not in (None, '') else None),
+        'use_pressure_sensor': ('use_pressure_sensor', lambda v: 1 if v else 0),
+        'pressure_mqtt_topic': ('pressure_mqtt_topic', lambda v: (v or '').strip()),
+        'pressure_unit': ('pressure_unit', lambda v: (str(v or 'bar')).strip()),
+        'pressure_mqtt_server_id': ('pressure_mqtt_server_id', lambda v: int(v) if v not in (None, '') else None),
+        'use_water_meter': ('use_water_meter', lambda v: 1 if v else 0),
+        'water_mqtt_topic': ('water_mqtt_topic', lambda v: (v or '').strip()),
+        'water_mqtt_server_id': ('water_mqtt_server_id', lambda v: int(v) if v not in (None, '') else None),
+    }
+    updates = {}
+    for k, (col, norm) in fields_map.items():
+        if k in data:
+            try:
+                updates[col] = norm(data.get(k))
+            except Exception:
+                # Непарсибельное значение игнорируем
+                pass
+    if updates:
+        # Базовые валидации
+        try:
+            if 'use_master_valve' in updates and int(updates.get('use_master_valve') or 0) == 1:
+                if not (updates.get('master_mqtt_topic') or (db.get_group(group_id) or {}).get('master_mqtt_topic')):
+                    return jsonify({'success': False, 'message': 'Нужен MQTT-топик мастер-клапана'}), 400
+                sid = updates.get('master_mqtt_server_id') or (db.get_group(group_id) or {}).get('master_mqtt_server_id')
+                if not sid or not db.get_mqtt_server(int(sid)):
+                    return jsonify({'success': False, 'message': 'Нужен корректный MQTT-сервер для мастер-клапана'}), 400
+            if 'master_mode' in updates:
+                if updates['master_mode'] not in ('NC', 'NO'):
+                    return jsonify({'success': False, 'message': 'master_mode должен быть NC или NO'}), 400
+            if 'pressure_unit' in updates:
+                if str(updates['pressure_unit']).lower() not in ('bar', 'kpa', 'psi'):
+                    return jsonify({'success': False, 'message': 'pressure_unit должен быть bar|kPa|psi'}), 400
+        except Exception:
+            pass
+        ok = db.update_group_fields(group_id, updates)
+        updated = updated or ok
     if updated:
         try:
             payload = {"group": group_id}
@@ -1753,6 +1795,11 @@ def api_update_group(group_id):
                 payload["name"] = data['name']
             if 'use_rain_sensor' in data:
                 payload["use_rain_sensor"] = bool(data.get('use_rain_sensor'))
+            for k in ('use_master_valve','master_mqtt_topic','master_mode','master_mqtt_server_id',
+                      'use_pressure_sensor','pressure_mqtt_topic','pressure_unit','pressure_mqtt_server_id',
+                      'use_water_meter','water_mqtt_topic','water_mqtt_server_id'):
+                if k in data:
+                    payload[k] = data.get(k)
             db.add_log('group_edit', json.dumps(payload))
         except Exception:
             pass
