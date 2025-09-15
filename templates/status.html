@@ -167,6 +167,20 @@
         border: 2px solid #fff; 
         transition: all 0.2s;
     }
+    /* Перенос текста для кнопок отложки: до 3 строк */
+    .btn-group button.delay {
+        white-space: normal; /* разрешаем переносы */
+        text-align: center;
+        line-height: 1.2;
+        height: auto; /* авто-высота при переносе */
+        min-height: 40px;
+        overflow: hidden; /* обрезаем сверх 3 строк */
+        display: -webkit-box; /* для line-clamp */
+        -webkit-line-clamp: 3; /* максимум 3 строки */
+        -webkit-box-orient: vertical;
+        word-break: break-word; /* перенос длинных слов при необходимости */
+        overflow-wrap: anywhere;
+    }
     .btn-group button:hover {
         transform: translateY(-1px);
         box-shadow: 0 2px 4px rgba(0,0,0,0.2);
