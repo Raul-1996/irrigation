@@ -326,17 +326,10 @@ class IrrigationScheduler:
                         okv = False
                     if not okv:
                         self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
-                    # MQTT publish ON
+                    # Centralized start to ensure MV logic
                     try:
-                        topic = (zone.get('topic') or '').strip()
-                        sid = zone.get('mqtt_server_id')
-                        if mqtt and topic and sid:
-                            t = normalize_topic(topic)
-                            server = self.db.get_mqtt_server(int(sid))
-                            if server:
-                                logger.debug(f"SCHED publish ON zone={zone_id} topic={t}")
-                                from app import _publish_mqtt_value as _pub
-                                _pub(server, t, '1', min_interval_sec=0.0)
+                        from services.zone_control import exclusive_start_zone as _start_central
+                        _start_central(int(zone_id))
                     except Exception:
                         pass
                     end_time = datetime.now() + timedelta(minutes=duration)
@@ -384,20 +377,12 @@ class IrrigationScheduler:
                     time.sleep(1)
                     remaining -= 1
 
-                # Публикуем OFF и останавливаем зону
+                # Centralized stop to ensure MV delayed close
                 try:
-                    topic = (zone.get('topic') or '').strip()
-                    sid = zone.get('mqtt_server_id')
-                    if mqtt and topic and sid:
-                        t = normalize_topic(topic)
-                        server = self.db.get_mqtt_server(int(sid))
-                        if server:
-                            logger.debug(f"SCHED publish OFF zone={zone_id} topic={t}")
-                            from app import _publish_mqtt_value as _pub
-                            _pub(server, t, '0', min_interval_sec=0.0)
+                    from services.zone_control import stop_zone as _stop_central
+                    _stop_central(int(zone_id), reason='auto', force=False)
                 except Exception:
-                    pass
-                self._stop_zone(zone_id)
+                    self._stop_zone(zone_id)
                 self.active_zones.pop(zone_id, None)
 
                 # Дождёмся оставшиеся ранние секунды до «номинального» конца зоны, чтобы старт следующей был вовремя

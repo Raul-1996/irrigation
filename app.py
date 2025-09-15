@@ -3430,27 +3430,22 @@ def start_zone(zone_id):
         except Exception:
             pass
 
-        # Устанавливаем время начала полива для зоны
-        start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+        # Централизованный старт зоны (открывает МК при необходимости и публикует MQTT)
+        try:
+            from services.zone_control import exclusive_start_zone as _start_central
+            ok = _start_central(int(zone_id))
+            if not ok:
+                return jsonify({'success': False, 'message': 'Не удалось запустить зону'}), 500
+        except Exception:
+            logger.exception('start_zone: central start failed')
+            return jsonify({'success': False, 'message': 'Не удалось запустить зону'}), 500
+        # Планируем автоостановку для ручного старта
         try:
             scheduler = get_scheduler()
             if scheduler:
-                # На уровне планировщика ожидание уже укорочено на N секунд (настройка)
                 scheduler.schedule_zone_stop(zone_id, int(zone['duration']), command_id=str(int(time.time())))
         except Exception as e:
             logger.error(f"Ошибка планирования остановки зоны {zone_id}: {e}")
-        # Публикуем MQTT ON, если у зоны настроен MQTT
-        try:
-            sid = zone.get('mqtt_server_id')
-            topic = (zone.get('topic') or '').strip()
-            if mqtt and sid and topic:
-                t = normalize_topic(topic)
-                server = db.get_mqtt_server(int(sid))
-                if server:
-                    _publish_mqtt_async(server, t, '1')
-        except Exception:
-            logger.exception("Ошибка публикации MQTT '1' при ручном запуске зоны")
 
         db.add_log('zone_start', json.dumps({
             "zone": zone_id,
@@ -3478,25 +3473,14 @@ def stop_zone(zone_id):
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
-        # Очищаем время начала полива и фиксируем last_watering_time
-        last_time = zone.get('watering_start_time')
-        db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
-        # Пометим зону как недавно остановленную
+        # Централизованный стоп зоны (с отложенным закрытием МК)
         try:
-            _mark_zone_stopped(int(zone_id))
+            from services.zone_control import stop_zone as _stop_central
+            if not _stop_central(int(zone_id), reason='manual', force=False):
+                return jsonify({'success': False, 'message': 'Не удалось остановить зону'}), 500
         except Exception:
-            pass
-        # Публикуем MQTT OFF, если у зоны настроен MQTT
-        try:
-            sid = zone.get('mqtt_server_id')
-            topic = (zone.get('topic') or '').strip()
-            if mqtt and sid and topic:
-                t = topic if str(topic).startswith('/') else '/' + str(topic)
-                server = db.get_mqtt_server(int(sid))
-                if server:
-                    _publish_mqtt_value(server, t, '0')
-        except Exception:
-            logger.exception("Ошибка публикации MQTT '0' при ручной остановке зоны")
+            logger.exception('stop_zone: central stop failed')
+            return jsonify({'success': False, 'message': 'Не удалось остановить зону'}), 500
         try:
             db.add_log('zone_stop', json.dumps({
                 "zone": int(zone_id),
@@ -4040,6 +4024,48 @@ def api_master_valve_toggle(group_id, action):
     except Exception as e:
         logger.error(f"api_master_valve_toggle failed: {e}")
         return jsonify({"success": False, "message": "Ошибка"}), 500
+
+# Boot-time: ensure all zones and master valves are OFF on controller start
+try:
+    @app.before_first_request
+    def _boot_sync_all_outputs_off():
+        try:
+            zones = db.get_zones() or []
+            for z in zones:
+                try:
+                    sid = z.get('mqtt_server_id'); t = (z.get('topic') or '').strip()
+                    if sid and t:
+                        server = db.get_mqtt_server(int(sid))
+                        if server:
+                            _publish_mqtt_value(server, normalize_topic(t), '0', min_interval_sec=0.0, retain=True)
+                except Exception:
+                    pass
+            # Close all configured master valves (by unique topic/server)
+            seen = set()
+            for g in (db.get_groups() or []):
+                try:
+                    if int(g.get('use_master_valve') or 0) != 1:
+                        continue
+                except Exception:
+                    continue
+                mtopic = (g.get('master_mqtt_topic') or '').strip()
+                msid = g.get('master_mqtt_server_id')
+                if not mtopic or not msid:
+                    continue
+                key = (int(msid), mtopic)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    server = db.get_mqtt_server(int(msid))
+                    if server:
+                        _publish_mqtt_value(server, normalize_topic(mtopic), '0', min_interval_sec=0.0, retain=True)
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception('boot sync OFF failed')
+except Exception:
+    pass
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива
