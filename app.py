@@ -1509,6 +1509,15 @@ def api_zone_next_watering(zone_id):
                 zone_start_minutes = program_time.hour * 60 + program_time.minute + total_duration_before
                 zone_dt = datetime.combine(day_date, datetime.min.time()) + timedelta(minutes=zone_start_minutes)
                 if zone_dt > now:
+                    # Если это текущий день и текущая программа уже была отменена для группы зоны — пропускаем её
+                    try:
+                        gid = int((zone or {}).get('group_id') or 0)
+                        if gid and day_date == datetime.now().date():
+                            run_date = datetime.now().strftime('%Y-%m-%d')
+                            if db.is_program_run_cancelled_for_group(int(program['id']), run_date, gid):
+                                continue
+                    except Exception:
+                        pass
                     if best_dt is None or zone_dt < best_dt:
                         best_dt = zone_dt
                         best_payload = {
