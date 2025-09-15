@@ -4147,6 +4147,27 @@ def api_master_valve_toggle(group_id, action):
             db.update_group_fields(int(group_id), {'master_valve_observed': ('open' if want_open else 'closed')})
         except Exception:
             pass
+        # Push immediate SSE-like hint via WS/SSE hubs (best effort) so UI can update mv button text/state quickly
+        try:
+            payload = json.dumps({
+                'mv_group_id': int(group_id),
+                'mv_state': ('open' if want_open else 'closed')
+            })
+            try:
+                # WS broadcast if available
+                _WS_BROADCAST_QUEUE.put_nowait(payload)  # type: ignore[name-defined]
+            except Exception:
+                pass
+            try:
+                # SSE broadcast if available
+                with _SSE_HUB_LOCK:
+                    for q in list(_SSE_HUB_CLIENTS or []):  # type: ignore[name-defined]
+                        try: q.put_nowait(payload)
+                        except Exception: pass
+            except Exception:
+                pass
+        except Exception:
+            pass
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"api_master_valve_toggle failed: {e}")

@@ -996,11 +996,8 @@
             if (mvEnabled) {
                 const dotCls = mvState==='open' ? 'open' : (mvState==='closed' ? 'closed' : '');
                 const actionText = (mvState==='open') ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан';
-                const mvBtn = `<button id="mv-btn-${group.id}" class="mv-button" onclick="toggleMasterValve(${group.id})">
-                    <span class="mv-label">Состояние мастер-клапана</span>
-                    <span class="mv-dot ${dotCls}"></span>
-                    <span class="mv-action">${actionText}</span>
-                </button>`;
+                const stateText = mvState==='open' ? 'Открыт' : (mvState==='closed' ? 'Закрыт' : '—');
+                const mvBtn = `<button id="mv-btn-${group.id}" class="mv-button" data-mv-state="${mvState}" onclick="toggleMasterValve(${group.id})">\n                    <span class="mv-action">${actionText}</span>\n                    <span class="mv-dot ${dotCls}"></span>\n                    <span class="mv-state-text">(${stateText})</span>\n                </button>`;
                 gridCells.push(`<div class="grid-item grid-item-span2">${mvBtn}</div>`);
             }
             if (pressureOn) {
@@ -1105,10 +1102,11 @@
                 if (mvEnabled2) {
                     const dotCls2 = mvState2==='open' ? 'open' : (mvState2==='closed' ? 'closed' : '');
                     const actionText2 = (mvState2==='open') ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан';
-                    const mvBtn2 = `<button id=\"mv-btn-${group.id}\" class=\"mv-button\" onclick=\"toggleMasterValve(${group.id})\">`
-                                  + `<span class=\"mv-label\">Состояние мастер-клапана</span>`
-                                  + `<span class=\"mv-dot ${dotCls2}\"></span>`
+                    const stateText2 = mvState2==='open' ? 'Открыт' : (mvState2==='closed' ? 'Закрыт' : '—');
+                    const mvBtn2 = `<button id=\"mv-btn-${group.id}\" class=\"mv-button\" data-mv-state=\"${mvState2}\" onclick=\"toggleMasterValve(${group.id})\">`
                                   + `<span class=\"mv-action\">${actionText2}</span>`
+                                  + `<span class=\"mv-dot ${dotCls2}\"></span>`
+                                  + `<span class=\"mv-state-text\">(${stateText2})</span>`
                                   + `</button>`;
                     cells.push(`<div class=\"grid-item grid-item-span2\">${mvBtn2}</div>`);
                 }
@@ -1396,14 +1394,15 @@
         try {
             // UI busy
             const card = document.getElementById(`group-card-${groupId}`);
-            let btn = null;
-            if (card) {
-                btn = Array.from(card.querySelectorAll('.continue-group')).find(b => /мастер-клапан/i.test(b.textContent||''));
-                if (btn) { btn.disabled = true; btn.setAttribute('aria-busy','true'); }
+            const btn = card ? card.querySelector(`#mv-btn-${groupId}`) : null;
+            if (btn) { btn.disabled = true; btn.setAttribute('aria-busy','true'); }
+            // Determine current state from button data attribute if present, fallback to text
+            let currentState = (btn && btn.getAttribute('data-mv-state')) ? String(btn.getAttribute('data-mv-state')).toLowerCase() : '';
+            if (!currentState) {
+                const span = document.getElementById(`mv-state-${groupId}`);
+                currentState = span ? (span.textContent || '').trim().toLowerCase() : '';
             }
-            const span = document.getElementById(`mv-state-${groupId}`);
-            const current = span ? (span.textContent || '').trim().toLowerCase() : '';
-            const wantOpen = current !== 'открыт';
+            const wantOpen = currentState !== 'open' && currentState !== 'открыт';
             const url = wantOpen ? `/api/groups/${groupId}/master-valve/open` : `/api/groups/${groupId}/master-valve/close`;
             const res = await fetch(url, { method: 'POST' });
             let data = null; try { data = await res.json(); } catch(e) { data = null; }
@@ -1415,21 +1414,17 @@
             for (let i=0;i<4;i++) {
                 await new Promise(r=>setTimeout(r, 500));
                 try { await refreshSingleGroup(groupId); } catch(e) {}
-                const sp2 = document.getElementById(`mv-state-${groupId}`);
-                if (sp2) {
-                    const txt = (sp2.textContent||'').trim();
-                    if (wantOpen && txt === 'Открыт') break;
-                    if (!wantOpen && txt === 'Закрыт') break;
-                }
+                const btn2 = document.getElementById(`mv-btn-${groupId}`);
+                const stateAttr = btn2 ? String(btn2.getAttribute('data-mv-state')||'').toLowerCase() : '';
+                if (wantOpen && (stateAttr==='open' || stateAttr==='открыт')) break;
+                if (!wantOpen && (stateAttr==='closed' || stateAttr==='закрыт')) break;
             }
         } catch (e) {
             showNotification('Ошибка управления мастер-клапаном', 'error');
         } finally {
             const card = document.getElementById(`group-card-${groupId}`);
-            if (card) {
-                const btn = Array.from(card.querySelectorAll('.continue-group')).find(b => /мастер-клапан/i.test(b.textContent||''));
-                if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
-            }
+            const btn = card ? card.querySelector(`#mv-btn-${groupId}`) : null;
+            if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
         }
     }
     
