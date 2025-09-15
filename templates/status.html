@@ -190,6 +190,48 @@
     .start { background: #4caf50; color: #fff; }
     .stop-group { background: #b71c1c; color: #fff; }
     .continue-group { background: #4caf50; color: #fff; }
+    /* Широкая кнопка управления мастер-клапаном */
+    .mv-button {
+        background: #ffc107;
+        color: #000;
+        border: none;
+        width: 100%;
+        padding: 0.6rem 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.6rem;
+        white-space: normal;
+        line-height: 1.25;
+    }
+    .mv-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 2px solid #fff;
+        box-shadow: 0 0 0 1px rgba(0,0,0,0.1) inset;
+    }
+    .mv-dot.open { background: #4caf50; }
+    .mv-dot.closed { background: #d32f2f; }
+    .mv-label { opacity: 0.9; font-weight: 600; }
+    .mv-action { font-weight: 700; }
+    .grid-item-span2 { grid-column: 1 / -1; }
+    /* Большая одиночная кнопка действия группы */
+    .group-action-btn {
+        width: 100%;
+        padding: 0.6rem 1rem;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-weight: 700;
+    }
+    .group-action-start { background: #4caf50; color: #fff; }
+    .group-action-stop { background: #b71c1c; color: #fff; }
     .emergency { 
         background: #d32f2f; 
         color: #fff; 
@@ -931,6 +973,10 @@
             } else if (group.status === 'error' && group.error_message) {
                 extraText = String(group.error_message);
             }
+            const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
+            const groupActionHtml = anyZoneOnThisGroup
+                ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">Остановить полив группы</button>`
+                : `<button class="group-action-btn group-action-start" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>`;
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
@@ -938,10 +984,7 @@
                     <button class="delay" onclick="delayGroup(${group.id}, 3)">Остановить полив на 3 дня</button>
                     ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">Продолжить по расписанию</button>` : ''}
                 </div>
-                <div class="btn-group">
-                    <button class="continue-group" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>
-                    <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
-                </div>`;
+                <div class="btn-group" style="width:100%">${groupActionHtml}</div>`;
             // Optional feature blocks by group flags
             const mvEnabled = (group.use_master_valve === true) || (group.use_master_valve === 1);
             const mvState = String(group.master_valve_state || 'unknown');
@@ -951,10 +994,14 @@
             const flowOn = _flag(group.use_water_meter);
             const gridCells = [];
             if (mvEnabled) {
-                const mvBtnClass = 'delay';
-                const mvChipClass = mvState==='open' ? 'chip-green' : (mvState==='closed' ? 'chip-red' : '');
-                gridCells.push(`<div class="grid-item"><div class="btn-group"><button id="mv-btn-${group.id}" class="${mvBtnClass}" onclick="toggleMasterValve(${group.id})">${mvState==='open'?'Закрыть мастер-клапан':'Открыть мастер-клапан'}</button></div></div>`);
-                gridCells.push(`<div class="grid-item"><div id="mv-chip-${group.id}" class="info-chip ${mvChipClass}"><span class="label">Мастер-клапан:</span> <span id="mv-state-${group.id}">${mvIndicator}</span></div></div>`);
+                const dotCls = mvState==='open' ? 'open' : (mvState==='closed' ? 'closed' : '');
+                const actionText = (mvState==='open') ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан';
+                const mvBtn = `<button id="mv-btn-${group.id}" class="mv-button" onclick="toggleMasterValve(${group.id})">
+                    <span class="mv-label">Состояние мастер-клапана</span>
+                    <span class="mv-dot ${dotCls}"></span>
+                    <span class="mv-action">${actionText}</span>
+                </button>`;
+                gridCells.push(`<div class="grid-item grid-item-span2">${mvBtn}</div>`);
             }
             if (pressureOn) {
                 gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
@@ -1031,17 +1078,18 @@
             const mvEnabled2 = (group.use_master_valve === true) || (group.use_master_valve === 1); // показываем только если включено для группы
             const mvState2 = String(group.master_valve_state || 'unknown');
             const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
+            const anyZoneOnThisGroup2 = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
+            const groupActionHtml2 = anyZoneOnThisGroup2
+                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">Остановить полив группы</button>`
+                : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">Запустить полив группы</button>`;
             const groupButtons = `
-                <div class="btn-group">
-                    <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
-                    <button class="delay" onclick="delayGroup(${group.id}, 2)">Остановить полив на 2 дня</button>
-                    <button class="delay" onclick="delayGroup(${group.id}, 3)">Остановить полив на 3 дня</button>
-                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">Продолжить по расписанию</button>` : ''}
+                <div class=\"btn-group\">
+                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 1)\">Остановить полив на 1 день</button>
+                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 2)\">Остановить полив на 2 дня</button>
+                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 3)\">Остановить полив на 3 дня</button>
+                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class=\"cancel-postpone\" onclick=\"cancelPostpone(${group.id})\">Продолжить по расписанию</button>` : ''}
                 </div>
-                <div class="btn-group">
-                    <button class="continue-group" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>
-                    <button class="stop-group" onclick="stopGroup(${group.id})">Остановить полив группы</button>
-                </div>`;
+                <div class=\"btn-group\" style=\"width:100%\">${groupActionHtml2}</div>`;
             card.innerHTML = `
                 <div class="group-header">${group.name}</div>
                 <div id="group-status-${group.id}">${statusText}</div>
@@ -1055,8 +1103,14 @@
                 const flowOn2 = _flag2(group.use_water_meter);
                 const cells = [];
                 if (mvEnabled2) {
-                    cells.push(`<div class=\"grid-item\"><div class=\"btn-group\"><button class=\"continue-group\" onclick=\"toggleMasterValve(${group.id})\">${mvState2==='open'?'Закрыть мастер-клапан':'Открыть мастер-клапан'}</button></div></div>`);
-                    cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Мастер-клапан:</span> <span id=\"mv-state-${group.id}\">${mvIndicator2}</span></div></div>`);
+                    const dotCls2 = mvState2==='open' ? 'open' : (mvState2==='closed' ? 'closed' : '');
+                    const actionText2 = (mvState2==='open') ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан';
+                    const mvBtn2 = `<button id=\"mv-btn-${group.id}\" class=\"mv-button\" onclick=\"toggleMasterValve(${group.id})\">`
+                                  + `<span class=\"mv-label\">Состояние мастер-клапана</span>`
+                                  + `<span class=\"mv-dot ${dotCls2}\"></span>`
+                                  + `<span class=\"mv-action\">${actionText2}</span>`
+                                  + `</button>`;
+                    cells.push(`<div class=\"grid-item grid-item-span2\">${mvBtn2}</div>`);
                 }
                 if (pressureOn2) {
                     cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
