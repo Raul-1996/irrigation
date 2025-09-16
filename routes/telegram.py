@@ -11,6 +11,8 @@ InlineKeyboardMarkup = None
 
 _RL_CACHE = {}
 _RL_LIMIT = 10  # cmds/min per chat
+_CB_DEDUP = {}
+_CB_TTL = 300.0  # 5 min
 
 def _rate_limited(chat_id: int) -> bool:
     now = time.time()
@@ -29,6 +31,42 @@ def _send(chat_id: int, text: str):
         notifier.send_text(int(chat_id), text)
     except Exception:
         pass
+
+def _inline_markup(rows):
+    try:
+        return {'inline_keyboard': rows}
+    except Exception:
+        return None
+
+def _get_role(chat_id: int) -> str:
+    try:
+        u = db.get_bot_user_by_chat(int(chat_id)) or {}
+        r = str(u.get('role') or 'viewer')
+        return r
+    except Exception:
+        return 'viewer'
+
+def _role_allowed(current: str, required: str) -> bool:
+    order = {'viewer': 0, 'user': 1, 'admin': 2}
+    return order.get(current, 0) >= order.get(required, 0)
+
+def _dedup_cb(chat_id: int, data: str) -> bool:
+    # returns True if duplicated (should skip)
+    now = time.time()
+    key = f"{chat_id}:{data}"
+    # cleanup
+    try:
+        if len(_CB_DEDUP) > 2048:
+            dead = [k for k, ts in _CB_DEDUP.items() if now - ts > _CB_TTL]
+            for k in dead:
+                _CB_DEDUP.pop(k, None)
+    except Exception:
+        pass
+    ts = _CB_DEDUP.get(key)
+    if ts and (now - ts < 2.0):
+        return True
+    _CB_DEDUP[key] = now
+    return False
 
 telegram_bp = Blueprint('telegram_bp', __name__)
 
@@ -95,18 +133,18 @@ def telegram_webhook(secret):
         return jsonify({'ok': True})
     # Basic commands
     # --- Inline menu ---
-    def _inline_markup(rows):
-        try:
-            return {'inline_keyboard': rows}
-        except Exception:
-            return None
-
     def _send_menu(cid: int):
         kb = _inline_markup([
             [{'text': 'Группы', 'callback_data': 'menu:groups'}, {'text': 'Зоны', 'callback_data': 'menu:zones'}],
-            [{'text': 'Отчёт', 'callback_data': 'menu:report'}, {'text': 'Подписки', 'callback_data': 'menu:subs'}],
-            [{'text': 'Уведомления', 'callback_data': 'menu:notif'}]
+            [{'text': 'Отложить полив', 'callback_data': 'menu:postpone'}, {'text': 'Отчёты', 'callback_data': 'menu:report'}],
+            [{'text': 'Подписки', 'callback_data': 'menu:subs'}, {'text': 'Уведомления', 'callback_data': 'menu:notif'}]
         ])
+        try:
+            # админ-кнопка
+            if _role_allowed(_get_role(cid), 'admin'):
+                kb['inline_keyboard'].append([{'text':'Аварийная остановка','callback_data':'menu:emergency'}])
+        except Exception:
+            pass
         try:
             notifier.send_message(cid, 'Главное меню:', kb)
             return
@@ -314,6 +352,12 @@ def telegram_webhook(secret):
             data = str(callback.get('data') or '')
             cqid = callback.get('id')
             from_chat = ((callback.get('message') or {}).get('chat') or {}).get('id') or chat_id
+            if _dedup_cb(int(from_chat), data):
+                try:
+                    notifier.answer_callback(cqid)
+                except Exception:
+                    pass
+                return jsonify({'ok': True})
             # Acknowledge
             try:
                 notifier.answer_callback(cqid)
@@ -332,13 +376,35 @@ def telegram_webhook(secret):
                         notifier.send_message(from_chat, 'Выберите группу:', _inline_markup(rows))
                     else:
                         _send(from_chat, 'Нет групп')
+                elif action == 'postpone':
+                    gl = db.list_groups_min()
+                    if gl:
+                        rows = []
+                        for g in gl:
+                            gid = int(g['id']); name = g['name']
+                            rows.append([
+                                {'text': f"{name}: +1д", 'callback_data': f"grp_postpone:{gid}:1"},
+                                {'text': "+2д", 'callback_data': f"grp_postpone:{gid}:2"},
+                                {'text': "+3д", 'callback_data': f"grp_postpone:{gid}:3"}
+                            ])
+                        notifier.send_message(from_chat, 'Отложить полив по группам:', _inline_markup(rows))
+                    else:
+                        _send(from_chat, 'Нет групп')
                 elif action == 'report':
                     txt = build_report_text(period='today', fmt='brief')
                     _send(from_chat, txt)
                 elif action == 'subs':
                     _send(from_chat, 'Подписки: используйте команды /subscribe и /unsubscribe')
                 elif action == 'notif':
-                    _send(from_chat, 'Уведомления включены для админ-чат ID, заданного в настройках')
+                    _send(from_chat, 'Настройки уведомлений пока задаются админом на сервере')
+                elif action == 'emergency':
+                    role = _get_role(from_chat)
+                    if not _role_allowed(role, 'admin'):
+                        _send(from_chat, 'Нет прав')
+                    else:
+                        rows = [[{'text':'🚨 Подтвердить остановку','callback_data':'confirm:emergency:on'}],
+                                [{'text':'Отмена','callback_data':'confirm:cancel'}]]
+                        notifier.send_message(from_chat, 'Подтвердите аварийную остановку', _inline_markup(rows))
                 return jsonify({'ok': True})
             if data.startswith('zones:'):
                 try:
@@ -366,6 +432,10 @@ def telegram_webhook(secret):
                 except Exception:
                     zid = 0
                 if zid:
+                    role = _get_role(from_chat)
+                    if not _role_allowed(role, 'user'):
+                        _send(from_chat, 'Нет прав')
+                        return jsonify({'ok': True})
                     try:
                         from services.zone_control import exclusive_start_zone
                         exclusive_start_zone(zid)
@@ -379,12 +449,93 @@ def telegram_webhook(secret):
                 except Exception:
                     zid = 0
                 if zid:
+                    role = _get_role(from_chat)
+                    if not _role_allowed(role, 'user'):
+                        _send(from_chat, 'Нет прав')
+                        return jsonify({'ok': True})
                     try:
                         from services.zone_control import stop_zone
                         stop_zone(zid, reason='telegram')
                         _send(from_chat, f'⏹ Зона {zid} остановлена')
                     except Exception:
                         _send(from_chat, 'Ошибка остановки зоны')
+                return jsonify({'ok': True})
+            if data.startswith('grp_start:'):
+                try:
+                    gid = int(data.split(':',1)[1])
+                except Exception:
+                    gid = 0
+                if gid:
+                    role = _get_role(from_chat)
+                    if not _role_allowed(role, 'user'):
+                        _send(from_chat, 'Нет прав')
+                        return jsonify({'ok': True})
+                    try:
+                        from irrigation_scheduler import get_scheduler
+                        s = get_scheduler()
+                        if s:
+                            s.start_group_sequence(gid)
+                        _send(from_chat, f'▶ Группа {gid} запущена')
+                    except Exception:
+                        _send(from_chat, 'Ошибка запуска группы')
+                return jsonify({'ok': True})
+            if data.startswith('grp_stop:'):
+                try:
+                    gid = int(data.split(':',1)[1])
+                except Exception:
+                    gid = 0
+                if gid:
+                    role = _get_role(from_chat)
+                    if not _role_allowed(role, 'user'):
+                        _send(from_chat, 'Нет прав')
+                        return jsonify({'ok': True})
+                    try:
+                        from services.zone_control import stop_all_in_group
+                        stop_all_in_group(gid, reason='telegram')
+                        _send(from_chat, f'⏹ Группа {gid} остановлена')
+                    except Exception:
+                        _send(from_chat, 'Ошибка остановки группы')
+                return jsonify({'ok': True})
+            if data.startswith('grp_postpone:'):
+                parts = data.split(':')
+                gid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                days = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+                if gid:
+                    role = _get_role(from_chat)
+                    if not _role_allowed(role, 'user'):
+                        _send(from_chat, 'Нет прав')
+                        return jsonify({'ok': True})
+                    try:
+                        from app import app as _app
+                        with _app.test_request_context(json={'group_id': gid, 'action': 'postpone', 'days': days}):
+                            from app import api_postpone as _pp
+                            _pp()
+                        _send(from_chat, f'Группа {gid}: отложен полив на {days} дн.')
+                    except Exception:
+                        _send(from_chat, 'Ошибка отложенного полива')
+                return jsonify({'ok': True})
+            if data == 'confirm:cancel':
+                _send(from_chat, 'Отменено')
+                return jsonify({'ok': True})
+            if data.startswith('confirm:emergency:'):
+                what = data.split(':',2)[2]
+                role = _get_role(from_chat)
+                if not _role_allowed(role, 'admin'):
+                    _send(from_chat, 'Нет прав')
+                    return jsonify({'ok': True})
+                try:
+                    from app import app as _app
+                    with _app.test_request_context():
+                        if what == 'on':
+                            from app import api_emergency_stop as _es
+                            _es()
+                            _send(from_chat, '🚨 Аварийная остановка активирована')
+                        else:
+                            from app import api_emergency_resume as _er
+                            _er()
+                            _send(from_chat, '✅ Аварийная остановка снята')
+                except Exception:
+                    _send(from_chat, 'Ошибка выполнения аварийной операции')
                 return jsonify({'ok': True})
         except Exception:
             pass
