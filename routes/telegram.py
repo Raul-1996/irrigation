@@ -9,8 +9,29 @@ import time
 import json
 import base64
 import uuid
+import logging
+import os
 InlineKeyboardButton = None
 InlineKeyboardMarkup = None
+
+# TELEGRAM logger (file + console)
+_TG_LOGGER = logging.getLogger('TELEGRAM')
+if not getattr(_TG_LOGGER, '_telegram_configured', False):
+    try:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        logs_dir = os.path.join(base_dir, 'logs')
+        os.makedirs(logs_dir, exist_ok=True)
+        log_path = os.path.join(logs_dir, 'telegram.txt')
+        fh = logging.FileHandler(log_path, encoding='utf-8')
+        fmt = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        fh.setFormatter(fmt)
+        _TG_LOGGER.addHandler(fh)
+        _TG_LOGGER.setLevel(logging.INFO)
+        _TG_LOGGER.propagate = True
+        _TG_LOGGER._telegram_configured = True  # type: ignore[attr-defined]
+        _TG_LOGGER.info(f"telegram route logger initialized -> {log_path}")
+    except Exception:
+        pass
 
 _RL_CACHE = {}
 _RL_LIMIT = 10  # cmds/min per chat
@@ -31,6 +52,10 @@ def _rate_limited(chat_id: int) -> bool:
 
 def _send(chat_id: int, text: str):
     try:
+        try:
+            _TG_LOGGER.info(f"send_text chat_id={chat_id} text={str(text)[:120]}")
+        except Exception:
+            pass
         notifier.send_text(int(chat_id), text)
     except Exception:
         pass
@@ -110,6 +135,10 @@ def _dedup_cb(chat_id: int, data: str) -> bool:
 telegram_bp = Blueprint('telegram_bp', __name__)
 
 def process_callback_json(from_chat: int, jd: dict) -> None:
+    try:
+        _TG_LOGGER.info(f"cb chat_id={from_chat} data={jd}")
+    except Exception:
+        pass
     # Idempotency check
     tok = jd.get('tok')
     if tok:
@@ -123,6 +152,10 @@ def process_callback_json(from_chat: int, jd: dict) -> None:
     if t == 'menu':
         a = jd.get('a')
         def _send_main(cid: int):
+            try:
+                _TG_LOGGER.info(f"menu main chat_id={cid}")
+            except Exception:
+                pass
             rows = [
                 [_btn('Группы', {'t': 'menu', 'a': 'groups'}), _btn('Зоны', {'t': 'menu', 'a': 'zones'})],
                 [_btn('Отложить полив', {'t': 'menu', 'a': 'postpone'}), _btn('Отчёты', {'t': 'menu', 'a': 'report'})],
@@ -132,13 +165,18 @@ def process_callback_json(from_chat: int, jd: dict) -> None:
         if a == 'main':
             _send_main(from_chat)
         elif a == 'groups':
+            try:
+                _TG_LOGGER.info(f"menu groups chat_id={from_chat}")
+            except Exception:
+                pass
             gl_all = db.list_groups_min() or []
             gl = [g for g in gl_all if int(g.get('id') or 0) != 999]
             if gl:
-                txt = 'Группы:\n' + '\n'.join([str(g['name']) for g in gl])
-                _send(from_chat, txt)
+                rows = [[_btn(str(g['name']), {'t': 'group_sel', 'gid': int(g['id'])})] for g in gl]
+                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})])
+                notifier.send_message(from_chat, 'Выберите группу:', _inline_markup(rows))
             else:
-                _send(from_chat, 'Группы отсутствуют')
+                notifier.send_message(from_chat, 'Группы отсутствуют', _inline_markup([[ _btn('⬅ Назад', {'t': 'menu', 'a': 'main'}) ]]))
         elif a == 'zones':
             gl = [g for g in (db.list_groups_min() or []) if int(g.get('id') or 0) != 999]
             if gl:
@@ -200,6 +238,10 @@ def process_callback_json(from_chat: int, jd: dict) -> None:
     if t == 'zones_select':
         gid = int(jd.get('gid') or 0)
         if gid:
+            try:
+                _TG_LOGGER.info(f"zones_select chat_id={from_chat} gid={gid}")
+            except Exception:
+                pass
             zl = db.list_zones_by_group_min(gid)
             if zl:
                 rows = []
@@ -220,10 +262,14 @@ def process_callback_json(from_chat: int, jd: dict) -> None:
                 gname = g.get('name') if g else f'Группа {gid}'
             except Exception:
                 gname = f'Группа {gid}'
+            try:
+                _TG_LOGGER.info(f"group_sel chat_id={from_chat} gid={gid}")
+            except Exception:
+                pass
             rows = [
                 [_btn('▶ Запустить с 1-й', {'t': 'grp_start', 'gid': gid}), _btn('⏹ Остановить', {'t': 'grp_stop', 'gid': gid})],
                 [_btn('⏱ +1д', {'t': 'postpone', 'gid': gid, 'days': 1}), _btn('+2д', {'t': 'postpone', 'gid': gid, 'days': 2}), _btn('+3д', {'t': 'postpone', 'gid': gid, 'days': 3})],
-                [_btn('⬅ Назад', {'t': 'menu', 'a': 'groups'})],
+                [_btn('⬅ Назад', {'t': 'menu', 'a': 'groups'}), _btn('🏠 В меню', {'t': 'menu', 'a': 'main'})],
             ]
             notifier.send_message(from_chat, f'{gname}: действия', _inline_markup(rows))
         return
@@ -234,6 +280,10 @@ def process_callback_json(from_chat: int, jd: dict) -> None:
         gid = int(jd.get('gid') or 0)
         if gid:
             try:
+                try:
+                    _TG_LOGGER.info(f"grp_start chat_id={from_chat} gid={gid}")
+                except Exception:
+                    pass
                 from irrigation_scheduler import get_scheduler
                 s = get_scheduler()
                 if s:
@@ -397,15 +447,26 @@ def process_callback_json(from_chat: int, jd: dict) -> None:
                 _send(from_chat, 'Ошибка выполнения аварийной операции')
             return
 
+# Webhook endpoint: log full updates and outcomes
 @telegram_bp.route('/telegram/webhook/<secret>', methods=['POST'])
 def telegram_webhook(secret):
-    # Basic secret check
+    try:
+        _TG_LOGGER.info(f"webhook hit secret={secret}")
+    except Exception:
+        pass
     expected = db.get_setting_value('telegram_webhook_secret_path') or ''
-    # Если секрет не задан — допускаем работу вебхука (упрощённый режим)
     if expected:
         if str(secret) != str(expected):
+            try:
+                _TG_LOGGER.info("webhook forbidden: bad secret")
+            except Exception:
+                pass
             return jsonify({'ok': False}), 403
     update = request.get_json(silent=True) or {}
+    try:
+        _TG_LOGGER.info(f"webhook update={update}")
+    except Exception:
+        pass
     msg = update.get('message') or {}
     callback = update.get('callback_query') or {}
     chat = msg.get('chat') or {}
@@ -568,7 +629,7 @@ def telegram_webhook(secret):
                 _send(chat_id, f'▶ Группа {gid} запущена')
                 evt.publish({'type':'group_start','id':gid,'by':'telegram'})
             except Exception:
-                _send(chat_id, 'Ошибка запуска группы')
+                _send(from_chat, 'Ошибка запуска группы')
         return jsonify({'ok': True})
     if text.startswith('/group_stop'):
         parts = text.split()
@@ -577,10 +638,10 @@ def telegram_webhook(secret):
             try:
                 from services.zone_control import stop_all_in_group
                 stop_all_in_group(gid, reason='telegram')
-                _send(chat_id, f'⏹ Группа {gid} остановлена')
+                _send(from_chat, f'⏹ Группа {gid} остановлена')
                 evt.publish({'type':'group_stop','id':gid,'by':'telegram'})
             except Exception:
-                _send(chat_id, 'Ошибка остановки группы')
+                _send(from_chat, 'Ошибка остановки группы')
         return jsonify({'ok': True})
     if text.startswith('/postpone_cancel'):
         parts = text.split()
