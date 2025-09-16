@@ -30,6 +30,10 @@ from routes.programs import programs_bp
 from routes.groups import groups_bp
 from routes.auth import auth_bp
 from routes.settings import settings_bp
+try:
+    from routes.telegram import telegram_bp
+except Exception:
+    telegram_bp = None
 from werkzeug.security import check_password_hash
 from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor
 from services.locks import snapshot_all_locks as _locks_snapshot
@@ -1035,6 +1039,11 @@ app.register_blueprint(programs_bp)
 app.register_blueprint(groups_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(settings_bp)
+try:
+    if telegram_bp:
+        app.register_blueprint(telegram_bp)
+except Exception:
+    pass
 try:
     from routes.mqtt import mqtt_bp
     app.register_blueprint(mqtt_bp)
