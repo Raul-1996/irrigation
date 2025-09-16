@@ -80,7 +80,28 @@ def api_test_telegram():
         tok_enc = db.get_setting_value('telegram_bot_token_encrypted')
         if not tok_enc:
             return jsonify({'success': False, 'message': 'Токен бота не задан'}), 400
-        return jsonify({'success': True, 'message': 'Токен сохранён. Тестовая отправка появится после внедрения бота.'})
+        # Попробуем отправить тестовое сообщение
+        try:
+            from services.telegram_bot import notifier
+            chat_id = db.get_setting_value('telegram_admin_chat_id')
+            if not chat_id:
+                # fallback: последний активный чат
+                import sqlite3
+                with sqlite3.connect(db.db_path, timeout=5) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cur = conn.execute('SELECT chat_id FROM bot_users ORDER BY last_seen_at DESC LIMIT 1')
+                    row = cur.fetchone()
+                    chat_id = str(row['chat_id']) if row else None
+            if chat_id:
+                ok = notifier.send_text(int(chat_id), 'Тестовое сообщение: WB-Irrigation Bot активен')
+                if ok:
+                    return jsonify({'success': True, 'message': f'Отправлено в чат {chat_id}'} )
+                else:
+                    return jsonify({'success': False, 'message': 'Не удалось отправить сообщение — проверьте токен'}), 500
+            else:
+                return jsonify({'success': True, 'message': 'Токен сохранён. Откройте чат с ботом (/start), затем повторите тест.'})
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'Ошибка отправки: {e}'}), 500
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
