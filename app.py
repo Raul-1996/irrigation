@@ -4034,6 +4034,23 @@ def api_zone_mqtt_start(zone_id: int):
                             sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
                             from datetime import timedelta
                             sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
+                    # Fallback: если планировщик отсутствует — делаем мягкий автостоп в фоне
+                    if (not sched) and not app.config.get('TESTING'):
+                        try:
+                            dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
+                        except Exception:
+                            dur = 0
+                        if dur > 0:
+                            def _fallback_stop():
+                                try:
+                                    time.sleep(max(1, dur * 60))
+                                    # Центральный стоп с force=True, чтобы вычислить статистику даже если уже off
+                                    from services.zone_control import stop_zone as _stop
+                                    _stop(int(zone_id), reason='auto_fallback', force=True)
+                                except Exception:
+                                    try: logger.exception('fallback auto-stop failed')
+                                    except Exception: pass
+                            threading.Thread(target=_fallback_stop, daemon=True).start()
                 except Exception:
                     try: logger.exception('manual mqtt start: schedule auto-stop failed')
                     except Exception: pass
