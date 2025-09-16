@@ -7,100 +7,121 @@ from werkzeug.security import check_password_hash
 from datetime import datetime, timedelta
 import time
 import json
+import requests
 
 logger = logging.getLogger(__name__)
 
 class TelegramNotifier:
     def __init__(self):
-        self._bot = None
+        self._token: Optional[str] = None
         self._lock = threading.Lock()
 
-    def _ensure_bot(self):
+    def _ensure_token(self) -> Optional[str]:
         try:
-            if self._bot is not None:
-                return self._bot
+            if self._token:
+                return self._token
             tok_enc = db.get_setting_value('telegram_bot_token_encrypted')
             if not tok_enc:
                 return None
             token = decrypt_secret(tok_enc)
             if not token:
                 return None
-            from telegram import Bot
-            self._bot = Bot(token=token)
-            return self._bot
+            self._token = token
+            return self._token
         except Exception as e:
-            logger.error(f"TelegramNotifier ensure_bot failed: {e}")
+            logger.error(f"TelegramNotifier ensure_token failed: {e}")
             return None
 
     def send_text(self, chat_id: int, text: str) -> bool:
         try:
-            bot = self._ensure_bot()
-            if not bot:
+            token = self._ensure_token()
+            if not token:
                 return False
-            bot.send_message(chat_id=chat_id, text=text)
-            return True
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            resp = requests.post(url, json={
+                'chat_id': int(chat_id),
+                'text': str(text)
+            }, timeout=10)
+            data = resp.json() if resp.ok else {}
+            return bool(data.get('ok'))
         except Exception as e:
             logger.error(f"TelegramNotifier send_text failed: {e}")
             return False
 
     def send_message(self, chat_id: int, text: str, reply_markup=None) -> bool:
         try:
-            bot = self._ensure_bot()
-            if not bot:
+            token = self._ensure_token()
+            if not token:
                 return False
+            payload = {'chat_id': int(chat_id), 'text': str(text)}
             if reply_markup is not None:
-                bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-            else:
-                bot.send_message(chat_id=chat_id, text=text)
-            return True
+                payload['reply_markup'] = reply_markup
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            resp = requests.post(url, json=payload, timeout=10)
+            data = resp.json() if resp.ok else {}
+            return bool(data.get('ok'))
         except Exception as e:
             logger.error(f"TelegramNotifier send_message failed: {e}")
             return False
 
     def edit_message_text(self, chat_id: int, message_id: int, text: str, reply_markup=None) -> bool:
         try:
-            bot = self._ensure_bot()
-            if not bot:
+            token = self._ensure_token()
+            if not token:
                 return False
+            payload = {'chat_id': int(chat_id), 'message_id': int(message_id), 'text': str(text)}
             if reply_markup is not None:
-                bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
-            else:
-                bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-            return True
+                payload['reply_markup'] = reply_markup
+            url = f"https://api.telegram.org/bot{token}/editMessageText"
+            resp = requests.post(url, json=payload, timeout=10)
+            data = resp.json() if resp.ok else {}
+            return bool(data.get('ok'))
         except Exception as e:
             logger.error(f"TelegramNotifier edit_message_text failed: {e}")
             return False
 
     def answer_callback(self, callback_query_id: str, text: str = None, show_alert: bool = False) -> None:
         try:
-            bot = self._ensure_bot()
-            if not bot or not callback_query_id:
+            token = self._ensure_token()
+            if not token or not callback_query_id:
                 return
+            url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+            payload = {'callback_query_id': str(callback_query_id)}
             if text is not None:
-                bot.answer_callback_query(callback_query_id=callback_query_id, text=text, show_alert=bool(show_alert))
-            else:
-                bot.answer_callback_query(callback_query_id=callback_query_id)
+                payload['text'] = str(text)
+                payload['show_alert'] = bool(show_alert)
+            requests.post(url, json=payload, timeout=10)
         except Exception as e:
             logger.error(f"TelegramNotifier answer_callback failed: {e}")
 
     def set_webhook(self, url: str) -> bool:
         try:
-            bot = self._ensure_bot()
-            if not bot or not url:
+            token = self._ensure_token()
+            if not token or not url:
                 return False
-            bot.set_webhook(url=url)
-            return True
+            payload = {'url': str(url)}
+            # Передадим секрет, если он задан
+            try:
+                wh_secret = db.get_setting_value('telegram_webhook_secret_path')
+                if wh_secret:
+                    payload['secret_token'] = str(wh_secret)
+            except Exception:
+                pass
+            resp = requests.post(f"https://api.telegram.org/bot{token}/setWebhook", json=payload, timeout=10)
+            data = resp.json() if resp.ok else {}
+            return bool(data.get('ok'))
         except Exception as e:
             logger.error(f"TelegramNotifier set_webhook failed: {e}")
             return False
 
     def delete_webhook(self) -> bool:
         try:
-            bot = self._ensure_bot()
-            if not bot:
+            token = self._ensure_token()
+            if not token:
                 return False
-            bot.delete_webhook()
-            return True
+            resp = requests.post(f"https://api.telegram.org/bot{token}/deleteWebhook", timeout=10)
+            data = resp.json() if resp.ok else {}
+            return bool(data.get('ok'))
         except Exception as e:
             logger.error(f"TelegramNotifier delete_webhook failed: {e}")
             return False
@@ -245,33 +266,35 @@ class TelegramLongPoller:
     def _run(self):
         try:
             # if webhook is active, skip polling
-            bot = notifier._ensure_bot()
-            if not bot:
+            token = notifier._ensure_token()
+            if not token:
                 return
             try:
-                info = bot.get_webhook_info()
-                if info and getattr(info, 'url', ''):
+                resp = requests.get(f"https://api.telegram.org/bot{token}/getWebhookInfo", timeout=10)
+                info = resp.json() if resp.ok else {}
+                if (info.get('ok') and (info.get('result') or {}).get('url')):
                     return  # webhook active
             except Exception:
                 pass
             self._running = True
             while self._running:
                 try:
-                    updates = bot.get_updates(offset=self._offset, timeout=30)
-                    for u in updates or []:
+                    params = {'timeout': 50}
+                    if self._offset is not None:
+                        params['offset'] = int(self._offset)
+                    resp = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params, timeout=60)
+                    data = resp.json() if resp.ok else {}
+                    for u in (data.get('result') or []):
                         try:
-                            self._offset = (u.update_id or 0) + 1
+                            self._offset = int(u.get('update_id', 0)) + 1
                         except Exception:
                             pass
-                        try:
-                            msg = u.effective_message
-                            chat = u.effective_chat
-                            if not msg or not chat:
-                                continue
-                            text = msg.text or ''
-                            self._handle_message(chat.id, text, getattr(chat, 'username', None), getattr(chat, 'first_name', None))
-                        except Exception:
-                            continue
+                        msg = u.get('message') or {}
+                        chat = msg.get('chat') or {}
+                        text = msg.get('text') or ''
+                        cid = chat.get('id')
+                        if cid:
+                            self._handle_message(int(cid), text, chat.get('username'), chat.get('first_name'))
                 except Exception:
                     time.sleep(2)
                     continue
