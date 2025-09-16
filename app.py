@@ -431,7 +431,7 @@ def dlog(msg: str, *args) -> None:
             logger.info("DBG: " + msg, *args)
         except Exception:
             try:
-                logger.info("DBG: %s", msg)
+                logger.info(f"DBG: {msg}")
             except Exception:
                 pass
 
@@ -549,7 +549,7 @@ def _warm_mqtt_clients() -> None:
                 pass
         _MQTT_WARMED = True
         try:
-            logger.info("MQTT clients warmed: %s", len(servers))
+            logger.info(f"MQTT clients warmed: {len(servers)}")
         except Exception:
             pass
     except Exception:
@@ -716,7 +716,7 @@ class EnvMonitor:
                 pass
             return
         try:
-            logger.info("EnvMonitor starting with cfg=%s", cfg)
+            logger.info(f"EnvMonitor starting with cfg={cfg}")
         except Exception:
             pass
         # Temperature
@@ -730,7 +730,7 @@ class EnvMonitor:
                         cl.username_pw_set(server.get('username'), server.get('password') or None)
                     topic_t = (tcfg['topic'] or '').strip()
                     try:
-                        logger.info('EnvMonitor temp connecting host=%s port=%s topic=%s', server.get('host'), server.get('port'), topic_t)
+                        logger.info(f"EnvMonitor temp connecting host={server.get('host')} port={server.get('port')} topic={topic_t}")
                     except Exception:
                         pass
                     def _on_msg_temp(c, u, msg):
@@ -747,13 +747,13 @@ class EnvMonitor:
                     def _on_connect_temp(c, u, flags, reason_code, properties=None):
                         try:
                             c.subscribe(topic_t, qos=0)
-                            logger.info("EnvMonitor temp subscribed %s", topic_t)
+                            logger.info(f"EnvMonitor temp subscribed {topic_t}")
                         except Exception:
                             logger.exception('EnvMonitor temp subscribe failed')
                     def _on_disconnect_temp(c, u, rc, properties=None):
                         try:
                             self.temp_client = None
-                            logger.info("EnvMonitor temp disconnected: rc=%s", rc)
+                            logger.info(f"EnvMonitor temp disconnected: rc={rc}")
                         except Exception:
                             pass
                     cl.on_message = _on_msg_temp
@@ -782,7 +782,7 @@ class EnvMonitor:
                         cl.username_pw_set(server.get('username'), server.get('password') or None)
                     topic_h = (hcfg['topic'] or '').strip()
                     try:
-                        logger.info('EnvMonitor hum connecting host=%s port=%s topic=%s', server.get('host'), server.get('port'), topic_h)
+                        logger.info(f"EnvMonitor hum connecting host={server.get('host')} port={server.get('port')} topic={topic_h}")
                     except Exception:
                         pass
                     def _on_msg_hum(c, u, msg):
@@ -799,13 +799,13 @@ class EnvMonitor:
                     def _on_connect_hum(c, u, flags, reason_code, properties=None):
                         try:
                             c.subscribe(topic_h, qos=0)
-                            logger.info("EnvMonitor hum subscribed %s", topic_h)
+                            logger.info(f"EnvMonitor hum subscribed {topic_h}")
                         except Exception:
                             logger.exception('EnvMonitor hum subscribe failed')
                     def _on_disconnect_hum(c, u, rc, properties=None):
                         try:
                             self.hum_client = None
-                            logger.info("EnvMonitor hum disconnected: rc=%s", rc)
+                            logger.info(f"EnvMonitor hum disconnected: rc={rc}")
                         except Exception:
                             pass
                     cl.on_message = _on_msg_hum
@@ -894,7 +894,7 @@ def _init_scheduler_before_request():
                             except Exception:
                                 mode = 'NC'
                             close_val = '1' if mode == 'NO' else '0'
-                            logger.info("Boot initial sync: closing master valve sid=%s topic=%s mode=%s val=%s", msid, mtopic, mode, close_val)
+                            logger.info(f"Boot initial sync: closing master valve sid={msid} topic={mtopic} mode={mode} val={close_val}")
                             _publish_mqtt_value(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
                     except Exception:
                         logger.exception('Boot initial sync: master valve close failed')
@@ -4067,7 +4067,7 @@ def _probe_env_values(cfg: dict) -> None:
             if not server or not topic:
                 continue
             try:
-                logger.info('EnvProbe: connect sid=%s host=%s port=%s topic=%s kind=%s', sid, server.get('host'), server.get('port'), topic, kind)
+                logger.info(f"EnvProbe: connect sid={sid} host={server.get('host')} port={server.get('port')} topic={topic} kind={kind}")
                 cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
                 if server.get('username'):
                     cl.username_pw_set(server.get('username'), server.get('password') or None)
