@@ -148,6 +148,12 @@ def exclusive_start_zone(zone_id: int) -> bool:
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
                     except Exception:
                         logger.exception("exclusive_start_zone: mqtt off peer failed (sequential)")
+        try:
+            # publish event
+            from services import events as _ev
+            _ev.publish({'type':'zone_start','id': int(zone_id), 'by':'api'})
+        except Exception:
+            pass
         return True
     except Exception:
         logger.exception("exclusive_start_zone failed")
@@ -312,6 +318,11 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
             logger.exception('stop_zone: water stats update failed')
         try:
             db.add_log('zone_stop', f'{reason}: zone={int(zone_id)}')
+        except Exception:
+            pass
+        try:
+            from services import events as _ev
+            _ev.publish({'type':'zone_stop','id': int(zone_id), 'by': reason})
         except Exception:
             pass
         return True

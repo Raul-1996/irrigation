@@ -17,6 +17,10 @@ try:
 except Exception:
     mqtt = None
 from flask import Response, stream_with_context
+try:
+    from services import events as _events
+except Exception:
+    _events = None
 import time as _perf_time
 import threading
 import queue
@@ -3274,6 +3278,11 @@ def api_emergency_stop():
                         pass
         except Exception:
             pass
+        try:
+            if _events:
+                _events.publish({'type':'emergency_on','by':'api'})
+        except Exception:
+            pass
         return jsonify({"success": True, "message": "Аварийная остановка выполнена"})
     except Exception as e:
         logger.error(f"Ошибка аварийной остановки: {e}")
@@ -3286,6 +3295,11 @@ def api_emergency_resume():
     try:
         app.config['EMERGENCY_STOP'] = False
         db.add_log('emergency_stop', json.dumps({"active": False}))
+        try:
+            if _events:
+                _events.publish({'type':'emergency_off','by':'api'})
+        except Exception:
+            pass
         return jsonify({"success": True, "message": "Полив возобновлен"})
     except Exception as e:
         logger.error(f"Ошибка возобновления после аварийной остановки: {e}")
