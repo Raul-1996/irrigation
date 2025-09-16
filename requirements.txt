@@ -6,3 +6,5 @@ python-dotenv==1.0.1
 paho-mqtt==2.1.0
 Flask-Sock==0.7.0
 hypercorn==0.14.4
+python-telegram-bot==21.6
+pycryptodome==3.21.0
