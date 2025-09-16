@@ -2091,5 +2091,126 @@ class IrrigationDB:
                 'period_days': days
             }
 
+    # ===== Telegram bot helpers =====
+    def get_bot_user_by_chat(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT * FROM bot_users WHERE chat_id = ? LIMIT 1', (int(chat_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка чтения bot_user chat_id={chat_id}: {e}")
+            return None
+
+    def upsert_bot_user(self, chat_id: int, username: Optional[str], first_name: Optional[str]) -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute('''
+                    INSERT INTO bot_users(chat_id, username, first_name, created_at)
+                    VALUES(?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, last_seen_at=CURRENT_TIMESTAMP
+                ''', (int(chat_id), username, first_name))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка upsert bot_user chat_id={chat_id}: {e}")
+            return False
+
+    def set_bot_user_authorized(self, chat_id: int, role: str = 'user') -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute('UPDATE bot_users SET is_authorized=1, role=?, failed_attempts=0, locked_until=NULL, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?', (str(role), int(chat_id)))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка авторизации bot_user chat_id={chat_id}: {e}")
+            return False
+
+    def inc_bot_user_failed(self, chat_id: int) -> int:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute('UPDATE bot_users SET failed_attempts=COALESCE(failed_attempts,0)+1, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?', (int(chat_id),))
+                conn.commit()
+                cur = conn.execute('SELECT failed_attempts FROM bot_users WHERE chat_id=?', (int(chat_id),))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            logger.error(f"Ошибка инкремента failed_attempts chat_id={chat_id}: {e}")
+            return 0
+
+    def lock_bot_user_until(self, chat_id: int, until_iso: str) -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute('UPDATE bot_users SET locked_until=? WHERE chat_id=?', (str(until_iso), int(chat_id)))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка блокировки bot_user chat_id={chat_id}: {e}")
+            return False
+
+    def list_groups_min(self) -> List[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT id, name FROM groups ORDER BY id')
+                return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+    def list_zones_by_group_min(self, group_id: int) -> List[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT id, name, duration, state FROM zones WHERE group_id=? ORDER BY id', (int(group_id),))
+                return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+    def get_due_bot_subscriptions(self, now_local: datetime) -> List[Dict[str, Any]]:
+        try:
+            hhmm = now_local.strftime('%H:%M')
+            dow = now_local.weekday()  # 0=Mon
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('''
+                    SELECT bs.*, bu.chat_id FROM bot_subscriptions bs
+                    JOIN bot_users bu ON bu.id = bs.user_id
+                    WHERE bs.enabled=1 AND bs.time_local=?
+                ''', (hhmm,))
+                out = []
+                for r in cur.fetchall():
+                    rec = dict(r)
+                    if str(rec.get('type')) == 'weekly':
+                        mask = (rec.get('dow_mask') or '').strip()
+                        if not mask:
+                            continue
+                        try:
+                            ok = mask[dow] == '1'
+                        except Exception:
+                            ok = False
+                        if not ok:
+                            continue
+                    out.append(rec)
+                return out
+        except Exception as e:
+            logger.error(f"Ошибка получения due подписок: {e}")
+            return []
+
+    def create_or_update_subscription(self, user_id: int, sub_type: str, fmt: str, time_local: str, dow_mask: Optional[str], enabled: bool = True) -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cur = conn.execute('SELECT id FROM bot_subscriptions WHERE user_id=? AND type=?', (int(user_id), str(sub_type)))
+                row = cur.fetchone()
+                if row:
+                    conn.execute('UPDATE bot_subscriptions SET format=?, time_local=?, dow_mask=?, enabled=? WHERE id=?', (str(fmt), str(time_local), (dow_mask or ''), 1 if enabled else 0, int(row[0])))
+                else:
+                    conn.execute('INSERT INTO bot_subscriptions(user_id, type, format, time_local, dow_mask, enabled) VALUES(?,?,?,?,?,?)', (int(user_id), str(sub_type), str(fmt), str(time_local), (dow_mask or ''), 1 if enabled else 0))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения подписки: {e}")
+            return False
+
 # Глобальный экземпляр базы данных
 db = IrrigationDB()
