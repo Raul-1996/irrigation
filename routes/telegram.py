@@ -105,7 +105,17 @@ def telegram_webhook(secret):
         pass
     # Simple commands: /start, /auth <pwd>
     if text.startswith('/start'):
-        _send(chat_id, 'Привет! Это WB-Irrigation. Для доступа отправьте команду /auth <пароль>.')
+        welcome = (
+            'Привет! Это WB‑Irrigation Bot.\n\n'
+            'Доступные команды:\n'
+            '/auth <пароль> — авторизация\n'
+            '/menu — главное меню\n'
+            '/help — краткая справка\n'
+            '/report — быстрый отчёт\n'
+            '/subscribe, /unsubscribe — подписки\n\n'
+            'Сначала пройдите авторизацию: /auth <пароль>'
+        )
+        _send(chat_id, welcome)
         return jsonify({'ok': True})
     if text.startswith('/auth'):
         parts = text.split(maxsplit=1)
@@ -114,7 +124,11 @@ def telegram_webhook(secret):
             h = db.get_setting_value('telegram_access_password_hash')
             if h and check_password_hash(h, pwd):
                 db.set_bot_user_authorized(int(chat_id), role='user')
-                _send(chat_id, 'Готово. Доступ предоставлен. Введите /menu.')
+                _send(chat_id, 'Готово. Доступ предоставлен.')
+                try:
+                    _send_menu(chat_id)
+                except Exception:
+                    _send(chat_id, 'Введите /menu для открытия клавиатуры.')
                 return jsonify({'ok': True})
             else:
                 failed = db.inc_bot_user_failed(int(chat_id))

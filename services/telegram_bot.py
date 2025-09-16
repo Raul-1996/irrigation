@@ -155,7 +155,16 @@ class TelegramLongPoller:
 
         # /start
         if text.startswith('/start'):
-            notifier.send_text(chat_id, 'Привет! Это WB-Irrigation. Для доступа отправьте команду /auth <пароль>.')
+            notifier.send_text(chat_id, (
+                'Привет! Это WB‑Irrigation Bot.\n\n'
+                'Доступные команды:\n'
+                '/auth <пароль> — авторизация\n'
+                '/menu — главное меню\n'
+                '/help — краткая справка\n'
+                '/report — быстрый отчёт\n'
+                '/subscribe, /unsubscribe — подписки\n\n'
+                'Сначала пройдите авторизацию: /auth <пароль>'
+            ))
             return
         # /auth
         if text.startswith('/auth'):
@@ -165,7 +174,18 @@ class TelegramLongPoller:
                 h = db.get_setting_value('telegram_access_password_hash')
                 if h and check_password_hash(h, pwd):
                     db.set_bot_user_authorized(int(chat_id), role='user')
-                    notifier.send_text(chat_id, 'Готово. Доступ предоставлен. Введите /menu.')
+                    notifier.send_text(chat_id, 'Готово. Доступ предоставлен.')
+                    # Отправим клавиатуру меню
+                    try:
+                        from routes.telegram import _inline_markup
+                        kb = _inline_markup([
+                            [{'text': 'Группы', 'callback_data': 'menu:groups'}, {'text': 'Зоны', 'callback_data': 'menu:zones'}],
+                            [{'text': 'Отложить полив', 'callback_data': 'menu:postpone'}, {'text': 'Отчёты', 'callback_data': 'menu:report'}],
+                            [{'text': 'Подписки', 'callback_data': 'menu:subs'}, {'text': 'Уведомления', 'callback_data': 'menu:notif'}]
+                        ])
+                        notifier.send_message(chat_id, 'Главное меню:', kb)
+                    except Exception:
+                        pass
                     return
                 else:
                     failed = db.inc_bot_user_failed(int(chat_id))
