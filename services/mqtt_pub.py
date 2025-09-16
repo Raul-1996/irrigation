@@ -56,7 +56,7 @@ def get_or_create_mqtt_client(server: dict):
                 host = server.get('host') or '127.0.0.1'
                 port = int(server.get('port') or 1883)
                 try:
-                    # быстрый авто-ре-коннект и асинхронное подключение
+                    # быстрый авто-ре-коннект
                     try:
                         cl.reconnect_delay_set(min_delay=1, max_delay=5)
                     except Exception:
@@ -65,12 +65,12 @@ def get_or_create_mqtt_client(server: dict):
                         cl.max_inflight_messages_set(100)
                     except Exception:
                         pass
-                    # запускаем цикл и подключаемся асинхронно, чтобы не блокировать HTTP
+                    # Синхронное подключение (надёжнее для тестов/первой публикации)
+                    cl.connect(host, port, 10)
                     try:
                         cl.loop_start()
                     except Exception:
                         pass
-                    cl.connect_async(host, port, 30)
                 except Exception:
                     # не кэшируем неудачное подключение
                     return None
