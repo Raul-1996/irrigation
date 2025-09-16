@@ -154,6 +154,11 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'groups_add_water_meter_extended', self._migrate_add_groups_water_meter_extended)
                 self._apply_named_migration(conn, 'zones_add_water_stats', self._migrate_add_zones_water_stats)
                 self._apply_named_migration(conn, 'create_zone_runs_v1', self._migrate_create_zone_runs)
+                # Telegram bot migrations
+                self._apply_named_migration(conn, 'telegram_add_settings_fields', self._migrate_add_telegram_settings)
+                self._apply_named_migration(conn, 'telegram_create_bot_users', self._migrate_create_bot_users)
+                self._apply_named_migration(conn, 'telegram_create_bot_subscriptions', self._migrate_create_bot_subscriptions)
+                self._apply_named_migration(conn, 'telegram_create_bot_audit', self._migrate_create_bot_audit)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -523,6 +528,85 @@ class IrrigationDB:
             logger.info('Создана таблица zone_runs')
         except Exception as e:
             logger.error(f"Ошибка миграции create_zone_runs_v1: {e}")
+
+    def _migrate_add_telegram_settings(self, conn):
+        """Добавить ключи настроек телеграм-бота в settings (если отсутствуют)."""
+        try:
+            keys = [
+                'telegram_bot_token_encrypted',
+                'telegram_access_password_hash',
+                'telegram_webhook_secret_path',
+                'telegram_admin_chat_id',
+            ]
+            for k in keys:
+                cur = conn.execute('SELECT 1 FROM settings WHERE key=?', (k,))
+                if cur.fetchone() is None:
+                    conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)', (k, None))
+            conn.commit()
+            logger.info('Добавлены ключи настроек телеграм-бота в settings')
+        except Exception as e:
+            logger.error(f"Ошибка миграции telegram_add_settings_fields: {e}")
+
+    def _migrate_create_bot_users(self, conn):
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER UNIQUE,
+                    username TEXT,
+                    first_name TEXT,
+                    role TEXT DEFAULT 'user',
+                    is_authorized INTEGER DEFAULT 0,
+                    failed_attempts INTEGER DEFAULT 0,
+                    locked_until TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_bot_users_chat ON bot_users(chat_id)')
+            conn.commit()
+            logger.info('Создана таблица bot_users')
+        except Exception as e:
+            logger.error(f"Ошибка миграции telegram_create_bot_users: {e}")
+
+    def _migrate_create_bot_subscriptions(self, conn):
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    time_local TEXT NOT NULL,
+                    dow_mask TEXT,
+                    enabled INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES bot_users(id) ON DELETE CASCADE
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_bot_subs_user ON bot_subscriptions(user_id)')
+            conn.commit()
+            logger.info('Создана таблица bot_subscriptions')
+        except Exception as e:
+            logger.error(f"Ошибка миграции telegram_create_bot_subscriptions: {e}")
+
+    def _migrate_create_bot_audit(self, conn):
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    action TEXT,
+                    payload_json TEXT,
+                    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES bot_users(id) ON DELETE SET NULL
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_bot_audit_user ON bot_audit(user_id)')
+            conn.commit()
+            logger.info('Создана таблица bot_audit')
+        except Exception as e:
+            logger.error(f"Ошибка миграции telegram_create_bot_audit: {e}")
 
     # --- API для zone_runs ---
     def create_zone_run(self, zone_id: int, group_id: int, start_utc: str, start_monotonic: float,
