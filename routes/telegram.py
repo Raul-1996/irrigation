@@ -46,6 +46,20 @@ def telegram_webhook(secret):
     if not chat_id:
         return jsonify({'ok': True})
     db.upsert_bot_user(int(chat_id), username, first_name)
+    # lock check
+    try:
+        ulock = db.get_bot_user_by_chat(int(chat_id)) or {}
+        locked_until = ulock.get('locked_until')
+        if locked_until:
+            try:
+                lu = datetime.strptime(str(locked_until), '%Y-%m-%d %H:%M:%S')
+                if datetime.now() < lu and not text.startswith('/start'):
+                    _send(chat_id, 'Ваш аккаунт временно заблокирован. Попробуйте позже.')
+                    return jsonify({'ok': True})
+            except Exception:
+                pass
+    except Exception:
+        pass
     # Simple commands: /start, /auth <pwd>
     if text.startswith('/start'):
         _send(chat_id, 'Привет! Это WB-Irrigation. Для доступа отправьте команду /auth <пароль>.')
@@ -121,6 +135,42 @@ def telegram_webhook(secret):
                 evt.publish({'type':'group_stop','id':gid,'by':'telegram'})
             except Exception:
                 _send(chat_id, 'Ошибка остановки группы')
+        return jsonify({'ok': True})
+    if text.startswith('/postpone_cancel'):
+        parts = text.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            gid = int(parts[1])
+            try:
+                from app import app as _app
+                with _app.test_request_context(json={'group_id': gid, 'action': 'cancel'}):
+                    from app import api_postpone as _pp
+                    _pp()
+                _send(chat_id, f'Отложенный полив для группы {gid} отменен')
+            except Exception:
+                _send(chat_id, 'Ошибка отмены отложенного полива')
+        else:
+            _send(chat_id, 'Используйте: /postpone_cancel <group_id>')
+        return jsonify({'ok': True})
+    if text.startswith('/postpone'):
+        parts = text.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            gid = int(parts[1])
+            days = 1
+            try:
+                if len(parts) > 2:
+                    days = max(1, min(7, int(parts[2])))
+            except Exception:
+                days = 1
+            try:
+                from app import app as _app
+                with _app.test_request_context(json={'group_id': gid, 'action': 'postpone', 'days': days}):
+                    from app import api_postpone as _pp
+                    _pp()
+                _send(chat_id, f'Полив группы {gid} отложен на {days} дн.')
+            except Exception:
+                _send(chat_id, 'Ошибка установки отложенного полива')
+        else:
+            _send(chat_id, 'Используйте: /postpone <group_id> <days>')
         return jsonify({'ok': True})
     if text.startswith('/zone_start'):
         parts = text.split()
