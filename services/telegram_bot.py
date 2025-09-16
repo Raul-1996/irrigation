@@ -79,6 +79,28 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"TelegramNotifier answer_callback failed: {e}")
 
+    def set_webhook(self, url: str) -> bool:
+        try:
+            bot = self._ensure_bot()
+            if not bot or not url:
+                return False
+            bot.set_webhook(url=url)
+            return True
+        except Exception as e:
+            logger.error(f"TelegramNotifier set_webhook failed: {e}")
+            return False
+
+    def delete_webhook(self) -> bool:
+        try:
+            bot = self._ensure_bot()
+            if not bot:
+                return False
+            bot.delete_webhook()
+            return True
+        except Exception as e:
+            logger.error(f"TelegramNotifier delete_webhook failed: {e}")
+            return False
+
 notifier = TelegramNotifier()
 
 def subscribe_to_events():
