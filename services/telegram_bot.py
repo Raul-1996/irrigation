@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import time
 import json
 import requests
+import base64
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,12 @@ class TelegramNotifier:
             return bool(data.get('ok'))
         except Exception as e:
             logger.error(f"TelegramNotifier send_message failed: {e}")
+            return False
+
+    def send_menu(self, chat_id: int, text: str, inline_keyboard_rows: list[list[dict]]) -> bool:
+        try:
+            return self.send_message(chat_id, text, {'inline_keyboard': inline_keyboard_rows})
+        except Exception:
             return False
 
     def edit_message_text(self, chat_id: int, message_id: int, text: str, reply_markup=None) -> bool:
@@ -175,17 +183,27 @@ class TelegramLongPoller:
                 if h and check_password_hash(h, pwd):
                     db.set_bot_user_authorized(int(chat_id), role='user')
                     notifier.send_text(chat_id, 'Готово. Доступ предоставлен.')
-                    # Отправим клавиатуру меню
+                    # Отправим красивое меню (inline клавиатура с JSON callbacks)
                     try:
-                        from routes.telegram import _inline_markup
-                        kb = _inline_markup([
-                            [{'text': 'Группы', 'callback_data': 'menu:groups'}, {'text': 'Зоны', 'callback_data': 'menu:zones'}],
-                            [{'text': 'Отложить полив', 'callback_data': 'menu:postpone'}, {'text': 'Отчёты', 'callback_data': 'menu:report'}],
-                            [{'text': 'Подписки', 'callback_data': 'menu:subs'}, {'text': 'Уведомления', 'callback_data': 'menu:notif'}]
-                        ])
-                        notifier.send_message(chat_id, 'Главное меню:', kb)
+                        rows = [
+                            [
+                                {'text': 'Группы', 'callback_data': 'menu:groups'},
+                                {'text': 'Зоны', 'callback_data': 'menu:zones'},
+                            ],
+                            [
+                                {'text': 'Отложить полив', 'callback_data': 'menu:postpone'},
+                                {'text': 'Отчёты', 'callback_data': 'menu:report'},
+                            ],
+                            [
+                                {'text': 'Подписки', 'callback_data': 'menu:subs'},
+                                {'text': 'Уведомления', 'callback_data': 'menu:notif'},
+                            ],
+                        ]
+                        ok = notifier.send_menu(chat_id, 'Главное меню:', rows)
+                        if not ok:
+                            notifier.send_text(chat_id, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
                     except Exception:
-                        pass
+                        notifier.send_text(chat_id, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
                     return
                 else:
                     failed = db.inc_bot_user_failed(int(chat_id))
@@ -207,7 +225,26 @@ class TelegramLongPoller:
             notifier.send_text(chat_id, '/menu, /groups, /zones <group>, /group_start <id>, /group_stop <id>, /zone_start <id>, /zone_stop <id>, /report today')
             return
         if text.startswith('/menu'):
-            notifier.send_text(chat_id, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
+            try:
+                rows = [
+                    [
+                        {'text': 'Группы', 'callback_data': 'menu:groups'},
+                        {'text': 'Зоны', 'callback_data': 'menu:zones'},
+                    ],
+                    [
+                        {'text': 'Отложить полив', 'callback_data': 'menu:postpone'},
+                        {'text': 'Отчёты', 'callback_data': 'menu:report'},
+                    ],
+                    [
+                        {'text': 'Подписки', 'callback_data': 'menu:subs'},
+                        {'text': 'Уведомления', 'callback_data': 'menu:notif'},
+                    ],
+                ]
+                ok = notifier.send_menu(chat_id, 'Главное меню:', rows)
+                if not ok:
+                    notifier.send_text(chat_id, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
+            except Exception:
+                notifier.send_text(chat_id, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
             return
         if text.startswith('/groups'):
             gl = db.list_groups_min()
@@ -309,6 +346,37 @@ class TelegramLongPoller:
                             self._offset = int(u.get('update_id', 0)) + 1
                         except Exception:
                             pass
+                        # Handle callback queries first
+                        cq = u.get('callback_query') or {}
+                        if cq:
+                            try:
+                                cqid = cq.get('id')
+                                if cqid:
+                                    try:
+                                        notifier.answer_callback(cqid)
+                                    except Exception:
+                                        pass
+                                from_chat = ((cq.get('message') or {}).get('chat') or {}).get('id')
+                                data_cb = cq.get('data') or ''
+                                if from_chat and data_cb:
+                                    try:
+                                        # Legacy mapping only (rely on route handlers)
+                                        # We keep compatibility but prioritize server route
+                                        pass
+                                    except Exception:
+                                        pass
+                                # Always forward callbacks to server route via HTTP-less call
+                                try:
+                                    from routes.telegram import process_callback_json, _cb_decode
+                                    jd2 = _cb_decode(str(data_cb))
+                                    if jd2.get('t') or data_cb:
+                                        # Pass either JSON or legacy handled inside route
+                                        process_callback_json(int(from_chat), jd2 if jd2 else {'t': 'menu', 'a': 'main'})
+                                        continue
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
                         msg = u.get('message') or {}
                         chat = msg.get('chat') or {}
                         text = msg.get('text') or ''
@@ -333,8 +401,8 @@ _poller: Optional[TelegramLongPoller] = None
 def start_long_polling_if_needed():
     global _poller
     try:
-        # Ensure bot configured
-        if not notifier._ensure_bot():
+        # Ensure bot token configured
+        if not notifier._ensure_token():
             return
         # If webhook has been set, do nothing (will be skipped inside as well)
         if _poller is None:

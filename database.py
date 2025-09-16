@@ -159,6 +159,8 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'telegram_create_bot_users', self._migrate_create_bot_users)
                 self._apply_named_migration(conn, 'telegram_create_bot_subscriptions', self._migrate_create_bot_subscriptions)
                 self._apply_named_migration(conn, 'telegram_create_bot_audit', self._migrate_create_bot_audit)
+                self._apply_named_migration(conn, 'telegram_add_fsm_and_notif', self._migrate_add_fsm_and_notif)
+                self._apply_named_migration(conn, 'telegram_create_bot_idempotency', self._migrate_create_bot_idempotency)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -607,6 +609,147 @@ class IrrigationDB:
             logger.info('Создана таблица bot_audit')
         except Exception as e:
             logger.error(f"Ошибка миграции telegram_create_bot_audit: {e}")
+
+    def _migrate_add_fsm_and_notif(self, conn):
+        try:
+            # Добавляем недостающие столбцы в bot_users
+            cols = {
+                'fsm_state': "ALTER TABLE bot_users ADD COLUMN fsm_state TEXT",
+                'fsm_data': "ALTER TABLE bot_users ADD COLUMN fsm_data TEXT",
+                'notif_critical': "ALTER TABLE bot_users ADD COLUMN notif_critical INTEGER DEFAULT 1",
+                'notif_emergency': "ALTER TABLE bot_users ADD COLUMN notif_emergency INTEGER DEFAULT 1",
+                'notif_postpone': "ALTER TABLE bot_users ADD COLUMN notif_postpone INTEGER DEFAULT 1",
+                'notif_zone_events': "ALTER TABLE bot_users ADD COLUMN notif_zone_events INTEGER DEFAULT 0",
+                'notif_rain': "ALTER TABLE bot_users ADD COLUMN notif_rain INTEGER DEFAULT 0",
+            }
+            # Определим текущие колонки
+            cur = conn.execute('PRAGMA table_info(bot_users)')
+            existing = {row[1] for row in cur.fetchall()}
+            for name, ddl in cols.items():
+                if name not in existing:
+                    try:
+                        conn.execute(ddl)
+                    except Exception:
+                        pass
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка миграции telegram_add_fsm_and_notif: {e}")
+
+    def _migrate_create_bot_idempotency(self, conn):
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_idempotency (
+                    token TEXT PRIMARY KEY,
+                    chat_id INTEGER,
+                    action TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_bot_idemp_chat ON bot_idempotency(chat_id)')
+            conn.commit()
+            logger.info('Создана таблица bot_idempotency')
+        except Exception as e:
+            logger.error(f"Ошибка миграции telegram_create_bot_idempotency: {e}")
+
+    # --- Telegram bot helpers: FSM ---
+    def set_bot_fsm(self, chat_id: int, state: Optional[str], data: Optional[dict]) -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                payload = None
+                try:
+                    payload = None if data is None else json.dumps(data, ensure_ascii=False)
+                except Exception:
+                    payload = None
+                conn.execute(
+                    'UPDATE bot_users SET fsm_state=?, fsm_data=?, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
+                    (None if state is None else str(state), payload, int(chat_id))
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка установки FSM chat_id={chat_id}: {e}")
+            return False
+
+    def get_bot_fsm(self, chat_id: int) -> tuple[Optional[str], Optional[dict]]:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT fsm_state, fsm_data FROM bot_users WHERE chat_id=?', (int(chat_id),))
+                row = cur.fetchone()
+                if not row:
+                    return None, None
+                st = row['fsm_state']
+                data = None
+                try:
+                    data = json.loads(row['fsm_data']) if row['fsm_data'] else None
+                except Exception:
+                    data = None
+                return st, data
+        except Exception as e:
+            logger.error(f"Ошибка чтения FSM chat_id={chat_id}: {e}")
+            return None, None
+
+    # --- Telegram bot helpers: Idempotency tokens ---
+    def is_new_idempotency_token(self, token: str, chat_id: int, action: str, ttl_seconds: int = 600) -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                # Очистка старых токенов
+                try:
+                    conn.execute('DELETE FROM bot_idempotency WHERE created_at < datetime("now", ?)', (f'-{int(ttl_seconds)} seconds',))
+                except Exception:
+                    pass
+                try:
+                    conn.execute('INSERT INTO bot_idempotency(token, chat_id, action) VALUES(?,?,?)', (str(token), int(chat_id), str(action)))
+                    conn.commit()
+                    return True
+                except sqlite3.IntegrityError:
+                    return False
+        except Exception as e:
+            logger.error(f"Ошибка записи идемпотентного токена {token}: {e}")
+            return False
+
+    # --- Telegram bot helpers: Notification toggles ---
+    def get_bot_user_notif_settings(self, chat_id: int) -> dict:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('''
+                    SELECT notif_critical, notif_emergency, notif_postpone, notif_zone_events, notif_rain
+                    FROM bot_users WHERE chat_id=? LIMIT 1
+                ''', (int(chat_id),))
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                return {
+                    'critical': int(row['notif_critical'] or 0),
+                    'emergency': int(row['notif_emergency'] or 0),
+                    'postpone': int(row['notif_postpone'] or 0),
+                    'zone_events': int(row['notif_zone_events'] or 0),
+                    'rain': int(row['notif_rain'] or 0),
+                }
+        except Exception as e:
+            logger.error(f"Ошибка чтения настроек уведомлений chat_id={chat_id}: {e}")
+            return {}
+
+    def set_bot_user_notif_toggle(self, chat_id: int, key: str, enabled: bool) -> bool:
+        allowed = {
+            'critical': 'notif_critical',
+            'emergency': 'notif_emergency',
+            'postpone': 'notif_postpone',
+            'zone_events': 'notif_zone_events',
+            'rain': 'notif_rain',
+        }
+        col = allowed.get(key)
+        if not col:
+            return False
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute(f'UPDATE bot_users SET {col}=? WHERE chat_id=?', (1 if enabled else 0, int(chat_id)))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения тумблера уведомлений {key} chat_id={chat_id}: {e}")
+            return False
 
     # --- API для zone_runs ---
     def create_zone_run(self, zone_id: int, group_id: int, start_utc: str, start_monotonic: float,

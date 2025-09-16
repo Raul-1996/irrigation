@@ -6,6 +6,9 @@ from services.telegram_bot import notifier
 from services.reports import build_report_text
 from services import events as evt
 import time
+import json
+import base64
+import uuid
 InlineKeyboardButton = None
 InlineKeyboardMarkup = None
 
@@ -38,6 +41,35 @@ def _inline_markup(rows):
     except Exception:
         return None
 
+def _cb_encode(payload: dict) -> str:
+    try:
+        # Ensure idempotency token
+        if 'tok' not in payload:
+            payload = {**payload, 'tok': str(uuid.uuid4())}
+        raw = json.dumps(payload, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        return base64.urlsafe_b64encode(raw).decode('ascii')
+    except Exception:
+        return ''
+
+def _cb_decode(data: str) -> dict:
+    # Try base64 JSON first, then plain JSON, else empty
+    if not data:
+        return {}
+    try:
+        # Some clients may pass pure JSON (dev tools), handle it
+        if data.startswith('{') and data.endswith('}'):
+            return json.loads(data)
+    except Exception:
+        pass
+    try:
+        raw = base64.urlsafe_b64decode(data.encode('ascii'))
+        return json.loads(raw.decode('utf-8'))
+    except Exception:
+        return {}
+
+def _btn(text: str, payload: dict) -> dict:
+    return {'text': text, 'callback_data': _cb_encode(payload)}
+
 def _get_role(chat_id: int) -> str:
     try:
         u = db.get_bot_user_by_chat(int(chat_id)) or {}
@@ -49,6 +81,13 @@ def _get_role(chat_id: int) -> str:
 def _role_allowed(current: str, required: str) -> bool:
     order = {'viewer': 0, 'user': 1, 'admin': 2}
     return order.get(current, 0) >= order.get(required, 0)
+
+def _require_role(chat_id: int, required: str) -> bool:
+    role = _get_role(chat_id)
+    if not _role_allowed(role, required):
+        _send(chat_id, 'Нет прав')
+        return False
+    return True
 
 def _dedup_cb(chat_id: int, data: str) -> bool:
     # returns True if duplicated (should skip)
@@ -69,6 +108,294 @@ def _dedup_cb(chat_id: int, data: str) -> bool:
     return False
 
 telegram_bp = Blueprint('telegram_bp', __name__)
+
+def process_callback_json(from_chat: int, jd: dict) -> None:
+    # Idempotency check
+    tok = jd.get('tok')
+    if tok:
+        try:
+            if not db.is_new_idempotency_token(str(tok), int(from_chat), str(jd.get('t'))):
+                return
+        except Exception:
+            pass
+    t = jd.get('t')
+    # --- Menu navigation ---
+    if t == 'menu':
+        a = jd.get('a')
+        def _send_main(cid: int):
+            rows = [
+                [_btn('Группы', {'t': 'menu', 'a': 'groups'}), _btn('Зоны', {'t': 'menu', 'a': 'zones'})],
+                [_btn('Отложить полив', {'t': 'menu', 'a': 'postpone'}), _btn('Отчёты', {'t': 'menu', 'a': 'report'})],
+                [_btn('Подписки', {'t': 'menu', 'a': 'subs'}), _btn('Уведомления', {'t': 'menu', 'a': 'notif'})],
+            ]
+            notifier.send_message(cid, 'Главное меню:', _inline_markup(rows))
+        if a == 'main':
+            _send_main(from_chat)
+        elif a == 'groups':
+            gl_all = db.list_groups_min() or []
+            gl = [g for g in gl_all if int(g.get('id') or 0) != 999]
+            if gl:
+                txt = 'Группы:\n' + '\n'.join([str(g['name']) for g in gl])
+                _send(from_chat, txt)
+            else:
+                _send(from_chat, 'Группы отсутствуют')
+        elif a == 'zones':
+            gl = [g for g in (db.list_groups_min() or []) if int(g.get('id') or 0) != 999]
+            if gl:
+                rows = [[_btn(str(g['name']), {'t': 'zones_select', 'gid': int(g['id'])})] for g in gl]
+                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})])
+                notifier.send_message(from_chat, 'Выберите группу для просмотра зон:', _inline_markup(rows))
+            else:
+                notifier.send_message(from_chat, 'Нет групп', _inline_markup([[ _btn('⬅ Назад', {'t': 'menu', 'a': 'main'}) ]]))
+        elif a == 'postpone':
+            gl = [g for g in (db.list_groups_min() or []) if int(g.get('id') or 0) != 999]
+            if gl:
+                rows = []
+                for g in gl:
+                    gid = int(g['id']); name = g['name']
+                    rows.append([
+                        _btn(f"{name}: +1д", {'t': 'postpone', 'gid': gid, 'days': 1}),
+                        _btn('+2д', {'t': 'postpone', 'gid': gid, 'days': 2}),
+                        _btn('+3д', {'t': 'postpone', 'gid': gid, 'days': 3}),
+                    ])
+                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})])
+                notifier.send_message(from_chat, 'Отложить полив по группам:', _inline_markup(rows))
+            else:
+                notifier.send_message(from_chat, 'Нет групп', _inline_markup([[ _btn('⬅ Назад', {'t': 'menu', 'a': 'main'}) ]]))
+        elif a == 'report':
+            db.set_bot_fsm(int(from_chat), 'DIALOG_REPORT', {'step': 'period'})
+            rows = [
+                [_btn('Сегодня', {'t': 'report', 'step': 'format', 'p': {'period': 'today'}}), _btn('Вчера', {'t': 'report', 'step': 'format', 'p': {'period': 'yesterday'}})],
+                [_btn('7 дней', {'t': 'report', 'step': 'format', 'p': {'period': '7'}}), _btn('30 дней', {'t': 'report', 'step': 'format', 'p': {'period': '30'}})],
+                [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})],
+            ]
+            notifier.send_message(from_chat, 'Выберите период отчёта:', _inline_markup(rows))
+        elif a == 'subs':
+            db.set_bot_fsm(int(from_chat), 'DIALOG_SUBSCRIBE', {'step': 'type'})
+            rows = [[_btn('Ежедневная', {'t': 'subs', 'step': 'format', 'stype': 'daily'})],
+                    [_btn('Еженедельная', {'t': 'subs', 'step': 'format', 'stype': 'weekly'})],
+                    [_btn('Отключить все', {'t': 'subs', 'step': 'disable'})],
+                    [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})]]
+            notifier.send_message(from_chat, 'Тип подписки:', _inline_markup(rows))
+        elif a == 'notif':
+            s = db.get_bot_user_notif_settings(int(from_chat))
+            def flag(v):
+                return '✅' if int(v or 0) == 1 else '❌'
+            rows = [
+                [_btn(f"Критические {flag(s.get('critical'))}", {'t': 'notif', 'k': 'critical', 'v': 1-int(s.get('critical',0))}), _btn(f"Авария {flag(s.get('emergency'))}", {'t': 'notif', 'k': 'emergency', 'v': 1-int(s.get('emergency',0))})],
+                [_btn(f"Отложен полив {flag(s.get('postpone'))}", {'t': 'notif', 'k': 'postpone', 'v': 1-int(s.get('postpone',0))}), _btn(f"События зон {flag(s.get('zone_events'))}", {'t': 'notif', 'k': 'zone_events', 'v': 1-int(s.get('zone_events',0))})],
+                [_btn(f"Дождь {flag(s.get('rain'))}", {'t': 'notif', 'k': 'rain', 'v': 1-int(s.get('rain',0))})],
+                [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})],
+            ]
+            notifier.send_message(from_chat, 'Настройки уведомлений:', _inline_markup(rows))
+        elif a == 'emergency':
+            if not _require_role(int(from_chat), 'admin'):
+                return
+            rows = [[_btn('🚨 Подтвердить остановку', {'t': 'confirm', 'a': 'emergency', 'do': 'on'})],
+                    [_btn('Отмена', {'t': 'confirm', 'a': 'cancel'})],
+                    [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})]]
+            notifier.send_message(from_chat, 'Подтвердите аварийную остановку', _inline_markup(rows))
+        return
+    # --- Zones select ---
+    if t == 'zones_select':
+        gid = int(jd.get('gid') or 0)
+        if gid:
+            zl = db.list_zones_by_group_min(gid)
+            if zl:
+                rows = []
+                for z in zl:
+                    zid = int(z['id']); name = z['name']
+                    rows.append([_btn(f"▶ {name}", {'t': 'zone_start', 'zid': zid}), _btn(f"⏹ {name}", {'t': 'zone_stop', 'zid': zid})])
+                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'zones'})])
+                notifier.send_message(from_chat, 'Выберите действие по зонам', _inline_markup(rows))
+            else:
+                _send(from_chat, f'В группе {gid} нет зон')
+        return
+    # --- Group selected actions ---
+    if t == 'group_sel':
+        gid = int(jd.get('gid') or 0)
+        if gid:
+            try:
+                g = next((x for x in (db.list_groups_min() or []) if int(x.get('id') or 0) == gid), None)
+                gname = g.get('name') if g else f'Группа {gid}'
+            except Exception:
+                gname = f'Группа {gid}'
+            rows = [
+                [_btn('▶ Запустить с 1-й', {'t': 'grp_start', 'gid': gid}), _btn('⏹ Остановить', {'t': 'grp_stop', 'gid': gid})],
+                [_btn('⏱ +1д', {'t': 'postpone', 'gid': gid, 'days': 1}), _btn('+2д', {'t': 'postpone', 'gid': gid, 'days': 2}), _btn('+3д', {'t': 'postpone', 'gid': gid, 'days': 3})],
+                [_btn('⬅ Назад', {'t': 'menu', 'a': 'groups'})],
+            ]
+            notifier.send_message(from_chat, f'{gname}: действия', _inline_markup(rows))
+        return
+    # --- Actions: groups/zones ---
+    if t == 'grp_start':
+        if not _require_role(int(from_chat), 'user'):
+            return
+        gid = int(jd.get('gid') or 0)
+        if gid:
+            try:
+                from irrigation_scheduler import get_scheduler
+                s = get_scheduler()
+                if s:
+                    s.start_group_sequence(gid)
+                _send(from_chat, f'▶ Группа {gid} запущена')
+            except Exception:
+                _send(from_chat, 'Ошибка запуска группы')
+        return
+    if t == 'grp_stop':
+        if not _require_role(int(from_chat), 'user'):
+            return
+        gid = int(jd.get('gid') or 0)
+        if gid:
+            try:
+                from services.zone_control import stop_all_in_group
+                stop_all_in_group(gid, reason='telegram')
+                _send(from_chat, f'⏹ Группа {gid} остановлена')
+            except Exception:
+                _send(from_chat, 'Ошибка остановки группы')
+        return
+    if t == 'zone_start':
+        if not _require_role(int(from_chat), 'user'):
+            return
+        zid = int(jd.get('zid') or 0)
+        if zid:
+            try:
+                from services.zone_control import exclusive_start_zone
+                exclusive_start_zone(zid)
+                _send(from_chat, f'▶ Зона {zid} запущена')
+            except Exception:
+                _send(from_chat, 'Ошибка запуска зоны')
+        return
+    if t == 'zone_stop':
+        if not _require_role(int(from_chat), 'user'):
+            return
+        zid = int(jd.get('zid') or 0)
+        if zid:
+            try:
+                from services.zone_control import stop_zone
+                stop_zone(zid, reason='telegram')
+                _send(from_chat, f'⏹ Зона {zid} остановлена')
+            except Exception:
+                _send(from_chat, 'Ошибка остановки зоны')
+        return
+    if t == 'postpone':
+        if not _require_role(int(from_chat), 'user'):
+            return
+        gid = int(jd.get('gid') or 0)
+        days = int(jd.get('days') or 1)
+        if gid:
+            try:
+                from app import app as _app
+                with _app.test_request_context(json={'group_id': gid, 'action': 'postpone', 'days': days}):
+                    from app import api_postpone as _pp
+                    _pp()
+                _send(from_chat, f'Группа {gid}: отложен полив на {days} дн.')
+            except Exception:
+                _send(from_chat, 'Ошибка отложенного полива')
+        return
+    # --- Reports dialog ---
+    if t == 'report':
+        st, fd = db.get_bot_fsm(int(from_chat))
+        step = jd.get('step')
+        p = jd.get('p') or {}
+        if step == 'format':
+            period = str(p.get('period') or 'today')
+            db.set_bot_fsm(int(from_chat), 'DIALOG_REPORT', {'step': 'format', 'period': period})
+            rows = [[_btn('Краткий', {'t': 'report', 'step': 'send', 'p': {'period': period, 'format': 'brief'}}), _btn('Подробный', {'t': 'report', 'step': 'send', 'p': {'period': period, 'format': 'full'}})],
+                    [_btn('Отмена', {'t': 'confirm', 'a': 'cancel'})]]
+            notifier.send_message(from_chat, 'Формат отчёта:', _inline_markup(rows))
+            return
+        if step == 'send':
+            period = str((p or {}).get('period') or 'today')
+            fmt = 'brief' if str((p or {}).get('format') or 'brief') != 'full' else 'full'
+            txt = build_report_text(period=period, fmt=fmt)
+            db.set_bot_fsm(int(from_chat), None, None)
+            _send(from_chat, txt)
+            return
+    # --- Subscriptions dialog ---
+    if t == 'subs':
+        step = jd.get('step')
+        if step == 'disable':
+            u = db.get_bot_user_by_chat(int(from_chat))
+            if u:
+                try:
+                    db.create_or_update_subscription(int(u.get('id')), 'daily', 'brief', '08:00', None, False)
+                    db.create_or_update_subscription(int(u.get('id')), 'weekly', 'brief', '08:00', '1111111', False)
+                except Exception:
+                    pass
+            _send(from_chat, 'Подписки отключены')
+            db.set_bot_fsm(int(from_chat), None, None)
+            return
+        if step == 'format':
+            stype = str(jd.get('stype') or 'daily')
+            db.set_bot_fsm(int(from_chat), 'DIALOG_SUBSCRIBE', {'step': 'format', 'stype': stype})
+            rows = [[
+                _btn('Краткий', {'t': 'subs', 'step': 'time', 'stype': stype, 'fmt': 'brief'}),
+                _btn('Подробный', {'t': 'subs', 'step': 'time', 'stype': stype, 'fmt': 'full'})
+            ]]
+            notifier.send_message(from_chat, 'Формат подписки:', _inline_markup(rows))
+            return
+        if step == 'time':
+            stype = str(jd.get('stype') or 'daily')
+            fmt = str(jd.get('fmt') or 'brief')
+            times = ['07:00', '08:00', '09:00', '20:00']
+            row = [_btn(ti, {'t': 'subs', 'step': 'save', 'stype': stype, 'fmt': fmt, 'time': ti}) for ti in times]
+            notifier.send_message(from_chat, 'Выберите время (локальное):', _inline_markup([row]))
+            return
+        if step == 'save':
+            stype = str(jd.get('stype') or 'daily')
+            fmt = str(jd.get('fmt') or 'brief')
+            tl = str(jd.get('time') or '08:00')
+            dow = None
+            if stype == 'weekly':
+                dow = '1111100'
+            u = db.get_bot_user_by_chat(int(from_chat))
+            if u:
+                db.create_or_update_subscription(int(u.get('id')), stype, fmt, tl, dow, True)
+            db.set_bot_fsm(int(from_chat), None, None)
+            _send(from_chat, 'Подписка сохранена')
+            return
+    # --- Notification toggles ---
+    if t == 'notif':
+        k = str(jd.get('k') or '')
+        v = int(jd.get('v') or 0) == 1
+        if k:
+            db.set_bot_user_notif_toggle(int(from_chat), k, v)
+        s = db.get_bot_user_notif_settings(int(from_chat))
+        def flag(vx):
+            return '✅' if int(vx or 0) == 1 else '❌'
+        rows = [
+            [_btn(f"Критические {flag(s.get('critical'))}", {'t': 'notif', 'k': 'critical', 'v': 1-int(s.get('critical',0))}), _btn(f"Авария {flag(s.get('emergency'))}", {'t': 'notif', 'k': 'emergency', 'v': 1-int(s.get('emergency',0))})],
+            [_btn(f"Отложен полив {flag(s.get('postpone'))}", {'t': 'notif', 'k': 'postpone', 'v': 1-int(s.get('postpone',0))}), _btn(f"События зон {flag(s.get('zone_events'))}", {'t': 'notif', 'k': 'zone_events', 'v': 1-int(s.get('zone_events',0))})],
+            [_btn(f"Дождь {flag(s.get('rain'))}", {'t': 'notif', 'k': 'rain', 'v': 1-int(s.get('rain',0))})],
+        ]
+        notifier.send_message(from_chat, 'Настройки уведомлений:', _inline_markup(rows))
+        return
+    # --- Confirm dangerous operations ---
+    if t == 'confirm':
+        a = jd.get('a')
+        if a == 'cancel':
+            _send(from_chat, 'Отменено')
+            db.set_bot_fsm(int(from_chat), None, None)
+            return
+        if a == 'emergency':
+            if not _require_role(int(from_chat), 'admin'):
+                return
+            do = jd.get('do')
+            try:
+                from app import app as _app
+                with _app.test_request_context():
+                    if do == 'on':
+                        from app import api_emergency_stop as _es
+                        _es()
+                        _send(from_chat, '🚨 Аварийная остановка активирована')
+                    else:
+                        from app import api_emergency_resume as _er
+                        _er()
+                        _send(from_chat, '✅ Аварийная остановка снята')
+            except Exception:
+                _send(from_chat, 'Ошибка выполнения аварийной операции')
+            return
 
 @telegram_bp.route('/telegram/webhook/<secret>', methods=['POST'])
 def telegram_webhook(secret):
@@ -103,7 +430,7 @@ def telegram_webhook(secret):
                 pass
     except Exception:
         pass
-    # Simple commands: /start, /auth <pwd>
+    # Simple commands: /start, /auth [pwd]
     if text.startswith('/start'):
         welcome = (
             'Привет! Это WB‑Irrigation Bot.\n\n'
@@ -124,6 +451,7 @@ def telegram_webhook(secret):
             h = db.get_setting_value('telegram_access_password_hash')
             if h and check_password_hash(h, pwd):
                 db.set_bot_user_authorized(int(chat_id), role='user')
+                db.set_bot_fsm(int(chat_id), None, None)
                 _send(chat_id, 'Готово. Доступ предоставлен.')
                 try:
                     _send_menu(chat_id)
@@ -137,6 +465,46 @@ def telegram_webhook(secret):
                     db.lock_bot_user_until(int(chat_id), until)
                 _send(chat_id, f'Пароль неверный. Осталось попыток: {max(0, 5-failed)}')
                 return jsonify({'ok': True})
+        else:
+            db.set_bot_fsm(int(chat_id), 'AUTH_WAIT_PASSWORD', {})
+            _send(chat_id, 'Введите пароль текстом:')
+            return jsonify({'ok': True})
+
+    if text.startswith('/logout'):
+        db.set_bot_fsm(int(chat_id), None, None)
+        try:
+            # Сбрасываем авторизацию
+            from sqlite3 import connect, Row
+            with connect(db.db_path, timeout=5) as conn:
+                conn.execute('UPDATE bot_users SET is_authorized=0 WHERE chat_id=?', (int(chat_id),))
+                conn.commit()
+        except Exception:
+            pass
+        _send(chat_id, 'Вы вышли. Для входа: /auth <пароль>')
+        return jsonify({'ok': True})
+
+    # FSM: password input
+    try:
+        st, fd = db.get_bot_fsm(int(chat_id))
+    except Exception:
+        st, fd = None, None
+    if st == 'AUTH_WAIT_PASSWORD' and text and not text.startswith('/'):
+        h = db.get_setting_value('telegram_access_password_hash')
+        if h and check_password_hash(h, text.strip()):
+            db.set_bot_user_authorized(int(chat_id), role='user')
+            db.set_bot_fsm(int(chat_id), None, None)
+            _send(chat_id, 'Готово. Доступ предоставлен.')
+            try:
+                _send_menu(chat_id)
+            except Exception:
+                pass
+        else:
+            failed = db.inc_bot_user_failed(int(chat_id))
+            if failed >= 5:
+                until = (datetime.now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+                db.lock_bot_user_until(int(chat_id), until)
+            _send(chat_id, f'Пароль неверный. Осталось попыток: {max(0, 5-failed)}')
+        return jsonify({'ok': True})
     # rate limit (skip for callback pings w/o data)
     if _rate_limited(int(chat_id)):
         _send(chat_id, 'Слишком часто. Повторите позже.')
@@ -148,15 +516,16 @@ def telegram_webhook(secret):
     # Basic commands
     # --- Inline menu ---
     def _send_menu(cid: int):
-        kb = _inline_markup([
-            [{'text': 'Группы', 'callback_data': 'menu:groups'}, {'text': 'Зоны', 'callback_data': 'menu:zones'}],
-            [{'text': 'Отложить полив', 'callback_data': 'menu:postpone'}, {'text': 'Отчёты', 'callback_data': 'menu:report'}],
-            [{'text': 'Подписки', 'callback_data': 'menu:subs'}, {'text': 'Уведомления', 'callback_data': 'menu:notif'}]
-        ])
+        rows = [
+            [_btn('Группы', {'t': 'menu', 'a': 'groups'}), _btn('Зоны', {'t': 'menu', 'a': 'zones'})],
+            [_btn('Отложить полив', {'t': 'menu', 'a': 'postpone'}), _btn('Отчёты', {'t': 'menu', 'a': 'report'})],
+            [_btn('Подписки', {'t': 'menu', 'a': 'subs'}), _btn('Уведомления', {'t': 'menu', 'a': 'notif'})]
+        ]
+        kb = _inline_markup(rows)
         try:
             # админ-кнопка
             if _role_allowed(_get_role(cid), 'admin'):
-                kb['inline_keyboard'].append([{'text':'Аварийная остановка','callback_data':'menu:emergency'}])
+                kb['inline_keyboard'].append([_btn('Аварийная остановка', {'t': 'menu', 'a': 'emergency'})])
         except Exception:
             pass
         try:
@@ -377,6 +746,12 @@ def telegram_webhook(secret):
                 notifier.answer_callback(cqid)
             except Exception:
                 pass
+            # Try JSON/base64 callbacks first
+            jd = _cb_decode(data)
+            if jd.get('t'):
+                process_callback_json(int(from_chat), jd)
+                return jsonify({'ok': True})
+
             if data.startswith('menu:'):
                 action = data.split(':',1)[1]
                 if action == 'groups':

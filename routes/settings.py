@@ -50,15 +50,15 @@ def api_put_telegram_settings():
                     db.set_setting_value('telegram_webhook_secret_path', secrets.token_urlsafe(16))
                 except Exception:
                     pass
-            # Попытаться автоматически зарегистрировать вебхук, если известен BASE_URL
-            try:
-                base_url = (request.host_url or '').rstrip('/')
-                # Используем текущий хост; если секрет пуст — подставим 'any'
-                wh_secret = db.get_setting_value('telegram_webhook_secret_path') or 'any'
-                from services.telegram_bot import notifier
-                notifier.set_webhook(f"{base_url}/telegram/webhook/{wh_secret}")
-            except Exception:
-                pass
+            # Настройка вебхука — только по явному запросу
+            if bool(data.get('set_webhook')):
+                try:
+                    base_url = (request.host_url or '').rstrip('/')
+                    wh_secret = db.get_setting_value('telegram_webhook_secret_path') or 'any'
+                    from services.telegram_bot import notifier
+                    notifier.set_webhook(f"{base_url}/telegram/webhook/{wh_secret}")
+                except Exception:
+                    pass
         if 'telegram_access_password' in data:
             from werkzeug.security import generate_password_hash
             pwd = data.get('telegram_access_password') or ''
