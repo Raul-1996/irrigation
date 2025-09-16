@@ -692,10 +692,60 @@
                 const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.textContent = 'Расход (л) за прошлый полив';
                 tr.insertBefore(thAvg, tr.lastElementChild);
                 tr.insertBefore(thTot, tr.lastElementChild);
+                // как только добавили заголовки — убедимся, что в строках есть ячейки
+                try { ensureAdminCellsInRows(); } catch(e){}
+                // и сразу заполним их текущими значениями из zonesData, если они уже есть
+                try { fillAdminCellsFromZonesData(); } catch(e){}
             } else if (!isAdmin && hasAdmin) {
                 head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
             }
         } catch(e) {}
+    }
+
+    function ensureAdminCellsInRows(){
+        try{
+            const head = document.getElementById('zones-table-head');
+            const need = !!(head && head.querySelector('th.admin-only'));
+            if (!need) return;
+            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
+            tbody.querySelectorAll('tr').forEach(row=>{
+                const adminTds = row.querySelectorAll('td.admin-only');
+                if (adminTds.length >= 2) return;
+                const photoTd = row.lastElementChild; // фото — последняя колонка
+                const tdAvg = document.createElement('td'); tdAvg.className = 'admin-only'; tdAvg.textContent = 'НД';
+                const tdTot = document.createElement('td'); tdTot.className = 'admin-only'; tdTot.textContent = 'НД';
+                if (photoTd && photoTd.parentElement === row) {
+                    row.insertBefore(tdAvg, photoTd);
+                    row.insertBefore(tdTot, photoTd);
+                } else {
+                    row.appendChild(tdAvg); row.appendChild(tdTot);
+                }
+            });
+        }catch(e){}
+    }
+
+    function fillAdminCellsFromZonesData(){
+        try{
+            if (!Array.isArray(zonesData) || !zonesData.length) return;
+            const byId = {};
+            zonesData.forEach(z=>{ byId[String(z.id)] = z; });
+            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
+            tbody.querySelectorAll('tr').forEach(row=>{
+                const idCell = row.querySelector('td:nth-child(2)');
+                const adminCells = row.querySelectorAll('td.admin-only');
+                if (!idCell || adminCells.length < 2) return;
+                const zid = idCell.textContent.trim();
+                const z = byId[zid]; if (!z) return;
+                let avg = (z.last_avg_flow_lpm!=null && z.last_avg_flow_lpm!=='') ? z.last_avg_flow_lpm : 'НД';
+                let tot = (z.last_total_liters!=null && z.last_total_liters!=='') ? z.last_total_liters : 'НД';
+                if (avg !== 'НД') {
+                    const n = Number(avg);
+                    if (!Number.isNaN(n)) avg = String(Math.round(n));
+                }
+                adminCells[0].textContent = avg;
+                adminCells[1].textContent = tot;
+            });
+        }catch(e){}
     }
 
     async function loadStatusData() {
@@ -726,6 +776,10 @@
             zonesData = Array.isArray(zonesRespJson) ? zonesRespJson : [];
             const tbody = document.getElementById('zones-table-body');
             try { updateAdminHeaderColumns(); } catch(e){}
+            // ВАЖНО: сначала убедимся, что в существующих строках есть админ-ячейки,
+            // чтобы ниже мы могли сразу заполнить их актуальными значениями без задержки
+            try { ensureAdminCellsInRows(); } catch(e){}
+            try { fillAdminCellsFromZonesData(); } catch(e){}
             const existingRows = {};
             tbody.querySelectorAll('tr').forEach(row=>{
                 const idCell = row.querySelector('td:nth-child(2)');
@@ -751,12 +805,16 @@
                         try { row.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
                     }
                     // обновим админ-ячейки, если есть
-                    const isAdmin = !!(statusData && statusData.is_admin);
+                    const isAdmin = (!!(statusData && statusData.is_admin)) || !!document.querySelector('#zones-table-head th.admin-only');
                     if (isAdmin) {
                         const adminCells = row.querySelectorAll('td.admin-only');
                         if (adminCells && adminCells.length>=2){
-                            const avg = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : '—';
-                            const tot = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : '—';
+                            let avg = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
+                            const tot = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
+                            if (avg !== 'НД') {
+                                const n = Number(avg);
+                                if (!Number.isNaN(n)) avg = String(Math.round(n));
+                            }
                             adminCells[0].textContent = avg;
                             adminCells[1].textContent = tot;
                         }
@@ -766,9 +824,13 @@
                     const tr = document.createElement('tr');
                     const emergency = !!(statusData && statusData.emergency_stop);
                     const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
-                    const isAdmin = !!(statusData && statusData.is_admin);
-                    const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : '—';
-                    const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : '—';
+                    const isAdmin = (!!(statusData && statusData.is_admin)) || !!document.querySelector('#zones-table-head th.admin-only');
+                    let avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
+                    if (avgFlow !== 'НД') {
+                        const n = Number(avgFlow);
+                        if (!Number.isNaN(n)) avgFlow = String(Math.round(n));
+                    }
+                    const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
                     tr.innerHTML = `
                         <td><span class="indicator ${zone.state}"></span></td>
                         <td>${zone.id}</td>
@@ -794,6 +856,9 @@
                 }
             });
             if (frag.childNodes.length) tbody.appendChild(frag);
+            // Повторная страховка на случай вновь созданных строк
+            try { ensureAdminCellsInRows(); } catch(e){}
+            try { fillAdminCellsFromZonesData(); } catch(e){}
             document.getElementById('zones-count').textContent = filteredZones.length;
             hideConnectionError();
             // После первичного рендера — синхронизация с актуальным статусом групп
@@ -1258,9 +1323,9 @@
             }
             const tr = document.createElement('tr');
             
-            const isAdmin = !!(statusData && statusData.is_admin);
-            const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : '—';
-            const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : '—';
+            const isAdmin = (!!(statusData && statusData.is_admin)) || !!document.querySelector('#zones-table-head th.admin-only');
+            const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
+            const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
              tr.innerHTML = `
                  <td><span class="indicator ${zone.state}"></span></td>
                  <td>${zone.id}</td>
@@ -1614,6 +1679,12 @@
             let es; let retry = 0; let reconnectTimer = null;
             // WebSocket client (primary)
             let ws; let wsRetry = 0; let wsTimer = null;
+            // Debounce для мгновенного обновления зон после смены состояния зоны
+            let zonesReloadTimer = null;
+            function requestZonesReload(){
+                try{ clearTimeout(zonesReloadTimer); }catch(e){}
+                zonesReloadTimer = setTimeout(()=>{ try{ loadZonesData(); }catch(e){} }, 500);
+            }
             function connectWS(){
                 try{ if (ws){ ws.close(); } }catch(e){}
                 try{
@@ -1634,6 +1705,7 @@
                                 if (idx>=0){ zonesData[idx].state = data.state; }
                                 const gid = typeof data.group_id !== 'undefined' ? Number(data.group_id) : (idx>=0 ? zonesData[idx].group_id : null);
                                 if (gid) { refreshSingleGroup(gid); }
+                                if (String(data.state).toLowerCase() === 'off') { requestZonesReload(); }
                             } else if (typeof data.mv_group_id !== 'undefined') {
                                 const gid = Number(data.mv_group_id);
                                 const card = document.getElementById(`group-card-${gid}`);
@@ -1679,6 +1751,7 @@
                             if (idx>=0){ zonesData[idx].state = data.state; }
                             const gid = typeof data.group_id !== 'undefined' ? Number(data.group_id) : (idx>=0 ? zonesData[idx].group_id : null);
                             if (gid) { refreshSingleGroup(gid); }
+                            if (String(data.state).toLowerCase() === 'off') { requestZonesReload(); }
                         } else if (typeof data.mv_group_id !== 'undefined') {
                             const gid = Number(data.mv_group_id);
                             const card = document.getElementById(`group-card-${gid}`);
@@ -1762,6 +1835,8 @@
                 const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.textContent = 'Расход (л) за прошлый полив';
                 tr.insertBefore(thAvg, tr.lastElementChild);
                 tr.insertBefore(thTot, tr.lastElementChild);
+                try { ensureAdminCellsInRows(); } catch(e){}
+                try { fillAdminCellsFromZonesData(); } catch(e){}
             } else if (!isAdmin && hasAdmin) {
                 head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
             }

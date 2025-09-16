@@ -3,7 +3,7 @@ import json
 import os
 import shutil
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -153,6 +153,7 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'groups_add_master_valve_observed', self._migrate_add_groups_master_valve_observed)
                 self._apply_named_migration(conn, 'groups_add_water_meter_extended', self._migrate_add_groups_water_meter_extended)
                 self._apply_named_migration(conn, 'zones_add_water_stats', self._migrate_add_zones_water_stats)
+                self._apply_named_migration(conn, 'create_zone_runs_v1', self._migrate_create_zone_runs)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -492,6 +493,92 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка миграции zones_add_water_stats: {e}")
 
+    def _migrate_create_zone_runs(self, conn):
+        """Создать таблицу zone_runs для фиксации снапшотов импульсов на старте/стопе."""
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS zone_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    zone_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    start_utc TEXT,
+                    end_utc TEXT,
+                    start_monotonic REAL,
+                    end_monotonic REAL,
+                    start_raw_pulses INTEGER,
+                    end_raw_pulses INTEGER,
+                    pulse_liters_at_start INTEGER,
+                    base_m3_at_start REAL,
+                    total_liters REAL,
+                    avg_flow_lpm REAL,
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_zone_runs_zone ON zone_runs(zone_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_zone_runs_group ON zone_runs(group_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_zone_runs_active ON zone_runs(zone_id, end_utc)')
+            conn.commit()
+            logger.info('Создана таблица zone_runs')
+        except Exception as e:
+            logger.error(f"Ошибка миграции create_zone_runs_v1: {e}")
+
+    # --- API для zone_runs ---
+    def create_zone_run(self, zone_id: int, group_id: int, start_utc: str, start_monotonic: float,
+                        start_raw_pulses: Optional[int], pulse_liters_at_start: int,
+                        base_m3_at_start: Optional[float] = None) -> Optional[int]:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cur = conn.execute('''
+                    INSERT INTO zone_runs(zone_id, group_id, start_utc, start_monotonic, start_raw_pulses, pulse_liters_at_start, base_m3_at_start)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (int(zone_id), int(group_id), str(start_utc), float(start_monotonic),
+                      None if start_raw_pulses is None else int(start_raw_pulses), int(pulse_liters_at_start),
+                      None if base_m3_at_start is None else float(base_m3_at_start)))
+                run_id = cur.lastrowid
+                conn.commit()
+                return int(run_id)
+        except Exception as e:
+            logger.error(f"Ошибка создания zone_run для зоны {zone_id}: {e}")
+            return None
+
+    def get_open_zone_run(self, zone_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('''
+                    SELECT * FROM zone_runs WHERE zone_id = ? AND end_utc IS NULL ORDER BY id DESC LIMIT 1
+                ''', (int(zone_id),))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка чтения открытого run для зоны {zone_id}: {e}")
+            return None
+
+    def finish_zone_run(self, run_id: int, end_utc: str, end_monotonic: float, end_raw_pulses: Optional[int],
+                         total_liters: Optional[float], avg_flow_lpm: Optional[float], status: str = 'ok') -> bool:
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                fields = ['end_utc = ?', 'end_monotonic = ?', 'status = ?', 'updated_at = CURRENT_TIMESTAMP']
+                params: List[Any] = [str(end_utc), float(end_monotonic), str(status)]
+                if end_raw_pulses is not None:
+                    fields.append('end_raw_pulses = ?')
+                    params.append(int(end_raw_pulses))
+                if total_liters is not None:
+                    fields.append('total_liters = ?')
+                    params.append(float(total_liters))
+                if avg_flow_lpm is not None:
+                    fields.append('avg_flow_lpm = ?')
+                    params.append(float(avg_flow_lpm))
+                params.append(int(run_id))
+                sql = f"UPDATE zone_runs SET {', '.join(fields)} WHERE id = ?"
+                conn.execute(sql, params)
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка завершения zone_run {run_id}: {e}")
+            return False
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
@@ -646,6 +733,14 @@ class IrrigationDB:
                     sql_fields.append('last_watering_time = ?')
                     params.append(updated_data['last_watering_time'])
                 
+                # Поля статистики воды для зоны
+                if 'last_avg_flow_lpm' in updated_data:
+                    sql_fields.append('last_avg_flow_lpm = ?')
+                    params.append(updated_data['last_avg_flow_lpm'])
+                if 'last_total_liters' in updated_data:
+                    sql_fields.append('last_total_liters = ?')
+                    params.append(updated_data['last_total_liters'])
+
                 if 'mqtt_server_id' in updated_data:
                     sql_fields.append('mqtt_server_id = ?')
                     params.append(updated_data.get('mqtt_server_id'))
@@ -754,6 +849,9 @@ class IrrigationDB:
                     if 'watering_start_time' in merged: add('watering_start_time', merged['watering_start_time'])
                     if 'scheduled_start_time' in merged: add('scheduled_start_time', merged['scheduled_start_time'])
                     if 'last_watering_time' in merged: add('last_watering_time', merged['last_watering_time'])
+                    # Статистика воды
+                    if 'last_avg_flow_lpm' in merged: add('last_avg_flow_lpm', merged['last_avg_flow_lpm'])
+                    if 'last_total_liters' in merged: add('last_total_liters', merged['last_total_liters'])
                     if 'mqtt_server_id' in merged: add('mqtt_server_id', merged.get('mqtt_server_id'))
                     fields.append('updated_at = CURRENT_TIMESTAMP')
                     params.append(zone_id)

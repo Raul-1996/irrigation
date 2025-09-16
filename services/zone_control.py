@@ -51,8 +51,30 @@ def exclusive_start_zone(zone_id: int) -> bool:
                 if cur_state in ('on', 'starting'):
                     pass
                 else:
-                    # transition to starting
                     _versioned_update(zone_id, {'state': 'starting', 'commanded_state': 'on', 'watering_start_time': start_ts})
+            try:
+                # Снапшот счётчика воды на старте (если у группы есть счётчик)
+                try:
+                    gid = int(z.get('group_id') or 0)
+                except Exception:
+                    gid = 0
+                if gid and gid != 999:
+                    try:
+                        g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
+                    except Exception:
+                        g = None
+                    if g and int(g.get('use_water_meter') or 0) == 1:
+                        try:
+                            # Берём пульсы на/до момента старта, чтобы избежать лагов подписки
+                            raw = water_monitor.get_pulses_at_or_before(gid, time.time())
+                            pulse = str(g.get('water_pulse_size') or '1l')
+                            liters = 100 if pulse == '100l' else 10 if pulse == '10l' else 1
+                            base_m3 = float(g.get('water_base_value_m3') or 0.0)
+                            db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3)
+                        except Exception:
+                            logger.exception('start snapshot failed')
+            except Exception:
+                pass
             try:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                 gid = int(z.get('group_id') or 0)
@@ -141,6 +163,54 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
         if not z:
             return False
         if (str(z.get('state')).lower() in ('off', 'stopping')) and not force:
+            # Зона уже оффлайн (часто по MQTT). Тем не менее, попробуем посчитать и сохранить статистику воды.
+            try:
+                gid = int(z.get('group_id') or 0)
+                if gid and gid != 999:
+                    total_liters = None; avg_lpm = None
+                    # 1) Если есть открытый run — завершим его по текущим пульсам
+                    try:
+                        run = db.get_open_zone_run(int(zone_id))
+                    except Exception:
+                        run = None
+                    if run:
+                        try:
+                            end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
+                        except Exception:
+                            end_raw = None
+                        try:
+                            start_raw = run.get('start_raw_pulses')
+                            liters_per_pulse = int(run.get('pulse_liters_at_start') or 1)
+                            end_mono = time.monotonic()
+                            start_mono = float(run.get('start_monotonic') or 0.0)
+                            dp = None if (end_raw is None or start_raw is None) else max(0, int(end_raw) - int(start_raw))
+                            if dp is not None:
+                                total_liters = round(dp * liters_per_pulse, 2)
+                                dur_sec = max(1.0, end_mono - start_mono)
+                                avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
+                            db.finish_zone_run(int(run['id']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), end_mono, end_raw, total_liters, avg_lpm, status='ok')
+                        except Exception:
+                            logger.exception('finish snapshot (already off) failed')
+                    # 2) Фоллбэк: по времени последнего полива/старта посчитаем суммарно
+                    if (total_liters is None) and (avg_lpm is None):
+                        try:
+                            since_iso = z.get('last_watering_time') or z.get('watering_start_time')
+                        except Exception:
+                            since_iso = None
+                        if since_iso:
+                            t_l, a_lpm = water_monitor.summarize_run(gid, since_iso)
+                            total_liters = t_l if t_l is not None else total_liters
+                            avg_lpm = a_lpm if a_lpm is not None else avg_lpm
+                    if (total_liters is not None) or (avg_lpm is not None):
+                        updates = {}
+                        if avg_lpm is not None:
+                            updates['last_avg_flow_lpm'] = avg_lpm
+                        if total_liters is not None:
+                            updates['last_total_liters'] = total_liters
+                        if updates:
+                            db.update_zone(int(zone_id), updates)
+            except Exception:
+                logger.exception('stop_zone (already off): water stats update failed')
             return True
         last_time = z.get('watering_start_time')
         # Стейт: on/starting -> stopping
@@ -199,16 +269,45 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
         # Обновим статистику воды для зоны, если группа использует счётчик
         try:
             gid = int(z.get('group_id') or 0)
+            total_liters = None; avg_lpm = None
             if gid and gid != 999:
-                total_liters, avg_lpm = water_monitor.summarize_run(gid, last_time)
-                if total_liters is not None or avg_lpm is not None:
-                    updates = {}
-                    if avg_lpm is not None:
-                        updates['last_avg_flow_lpm'] = avg_lpm
-                    if total_liters is not None:
-                        updates['last_total_liters'] = total_liters
-                    if updates:
-                        db.update_zone(int(zone_id), updates)
+                # Попробуем быстрый расчёт по снапшотам
+                try:
+                    run = db.get_open_zone_run(int(zone_id))
+                except Exception:
+                    run = None
+                if run:
+                    try:
+                        # Берём пульсы на/после момента стопа, чтобы избежать лагов
+                        end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
+                    except Exception:
+                        end_raw = None
+                    try:
+                        start_raw = run.get('start_raw_pulses')
+                        liters_per_pulse = int(run.get('pulse_liters_at_start') or 1)
+                        end_mono = time.monotonic()
+                        start_mono = float(run.get('start_monotonic') or 0.0)
+                        dp = None if (end_raw is None or start_raw is None) else max(0, int(end_raw) - int(start_raw))
+                        if dp is not None:
+                            total_liters = round(dp * liters_per_pulse, 2)
+                            dur_sec = max(1.0, end_mono - start_mono)
+                            avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
+                        db.finish_zone_run(int(run['id']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), end_mono, end_raw, total_liters, avg_lpm, status='ok')
+                    except Exception:
+                        logger.exception('finish snapshot failed')
+                # Если снапшоты не дали результата — fallback к summarize_run
+                if (total_liters is None) and (avg_lpm is None):
+                    t_l, a_lpm = water_monitor.summarize_run(gid, last_time)
+                    total_liters = t_l if t_l is not None else total_liters
+                    avg_lpm = a_lpm if a_lpm is not None else avg_lpm
+            if total_liters is not None or avg_lpm is not None:
+                updates = {}
+                if avg_lpm is not None:
+                    updates['last_avg_flow_lpm'] = avg_lpm
+                if total_liters is not None:
+                    updates['last_total_liters'] = total_liters
+                if updates:
+                    db.update_zone(int(zone_id), updates)
         except Exception:
             logger.exception('stop_zone: water stats update failed')
         try:

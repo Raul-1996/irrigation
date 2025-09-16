@@ -382,6 +382,48 @@ class WaterMonitor:
         except Exception:
             return (None, None)
 
+    def get_raw_pulses(self, group_id: int) -> Optional[int]:
+        """Возвращает последние сырые импульсы для группы (или None, если нет сэмплов)."""
+        try:
+            with self._lock:
+                dq = self._samples.get(int(group_id))
+                if not dq or len(dq) == 0:
+                    return None
+                return int(dq[-1][1])
+        except Exception:
+            return None
+
+    def get_pulses_at_or_before(self, group_id: int, ts: float) -> Optional[int]:
+        """Пульсы на момент ts (берём последний сэмпл с ts' <= заданного)."""
+        try:
+            with self._lock:
+                arr = list(self._samples.get(int(group_id)) or [])
+            if not arr:
+                return None
+            best = None
+            for t, p in arr:
+                if t <= ts:
+                    best = p
+                else:
+                    break
+            return int(best) if best is not None else int(arr[0][1]) if arr else None
+        except Exception:
+            return None
+
+    def get_pulses_at_or_after(self, group_id: int, ts: float) -> Optional[int]:
+        """Пульсы после/на момент ts (берём первый сэмпл с ts' >= заданного)."""
+        try:
+            with self._lock:
+                arr = list(self._samples.get(int(group_id)) or [])
+            if not arr:
+                return None
+            for t, p in arr:
+                if t >= ts:
+                    return int(p)
+            return int(arr[-1][1]) if arr else None
+        except Exception:
+            return None
+
 water_monitor = WaterMonitor()
 
 def start_rain_monitor():

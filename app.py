@@ -952,8 +952,15 @@ def _init_scheduler_before_request():
     except Exception:
         pass
 
-    # Инициализация/перезапуск RainMonitor при изменении конфигурации
+    # Инициализация/перезапуск WaterMonitor и Rain/Env при изменении конфигурации
     try:
+        # Стартуем WaterMonitor один раз на старте приложения (идемпотентно)
+        if not app.config.get('TESTING'):
+            try:
+                from services.monitors import start_water_monitor as _start_wm
+                _start_wm()
+            except Exception:
+                pass
         if not app.config.get('TESTING'):
             cfg = db.get_rain_config()
             sig = (cfg.get('enabled'), cfg.get('topic'), cfg.get('type'), cfg.get('server_id'))
@@ -2623,11 +2630,6 @@ def api_server_time():
 @app.route('/api/status')
 def api_status():
     rain_cfg = db.get_rain_config()
-    # Ensure monitors are running (idempotent)
-    try:
-        start_water_monitor()
-    except Exception:
-        pass
     
     # Получаем зоны и группы из БД
     zones = db.get_zones()
