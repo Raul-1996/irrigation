@@ -34,8 +34,17 @@ try:
     from routes.telegram import telegram_bp
 except Exception:
     telegram_bp = None
+try:
+    from routes.reports import reports_bp
+except Exception:
+    reports_bp = None
 from werkzeug.security import check_password_hash
 from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor
+try:
+    from services.telegram_bot import subscribe_to_events as _tg_subscribe
+    _tg_subscribe()
+except Exception:
+    pass
 from services.locks import snapshot_all_locks as _locks_snapshot
 from collections import deque
 
@@ -1042,6 +1051,8 @@ app.register_blueprint(settings_bp)
 try:
     if telegram_bp:
         app.register_blueprint(telegram_bp)
+    if reports_bp:
+        app.register_blueprint(reports_bp)
 except Exception:
     pass
 try:
