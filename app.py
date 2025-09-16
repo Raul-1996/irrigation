@@ -1355,6 +1355,15 @@ def api_map_delete(filename):
 def service_worker():
     return app.send_static_file('sw.js')
 
+@app.route('/ws')
+def ws_stub():
+    try:
+        resp = jsonify({'success': False, 'message': 'WebSocket not supported. Use SSE at /api/mqtt/zones-sse'})
+    except Exception:
+        return ('WebSocket not supported. Use SSE at /api/mqtt/zones-sse', 200, {'Cache-Control': 'no-store'})
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
 @app.route('/health')
 def health_check():
     try:
