@@ -39,6 +39,46 @@ class TelegramNotifier:
             logger.error(f"TelegramNotifier send_text failed: {e}")
             return False
 
+    def send_message(self, chat_id: int, text: str, reply_markup=None) -> bool:
+        try:
+            bot = self._ensure_bot()
+            if not bot:
+                return False
+            if reply_markup is not None:
+                bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+            else:
+                bot.send_message(chat_id=chat_id, text=text)
+            return True
+        except Exception as e:
+            logger.error(f"TelegramNotifier send_message failed: {e}")
+            return False
+
+    def edit_message_text(self, chat_id: int, message_id: int, text: str, reply_markup=None) -> bool:
+        try:
+            bot = self._ensure_bot()
+            if not bot:
+                return False
+            if reply_markup is not None:
+                bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+            else:
+                bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+            return True
+        except Exception as e:
+            logger.error(f"TelegramNotifier edit_message_text failed: {e}")
+            return False
+
+    def answer_callback(self, callback_query_id: str, text: str = None, show_alert: bool = False) -> None:
+        try:
+            bot = self._ensure_bot()
+            if not bot or not callback_query_id:
+                return
+            if text is not None:
+                bot.answer_callback_query(callback_query_id=callback_query_id, text=text, show_alert=bool(show_alert))
+            else:
+                bot.answer_callback_query(callback_query_id=callback_query_id)
+        except Exception as e:
+            logger.error(f"TelegramNotifier answer_callback failed: {e}")
+
 notifier = TelegramNotifier()
 
 def subscribe_to_events():
