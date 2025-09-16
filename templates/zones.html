@@ -92,7 +92,7 @@
     .zones-table th,
     .zones-table td {
         padding: 0.5rem;
-        text-align: left;
+        text-align: center;
         border-bottom: 1px solid #eee;
         vertical-align: middle;
     }
@@ -214,6 +214,7 @@
         display: flex;
         gap: 0.3rem;
         flex-wrap: wrap;
+        justify-content: center;
     }
     
     .zone-actions button {
@@ -1262,7 +1263,6 @@
                 </td>
                 <td>
                     <div class="zone-actions">
-                        <button class="save-btn" onclick="saveZone(${zone.id})" disabled>💾</button>
                         <button class="start-btn" onclick="toggleZone(${zone.id})">${zone.state === 'on' ? '⏹️' : '▶️'}</button>
                         <button class="delete-btn" onclick="deleteZone(${zone.id})">🗑️</button>
                     </div>
@@ -1423,7 +1423,6 @@
                         </div>
                         <div class="modal-actions">
                             <div id="water-actions-${group.id}" style="display:none; gap:8px;">
-                                <button type="button" class="btn-primary" onclick="waterSave(${group.id})">Сохранить</button>
                                 <button type="button" class="btn-secondary" onclick="waterCancel(${group.id})">Отменить</button>
                                 <button type="button" class="btn-secondary" onclick="waterProbeOnce(${group.id})">Получить данные по MQTT</button>
                             </div>
@@ -1887,23 +1886,24 @@
         if (actions) actions.style.display = 'none';
         waterSetDigits(groupId, Number(st.baseValueM3||0));
     }
-    async function waterSave(groupId){
+    async function waterAutoSave(groupId){
         try{
             const newVal = waterDigitsToValue(groupId);
-            // fix as new base
             const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
             const curP = pulsesEl ? parseInt(pulsesEl.value||'0')||0 : (__waterState[groupId]?.currentPulses||0);
             const payload = { water_base_value_m3: newVal, water_base_pulses: curP };
             const ok = await api.put(`/api/groups/${groupId}`, payload);
-            if (!ok){ showNotification('Не удалось сохранить базовое значение', 'error'); return; }
+            if (!ok){ return; }
             __waterState[groupId] = __waterState[groupId] || {};
             __waterState[groupId].baseValueM3 = newVal;
             __waterState[groupId].basePulses = curP;
             __waterState[groupId].editing = false;
-            const actions = document.getElementById(`water-actions-${groupId}`);
-            if (actions) actions.style.display = 'none';
-            showNotification('Настройки счётчика воды сохранены', 'success');
-        }catch(e){ showNotification('Ошибка сохранения счётчика воды', 'error'); }
+        }catch(e){}
+    }
+    const __waterSaveTimers = {};
+    function scheduleWaterAutoSave(groupId){
+        if (__waterSaveTimers[groupId]) clearTimeout(__waterSaveTimers[groupId]);
+        __waterSaveTimers[groupId] = setTimeout(()=>{ waterAutoSave(groupId); }, 600);
     }
     async function waterFlushSave(groupId){
         try{
@@ -2094,11 +2094,8 @@
             row.classList.add('modified');
             modifiedZones.add(zoneId);
             
-            // Активируем кнопку сохранения
-            const saveBtn = row.querySelector('.save-btn');
-            if (saveBtn) {
-                saveBtn.disabled = false;
-            }
+            // Автосохранение через debounce
+            scheduleZoneAutoSave(zoneId);
         }
     }
     
@@ -2129,7 +2126,7 @@
                 updatedZone.mqtt_server_id = val === '' ? null : parseInt(val);
             }
 
-            // 1) Перед сохранением проверяем конфликты по программам (bulk API)
+            // Проверка конфликтов (как было)
             try {
                 const r = await fetch('/api/zones/check-duration-conflicts-bulk', {
                     method: 'POST',
@@ -2141,32 +2138,23 @@
                 if (zres && zres.has_conflicts) {
                     showDurationConflictModal(zres.conflicts);
                     showNotification('Обнаружены конфликты программ. Изменение не сохранено.', 'warning');
-                    return; // блокируем сохранение
+                    return;
                 }
-            } catch (err) {
-                console.error('Ошибка проверки конфликтов:', err);
-            }
+            } catch (err) {}
             
             const success = await api.put(`/api/zones/${zoneId}`, updatedZone);
             if (success) {
-                // Обновляем данные в локальном массиве
                 const zoneIndex = zonesData.findIndex(z => z.id === zoneId);
                 if (zoneIndex !== -1) {
                     zonesData[zoneIndex] = { ...zonesData[zoneIndex], ...updatedZone };
                 }
-                
-                // Убираем модификацию только для этой зоны
                 row.classList.remove('modified');
                 modifiedZones.delete(zoneId);
-                row.querySelector('.save-btn').disabled = true;
-                showNotification('Зона обновлена', 'success');
-                
-                // Обновляем только сетку групп, если нужно
+                showNotification('Зона сохранена', 'success');
                 renderGroupsGrid();
             }
         } catch (error) {
-            console.error('Ошибка сохранения зоны:', error);
-            showNotification('Ошибка сохранения зоны', 'error');
+            showNotification('Ошибка автосохранения зоны', 'error');
         }
     }
     
@@ -3101,6 +3089,12 @@
             if (!(j && j.success)) showNotification(j && j.message ? j.message : 'Не удалось сохранить настройку', 'error');
             else showNotification('Настройка сохранена', 'success');
         } catch (e) { showNotification('Ошибка сохранения', 'error'); }
+    }
+
+    const __zoneSaveTimers = {};
+    function scheduleZoneAutoSave(zoneId){
+        if (__zoneSaveTimers[zoneId]) clearTimeout(__zoneSaveTimers[zoneId]);
+        __zoneSaveTimers[zoneId] = setTimeout(()=>{ saveZone(zoneId); }, 500);
     }
 </script>
 
