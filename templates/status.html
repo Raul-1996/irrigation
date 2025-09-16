@@ -1720,7 +1720,8 @@
         // Подписка на статусы зон через SSE
         try {
             let es; let retry = 0; let reconnectTimer = null;
-            // WebSocket client (primary)
+            // WebSocket client (disabled by default; use SSE)
+            const ENABLE_WS = false;
             let ws; let wsRetry = 0; let wsTimer = null;
             // Debounce для мгновенного обновления зон после смены состояния зоны
             let zonesReloadTimer = null;
@@ -1729,6 +1730,7 @@
                 zonesReloadTimer = setTimeout(()=>{ try{ loadZonesData(); }catch(e){} }, 500);
             }
             function connectWS(){
+                if (!ENABLE_WS) return;
                 try{ if (ws){ ws.close(); } }catch(e){}
                 try{
                     const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
@@ -1774,7 +1776,7 @@
                     };
                 }catch(e){}
             }
-            connectWS();
+            if (ENABLE_WS) connectWS();
             function connectSSE(){
                 try { if (es) { try{ es.close(); }catch(e){} } } catch(e){}
                 es = new EventSource('/api/mqtt/zones-sse');
@@ -1824,7 +1826,7 @@
                 if (document.visibilityState === 'visible'){
                     // re-arm SSE if needed
                     if (!es || es.readyState === EventSource.CLOSED) connectSSE();
-                    try{ if (!ws || ws.readyState === WebSocket.CLOSED) connectWS(); }catch(e){}
+                    if (ENABLE_WS) { try{ if (!ws || ws.readyState === WebSocket.CLOSED) connectWS(); }catch(e){} }
                 }
             });
         } catch (e) {}
