@@ -151,6 +151,8 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'zones_add_commanded_observed', self._migrate_add_commanded_observed)
                 self._apply_named_migration(conn, 'groups_add_master_and_sensors', self._migrate_add_groups_master_and_sensors)
                 self._apply_named_migration(conn, 'groups_add_master_valve_observed', self._migrate_add_groups_master_valve_observed)
+                self._apply_named_migration(conn, 'groups_add_water_meter_extended', self._migrate_add_groups_water_meter_extended)
+                self._apply_named_migration(conn, 'zones_add_water_stats', self._migrate_add_zones_water_stats)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -441,6 +443,10 @@ class IrrigationDB:
             add('use_water_meter', 'ALTER TABLE groups ADD COLUMN use_water_meter INTEGER DEFAULT 0')
             add('water_mqtt_topic', 'ALTER TABLE groups ADD COLUMN water_mqtt_topic TEXT DEFAULT ""')
             add('water_mqtt_server_id', 'ALTER TABLE groups ADD COLUMN water_mqtt_server_id INTEGER')
+            # Water meter extended settings
+            add('water_pulse_size', 'ALTER TABLE groups ADD COLUMN water_pulse_size TEXT DEFAULT "1l"')
+            add('water_base_value_m3', 'ALTER TABLE groups ADD COLUMN water_base_value_m3 REAL DEFAULT 0')
+            add('water_base_pulses', 'ALTER TABLE groups ADD COLUMN water_base_pulses INTEGER DEFAULT 0')
             conn.commit()
             logger.info('Добавлены поля мастер-клапана и сенсоров в таблицу groups')
         except Exception as e:
@@ -457,13 +463,42 @@ class IrrigationDB:
         except Exception as e:
             logger.error(f"Ошибка миграции groups_add_master_valve_observed: {e}")
 
+    def _migrate_add_groups_water_meter_extended(self, conn):
+        try:
+            cursor = conn.execute("PRAGMA table_info(groups)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'water_pulse_size' not in cols:
+                conn.execute('ALTER TABLE groups ADD COLUMN water_pulse_size TEXT DEFAULT "1l"')
+            if 'water_base_value_m3' not in cols:
+                conn.execute('ALTER TABLE groups ADD COLUMN water_base_value_m3 REAL DEFAULT 0')
+            if 'water_base_pulses' not in cols:
+                conn.execute('ALTER TABLE groups ADD COLUMN water_base_pulses INTEGER DEFAULT 0')
+            conn.commit()
+            logger.info('Добавлены поля water_pulse_size, water_base_value_m3, water_base_pulses в groups')
+        except Exception as e:
+            logger.error(f"Ошибка миграции groups_add_water_meter_extended: {e}")
+
+    def _migrate_add_zones_water_stats(self, conn):
+        """Добавить в таблицу zones последние статистики воды для отображения на статусе."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'last_avg_flow_lpm' not in cols:
+                conn.execute('ALTER TABLE zones ADD COLUMN last_avg_flow_lpm REAL')
+            if 'last_total_liters' not in cols:
+                conn.execute('ALTER TABLE zones ADD COLUMN last_total_liters REAL')
+            conn.commit()
+            logger.info('Добавлены поля last_avg_flow_lpm, last_total_liters в zones')
+        except Exception as e:
+            logger.error(f"Ошибка миграции zones_add_water_stats: {e}")
+
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны"""
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
-                    SELECT z.*, g.name as group_name 
+                    SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
                     FROM zones z 
                     LEFT JOIN groups g ON z.group_id = g.id 
                     ORDER BY z.id
@@ -1235,7 +1270,8 @@ class IrrigationDB:
         allowed = {
             'use_master_valve', 'master_mqtt_topic', 'master_mode', 'master_mqtt_server_id',
             'use_pressure_sensor', 'pressure_mqtt_topic', 'pressure_unit', 'pressure_mqtt_server_id',
-            'use_water_meter', 'water_mqtt_topic', 'water_mqtt_server_id', 'master_valve_observed'
+            'use_water_meter', 'water_mqtt_topic', 'water_mqtt_server_id', 'master_valve_observed',
+            'water_pulse_size', 'water_base_value_m3', 'water_base_pulses'
         }
         set_parts = []
         params = []

@@ -578,7 +578,7 @@
         <h3>Все зоны (<span id="zones-count">0</span>)</h3>
     </div>
     <table class="zones-table">
-        <thead>
+        <thead id="zones-table-head">
             <tr>
                 <th>Статус</th>
                 <th>№</th>
@@ -679,9 +679,29 @@
         document.getElementById('datetime').textContent = dt;
     }
     
+    function updateAdminHeaderColumns(){
+        try {
+            const head = document.getElementById('zones-table-head');
+            if (!head) return;
+            const isAdmin = !!(statusData && statusData.is_admin);
+            const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
+            const tr = head.querySelector('tr');
+            if (!tr) return;
+            if (isAdmin && !hasAdmin) {
+                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.textContent = 'Средний расход (л/мин)';
+                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.textContent = 'Расход (л) за прошлый полив';
+                tr.insertBefore(thAvg, tr.lastElementChild);
+                tr.insertBefore(thTot, tr.lastElementChild);
+            } else if (!isAdmin && hasAdmin) {
+                head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
+            }
+        } catch(e) {}
+    }
+
     async function loadStatusData() {
         try {
             statusData = await api.get('/api/status');
+            updateAdminHeaderColumns();
             updateStatusDisplay();
             hideConnectionError();
             updateMqttWarnings();
@@ -705,6 +725,7 @@
             }
             zonesData = Array.isArray(zonesRespJson) ? zonesRespJson : [];
             const tbody = document.getElementById('zones-table-body');
+            try { updateAdminHeaderColumns(); } catch(e){}
             const existingRows = {};
             tbody.querySelectorAll('tr').forEach(row=>{
                 const idCell = row.querySelector('td:nth-child(2)');
@@ -729,11 +750,25 @@
                     if (!row.getAttribute('data-zone-id')) {
                         try { row.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
                     }
+                    // обновим админ-ячейки, если есть
+                    const isAdmin = !!(statusData && statusData.is_admin);
+                    if (isAdmin) {
+                        const adminCells = row.querySelectorAll('td.admin-only');
+                        if (adminCells && adminCells.length>=2){
+                            const avg = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : '—';
+                            const tot = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : '—';
+                            adminCells[0].textContent = avg;
+                            adminCells[1].textContent = tot;
+                        }
+                    }
                 } else {
                     // создаём новую строку с placeholders для группы и next
                     const tr = document.createElement('tr');
                     const emergency = !!(statusData && statusData.emergency_stop);
                     const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
+                    const isAdmin = !!(statusData && statusData.is_admin);
+                    const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : '—';
+                    const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : '—';
                     tr.innerHTML = `
                         <td><span class="indicator ${zone.state}"></span></td>
                         <td>${zone.id}</td>
@@ -744,6 +779,8 @@
                         <td data-group-id="${zone.group_id}">${zone.group_id}</td>
                         <td class="hide-mobile col-last-watering">—</td>
                         <td class="col-next" data-label="Следующий полив">—</td>
+                        ${isAdmin ? `<td class=\"admin-only\">${avgFlow}</td>` : ''}
+                        ${isAdmin ? `<td class=\"admin-only\">${totalLiters}</td>` : ''}
                         <td class="col-photo" data-label="Фото">
                             <div class="zone-photo">
                                 ${zone.photo_path ? 
@@ -1031,7 +1068,9 @@
                 gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
             }
             if (flowOn) {
-                gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Расход воды:</span> <span id="flow-${group.id}">${(group.flow_value!=null&&group.flow_value!=='')?group.flow_value:'—'}</span> л/мин</div></div>`);
+                const meter = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
+                const flow = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
+                gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${meter}</span> м³ (<span id="flow-${group.id}">${flow}</span> л/мин)</div></div>`);
             }
             // pad to keep even number of cells for 2x2 symmetry on desktop
             const mvBlock = gridCells.length ? `<div class="group-info-grid">${gridCells.join('')}${gridCells.length % 2 ? '<div class="grid-item"></div>' : ''}</div>` : '';
@@ -1141,7 +1180,9 @@
                     cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
                 }
                 if (flowOn2) {
-                    cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Расход воды:</span> <span id=\"flow-${group.id}\">${(group.flow_value!=null&&group.flow_value!=='')?group.flow_value:'—'}</span> л/мин</div></div>`);
+                    const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
+                    const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
+                    cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${meter2}</span> м³ (<span id=\"flow-${group.id}\">${flow2}</span> л/мин)</div></div>`);
                 }
                 if (cells.length) {
                     const pad2 = cells.length % 2 ? '<div class=\"grid-item\"></div>' : '';
@@ -1217,25 +1258,30 @@
             }
             const tr = document.createElement('tr');
             
-            tr.innerHTML = `
-                <td><span class="indicator ${zone.state}"></span></td>
-                <td>${zone.id}</td>
-                <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
-                <td>${zone.name}</td>
-                <td>${zone.icon}</td>
-                <td>${zone.duration} мин</td>
-                <td>${groupNameById[zone.group_id] || zone.group_id}</td>
-                <td class="hide-mobile col-last-watering">—</td>
-                <td class="col-next" data-label="Следующий полив">${nextWatering}</td>
-                <td class="col-photo" data-label="Фото">
-                    <div class="zone-photo">
-                        ${zone.photo_path ? 
-                            `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
-                            `<div class="no-photo" title="Нет фото">📷</div>`
-                        }
-                    </div>
-                </td>
-            `;
+            const isAdmin = !!(statusData && statusData.is_admin);
+            const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : '—';
+            const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : '—';
+             tr.innerHTML = `
+                 <td><span class="indicator ${zone.state}"></span></td>
+                 <td>${zone.id}</td>
+                 <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
+                 <td>${zone.name}</td>
+                 <td>${zone.icon}</td>
+                 <td>${zone.duration} мин</td>
+                 <td>${groupNameById[zone.group_id] || zone.group_id}</td>
+                 <td class="hide-mobile col-last-watering">—</td>
+                 <td class="col-next" data-label="Следующий полив">${nextWatering}</td>
+                 ${isAdmin ? `<td class=\"admin-only\">${avgFlow}</td>` : ''}
+                 ${isAdmin ? `<td class=\"admin-only\">${totalLiters}</td>` : ''}
+                 <td class="col-photo" data-label="Фото">
+                     <div class="zone-photo">
+                         ${zone.photo_path ? 
+                             `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
+                             `<div class="no-photo" title="Нет фото">📷</div>`
+                         }
+                     </div>
+                 </td>
+             `;
             
             frag.appendChild(tr);
         });
@@ -1702,5 +1748,24 @@
             await Promise.all(promises);
         } catch (e) { /* ignore group update error */ }
     }
+
+    // Добавим/уберём админские колонки в заголовке по роли
+    try {
+        const head = document.getElementById('zones-table-head');
+        if (head) {
+            const isAdmin = !!(statusData && statusData.is_admin);
+            const ths = head.querySelectorAll('tr th');
+            const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
+            if (isAdmin && !hasAdmin) {
+                const tr = head.querySelector('tr');
+                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.textContent = 'Средний расход (л/мин)';
+                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.textContent = 'Расход (л) за прошлый полив';
+                tr.insertBefore(thAvg, tr.lastElementChild);
+                tr.insertBefore(thTot, tr.lastElementChild);
+            } else if (!isAdmin && hasAdmin) {
+                head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
+            }
+        }
+    } catch(e) {}
 </script>
 {% endblock %}

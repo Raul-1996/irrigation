@@ -7,6 +7,7 @@ from database import db
 from services.locks import group_lock, zone_lock
 from services.mqtt_pub import publish_mqtt_value
 from utils import normalize_topic
+from services.monitors import water_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,21 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
         # Завершаем переход: stopping -> off
         with zone_lock(zone_id):
             _versioned_update(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time, 'planned_end_time': None})
+        # Обновим статистику воды для зоны, если группа использует счётчик
+        try:
+            gid = int(z.get('group_id') or 0)
+            if gid and gid != 999:
+                total_liters, avg_lpm = water_monitor.summarize_run(gid, last_time)
+                if total_liters is not None or avg_lpm is not None:
+                    updates = {}
+                    if avg_lpm is not None:
+                        updates['last_avg_flow_lpm'] = avg_lpm
+                    if total_liters is not None:
+                        updates['last_total_liters'] = total_liters
+                    if updates:
+                        db.update_zone(int(zone_id), updates)
+        except Exception:
+            logger.exception('stop_zone: water stats update failed')
         try:
             db.add_log('zone_stop', f'{reason}: zone={int(zone_id)}')
         except Exception:

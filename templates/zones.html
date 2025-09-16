@@ -159,6 +159,17 @@
         border-radius: 3px;
         transition: var(--transition);
     }
+
+    /* Water meter digits UI */
+    .water-digits { display:flex; gap:6px; justify-content:center; align-items:center; }
+    .water-digits .digit-col { display:flex; flex-direction:column; align-items:center; gap:2px; }
+    .water-digits .btn-small { padding:2px 6px; font-size:12px; line-height:14px; }
+    .water-digits .digit { font-size:28px; font-weight:700; width:26px; text-align:center; color:#111; }
+    .water-digits .digit-col[data-i="5"] .digit,
+    .water-digits .digit-col[data-i="6"] .digit,
+    .water-digits .digit-col[data-i="7"] .digit { color:#d32f2f; }
+    .water-digits .digit-col[data-i="4"] { position:relative; }
+    .water-digits .digit-col[data-i="4"]::after { content:','; position:absolute; right:-6px; top:18px; font-size:18px; color:#444; }
     
     .zone-name:focus {
         border-color: var(--primary-color);
@@ -1154,6 +1165,7 @@
             
             renderZonesTable();
             renderGroupsGrid();
+            try { (groupsData||[]).filter(g=>g.id!==999).forEach(g=>waterInitForGroup(g)); } catch(e){}
             loadGroupSelectors();
             updateZonesCount();
             await loadEarlyOff();
@@ -1314,7 +1326,7 @@
                             <div class="form-group">
                                 <label>MQTT сервер</label>
                                 <select id="mv-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.master_mqtt_server_id||'')?'selected':''}>${s.name}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
@@ -1345,7 +1357,7 @@
                             <div class="form-group">
                                 <label>MQTT сервер</label>
                                 <select id="pressure-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.pressure_mqtt_server_id||'')?'selected':''}>${s.name}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
@@ -1377,7 +1389,7 @@
                             <div class="form-group">
                                 <label>MQTT сервер</label>
                                 <select id="water-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.water_mqtt_server_id||'')?'selected':''}>${s.name}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
@@ -1392,8 +1404,29 @@
                                     <option value="100l" ${(group.water_pulse_size||'1l')==='100l'?'selected':''}>100 л</option>
                                 </select>
                             </div>
+                            <div class="form-group">
+                                <label>Импульсы WB-MWAC (текущее)</label>
+                                <input type="text" id="water-pulses-${group.id}" value="" readonly aria-readonly style="background:#f1f3f5">
+                            </div>
+                            <div class="form-group">
+                                <label>Показание счётчика (м³)</label>
+                                <div class="water-digits" id="water-digits-${group.id}" aria-label="Показание счётчика">
+                                    ${[0,1,2,3,4,5,6,7].map(i=>`
+                                    <div class="digit-col" data-i="${i}">
+                                        <button type="button" class="btn-small" onclick="waterIncDigit(${group.id}, ${i}, 1)">+</button>
+                                        <div class="digit" id="water-digit-${group.id}-${i}">0</div>
+                                        <button type="button" class="btn-small" onclick="waterIncDigit(${group.id}, ${i}, -1)">−</button>
+                                    </div>`).join('')}
+                                </div>
+                                
+                            </div>
                         </div>
                         <div class="modal-actions">
+                            <div id="water-actions-${group.id}" style="display:none; gap:8px;">
+                                <button type="button" class="btn-primary" onclick="waterSave(${group.id})">Сохранить</button>
+                                <button type="button" class="btn-secondary" onclick="waterCancel(${group.id})">Отменить</button>
+                                <button type="button" class="btn-secondary" onclick="waterProbeOnce(${group.id})">Получить данные по MQTT</button>
+                            </div>
                             <button type="button" class="btn-secondary" onclick="closeWaterSettings(${group.id})">Закрыть</button>
                         </div>
                     </div>
@@ -1678,8 +1711,15 @@
     function closeMasterSettings(groupId){ closeModalById(`modal-master-${groupId}`); }
     function openPressureSettings(groupId){ openModalById(`modal-pressure-${groupId}`); }
     function closePressureSettings(groupId){ closeModalById(`modal-pressure-${groupId}`); }
-    function openWaterSettings(groupId){ openModalById(`modal-water-${groupId}`); }
-    function closeWaterSettings(groupId){ closeModalById(`modal-water-${groupId}`); }
+    function openWaterSettings(groupId){
+        openModalById(`modal-water-${groupId}`);
+        try { waterStartLive(groupId); } catch(e){}
+    }
+    function closeWaterSettings(groupId){
+        try { waterStopLive(groupId); } catch(e){}
+        try { waterFlushSave(groupId); } catch(e){}
+        closeModalById(`modal-water-${groupId}`);
+    }
 
     // Safety: recenter on resize/orientationchange
     function recenterOpenModals(){
@@ -1757,6 +1797,155 @@
                 else { if (badge){ badge.textContent='Ошибка'; badge.className='save-badge error'; } }
             }catch(e){ if (badge){ badge.textContent='Ошибка'; badge.className='save-badge error'; } }
         }, 450);
+    }
+
+    // ===== Water meter helpers =====
+    const __waterState = {}; // { [groupId]: { editing: false, baseValueM3: 0, basePulses: 0, currentPulses: 0, pulseSize: '1l' } }
+    function waterMarkDirty(groupId){
+        __waterState[groupId] = __waterState[groupId] || {};
+        __waterState[groupId].editing = true;
+        const actions = document.getElementById(`water-actions-${groupId}`);
+        if (actions) actions.style.display = 'flex';
+    }
+    function waterDigitsToValue(groupId){
+        let val = 0;
+        for (let i=0;i<8;i++){
+            const el = document.getElementById(`water-digit-${groupId}-${i}`);
+            const d = el ? parseInt(el.textContent||'0')||0 : 0;
+            if (i<5){ // integer part positions 0..4 (hundred-thousands..ones)
+                const pow = 4 - i; // i=0 -> 10^4, i=4 -> 10^0
+                val += d * Math.pow(10, pow);
+            } else {
+                const fracPos = i - 4; // i=5 -> 1st decimal
+                val += d * Math.pow(10, -fracPos);
+            }
+        }
+        return Number(val.toFixed(3));
+    }
+    function waterSetDigits(groupId, valueM3){
+        const v = Math.max(0, Math.min(99999.999, Number(valueM3)||0));
+        const intPart = Math.floor(v);
+        const fracPart = Math.round((v - intPart) * 1000); // 0..999
+        const digits = [
+            Math.floor(intPart / 10000) % 10,
+            Math.floor(intPart / 1000) % 10,
+            Math.floor(intPart / 100) % 10,
+            Math.floor(intPart / 10) % 10,
+            intPart % 10,
+            Math.floor(fracPart / 100) % 10,
+            Math.floor(fracPart / 10) % 10,
+            fracPart % 10
+        ];
+        for (let i=0;i<8;i++){
+            const el = document.getElementById(`water-digit-${groupId}-${i}`);
+            if (el) el.textContent = String(digits[i]);
+        }
+    }
+    function waterIncDigit(groupId, idx, delta){
+        const el = document.getElementById(`water-digit-${groupId}-${idx}`);
+        if (!el) return;
+        let d = parseInt(el.textContent||'0')||0;
+        d = (d + delta + 10) % 10;
+        el.textContent = String(d);
+        waterMarkDirty(groupId);
+    }
+    function waterCurrentFromPulses(groupId){
+        const st = __waterState[groupId] || {};
+        const pulseSize = (document.getElementById(`water-pulse-${groupId}`)||{}).value || st.pulseSize || '1l';
+        const litersPerPulse = pulseSize==='100l' ? 100 : (pulseSize==='10l' ? 10 : 1);
+        const baseM3 = Number(st.baseValueM3||0);
+        const deltaPulses = Number(st.currentPulses||0) - Number(st.basePulses||0);
+        const deltaM3 = (deltaPulses * litersPerPulse) / 1000.0;
+        return Math.max(0, baseM3 + deltaM3);
+    }
+    async function waterProbeOnce(groupId){
+        try{
+            const serverEl = document.getElementById(`water-server-${groupId}`);
+            const topicEl = document.getElementById(`water-topic-${groupId}`);
+            const sid = serverEl && serverEl.value ? parseInt(serverEl.value) : null;
+            const topic = topicEl && topicEl.value ? topicEl.value.trim() : '';
+            if (!sid || !topic){ showNotification('Укажите MQTT сервер и MQTT-топик счётчика воды', 'warning'); return; }
+            const res = await fetch(`/api/mqtt/${sid}/probe`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: topic, duration: 1.5 })});
+            const data = await res.json();
+            const item = (data && data.items || []).find(it=> it.topic===topic);
+            if (!item){ showNotification(`Нет данных по топику: ${topic}`, 'warning'); return; }
+            const pulses = parseInt((item.payload||'').replace(/[^0-9-]/g,''))||0;
+            const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
+            if (pulsesEl) pulsesEl.value = String(pulses);
+            __waterState[groupId] = __waterState[groupId] || {};
+            __waterState[groupId].currentPulses = pulses;
+            if (!__waterState[groupId].editing){
+                const val = waterCurrentFromPulses(groupId);
+                waterSetDigits(groupId, val);
+            }
+        }catch(e){ showNotification('Ошибка запроса MQTT', 'error'); }
+    }
+    function waterCancel(groupId){
+        const st = __waterState[groupId] || {};
+        __waterState[groupId].editing = false;
+        const actions = document.getElementById(`water-actions-${groupId}`);
+        if (actions) actions.style.display = 'none';
+        waterSetDigits(groupId, Number(st.baseValueM3||0));
+    }
+    async function waterSave(groupId){
+        try{
+            const newVal = waterDigitsToValue(groupId);
+            // fix as new base
+            const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
+            const curP = pulsesEl ? parseInt(pulsesEl.value||'0')||0 : (__waterState[groupId]?.currentPulses||0);
+            const payload = { water_base_value_m3: newVal, water_base_pulses: curP };
+            const ok = await api.put(`/api/groups/${groupId}`, payload);
+            if (!ok){ showNotification('Не удалось сохранить базовое значение', 'error'); return; }
+            __waterState[groupId] = __waterState[groupId] || {};
+            __waterState[groupId].baseValueM3 = newVal;
+            __waterState[groupId].basePulses = curP;
+            __waterState[groupId].editing = false;
+            const actions = document.getElementById(`water-actions-${groupId}`);
+            if (actions) actions.style.display = 'none';
+            showNotification('Настройки счётчика воды сохранены', 'success');
+        }catch(e){ showNotification('Ошибка сохранения счётчика воды', 'error'); }
+    }
+    async function waterFlushSave(groupId){
+        try{
+            const wServerSel = document.getElementById(`water-server-${groupId}`);
+            const wServer = wServerSel ? parseInt(wServerSel.value) : null;
+            const wTopic = (document.getElementById(`water-topic-${groupId}`)||{}).value || '';
+            const wPulseSel = document.getElementById(`water-pulse-${groupId}`);
+            const wPulse = wPulseSel ? wPulseSel.value : '1l';
+            const payload = {
+                water_mqtt_server_id: isNaN(wServer)? null : wServer,
+                water_mqtt_topic: wTopic,
+                water_pulse_size: wPulse
+            };
+            await api.put(`/api/groups/${groupId}`, payload);
+        }catch(e){ /* no-op */ }
+    }
+    function waterInitForGroup(group){
+        __waterState[group.id] = __waterState[group.id] || {};
+        __waterState[group.id].pulseSize = group.water_pulse_size || '1l';
+        __waterState[group.id].baseValueM3 = Number(group.water_base_value_m3||0);
+        __waterState[group.id].basePulses = parseInt(group.water_base_pulses||0)||0;
+        __waterState[group.id].currentPulses = __waterState[group.id].basePulses;
+        __waterState[group.id].editing = false;
+        // set digits to base on render
+        setTimeout(()=>{ try{ waterSetDigits(group.id, __waterState[group.id].baseValueM3); }catch(e){} }, 0);
+    }
+    const __waterLiveTimers = {};
+    function waterStartLive(groupId){
+        waterStopLive(groupId);
+        const fn = async ()=>{
+            if (__waterState[groupId]?.editing) return; // don't live-update while editing
+            await waterProbeOnce(groupId);
+            if (!__waterState[groupId]?.editing){
+                const val = waterCurrentFromPulses(groupId);
+                waterSetDigits(groupId, val);
+            }
+        };
+        __waterLiveTimers[groupId] = setInterval(fn, 3000);
+        fn();
+    }
+    function waterStopLive(groupId){
+        if (__waterLiveTimers[groupId]){ clearInterval(__waterLiveTimers[groupId]); delete __waterLiveTimers[groupId]; }
     }
 
     async function saveGroupMasterTopic(groupId) {

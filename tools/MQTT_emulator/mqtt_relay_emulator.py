@@ -15,6 +15,7 @@ import threading
 import time
 import random
 from typing import Dict, List, Tuple, Set
+import hashlib
 
 from flask import Flask, jsonify, request, Response
 import paho.mqtt.client as mqtt
@@ -109,6 +110,21 @@ INPUT_SWITCH_TOPICS_SET: Set[str] = set(INPUT_SWITCH_TOPICS)
 INPUT_COUNTER_TOPICS_SET: Set[str] = set(INPUT_COUNTER_TOPICS)
 MSW_TOPICS_SET: Set[str] = set(MSW_TOPICS)
 
+# Water consumption emulation (flow counter auto-increment)
+WATER_EMU_ENABLED = (os.getenv("EMULATOR_WATER_ENABLED", "1") == "1")
+try:
+    WATER_MIN_SEC = float(os.getenv("EMULATOR_WATER_MIN_SEC", "5"))
+    WATER_MAX_SEC = float(os.getenv("EMULATOR_WATER_MAX_SEC", "12"))
+except Exception:
+    WATER_MIN_SEC, WATER_MAX_SEC = 5.0, 12.0
+if WATER_MAX_SEC < WATER_MIN_SEC:
+    WATER_MIN_SEC, WATER_MAX_SEC = WATER_MAX_SEC, WATER_MIN_SEC
+try:
+    FLOW_COUNTER_INPUT_INDEX = int(os.getenv("EMULATOR_FLOW_COUNTER_INDEX", "2"))
+except Exception:
+    FLOW_COUNTER_INPUT_INDEX = 2
+FLOW_COUNTER_TOPIC = f"/devices/wb-mr6cv3_{INPUT_DEVICE_ID}/controls/Input {FLOW_COUNTER_INPUT_INDEX} counter"
+
 # ------------------------------
 # Shared State
 # ------------------------------
@@ -141,6 +157,19 @@ log_lock = threading.Lock()
 log_buffer: deque[str] = deque(maxlen=1000)
 msw_temp_direction: int = 1
 msw_hum_direction: int = 1
+
+# Pre-compute stable per-relay intervals in seconds (5..12s by default), using MD5 for determinism across runs
+def _interval_for_topic(topic: str) -> float:
+    if WATER_MAX_SEC <= WATER_MIN_SEC:
+        return max(0.5, WATER_MIN_SEC)
+    digest = hashlib.md5(topic.encode("utf-8")).digest()
+    num = int.from_bytes(digest[:4], "big")
+    span = int(WATER_MAX_SEC - WATER_MIN_SEC) + 1
+    offs = num % max(1, span)
+    return float(int(WATER_MIN_SEC) + offs)
+
+RELAY_TOPIC_INTERVAL: Dict[str, float] = {t: _interval_for_topic(t) for t in RELAY_TOPICS}
+relay_next_due_ts: Dict[str, float] = {t: time.time() + RELAY_TOPIC_INTERVAL[t] for t in RELAY_TOPICS}
 
 
 def log_event(message: str) -> None:
@@ -218,7 +247,9 @@ def device_on_connect(client: mqtt.Client, userdata, flags, reason_code, propert
     # Subscribe to all topics; allow receiving our own echoes to detect changes once, but avoid infinite loops
     # We'll prevent re-echoing the same value by comparing with the previous state.
     log_event(f"device: connected to MQTT (rc={reason_code}) — subscribing to topics")
-    for t in ALL_TOPICS:
+    # Subscribe only to relays and inputs; MSW sensor topics are published by this client and
+    # do not require echo/processing. Skipping them also avoids echo storms on brokers without noLocal.
+    for t in (RELAY_TOPICS + INPUT_SWITCH_TOPICS + INPUT_COUNTER_TOPICS):
         # Using MQTT v5 SubscribeOptions if available
         try:
             # Avoid receiving our own published echoes to further reduce feedback
@@ -226,7 +257,20 @@ def device_on_connect(client: mqtt.Client, userdata, flags, reason_code, propert
             client.subscribe(t, options=options)
         except Exception:
             client.subscribe(t, qos=0)
-    log_event(f"device: subscribed to {len(ALL_TOPICS)} topics")
+    log_event(f"device: subscribed to {len(RELAY_TOPICS) + len(INPUT_SWITCH_TOPICS) + len(INPUT_COUNTER_TOPICS)} topics (MSW skipped)")
+    # Publish current cached state for all topics as retained so broker holds last known values
+    try:
+        with state_lock:
+            items = [(t, topic_to_state.get(t, "0")) for t in ALL_TOPICS]
+        for t, v in items:
+            try:
+                client.publish(t, payload=v, qos=0, retain=True)
+                if LOG_TX:
+                    log_event(f"device: TX retained init topic={t} payload={v}")
+            except Exception as _e:
+                log_event(f"device: retained init publish failed topic={t} err={_e}")
+    except Exception as _e:
+        log_event(f"device: retained init error { _e }")
 
 
 def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
@@ -255,18 +299,28 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
         # Unknown topic: store raw
         want = raw
 
-    # Conditional RX logging by topic class
-    if (topic in RELAY_TOPICS_SET and LOG_RX_RELAYS) or (topic in INPUT_SWITCH_TOPICS_SET and LOG_RX_INPUTS) or (topic in INPUT_COUNTER_TOPICS_SET and LOG_RX_INPUTS) or (topic in MSW_TOPICS_SET and LOG_RX_MSW):
-        if LOG_RX:
-            log_event(f"device: RX topic={topic} payload={raw!r} -> want={want}")
+    # Determine per-class log permissions
+    is_relay = topic in RELAY_TOPICS_SET
+    is_input = (topic in INPUT_SWITCH_TOPICS_SET) or (topic in INPUT_COUNTER_TOPICS_SET)
+    is_msw = topic in MSW_TOPICS_SET
+    rx_allowed = LOG_RX and ((is_relay and LOG_RX_RELAYS) or (is_input and LOG_RX_INPUTS) or (is_msw and LOG_RX_MSW))
+    if rx_allowed:
+        log_event(f"device: RX topic={topic} payload={raw!r} -> want={want}")
 
     with state_lock:
         previous = topic_to_state.get(topic, "0")
         changed = (want != previous)
         topic_to_state[topic] = want
+    # If relay state changed to ON, schedule next increment based on its interval
+    if changed and (topic in RELAY_TOPICS_SET) and (want == "1"):
+        try:
+            relay_next_due_ts[topic] = time.time() + RELAY_TOPIC_INTERVAL.get(topic, 7.0)
+        except Exception:
+            relay_next_due_ts[topic] = time.time() + 7.0
 
     # Simulate device switching delay and publish confirmation only if state changed
-    if changed and ECHO_ENABLED:
+    # Never echo MSW sensor topics to avoid log noise/loops
+    if changed and ECHO_ENABLED and not is_msw:
         # Suppress too-frequent echoes on the same topic
         now = time.time()
         with state_lock:
@@ -277,9 +331,11 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
             last_echo_ts[topic] = now
         if ECHO_DELAY_SECONDS > 0:
             time.sleep(ECHO_DELAY_SECONDS)
-        if LOG_TX:
+        # TX log respects per-class filters (reuse RX class toggles for simplicity)
+        tx_allowed = LOG_TX and ((is_relay and LOG_RX_RELAYS) or (is_input and LOG_RX_INPUTS) or (is_msw and LOG_RX_MSW))
+        if tx_allowed:
             log_event(f"device: TX echo topic={topic} payload={want}")
-        client.publish(topic, payload=want, qos=0, retain=False)
+        client.publish(topic, payload=want, qos=0, retain=True)
 
 
 def device_connect() -> None:
@@ -323,7 +379,7 @@ def publish_command(topic: str, value: str) -> None:
         log_event(f"controller: CMD publish topic={t} payload={v}")
     info = None
     try:
-        info = controller_client.publish(t, payload=v, qos=0, retain=False)
+        info = controller_client.publish(t, payload=v, qos=0, retain=True)
     except Exception as exc:
         log_event(f"controller: publish error: {exc}")
     # Mark command origin for diagnostics (emulator controller vs device echo)
@@ -516,6 +572,13 @@ def index():
         body: JSON.stringify({ value })
       });
     }
+    async function waterEmu(enabled) {
+      await fetch('/api/water-emulation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+    }
     function applyState(data) {
       for (const [topic, val] of Object.entries(data.states || {})) {
         const id = btoa(topic);
@@ -537,6 +600,17 @@ def index():
           }
         }
       }
+      // Water emulation UI
+      try {
+        const we = document.getElementById('water-emu-enabled');
+        if (we && typeof data.water_emulation_enabled !== 'undefined') {
+          we.checked = !!data.water_emulation_enabled;
+        }
+        const fct = document.getElementById('flow-counter-topic');
+        if (fct && data.flow_counter_topic) {
+          fct.textContent = data.flow_counter_topic;
+        }
+      } catch(e) {}
       // Apply log toggle states
       const lt = (data && data.log_toggles) || {};
       const map = [
@@ -572,7 +646,15 @@ def index():
         }
         const cnt = e.target.closest('[data-counter-topic]');
         if (cnt) {
+          // Briefly disable to prevent rapid double clicks from queueing too many requests
+          try { cnt.disabled = true; setTimeout(()=>{ try{ cnt.disabled = false; }catch(e){} }, 180); } catch(e) {}
           const topic = cnt.getAttribute('data-counter-topic');
+          // Optimistic UI: bump immediately
+          try {
+            const id = btoa(topic);
+            const status = document.getElementById('status-' + id);
+            if (status) { const cur = parseInt(status.textContent||'0')||0; status.textContent = String(cur + 1); }
+          } catch(e) {}
           counterIncr(topic).then(() => setTimeout(refresh, 150));
           return;
         }
@@ -595,6 +677,8 @@ def index():
       const allOff = document.getElementById('all-off');
       if (allOn) allOn.addEventListener('click', ()=> { toggleAll('1').then(()=> setTimeout(refresh, 150)); });
       if (allOff) allOff.addEventListener('click', ()=> { toggleAll('0').then(()=> setTimeout(refresh, 150)); });
+      const we = document.getElementById('water-emu-enabled');
+      if (we) we.addEventListener('change', ()=> { waterEmu(we.checked).then(()=> setTimeout(refresh, 150)); });
 
       // Logs polling
       const poll = () => fetch('/api/logs').then(r=>r.json()).then(data=>{
@@ -646,6 +730,8 @@ def index():
   <div class=\"global-controls\"> 
     <button class=\"btn primary\" id=\"all-on\">Включить все (1)</button>
     <button class=\"btn danger\" id=\"all-off\">Выключить все (0)</button>
+    <label><input type=\"checkbox\" id=\"water-emu-enabled\"/> Эмуляция расхода воды</label>
+    <span class=\"muted\">Счётчик: <span class=\"topic\" id=\"flow-counter-topic\"></span></span>
   </div>
   <div class=\"card\" style=\"max-width:980px;margin:12px auto;\"> 
     <div class=\"device-title\">Логи — фильтры</div>
@@ -678,6 +764,8 @@ def api_state():
     with state_lock:
         return jsonify({
             "states": {t: topic_to_state.get(t, "0") for t in ALL_TOPICS},
+            "water_emulation_enabled": bool(WATER_EMU_ENABLED),
+            "flow_counter_topic": FLOW_COUNTER_TOPIC,
             "log_toggles": {
                 "rx": LOG_RX,
                 "tx": LOG_TX,
@@ -745,6 +833,7 @@ def api_counter_incr():
     t = normalize_topic(topic)
     if t not in INPUT_COUNTER_TOPICS_SET:
         return jsonify({"ok": False, "error": "Not a counter topic"}), 400
+    # Serialize increments per topic to avoid race on rapid clicks
     with state_lock:
         try:
             cur = int(topic_to_state.get(t, "0"))
@@ -752,6 +841,7 @@ def api_counter_incr():
             cur = 0
         new_val = cur + 1
         topic_to_state[t] = str(new_val)
+    # Publish retained so broker holds last value
     publish_command(t, str(new_val))
     return jsonify({"ok": True, "value": new_val})
 
@@ -765,6 +855,23 @@ def api_toggle_all():
     for t in ALL_TOPICS:
         publish_command(t, value)
     return jsonify({"ok": True, "count": len(ALL_TOPICS)})
+
+
+@app.post("/api/water-emulation")
+def api_water_emulation_toggle():
+    global WATER_EMU_ENABLED
+    data = request.get_json(silent=True) or {}
+    def _coerce(v):
+        return bool(v) if isinstance(v, bool) else (str(v).strip() in ("1","true","True","on","ON"))
+    if "enabled" not in data:
+        return jsonify({"ok": False, "error": "Missing 'enabled'"}), 400
+    WATER_EMU_ENABLED = _coerce(data.get("enabled"))
+    # Reset due times to avoid burst on re-enable
+    now = time.time()
+    for t in RELAY_TOPICS:
+        relay_next_due_ts[t] = now + RELAY_TOPIC_INTERVAL.get(t, 7.0)
+    log_event(f"water-emu: set enabled={WATER_EMU_ENABLED}")
+    return jsonify({"ok": True, "enabled": WATER_EMU_ENABLED})
 
 
 def start_mqtt_clients():
@@ -813,14 +920,19 @@ def start_msw_autopublish_thread():
                 h_str = f"{cur_h:.2f}"
 
                 # Publish directly from the device client to avoid duplicate echo messages
+                # Respect MSW RX filter for TX as well: if LOG_RX_MSW is off, suppress TX logs and still update state/publish
                 try:
-                    device_client.publish(MSW_TEMPERATURE_TOPIC, payload=t_str, qos=0, retain=False)
+                    device_client.publish(MSW_TEMPERATURE_TOPIC, payload=t_str, qos=0, retain=True)
                     apply_local_state_raw(MSW_TEMPERATURE_TOPIC, t_str)
+                    if LOG_TX and LOG_RX_MSW:
+                        log_event(f"device: TX echo topic={MSW_TEMPERATURE_TOPIC} payload={t_str}")
                 except Exception as exc:
                     log_event(f"msw-auto: publish temp error {exc}")
                 try:
-                    device_client.publish(MSW_HUMIDITY_TOPIC, payload=h_str, qos=0, retain=False)
+                    device_client.publish(MSW_HUMIDITY_TOPIC, payload=h_str, qos=0, retain=True)
                     apply_local_state_raw(MSW_HUMIDITY_TOPIC, h_str)
+                    if LOG_TX and LOG_RX_MSW:
+                        log_event(f"device: TX echo topic={MSW_HUMIDITY_TOPIC} payload={h_str}")
                 except Exception as exc:
                     log_event(f"msw-auto: publish hum error {exc}")
             except Exception as exc:
@@ -830,9 +942,54 @@ def start_msw_autopublish_thread():
     threading.Thread(target=_loop, daemon=True).start()
 
 
+def _increment_flow_counter_once() -> None:
+    # Safely increments the configured flow counter and publishes retained
+    t = FLOW_COUNTER_TOPIC
+    with state_lock:
+        try:
+            cur = int(topic_to_state.get(t, "0"))
+        except Exception:
+            cur = 0
+        new_val = cur + 1
+        topic_to_state[t] = str(new_val)
+    try:
+        publish_command(t, str(new_val))
+    except Exception as exc:
+        log_event(f"water-emu: publish error {exc}")
+
+
+def start_water_emulation_thread() -> None:
+    # Background loop: if feature enabled and any relay is ON, increment flow counter per relay schedules
+    def _loop():
+        while True:
+            try:
+                if not WATER_EMU_ENABLED:
+                    time.sleep(0.2)
+                    continue
+                now = time.time()
+                any_on = False
+                for t in RELAY_TOPICS:
+                    with state_lock:
+                        is_on = (topic_to_state.get(t, "0") == "1")
+                    if not is_on:
+                        continue
+                    any_on = True
+                    due = relay_next_due_ts.get(t, now + RELAY_TOPIC_INTERVAL.get(t, 7.0))
+                    if now >= due:
+                        _increment_flow_counter_once()
+                        relay_next_due_ts[t] = now + RELAY_TOPIC_INTERVAL.get(t, 7.0)
+                # If no relays are on, just idle
+                time.sleep(0.2 if any_on else 0.5)
+            except Exception as exc:
+                log_event(f"water-emu: loop error {exc}")
+                time.sleep(0.5)
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def main():
     start_mqtt_clients()
     start_msw_autopublish_thread()
+    start_water_emulation_thread()
     app.run(host=HTTP_HOST, port=HTTP_PORT, debug=False, use_reloader=False)
 
 

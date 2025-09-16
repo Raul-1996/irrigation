@@ -31,7 +31,7 @@ from routes.groups import groups_bp
 from routes.auth import auth_bp
 from routes.settings import settings_bp
 from werkzeug.security import check_password_hash
-from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor
+from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor
 from services.locks import snapshot_all_locks as _locks_snapshot
 from collections import deque
 
@@ -1838,6 +1838,9 @@ def api_update_group(group_id):
         'use_water_meter': ('use_water_meter', lambda v: 1 if v else 0),
         'water_mqtt_topic': ('water_mqtt_topic', lambda v: (v or '').strip()),
         'water_mqtt_server_id': ('water_mqtt_server_id', lambda v: int(v) if v not in (None, '') else None),
+        'water_pulse_size': ('water_pulse_size', lambda v: (str(v or '1l') if str(v or '1l') in ('1l','10l','100l') else '1l')),
+        'water_base_value_m3': ('water_base_value_m3', lambda v: float(v) if v not in (None, '') else 0.0),
+        'water_base_pulses': ('water_base_pulses', lambda v: int(v) if v not in (None, '') else 0),
     }
     updates = {}
     for k, (col, norm) in fields_map.items():
@@ -1875,7 +1878,7 @@ def api_update_group(group_id):
                 payload["use_rain_sensor"] = bool(data.get('use_rain_sensor'))
             for k in ('use_master_valve','master_mqtt_topic','master_mode','master_mqtt_server_id',
                       'use_pressure_sensor','pressure_mqtt_topic','pressure_unit','pressure_mqtt_server_id',
-                      'use_water_meter','water_mqtt_topic','water_mqtt_server_id'):
+                      'use_water_meter','water_mqtt_topic','water_mqtt_server_id','water_pulse_size','water_base_value_m3','water_base_pulses'):
                 if k in data:
                     payload[k] = data.get(k)
             db.add_log('group_edit', json.dumps(payload))
@@ -2620,6 +2623,11 @@ def api_server_time():
 @app.route('/api/status')
 def api_status():
     rain_cfg = db.get_rain_config()
+    # Ensure monitors are running (idempotent)
+    try:
+        start_water_monitor()
+    except Exception:
+        pass
     
     # Получаем зоны и группы из БД
     zones = db.get_zones()
@@ -2786,7 +2794,22 @@ def api_status():
             use_water_meter = False
         pressure_unit = (group.get('pressure_unit') or 'bar') if use_pressure_sensor else None
         pressure_value = None if use_pressure_sensor else None
-        flow_value = None if use_water_meter else None
+        meter_value_m3 = None
+        flow_value = None
+        if use_water_meter:
+            try:
+                meter_value_m3 = water_monitor.get_current_reading_m3(int(group_id))
+                # If watering — compute l/min relative to current zone start
+                start_iso = None
+                if status == 'watering' and current_zone:
+                    try:
+                        cz = next((z for z in group_zones if int(z['id']) == int(current_zone)), None)
+                        start_iso = cz.get('watering_start_time') if cz else None
+                    except Exception:
+                        start_iso = None
+                flow_value = water_monitor.get_flow_lpm(int(group_id), start_iso)
+            except Exception:
+                meter_value_m3 = None; flow_value = None
 
         groups_status.append({
             'id': group_id,
@@ -2804,7 +2827,8 @@ def api_status():
             'pressure_value': pressure_value,
             'pressure_unit': pressure_unit,
             'use_water_meter': use_water_meter,
-            'flow_value': flow_value
+            'flow_value': flow_value,
+            'meter_value_m3': meter_value_m3
         })
     
     # Статус датчика дождя
@@ -2880,6 +2904,12 @@ def api_status():
         pass
 
     logger.info(f"api_status: temp={temperature} hum={humidity} temp_enabled={temp_enabled} hum_enabled={hum_enabled}")
+    # Determine user role
+    try:
+        role = session.get('role')
+        is_admin = (role == 'admin')
+    except Exception:
+        is_admin = False
     return jsonify({
         'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'temperature': temperature,
@@ -2888,6 +2918,7 @@ def api_status():
         'rain_sensor': rain_sensor_status,
         'groups': groups_status,
         'emergency_stop': app.config.get('EMERGENCY_STOP', False),
+        'is_admin': is_admin,
         # MQTT quick status for UI
         'mqtt_servers_count': mqtt_servers_count,
         'mqtt_enabled_count': mqtt_enabled_count,
