@@ -47,6 +47,9 @@ from services.monitors import rain_monitor, env_monitor, start_rain_monitor, sta
 try:
     from services.telegram_bot import subscribe_to_events as _tg_subscribe
     _tg_subscribe()
+    # Стартуем long polling как fallback, если вебхук недоступен (NAT, нет внешнего HTTPS)
+    from services.telegram_bot import start_long_polling_if_needed as _tg_poll_start
+    _tg_poll_start()
 except Exception:
     pass
 from services.locks import snapshot_all_locks as _locks_snapshot
