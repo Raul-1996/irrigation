@@ -154,6 +154,58 @@ def telegram_webhook(secret):
         txt = build_report_text(period=period, fmt='brief')
         _send(chat_id, txt)
         return jsonify({'ok': True})
+    if text.startswith('/whoami'):
+        _send(chat_id, f"chat_id={chat_id}, role={user.get('role','user')}")
+        return jsonify({'ok': True})
+    if text.startswith('/emergency_stop'):
+        if str(user.get('role','user')) != 'admin':
+            _send(chat_id, 'Нет прав')
+            return jsonify({'ok': True})
+        try:
+            from app import app as _app
+            with _app.test_request_context():
+                from app import api_emergency_stop as _es
+                _es()
+            _send(chat_id, '🚨 Аварийная остановка активирована')
+        except Exception:
+            _send(chat_id, 'Ошибка аварийной остановки')
+        return jsonify({'ok': True})
+    if text.startswith('/emergency_resume'):
+        if str(user.get('role','user')) != 'admin':
+            _send(chat_id, 'Нет прав')
+            return jsonify({'ok': True})
+        try:
+            from app import app as _app
+            with _app.test_request_context():
+                from app import api_emergency_resume as _er
+                _er()
+            _send(chat_id, '✅ Аварийная остановка снята')
+        except Exception:
+            _send(chat_id, 'Ошибка снятия аварийной остановки')
+        return jsonify({'ok': True})
+    if text.startswith('/broadcast'):
+        if str(user.get('role','user')) != 'admin':
+            _send(chat_id, 'Нет прав')
+            return jsonify({'ok': True})
+        msg = text[len('/broadcast'):].strip()
+        if not msg:
+            _send(chat_id, 'Текст пуст')
+            return jsonify({'ok': True})
+        try:
+            # naive: broadcast to all authorized users
+            import sqlite3
+            with sqlite3.connect(db.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute('SELECT chat_id FROM bot_users WHERE is_authorized=1')
+                for r in cur.fetchall():
+                    try:
+                        notifier.send_text(int(r['chat_id']), msg)
+                    except Exception:
+                        pass
+            _send(chat_id, 'Рассылка выполнена')
+        except Exception:
+            _send(chat_id, 'Ошибка рассылки')
+        return jsonify({'ok': True})
     if text.startswith('/subscribe'):
         # /subscribe daily brief 08:00   or weekly full 09:00 1111100
         try:
