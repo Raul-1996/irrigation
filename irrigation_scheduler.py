@@ -124,6 +124,27 @@ def job_clear_expired_postpones():
     except Exception:
         pass
 
+def job_dispatch_bot_subscriptions():
+    try:
+        from database import db
+        from services.reports import build_report_text
+        from services.telegram_bot import notifier
+        now = datetime.now()
+        due = db.get_due_bot_subscriptions(now)
+        for sub in due:
+            try:
+                fmt = str(sub.get('format') or 'brief')
+                ptype = str(sub.get('type') or 'daily')
+                period = 'today' if ptype == 'daily' else '7'
+                txt = build_report_text(period=period, fmt='brief' if fmt!='full' else 'full')
+                chat_id = int(sub.get('chat_id'))
+                if chat_id:
+                    notifier.send_text(chat_id, txt)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 class IrrigationScheduler:
     """Планировщик полива с последовательным запуском зон"""
@@ -247,6 +268,18 @@ class IrrigationScheduler:
             )
         except Exception as e:
             logger.error(f"Не удалось добавить джоб postpone_sweeper: {e}")
+        try:
+            self.scheduler.add_job(
+                job_dispatch_bot_subscriptions,
+                trigger=IntervalTrigger(minutes=1),
+                id='bot_sub_dispatcher',
+                replace_existing=True,
+                coalesce=False,
+                max_instances=1,
+                next_run_time=datetime.now()
+            )
+        except Exception as e:
+            logger.error(f"Не удалось добавить джоб bot_sub_dispatcher: {e}")
 
     def _stop_zone(self, zone_id: int):
         try:

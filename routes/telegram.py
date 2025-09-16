@@ -154,5 +154,32 @@ def telegram_webhook(secret):
         txt = build_report_text(period=period, fmt='brief')
         _send(chat_id, txt)
         return jsonify({'ok': True})
+    if text.startswith('/subscribe'):
+        # /subscribe daily brief 08:00   or weekly full 09:00 1111100
+        try:
+            parts = text.split()
+            stype = parts[1] if len(parts)>1 else 'daily'
+            sformat = parts[2] if len(parts)>2 else 'brief'
+            time_local = parts[3] if len(parts)>3 else '08:00'
+            dow = parts[4] if (len(parts)>4 and stype=='weekly') else None
+        except Exception:
+            stype, sformat, time_local, dow = 'daily','brief','08:00',None
+        # map chat->user
+        u = db.get_bot_user_by_chat(int(chat_id))
+        if u:
+            db.create_or_update_subscription(int(u.get('id')), stype, sformat, time_local, dow, True)
+            _send(chat_id, 'Подписка сохранена')
+        return jsonify({'ok': True})
+    if text.startswith('/unsubscribe'):
+        u = db.get_bot_user_by_chat(int(chat_id))
+        if u:
+            # disable all
+            try:
+                db.create_or_update_subscription(int(u.get('id')), 'daily', 'brief', '08:00', None, False)
+                db.create_or_update_subscription(int(u.get('id')), 'weekly', 'brief', '08:00', '1111111', False)
+            except Exception:
+                pass
+        _send(chat_id, 'Подписки отключены')
+        return jsonify({'ok': True})
     return jsonify({'ok': True})
 
