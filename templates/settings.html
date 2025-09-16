@@ -46,6 +46,41 @@
       </div>
       <div class="settings-msg" id="sys-msg"></div>
     </form>
+
+    <h3>Telegram бот</h3>
+    <form id="tg-form" class="settings-form" autocomplete="off" style="margin-bottom:10px">
+      <div class="settings-row">
+        <label for="tg_token">Bot API Token</label>
+        <div class="settings-input">
+          <input type="password" id="tg_token" name="tg_token" placeholder="123456:ABC-DEF..." value="" autocomplete="new-password">
+          <div class="hint" id="tg_token_mask" style="margin-top:4px; color:#666; font-size:12px;"></div>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="tg_access">Пароль доступа к боту</label>
+        <div class="settings-input">
+          <input type="password" id="tg_access" name="tg_access" placeholder="Пароль для авторизации /start" value="" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="tg_webhook">Секрет вебхука</label>
+        <div class="settings-input">
+          <input type="text" id="tg_webhook" name="tg_webhook" placeholder="например: a1b2c3d4" value="">
+          <div class="hint" style="margin-top:4px; color:#666; font-size:12px;">Эндпойнт будет /telegram/webhook/&lt;секрет&gt;</div>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="tg_admin">Admin Chat ID (опц.)</label>
+        <div class="settings-input">
+          <input type="text" id="tg_admin" name="tg_admin" placeholder="например: 123456789" value="">
+        </div>
+      </div>
+      <div class="settings-actions" style="display:flex; gap:8px; align-items:center;">
+        <button type="button" id="tg-save" class="settings-btn">Сохранить</button>
+        <button type="button" id="tg-test" class="settings-btn">Протестировать бота</button>
+      </div>
+      <div class="settings-msg" id="tg-msg"></div>
+    </form>
     <p class="settings-note">Минимальная длина пароля — 4 символа.</p>
     <form id="pwd-form" class="settings-form" autocomplete="off">
       <div class="settings-row">
@@ -137,6 +172,56 @@
         msg.textContent = (body.message || 'Не удалось сохранить'); msg.style.color = '#e11d48';
       }
     }catch(_){ msg.textContent = 'Ошибка сети'; msg.style.color = '#e11d48'; }
+  });
+
+  // Load Telegram masked fields
+  (async ()=>{
+    try{
+      const r = await fetch('/api/settings/telegram');
+      const j = await r.json();
+      if (j && j.telegram_bot_token_masked){
+        document.getElementById('tg_token_mask').textContent = `Сохранён: ${j.telegram_bot_token_masked}`;
+      }
+      if (j && typeof j.telegram_webhook_secret_path !== 'undefined'){
+        document.getElementById('tg_webhook').value = j.telegram_webhook_secret_path || '';
+      }
+      if (j && typeof j.telegram_admin_chat_id !== 'undefined'){
+        document.getElementById('tg_admin').value = j.telegram_admin_chat_id || '';
+      }
+    }catch(e){}
+  })();
+
+  // Save Telegram settings
+  document.getElementById('tg-save').addEventListener('click', async ()=>{
+    const msg = document.getElementById('tg-msg'); msg.textContent='';
+    const payload = {};
+    const tok = document.getElementById('tg_token').value.trim();
+    const acc = document.getElementById('tg_access').value.trim();
+    const wh = document.getElementById('tg_webhook').value.trim();
+    const adm = document.getElementById('tg_admin').value.trim();
+    if (tok) payload.telegram_bot_token = tok;
+    if (acc) payload.telegram_access_password = acc;
+    payload.telegram_webhook_secret_path = wh;
+    payload.telegram_admin_chat_id = adm;
+    const r = await fetch('/api/settings/telegram', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const j = await r.json();
+    msg.style.color = (j && j.success)? '#2e7d32' : '#c62828';
+    msg.textContent = (j && j.success)? 'Сохранено' : (j && j.error) ? j.error : 'Ошибка сохранения';
+    if (tok) document.getElementById('tg_token').value = '';
+    if (acc) document.getElementById('tg_access').value = '';
+    try{
+      const r2 = await fetch('/api/settings/telegram'); const j2 = await r2.json();
+      document.getElementById('tg_token_mask').textContent = j2.telegram_bot_token_masked ? `Сохранён: ${j2.telegram_bot_token_masked}` : '';
+    }catch(e){}
+  });
+
+  // Test Telegram settings
+  document.getElementById('tg-test').addEventListener('click', async ()=>{
+    const msg = document.getElementById('tg-msg'); msg.textContent='';
+    const r = await fetch('/api/settings/telegram/test', {method:'POST'});
+    const j = await r.json();
+    msg.style.color = (j && j.success)? '#2e7d32' : '#c62828';
+    msg.textContent = (j && j.message) ? j.message : ((j && j.success)? 'OK' : 'Ошибка');
   });
 </script>
 {% endblock %}
