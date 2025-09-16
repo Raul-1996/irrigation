@@ -376,6 +376,12 @@
         text-align: left;
         border-bottom: 1px solid #eee;
     }
+    /* Центровка админских колонок расхода */
+    .zones-table th.admin-only,
+    .zones-table td.admin-only {
+        text-align: center;
+        white-space: nowrap;
+    }
     .zones-table th {
         background: #f5f5f5;
         font-weight: 600;
@@ -709,8 +715,8 @@
             const tr = head.querySelector('tr');
             if (!tr) return;
             if (wantWaterCols && !hasAdmin) {
-                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.textContent = 'Средний расход (л/мин)';
-                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.textContent = 'Расход (л) за прошлый полив';
+                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.innerHTML = 'Средний расход<br>(л/мин)';
+                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.innerHTML = 'Расход (л)<br>за прошлый полив';
                 tr.insertBefore(thAvg, tr.lastElementChild);
                 tr.insertBefore(thTot, tr.lastElementChild);
                 // как только добавили заголовки — убедимся, что в строках есть ячейки
@@ -1876,8 +1882,8 @@
             const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
             if (isAdmin && !hasAdmin) {
                 const tr = head.querySelector('tr');
-                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.textContent = 'Средний расход (л/мин)';
-                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.textContent = 'Расход (л) за прошлый полив';
+                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.innerHTML = 'Средний расход<br>(л/мин)';
+                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.innerHTML = 'Расход (л)<br>за прошлый полив';
                 tr.insertBefore(thAvg, tr.lastElementChild);
                 tr.insertBefore(thTot, tr.lastElementChild);
                 try { ensureAdminCellsInRows(); } catch(e){}
