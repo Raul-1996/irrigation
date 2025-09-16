@@ -121,20 +121,27 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
         if cl is None:
             logger.warning("MQTT publish: client unavailable, dropping message")
             return False
-        # Publish to base topic
+        # Publish to base topic with retries to handle slow async connect
         try:
-            res = cl.publish(t, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
-            try:
-                rc = getattr(res, 'rc', 0)
-            except Exception:
-                rc = 0
-            if rc != 0:
-                logger.warning(f"MQTT publish initial rc={rc}, try reconnect")
+            attempts = 0
+            while attempts < 10:
+                attempts += 1
+                res = cl.publish(t, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
+                try:
+                    rc = getattr(res, 'rc', 0)
+                except Exception:
+                    rc = 0
+                if rc == 0:
+                    break
+                logger.warning(f"MQTT publish rc={rc}, retry {attempts}")
                 try:
                     cl.reconnect()
                 except Exception:
                     pass
-                res = cl.publish(t, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
+                time.sleep(0.1)
+            if attempts >= 10 and rc != 0:
+                logger.error('MQTT publish failed after retries')
+                return False
         except Exception:
             logger.exception('MQTT publish failed')
             return False
