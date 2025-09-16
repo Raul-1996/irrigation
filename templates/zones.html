@@ -1213,7 +1213,7 @@
                 </td>
                 <td>
                     <input type="number" class="zone-duration" value="${zone.duration}" 
-                           min="1" max="120" onchange="updateZone(${zone.id}, 'duration', this.value)">
+                           min="1" max="240" onchange="(function(inp){ let v=parseInt(inp.value||'0'); if(isNaN(v)||v<1)v=1; if(v>240)v=240; inp.value=v; updateZone(${zone.id}, 'duration', v); })(this)">
                 </td>
                 <td>
                     <select class="zone-group" onchange="updateZone(${zone.id}, 'group_id', this.value)">

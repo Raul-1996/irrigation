@@ -3142,6 +3142,13 @@ def api_start_zone_exclusive(group_id, zone_id):
         except Exception as _e:
             logger.exception('exclusive_start failed')
             return jsonify({"success": False, "message": "Ошибка запуска зоны"}), 500
+        # Кап-таймер зоны: не дольше 240 минут
+        try:
+            sched = get_scheduler()
+            if sched:
+                sched.schedule_zone_cap(int(zone_id), cap_minutes=240)
+        except Exception:
+            logger.exception('schedule zone cap failed')
         # Очистим плановые старты у «соседей» по группе
         try:
             db.clear_scheduled_for_zone_group_peers(int(zone_id), int(group_id))
@@ -4198,6 +4205,16 @@ def api_master_valve_toggle(group_id, action):
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
         try:
             db.update_group_fields(int(group_id), {'master_valve_observed': ('open' if want_open else 'closed')})
+        except Exception:
+            pass
+        # Кап только для ручного открытия. При открытии — ставим 24ч. При закрытии — отменяем.
+        try:
+            sched = get_scheduler()
+            if sched:
+                if want_open:
+                    sched.schedule_master_valve_cap(int(group_id), hours=24)
+                else:
+                    sched.cancel_master_valve_cap(int(group_id))
         except Exception:
             pass
         # Push immediate SSE-like hint via WS/SSE hubs (best effort) so UI can update mv button text/state quickly

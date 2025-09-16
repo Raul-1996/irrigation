@@ -87,6 +87,34 @@ def job_stop_zone(zone_id: int):
         pass
 
 
+def job_close_master_valve(group_id: int):
+    """Закрыть мастер-клапан у группы, если он включён."""
+    try:
+        from database import db
+        from services.mqtt_pub import publish_mqtt_value
+        g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(group_id)), None)
+        if not g:
+            return
+        if int(g.get('use_master_valve') or 0) != 1:
+            return
+        topic = (g.get('master_mqtt_topic') or '').strip()
+        sid = g.get('master_mqtt_server_id')
+        if not topic or not sid:
+            return
+        server = db.get_mqtt_server(int(sid))
+        if not server:
+            return
+        try:
+            mode = (g.get('master_mode') or 'NC').strip().upper()
+        except Exception:
+            mode = 'NC'
+        close_val = '1' if mode == 'NO' else '0'
+        publish_mqtt_value(server, normalize_topic(topic), close_val, min_interval_sec=0.0, retain=True, meta={'cmd':'master_cap_close'})
+        logger.info(f"Master valve cap close: group {group_id}")
+    except Exception as e:
+        logger.error(f"Ошибка cap-закрытия мастер-клапана для группы {group_id}: {e}")
+
+
 def job_clear_expired_postpones():
     try:
         from irrigation_scheduler import get_scheduler
@@ -551,6 +579,69 @@ class IrrigationScheduler:
             logger.info(f"Watchdog: zone {zone_id} hard-stop at {run_at}")
         except Exception as e:
             logger.error(f"Ошибка планирования watchdog-стопа зоны {zone_id}: {e}")
+
+    def schedule_zone_cap(self, zone_id: int, cap_minutes: int = 240):
+        """Абсолютный лимит работы зоны: форс-стоп через cap_minutes от текущего момента."""
+        try:
+            run_at = datetime.now() + timedelta(minutes=int(cap_minutes))
+            # Уникальный job id для капа
+            job_id = f"zone_cap_stop:{int(zone_id)}"
+            _kwargs = dict(
+                args=[zone_id],
+                id=job_id,
+                replace_existing=True,
+                misfire_grace_time=300,
+                coalesce=False,
+                max_instances=1,
+            )
+            if getattr(self, 'has_volatile_jobstore', False):
+                _kwargs['jobstore'] = 'volatile'
+            self.scheduler.add_job(job_stop_zone, DateTrigger(run_date=run_at), **_kwargs)
+            logger.info(f"Zone cap: zone {zone_id} hard-stop at {run_at} (cap {cap_minutes}m)")
+        except Exception as e:
+            logger.error(f"Ошибка планирования cap-стопа зоны {zone_id}: {e}")
+
+    def cancel_zone_cap(self, zone_id: int):
+        try:
+            job_id = f"zone_cap_stop:{int(zone_id)}"
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Ошибка отмены cap-стопа зоны {zone_id}: {e}")
+
+    def schedule_master_valve_cap(self, group_id: int, hours: int = 24):
+        """Абсолютный лимит открытого мастер-клапана — закрыть через hours часов.
+        Перепланируется при повторных вызовах.
+        """
+        try:
+            run_at = datetime.now() + timedelta(hours=int(hours))
+            job_id = f"master_cap_close:{int(group_id)}"
+            _kwargs = dict(
+                args=[group_id],
+                id=job_id,
+                replace_existing=True,
+                misfire_grace_time=600,
+                coalesce=False,
+                max_instances=1,
+            )
+            if getattr(self, 'has_volatile_jobstore', False):
+                _kwargs['jobstore'] = 'volatile'
+            self.scheduler.add_job(job_close_master_valve, DateTrigger(run_date=run_at), **_kwargs)
+            logger.info(f"Master valve cap: group {group_id} close at {run_at} (cap {hours}h)")
+        except Exception as e:
+            logger.error(f"Ошибка планирования cap-закрытия мастер-клапана для группы {group_id}: {e}")
+
+    def cancel_master_valve_cap(self, group_id: int):
+        try:
+            job_id = f"master_cap_close:{int(group_id)}"
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
 
     # ===== Ручной последовательный запуск всех зон в группе =====
     def start_group_sequence(self, group_id: int):
