@@ -4257,7 +4257,20 @@ try:
                     if sid and t:
                         server = db.get_mqtt_server(int(sid))
                         if server:
-                            _publish_mqtt_value(server, normalize_topic(t), '0', min_interval_sec=0.0, retain=True)
+                            # Публикуем OFF с небольшими ретраями на случай неготовности соединения
+                            t_norm = normalize_topic(t)
+                            for attempt in range(3):
+                                ok = _publish_mqtt_value(server, t_norm, '0', min_interval_sec=0.0, retain=True)
+                                if ok:
+                                    break
+                                try:
+                                    time.sleep(0.2 * (attempt + 1))
+                                except Exception:
+                                    pass
+                            try:
+                                time.sleep(0.01)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             # Close all configured master valves (by unique topic/server)
@@ -4284,7 +4297,19 @@ try:
                         except Exception:
                             mode = 'NC'
                         close_val = '1' if mode == 'NO' else '0'
-                        _publish_mqtt_value(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
+                        t_norm = normalize_topic(mtopic)
+                        for attempt in range(3):
+                            ok = _publish_mqtt_value(server, t_norm, close_val, min_interval_sec=0.0, retain=True)
+                            if ok:
+                                break
+                            try:
+                                time.sleep(0.2 * (attempt + 1))
+                            except Exception:
+                                pass
+                        try:
+                            time.sleep(0.01)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         except Exception:
