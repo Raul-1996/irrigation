@@ -39,8 +39,10 @@ telegram_bp = Blueprint('telegram_bp', __name__)
 def telegram_webhook(secret):
     # Basic secret check
     expected = db.get_setting_value('telegram_webhook_secret_path') or ''
-    if str(secret) != str(expected):
-        return jsonify({'ok': False}), 403
+    # Если секрет не задан — допускаем работу вебхука (упрощённый режим)
+    if expected:
+        if str(secret) != str(expected):
+            return jsonify({'ok': False}), 403
     update = request.get_json(silent=True) or {}
     msg = update.get('message') or {}
     callback = update.get('callback_query') or {}

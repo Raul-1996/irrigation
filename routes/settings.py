@@ -42,10 +42,19 @@ def api_put_telegram_settings():
             tok = data.get('telegram_bot_token') or ''
             val = encrypt_secret(tok) if tok else None
             ok &= db.set_setting_value('telegram_bot_token_encrypted', val)
+            # Автогенерация секрета вебхука, если не задан — для защиты, но не обязательна
+            cur = db.get_setting_value('telegram_webhook_secret_path') or ''
+            if not cur:
+                try:
+                    import secrets
+                    db.set_setting_value('telegram_webhook_secret_path', secrets.token_urlsafe(16))
+                except Exception:
+                    pass
         if 'telegram_access_password' in data:
             from werkzeug.security import generate_password_hash
             pwd = data.get('telegram_access_password') or ''
-            ok &= db.set_setting_value('telegram_access_password_hash', generate_password_hash(pwd))
+            # Явно указываем PBKDF2, чтобы избежать scrypt на системах без поддержки
+            ok &= db.set_setting_value('telegram_access_password_hash', generate_password_hash(pwd, method='pbkdf2:sha256:260000'))
         if 'telegram_webhook_secret_path' in data:
             ok &= db.set_setting_value('telegram_webhook_secret_path', data.get('telegram_webhook_secret_path') or '')
         if 'telegram_admin_chat_id' in data:
