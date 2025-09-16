@@ -6,11 +6,8 @@ from services.telegram_bot import notifier
 from services.reports import build_report_text
 from services import events as evt
 import time
-try:
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-except Exception:
-    InlineKeyboardButton = None
-    InlineKeyboardMarkup = None
+InlineKeyboardButton = None
+InlineKeyboardMarkup = None
 
 _RL_CACHE = {}
 _RL_LIMIT = 10  # cmds/min per chat
@@ -98,18 +95,23 @@ def telegram_webhook(secret):
         return jsonify({'ok': True})
     # Basic commands
     # --- Inline menu ---
+    def _inline_markup(rows):
+        try:
+            return {'inline_keyboard': rows}
+        except Exception:
+            return None
+
     def _send_menu(cid: int):
-        if InlineKeyboardButton and InlineKeyboardMarkup:
-            kb = [
-                [InlineKeyboardButton('Группы', callback_data='menu:groups'), InlineKeyboardButton('Зоны', callback_data='menu:zones')],
-                [InlineKeyboardButton('Отчёт', callback_data='menu:report'), InlineKeyboardButton('Подписки', callback_data='menu:subs')],
-                [InlineKeyboardButton('Уведомления', callback_data='menu:notif')]
-            ]
-            try:
-                notifier.send_message(cid, 'Главное меню:', InlineKeyboardMarkup(kb))
-                return
-            except Exception:
-                pass
+        kb = _inline_markup([
+            [{'text': 'Группы', 'callback_data': 'menu:groups'}, {'text': 'Зоны', 'callback_data': 'menu:zones'}],
+            [{'text': 'Отчёт', 'callback_data': 'menu:report'}, {'text': 'Подписки', 'callback_data': 'menu:subs'}],
+            [{'text': 'Уведомления', 'callback_data': 'menu:notif'}]
+        ])
+        try:
+            notifier.send_message(cid, 'Главное меню:', kb)
+            return
+        except Exception:
+            pass
         _send(cid, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
 
     if text.startswith('/help'):
@@ -325,11 +327,11 @@ def telegram_webhook(secret):
                     _send(from_chat, txt)
                 elif action == 'zones':
                     gl = db.list_groups_min()
-                    if InlineKeyboardButton and InlineKeyboardMarkup and gl:
-                        rows = [[InlineKeyboardButton(f"{g['id']}: {g['name']}", callback_data=f"zones:{g['id']}")] for g in gl]
-                        notifier.send_message(from_chat, 'Выберите группу:', InlineKeyboardMarkup(rows))
+                    if gl:
+                        rows = [[{'text': f"{g['id']}: {g['name']}", 'callback_data': f"zones:{g['id']}"}] for g in gl]
+                        notifier.send_message(from_chat, 'Выберите группу:', _inline_markup(rows))
                     else:
-                        _send(from_chat, 'Используйте: /zones <group_id>')
+                        _send(from_chat, 'Нет групп')
                 elif action == 'report':
                     txt = build_report_text(period='today', fmt='brief')
                     _send(from_chat, txt)
@@ -345,8 +347,44 @@ def telegram_webhook(secret):
                     gid = 0
                 if gid:
                     zl = db.list_zones_by_group_min(gid)
-                    txt = f'Зоны группы {gid}:\n' + '\n'.join([f"{z['id']}: {z['name']} ({z['state']})" for z in zl])
-                    _send(from_chat, txt)
+                    if zl:
+                        # Покажем клавиатуру для быстрого старта/стопа зон
+                        rows = []
+                        for z in zl:
+                            zid = int(z['id']); name = z['name']
+                            rows.append([
+                                {'text': f"▶ {name}", 'callback_data': f"zone_start:{zid}"},
+                                {'text': f"⏹ {name}", 'callback_data': f"zone_stop:{zid}"}
+                            ])
+                        notifier.send_message(from_chat, f'Группа {gid}: выберите действие по зонам', _inline_markup(rows))
+                    else:
+                        _send(from_chat, f'В группе {gid} нет зон')
+                return jsonify({'ok': True})
+            if data.startswith('zone_start:'):
+                try:
+                    zid = int(data.split(':',1)[1])
+                except Exception:
+                    zid = 0
+                if zid:
+                    try:
+                        from services.zone_control import exclusive_start_zone
+                        exclusive_start_zone(zid)
+                        _send(from_chat, f'▶ Зона {zid} запущена')
+                    except Exception:
+                        _send(from_chat, 'Ошибка запуска зоны')
+                return jsonify({'ok': True})
+            if data.startswith('zone_stop:'):
+                try:
+                    zid = int(data.split(':',1)[1])
+                except Exception:
+                    zid = 0
+                if zid:
+                    try:
+                        from services.zone_control import stop_zone
+                        stop_zone(zid, reason='telegram')
+                        _send(from_chat, f'⏹ Зона {zid} остановлена')
+                    except Exception:
+                        _send(from_chat, 'Ошибка остановки зоны')
                 return jsonify({'ok': True})
         except Exception:
             pass

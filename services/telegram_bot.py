@@ -336,20 +336,16 @@ def subscribe_to_events():
             if not admin_chat:
                 return
             t = str(ev.get('type') or '')
-            txt = None
-            if t == 'zone_start':
-                txt = f"▶ Зона {ev.get('id')} запущена ({ev.get('by','')})"
-            elif t == 'zone_stop':
-                txt = f"⏹ Зона {ev.get('id')} остановлена ({ev.get('by','')})"
-            elif t == 'group_start':
-                txt = f"▶ Группа {ev.get('id')} запущена ({ev.get('by','')})"
-            elif t == 'group_stop':
-                txt = f"⏹ Группа {ev.get('id')} остановлена ({ev.get('by','')})"
-            elif t == 'emergency_on':
-                txt = f"🚨 Аварийная остановка инициирована ({ev.get('by','')})"
-            elif t == 'emergency_off':
-                txt = f"✅ Аварийная остановка снята ({ev.get('by','')})"
-            if txt:
+            # Отправляем только критические уведомления
+            if t in ('emergency_on', 'emergency_off', 'critical_error', 'error'):
+                if t == 'emergency_on':
+                    txt = f"🚨 Аварийная остановка инициирована ({ev.get('by','')})"
+                elif t == 'emergency_off':
+                    txt = f"✅ Аварийная остановка снята ({ev.get('by','')})"
+                else:
+                    code = ev.get('code') or ev.get('name') or 'error'
+                    msg = ev.get('message') or ''
+                    txt = f"❗️Критическая ошибка: {code}\n{msg}".strip()
                 try:
                     notifier.send_text(int(admin_chat), txt)
                 except Exception:
