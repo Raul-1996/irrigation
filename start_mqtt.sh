@@ -1,6 +1,10 @@
 #!/bin/zsh
 set -euo pipefail
 
+# Resolve script directory and ensure we run from project root regardless of caller CWD
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # Kill processes occupying emulator HTTP port (default 5055 or EMULATOR_HTTP_PORT)
 PORT_TO_KILL=${EMULATOR_HTTP_PORT:-5055}
 if lsof -i :${PORT_TO_KILL} >/dev/null 2>&1; then
@@ -11,7 +15,7 @@ if lsof -i :${PORT_TO_KILL} >/dev/null 2>&1; then
 fi
 
 # Ensure docker mosquitto is running with our config (if Docker daemon is available)
-CFG_SRC="$(pwd)/tools/MQTT_emulator/mosquitto.conf"
+CFG_SRC="$SCRIPT_DIR/tools/MQTT_emulator/mosquitto.conf"
 if [ -f "$CFG_SRC" ]; then
   if command -v docker >/dev/null 2>&1; then
     if docker info >/dev/null 2>&1; then
@@ -73,11 +77,11 @@ if ! lsof -i :1883 >/dev/null 2>&1; then
 fi
 
 # Activate venv and install deps if needed
-if [ ! -x "venv/bin/python" ]; then
-  python3 -m venv venv
+if [ ! -x "$SCRIPT_DIR/venv/bin/python" ]; then
+  python3 -m venv "$SCRIPT_DIR/venv"
 fi
-source venv/bin/activate
-pip -q install -r requirements.txt
+. "$SCRIPT_DIR/venv/bin/activate"
+pip -q install -r "$SCRIPT_DIR/requirements.txt"
 
 # Export defaults if not provided
 export TEST_MQTT_HOST=${TEST_MQTT_HOST:-127.0.0.1}

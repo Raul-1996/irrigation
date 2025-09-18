@@ -1,993 +1,237 @@
-from flask import Blueprint, request, jsonify
-from database import db
-from werkzeug.security import check_password_hash
-from datetime import datetime, timedelta
-from services.telegram_bot import notifier
-from services.reports import build_report_text
-from services import events as evt
-import time
+"""
+Минимальные маршруты Telegram-бота.
+
+Требования:
+- Главное меню с одной кнопкой «Группы»
+- Меню «Группы»: список групп
+- Экран группы: две кнопки — «Запустить» и «Остановить»
+"""
+
+from typing import Optional, Tuple, List, Dict
 import json
-import base64
-import uuid
-import logging
-import os
-InlineKeyboardButton = None
-InlineKeyboardMarkup = None
+from datetime import datetime, timedelta
 
-# TELEGRAM logger (file + console)
-_TG_LOGGER = logging.getLogger('TELEGRAM')
-if not getattr(_TG_LOGGER, '_telegram_configured', False):
-    try:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        logs_dir = os.path.join(base_dir, 'logs')
-        os.makedirs(logs_dir, exist_ok=True)
-        log_path = os.path.join(logs_dir, 'telegram.txt')
-        fh = logging.FileHandler(log_path, encoding='utf-8')
-        fmt = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-        fh.setFormatter(fmt)
-        _TG_LOGGER.addHandler(fh)
-        _TG_LOGGER.setLevel(logging.INFO)
-        _TG_LOGGER.propagate = True
-        _TG_LOGGER._telegram_configured = True  # type: ignore[attr-defined]
-        _TG_LOGGER.info(f"telegram route logger initialized -> {log_path}")
-    except Exception:
-        pass
+from database import db
 
-_RL_CACHE = {}
-_RL_LIMIT = 10  # cmds/min per chat
-_CB_DEDUP = {}
-_CB_TTL = 300.0  # 5 min
+_notifier = None  # инжектируется из services/telegram_bot.py
 
-def _rate_limited(chat_id: int) -> bool:
-    now = time.time()
-    win = 60.0
-    t0, n = _RL_CACHE.get(chat_id, (now, 0))
-    if now - t0 > win:
-        _RL_CACHE[chat_id] = (now, 1)
-        return False
-    if n >= _RL_LIMIT:
-        return True
-    _RL_CACHE[chat_id] = (t0, n+1)
-    return False
 
-def _send(chat_id: int, text: str):
-    try:
-        try:
-            _TG_LOGGER.info(f"send_text chat_id={chat_id} text={str(text)[:120]}")
-        except Exception:
-            pass
-        notifier.send_text(int(chat_id), text)
-    except Exception:
-        pass
+def set_notifier(n) -> None:
+    global _notifier
+    _notifier = n
 
-def _inline_markup(rows):
-    try:
-        return {'inline_keyboard': rows}
-    except Exception:
-        return None
 
-def _cb_encode(payload: dict) -> str:
-    try:
-        # Ensure idempotency token
-        if 'tok' not in payload:
-            payload = {**payload, 'tok': str(uuid.uuid4())}
-        raw = json.dumps(payload, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
-        return base64.urlsafe_b64encode(raw).decode('ascii')
-    except Exception:
-        return ''
+# ---------- helpers ----------
 
-def _cb_decode(data: str) -> dict:
-    # Try base64 JSON first, then plain JSON, else empty
-    if not data:
+def _btn(text: str, data: str) -> Dict:
+    return {"text": text, "callback_data": data}
+
+
+def _inline_markup(rows: List[List[Dict]]) -> dict:
+    return {"inline_keyboard": rows}
+
+
+def _cb_decode(data: str) -> Dict:
+    # Плоский и предсказуемый формат: menu:*, group:<id>, group_start:<id>, group_stop:<id>
+    if not isinstance(data, str):
         return {}
+    if data.startswith('menu:'):
+        return {"t": "menu", "a": data.split(':', 1)[1]}
+    if data.startswith('group_start:'):
+        try:
+            return {"t": "group_start", "gid": int(data.split(':', 1)[1])}
+        except Exception:
+            return {}
+    if data.startswith('group_stop:'):
+        try:
+            return {"t": "group_stop", "gid": int(data.split(':', 1)[1])}
+        except Exception:
+            return {}
+    if data.startswith('group:'):
+        try:
+            return {"t": "group", "gid": int(data.split(':', 1)[1])}
+        except Exception:
+            return {}
+    # Совместимость со старым форматом
+    if data.startswith('groupsel:'):
+        try:
+            return {"t": "group", "gid": int(data.split(':', 1)[1])}
+        except Exception:
+            return {}
+    if data.startswith('postpone:'):
+        try:
+            _, gid, days = data.split(':', 2)
+            return {"t": "postpone", "gid": int(gid), "days": int(days)}
+        except Exception:
+            return {}
+    # JSON совместимость (на будущее)
     try:
-        # Some clients may pass pure JSON (dev tools), handle it
-        if data.startswith('{') and data.endswith('}'):
-            return json.loads(data)
-    except Exception:
-        pass
-    try:
-        raw = base64.urlsafe_b64decode(data.encode('ascii'))
-        return json.loads(raw.decode('utf-8'))
+        jd = json.loads(data)
+        return jd if isinstance(jd, dict) else {}
     except Exception:
         return {}
 
-def _btn(text: str, payload: dict) -> dict:
-    return {'text': text, 'callback_data': _cb_encode(payload)}
 
-def _get_role(chat_id: int) -> str:
+# ---------- экраны ----------
+
+def _screen_main_menu() -> Tuple[str, dict]:
+    rows = [[_btn('Группы', 'menu:groups')]]
+    return 'Главное меню:', _inline_markup(rows)
+
+
+def _screen_groups_list() -> Tuple[str, dict]:
+    groups = db.list_groups_min() or []
+    if not groups:
+        return 'Группы не найдены.', _inline_markup([[ _btn('⬅️ Назад', 'menu:root') ]])
+
+    rows: List[List[Dict]] = []
+    row: List[Dict] = []
+    for g in groups:
+        row.append(_btn(str(g.get('name') or f"#{g.get('id')}") , f"group:{int(g['id'])}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([_btn('⬅️ Назад', 'menu:root')])
+    return 'Выберите группу:', _inline_markup(rows)
+
+
+def _screen_group_actions(group_id: int) -> Tuple[str, dict]:
+    # Безопасно получаем название группы
+    g = {}
     try:
-        u = db.get_bot_user_by_chat(int(chat_id)) or {}
-        r = str(u.get('role') or 'viewer')
-        return r
+        gl = db.list_groups_min() or []
+        g = next((gg for gg in gl if int(gg.get('id')) == int(group_id)), {})
     except Exception:
-        return 'viewer'
+        g = {}
+    name = g.get('name') or f"#{group_id}"
+    rows = [
+        [_btn('▶ Запустить', f'group_start:{int(group_id)}')],
+        [_btn('⏹ Остановить', f'group_stop:{int(group_id)}')],
+        [
+            _btn('⏰ Отложить 1 день', f'postpone:{int(group_id)}:1'),
+            _btn('2 дня', f'postpone:{int(group_id)}:2'),
+            _btn('3 дня', f'postpone:{int(group_id)}:3'),
+        ],
+        [_btn('⬅️ К группам', 'menu:groups')],
+    ]
+    return f"Группа {name} (id={int(group_id)})", _inline_markup(rows)
 
-def _role_allowed(current: str, required: str) -> bool:
-    order = {'viewer': 0, 'user': 1, 'admin': 2}
-    return order.get(current, 0) >= order.get(required, 0)
 
-def _require_role(chat_id: int, required: str) -> bool:
-    role = _get_role(chat_id)
-    if not _role_allowed(role, required):
-        _send(chat_id, 'Нет прав')
-        return False
-    return True
+# ---------- действия ----------
 
-def _dedup_cb(chat_id: int, data: str) -> bool:
-    # returns True if duplicated (should skip)
-    now = time.time()
-    key = f"{chat_id}:{data}"
-    # cleanup
+def _do_group_start(group_id: int) -> str:
     try:
-        if len(_CB_DEDUP) > 2048:
-            dead = [k for k, ts in _CB_DEDUP.items() if now - ts > _CB_TTL]
-            for k in dead:
-                _CB_DEDUP.pop(k, None)
+        from irrigation_scheduler import get_scheduler
+        s = get_scheduler()
+        if not s:
+            return 'Планировщик недоступен'
+        ok = s.start_group_sequence(int(group_id))
+        return '▶ Запущен полив группы' if ok else 'Не удалось запустить'
     except Exception:
-        pass
-    ts = _CB_DEDUP.get(key)
-    if ts and (now - ts < 2.0):
-        return True
-    _CB_DEDUP[key] = now
-    return False
+        return 'Ошибка запуска группы'
 
-telegram_bp = Blueprint('telegram_bp', __name__)
 
-def process_callback_json(from_chat: int, jd: dict) -> None:
+def _do_group_stop(group_id: int) -> str:
     try:
-        _TG_LOGGER.info(f"cb chat_id={from_chat} data={jd}")
+        from services.zone_control import stop_all_in_group
+        stop_all_in_group(int(group_id), reason='telegram', force=True)
+        return '⏹ Полив группы остановлен'
     except Exception:
-        pass
-    # Idempotency check
-    tok = jd.get('tok')
-    if tok:
+        return 'Ошибка остановки группы'
+
+
+def _do_group_postpone(group_id: int, days: int) -> str:
+    try:
+        days = int(days)
+        until_date = datetime.now() + timedelta(days=days)
+        postpone_until = until_date.strftime('%Y-%m-%d 23:59:59')
+        zones = db.get_zones() or []
+        for z in zones:
+            try:
+                if int(z.get('group_id') or 0) == int(group_id):
+                    db.update_zone_postpone(int(z['id']), postpone_until, 'manual')
+            except Exception:
+                pass
         try:
-            if not db.is_new_idempotency_token(str(tok), int(from_chat), str(jd.get('t'))):
-                return
+            from services.zone_control import stop_all_in_group
+            stop_all_in_group(int(group_id), reason='manual_postpone', force=True)
         except Exception:
             pass
+        return f'⏰ Полив отложен на {days} дн. до {postpone_until}'
+    except Exception:
+        return 'Ошибка отложки группы'
+
+
+# ---------- роутер ----------
+
+def process_callback_json(chat_id: int, jd: Dict, message_id: Optional[int] = None) -> None:
+    if _notifier is None:
+        return
+
     t = jd.get('t')
-    # --- Menu navigation ---
+
     if t == 'menu':
         a = jd.get('a')
-        def _send_main(cid: int):
-            try:
-                _TG_LOGGER.info(f"menu main chat_id={cid}")
-            except Exception:
-                pass
-            rows = [
-                [_btn('Группы', {'t': 'menu', 'a': 'groups'}), _btn('Зоны', {'t': 'menu', 'a': 'zones'})],
-                [_btn('Отложить полив', {'t': 'menu', 'a': 'postpone'}), _btn('Отчёты', {'t': 'menu', 'a': 'report'})],
-                [_btn('Подписки', {'t': 'menu', 'a': 'subs'}), _btn('Уведомления', {'t': 'menu', 'a': 'notif'})],
-            ]
-            notifier.send_message(cid, 'Главное меню:', _inline_markup(rows))
-        if a == 'main':
-            _send_main(from_chat)
+        if a in (None, 'root'):
+            text, markup = _screen_main_menu()
         elif a == 'groups':
-            try:
-                _TG_LOGGER.info(f"menu groups chat_id={from_chat}")
-            except Exception:
-                pass
-            gl_all = db.list_groups_min() or []
-            gl = [g for g in gl_all if int(g.get('id') or 0) != 999]
-            if gl:
-                rows = [[_btn(str(g['name']), {'t': 'group_sel', 'gid': int(g['id'])})] for g in gl]
-                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})])
-                notifier.send_message(from_chat, 'Выберите группу:', _inline_markup(rows))
-            else:
-                notifier.send_message(from_chat, 'Группы отсутствуют', _inline_markup([[ _btn('⬅ Назад', {'t': 'menu', 'a': 'main'}) ]]))
-        elif a == 'zones':
-            gl = [g for g in (db.list_groups_min() or []) if int(g.get('id') or 0) != 999]
-            if gl:
-                rows = [[_btn(str(g['name']), {'t': 'zones_select', 'gid': int(g['id'])})] for g in gl]
-                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})])
-                notifier.send_message(from_chat, 'Выберите группу для просмотра зон:', _inline_markup(rows))
-            else:
-                notifier.send_message(from_chat, 'Нет групп', _inline_markup([[ _btn('⬅ Назад', {'t': 'menu', 'a': 'main'}) ]]))
-        elif a == 'postpone':
-            gl = [g for g in (db.list_groups_min() or []) if int(g.get('id') or 0) != 999]
-            if gl:
-                rows = []
-                for g in gl:
-                    gid = int(g['id']); name = g['name']
-                    rows.append([
-                        _btn(f"{name}: +1д", {'t': 'postpone', 'gid': gid, 'days': 1}),
-                        _btn('+2д', {'t': 'postpone', 'gid': gid, 'days': 2}),
-                        _btn('+3д', {'t': 'postpone', 'gid': gid, 'days': 3}),
-                    ])
-                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})])
-                notifier.send_message(from_chat, 'Отложить полив по группам:', _inline_markup(rows))
-            else:
-                notifier.send_message(from_chat, 'Нет групп', _inline_markup([[ _btn('⬅ Назад', {'t': 'menu', 'a': 'main'}) ]]))
-        elif a == 'report':
-            db.set_bot_fsm(int(from_chat), 'DIALOG_REPORT', {'step': 'period'})
-            rows = [
-                [_btn('Сегодня', {'t': 'report', 'step': 'format', 'p': {'period': 'today'}}), _btn('Вчера', {'t': 'report', 'step': 'format', 'p': {'period': 'yesterday'}})],
-                [_btn('7 дней', {'t': 'report', 'step': 'format', 'p': {'period': '7'}}), _btn('30 дней', {'t': 'report', 'step': 'format', 'p': {'period': '30'}})],
-                [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})],
-            ]
-            notifier.send_message(from_chat, 'Выберите период отчёта:', _inline_markup(rows))
-        elif a == 'subs':
-            db.set_bot_fsm(int(from_chat), 'DIALOG_SUBSCRIBE', {'step': 'type'})
-            rows = [[_btn('Ежедневная', {'t': 'subs', 'step': 'format', 'stype': 'daily'})],
-                    [_btn('Еженедельная', {'t': 'subs', 'step': 'format', 'stype': 'weekly'})],
-                    [_btn('Отключить все', {'t': 'subs', 'step': 'disable'})],
-                    [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})]]
-            notifier.send_message(from_chat, 'Тип подписки:', _inline_markup(rows))
-        elif a == 'notif':
-            s = db.get_bot_user_notif_settings(int(from_chat))
-            def flag(v):
-                return '✅' if int(v or 0) == 1 else '❌'
-            rows = [
-                [_btn(f"Критические {flag(s.get('critical'))}", {'t': 'notif', 'k': 'critical', 'v': 1-int(s.get('critical',0))}), _btn(f"Авария {flag(s.get('emergency'))}", {'t': 'notif', 'k': 'emergency', 'v': 1-int(s.get('emergency',0))})],
-                [_btn(f"Отложен полив {flag(s.get('postpone'))}", {'t': 'notif', 'k': 'postpone', 'v': 1-int(s.get('postpone',0))}), _btn(f"События зон {flag(s.get('zone_events'))}", {'t': 'notif', 'k': 'zone_events', 'v': 1-int(s.get('zone_events',0))})],
-                [_btn(f"Дождь {flag(s.get('rain'))}", {'t': 'notif', 'k': 'rain', 'v': 1-int(s.get('rain',0))})],
-                [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})],
-            ]
-            notifier.send_message(from_chat, 'Настройки уведомлений:', _inline_markup(rows))
-        elif a == 'emergency':
-            if not _require_role(int(from_chat), 'admin'):
-                return
-            rows = [[_btn('🚨 Подтвердить остановку', {'t': 'confirm', 'a': 'emergency', 'do': 'on'})],
-                    [_btn('Отмена', {'t': 'confirm', 'a': 'cancel'})],
-                    [_btn('⬅ Назад', {'t': 'menu', 'a': 'main'})]]
-            notifier.send_message(from_chat, 'Подтвердите аварийную остановку', _inline_markup(rows))
+            text, markup = _screen_groups_list()
+        else:
+            text, markup = _screen_main_menu()
+        if message_id:
+            _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+        else:
+            _notifier.send_message(chat_id, text, reply_markup=markup)
         return
-    # --- Zones select ---
-    if t == 'zones_select':
-        gid = int(jd.get('gid') or 0)
-        if gid:
-            try:
-                _TG_LOGGER.info(f"zones_select chat_id={from_chat} gid={gid}")
-            except Exception:
-                pass
-            zl = db.list_zones_by_group_min(gid)
-            if zl:
-                rows = []
-                for z in zl:
-                    zid = int(z['id']); name = z['name']
-                    rows.append([_btn(f"▶ {name}", {'t': 'zone_start', 'zid': zid}), _btn(f"⏹ {name}", {'t': 'zone_stop', 'zid': zid})])
-                rows.append([_btn('⬅ Назад', {'t': 'menu', 'a': 'zones'})])
-                notifier.send_message(from_chat, 'Выберите действие по зонам', _inline_markup(rows))
-            else:
-                _send(from_chat, f'В группе {gid} нет зон')
+
+    if t == 'group':
+        gid = int(jd.get('gid'))
+        text, markup = _screen_group_actions(gid)
+        if message_id:
+            _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+        else:
+            _notifier.send_message(chat_id, text, reply_markup=markup)
         return
-    # --- Group selected actions ---
-    if t == 'group_sel':
-        gid = int(jd.get('gid') or 0)
-        if gid:
-            try:
-                g = next((x for x in (db.list_groups_min() or []) if int(x.get('id') or 0) == gid), None)
-                gname = g.get('name') if g else f'Группа {gid}'
-            except Exception:
-                gname = f'Группа {gid}'
-            try:
-                _TG_LOGGER.info(f"group_sel chat_id={from_chat} gid={gid}")
-            except Exception:
-                pass
-            rows = [
-                [_btn('▶ Запустить с 1-й', {'t': 'grp_start', 'gid': gid}), _btn('⏹ Остановить', {'t': 'grp_stop', 'gid': gid})],
-                [_btn('⏱ +1д', {'t': 'postpone', 'gid': gid, 'days': 1}), _btn('+2д', {'t': 'postpone', 'gid': gid, 'days': 2}), _btn('+3д', {'t': 'postpone', 'gid': gid, 'days': 3})],
-                [_btn('⬅ Назад', {'t': 'menu', 'a': 'groups'}), _btn('🏠 В меню', {'t': 'menu', 'a': 'main'})],
-            ]
-            notifier.send_message(from_chat, f'{gname}: действия', _inline_markup(rows))
+
+    if t == 'group_start':
+        gid = int(jd.get('gid'))
+        notice = _do_group_start(gid)
+        text, markup = _screen_group_actions(gid)
+        if message_id:
+            _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+        else:
+            _notifier.send_message(chat_id, text, reply_markup=markup)
+        _notifier.send_text(chat_id, notice)
         return
-    # --- Actions: groups/zones ---
-    if t == 'grp_start':
-        if not _require_role(int(from_chat), 'user'):
-            return
-        gid = int(jd.get('gid') or 0)
-        if gid:
-            try:
-                try:
-                    _TG_LOGGER.info(f"grp_start chat_id={from_chat} gid={gid}")
-                except Exception:
-                    pass
-                from irrigation_scheduler import get_scheduler
-                s = get_scheduler()
-                if s:
-                    s.start_group_sequence(gid)
-                _send(from_chat, f'▶ Группа {gid} запущена')
-            except Exception:
-                _send(from_chat, 'Ошибка запуска группы')
+
+    if t == 'group_stop':
+        gid = int(jd.get('gid'))
+        notice = _do_group_stop(gid)
+        text, markup = _screen_group_actions(gid)
+        if message_id:
+            _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+        else:
+            _notifier.send_message(chat_id, text, reply_markup=markup)
+        _notifier.send_text(chat_id, notice)
         return
-    if t == 'grp_stop':
-        if not _require_role(int(from_chat), 'user'):
-            return
-        gid = int(jd.get('gid') or 0)
-        if gid:
-            try:
-                from services.zone_control import stop_all_in_group
-                stop_all_in_group(gid, reason='telegram')
-                _send(from_chat, f'⏹ Группа {gid} остановлена')
-            except Exception:
-                _send(from_chat, 'Ошибка остановки группы')
-        return
-    if t == 'zone_start':
-        if not _require_role(int(from_chat), 'user'):
-            return
-        zid = int(jd.get('zid') or 0)
-        if zid:
-            try:
-                from services.zone_control import exclusive_start_zone
-                exclusive_start_zone(zid)
-                _send(from_chat, f'▶ Зона {zid} запущена')
-            except Exception:
-                _send(from_chat, 'Ошибка запуска зоны')
-        return
-    if t == 'zone_stop':
-        if not _require_role(int(from_chat), 'user'):
-            return
-        zid = int(jd.get('zid') or 0)
-        if zid:
-            try:
-                from services.zone_control import stop_zone
-                stop_zone(zid, reason='telegram')
-                _send(from_chat, f'⏹ Зона {zid} остановлена')
-            except Exception:
-                _send(from_chat, 'Ошибка остановки зоны')
-        return
+
     if t == 'postpone':
-        if not _require_role(int(from_chat), 'user'):
-            return
-        gid = int(jd.get('gid') or 0)
+        gid = int(jd.get('gid'))
         days = int(jd.get('days') or 1)
-        if gid:
-            try:
-                from app import app as _app
-                with _app.test_request_context(json={'group_id': gid, 'action': 'postpone', 'days': days}):
-                    from app import api_postpone as _pp
-                    _pp()
-                _send(from_chat, f'Группа {gid}: отложен полив на {days} дн.')
-            except Exception:
-                _send(from_chat, 'Ошибка отложенного полива')
+        notice = _do_group_postpone(gid, days)
+        text, markup = _screen_group_actions(gid)
+        if message_id:
+            _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+        else:
+            _notifier.send_message(chat_id, text, reply_markup=markup)
+        _notifier.send_text(chat_id, notice)
         return
-    # --- Reports dialog ---
-    if t == 'report':
-        st, fd = db.get_bot_fsm(int(from_chat))
-        step = jd.get('step')
-        p = jd.get('p') or {}
-        if step == 'format':
-            period = str(p.get('period') or 'today')
-            db.set_bot_fsm(int(from_chat), 'DIALOG_REPORT', {'step': 'format', 'period': period})
-            rows = [[_btn('Краткий', {'t': 'report', 'step': 'send', 'p': {'period': period, 'format': 'brief'}}), _btn('Подробный', {'t': 'report', 'step': 'send', 'p': {'period': period, 'format': 'full'}})],
-                    [_btn('Отмена', {'t': 'confirm', 'a': 'cancel'})]]
-            notifier.send_message(from_chat, 'Формат отчёта:', _inline_markup(rows))
-            return
-        if step == 'send':
-            period = str((p or {}).get('period') or 'today')
-            fmt = 'brief' if str((p or {}).get('format') or 'brief') != 'full' else 'full'
-            txt = build_report_text(period=period, fmt=fmt)
-            db.set_bot_fsm(int(from_chat), None, None)
-            _send(from_chat, txt)
-            return
-    # --- Subscriptions dialog ---
-    if t == 'subs':
-        step = jd.get('step')
-        if step == 'disable':
-            u = db.get_bot_user_by_chat(int(from_chat))
-            if u:
-                try:
-                    db.create_or_update_subscription(int(u.get('id')), 'daily', 'brief', '08:00', None, False)
-                    db.create_or_update_subscription(int(u.get('id')), 'weekly', 'brief', '08:00', '1111111', False)
-                except Exception:
-                    pass
-            _send(from_chat, 'Подписки отключены')
-            db.set_bot_fsm(int(from_chat), None, None)
-            return
-        if step == 'format':
-            stype = str(jd.get('stype') or 'daily')
-            db.set_bot_fsm(int(from_chat), 'DIALOG_SUBSCRIBE', {'step': 'format', 'stype': stype})
-            rows = [[
-                _btn('Краткий', {'t': 'subs', 'step': 'time', 'stype': stype, 'fmt': 'brief'}),
-                _btn('Подробный', {'t': 'subs', 'step': 'time', 'stype': stype, 'fmt': 'full'})
-            ]]
-            notifier.send_message(from_chat, 'Формат подписки:', _inline_markup(rows))
-            return
-        if step == 'time':
-            stype = str(jd.get('stype') or 'daily')
-            fmt = str(jd.get('fmt') or 'brief')
-            times = ['07:00', '08:00', '09:00', '20:00']
-            row = [_btn(ti, {'t': 'subs', 'step': 'save', 'stype': stype, 'fmt': fmt, 'time': ti}) for ti in times]
-            notifier.send_message(from_chat, 'Выберите время (локальное):', _inline_markup([row]))
-            return
-        if step == 'save':
-            stype = str(jd.get('stype') or 'daily')
-            fmt = str(jd.get('fmt') or 'brief')
-            tl = str(jd.get('time') or '08:00')
-            dow = None
-            if stype == 'weekly':
-                dow = '1111100'
-            u = db.get_bot_user_by_chat(int(from_chat))
-            if u:
-                db.create_or_update_subscription(int(u.get('id')), stype, fmt, tl, dow, True)
-            db.set_bot_fsm(int(from_chat), None, None)
-            _send(from_chat, 'Подписка сохранена')
-            return
-    # --- Notification toggles ---
-    if t == 'notif':
-        k = str(jd.get('k') or '')
-        v = int(jd.get('v') or 0) == 1
-        if k:
-            db.set_bot_user_notif_toggle(int(from_chat), k, v)
-        s = db.get_bot_user_notif_settings(int(from_chat))
-        def flag(vx):
-            return '✅' if int(vx or 0) == 1 else '❌'
-        rows = [
-            [_btn(f"Критические {flag(s.get('critical'))}", {'t': 'notif', 'k': 'critical', 'v': 1-int(s.get('critical',0))}), _btn(f"Авария {flag(s.get('emergency'))}", {'t': 'notif', 'k': 'emergency', 'v': 1-int(s.get('emergency',0))})],
-            [_btn(f"Отложен полив {flag(s.get('postpone'))}", {'t': 'notif', 'k': 'postpone', 'v': 1-int(s.get('postpone',0))}), _btn(f"События зон {flag(s.get('zone_events'))}", {'t': 'notif', 'k': 'zone_events', 'v': 1-int(s.get('zone_events',0))})],
-            [_btn(f"Дождь {flag(s.get('rain'))}", {'t': 'notif', 'k': 'rain', 'v': 1-int(s.get('rain',0))})],
-        ]
-        notifier.send_message(from_chat, 'Настройки уведомлений:', _inline_markup(rows))
-        return
-    # --- Confirm dangerous operations ---
-    if t == 'confirm':
-        a = jd.get('a')
-        if a == 'cancel':
-            _send(from_chat, 'Отменено')
-            db.set_bot_fsm(int(from_chat), None, None)
-            return
-        if a == 'emergency':
-            if not _require_role(int(from_chat), 'admin'):
-                return
-            do = jd.get('do')
-            try:
-                from app import app as _app
-                with _app.test_request_context():
-                    if do == 'on':
-                        from app import api_emergency_stop as _es
-                        _es()
-                        _send(from_chat, '🚨 Аварийная остановка активирована')
-                    else:
-                        from app import api_emergency_resume as _er
-                        _er()
-                        _send(from_chat, '✅ Аварийная остановка снята')
-            except Exception:
-                _send(from_chat, 'Ошибка выполнения аварийной операции')
-            return
 
-# Webhook endpoint: log full updates and outcomes
-@telegram_bp.route('/telegram/webhook/<secret>', methods=['POST'])
-def telegram_webhook(secret):
-    try:
-        _TG_LOGGER.info(f"webhook hit secret={secret}")
-    except Exception:
-        pass
-    expected = db.get_setting_value('telegram_webhook_secret_path') or ''
-    if expected:
-        if str(secret) != str(expected):
-            try:
-                _TG_LOGGER.info("webhook forbidden: bad secret")
-            except Exception:
-                pass
-            return jsonify({'ok': False}), 403
-    update = request.get_json(silent=True) or {}
-    try:
-        _TG_LOGGER.info(f"webhook update={update}")
-    except Exception:
-        pass
-    msg = update.get('message') or {}
-    callback = update.get('callback_query') or {}
-    chat = msg.get('chat') or {}
-    text = msg.get('text') or ''
-    chat_id = chat.get('id')
-    username = chat.get('username')
-    first_name = chat.get('first_name')
-    if not chat_id:
-        return jsonify({'ok': True})
-    db.upsert_bot_user(int(chat_id), username, first_name)
-    # lock check
-    try:
-        ulock = db.get_bot_user_by_chat(int(chat_id)) or {}
-        locked_until = ulock.get('locked_until')
-        if locked_until:
-            try:
-                lu = datetime.strptime(str(locked_until), '%Y-%m-%d %H:%M:%S')
-                if datetime.now() < lu and not text.startswith('/start'):
-                    _send(chat_id, 'Ваш аккаунт временно заблокирован. Попробуйте позже.')
-                    return jsonify({'ok': True})
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # Simple commands: /start, /auth [pwd]
-    if text.startswith('/start'):
-        welcome = (
-            'Привет! Это WB‑Irrigation Bot.\n\n'
-            'Доступные команды:\n'
-            '/auth <пароль> — авторизация\n'
-            '/menu — главное меню\n'
-            '/help — краткая справка\n'
-            '/report — быстрый отчёт\n'
-            '/subscribe, /unsubscribe — подписки\n\n'
-            'Сначала пройдите авторизацию: /auth <пароль>'
-        )
-        _send(chat_id, welcome)
-        return jsonify({'ok': True})
-    if text.startswith('/auth'):
-        parts = text.split(maxsplit=1)
-        if len(parts) == 2:
-            pwd = parts[1].strip()
-            h = db.get_setting_value('telegram_access_password_hash')
-            if h and check_password_hash(h, pwd):
-                db.set_bot_user_authorized(int(chat_id), role='user')
-                db.set_bot_fsm(int(chat_id), None, None)
-                _send(chat_id, 'Готово. Доступ предоставлен.')
-                try:
-                    _send_menu(chat_id)
-                except Exception:
-                    _send(chat_id, 'Введите /menu для открытия клавиатуры.')
-                return jsonify({'ok': True})
-            else:
-                failed = db.inc_bot_user_failed(int(chat_id))
-                if failed >= 5:
-                    until = (datetime.now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
-                    db.lock_bot_user_until(int(chat_id), until)
-                _send(chat_id, f'Пароль неверный. Осталось попыток: {max(0, 5-failed)}')
-                return jsonify({'ok': True})
-        else:
-            db.set_bot_fsm(int(chat_id), 'AUTH_WAIT_PASSWORD', {})
-            _send(chat_id, 'Введите пароль текстом:')
-            return jsonify({'ok': True})
-
-    if text.startswith('/logout'):
-        db.set_bot_fsm(int(chat_id), None, None)
-        try:
-            # Сбрасываем авторизацию
-            from sqlite3 import connect, Row
-            with connect(db.db_path, timeout=5) as conn:
-                conn.execute('UPDATE bot_users SET is_authorized=0 WHERE chat_id=?', (int(chat_id),))
-                conn.commit()
-        except Exception:
-            pass
-        _send(chat_id, 'Вы вышли. Для входа: /auth <пароль>')
-        return jsonify({'ok': True})
-
-    # FSM: password input
-    try:
-        st, fd = db.get_bot_fsm(int(chat_id))
-    except Exception:
-        st, fd = None, None
-    if st == 'AUTH_WAIT_PASSWORD' and text and not text.startswith('/'):
-        h = db.get_setting_value('telegram_access_password_hash')
-        if h and check_password_hash(h, text.strip()):
-            db.set_bot_user_authorized(int(chat_id), role='user')
-            db.set_bot_fsm(int(chat_id), None, None)
-            _send(chat_id, 'Готово. Доступ предоставлен.')
-            try:
-                _send_menu(chat_id)
-            except Exception:
-                pass
-        else:
-            failed = db.inc_bot_user_failed(int(chat_id))
-            if failed >= 5:
-                until = (datetime.now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
-                db.lock_bot_user_until(int(chat_id), until)
-            _send(chat_id, f'Пароль неверный. Осталось попыток: {max(0, 5-failed)}')
-        return jsonify({'ok': True})
-    # rate limit (skip for callback pings w/o data)
-    if _rate_limited(int(chat_id)):
-        _send(chat_id, 'Слишком часто. Повторите позже.')
-        return jsonify({'ok': True})
-    user = db.get_bot_user_by_chat(int(chat_id)) or {}
-    if not user or not int(user.get('is_authorized') or 0):
-        _send(chat_id, 'Нет доступа. Авторизуйтесь: /auth <пароль>')
-        return jsonify({'ok': True})
-    # Basic commands
-    # --- Inline menu ---
-    def _send_menu(cid: int):
-        rows = [
-            [_btn('Группы', {'t': 'menu', 'a': 'groups'}), _btn('Зоны', {'t': 'menu', 'a': 'zones'})],
-            [_btn('Отложить полив', {'t': 'menu', 'a': 'postpone'}), _btn('Отчёты', {'t': 'menu', 'a': 'report'})],
-            [_btn('Подписки', {'t': 'menu', 'a': 'subs'}), _btn('Уведомления', {'t': 'menu', 'a': 'notif'})]
-        ]
-        kb = _inline_markup(rows)
-        try:
-            # админ-кнопка
-            if _role_allowed(_get_role(cid), 'admin'):
-                kb['inline_keyboard'].append([_btn('Аварийная остановка', {'t': 'menu', 'a': 'emergency'})])
-        except Exception:
-            pass
-        try:
-            notifier.send_message(cid, 'Главное меню:', kb)
-            return
-        except Exception:
-            pass
-        _send(cid, 'Меню: /groups, /zones <group>, /report today|7|30, /subscribe, /unsubscribe')
-
-    if text.startswith('/help'):
-        _send(chat_id, '/menu, /groups, /zones <group>, /group_start <id>, /group_stop <id>, /zone_start <id>, /zone_stop <id>, /report today')
-        return jsonify({'ok': True})
-    if text.startswith('/menu'):
-        _send_menu(chat_id)
-        return jsonify({'ok': True})
-    if text.startswith('/groups'):
-        gl = db.list_groups_min()
-        txt = 'Группы:\n' + '\n'.join([f"{g['id']}: {g['name']}" for g in gl])
-        _send(chat_id, txt)
-        return jsonify({'ok': True})
-    if text.startswith('/zones'):
-        parts = text.split()
-        gid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-        if not gid:
-            _send(chat_id, 'Используйте: /zones <group_id>')
-            return jsonify({'ok': True})
-        zl = db.list_zones_by_group_min(gid)
-        txt = f'Зоны группы {gid}:\n' + '\n'.join([f"{z['id']}: {z['name']} ({z['state']})" for z in zl])
-        _send(chat_id, txt)
-        return jsonify({'ok': True})
-    if text.startswith('/group_start'):
-        parts = text.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            gid = int(parts[1])
-            try:
-                from irrigation_scheduler import get_scheduler
-                s = get_scheduler()
-                if s:
-                    s.start_group_sequence(gid)
-                _send(chat_id, f'▶ Группа {gid} запущена')
-                evt.publish({'type':'group_start','id':gid,'by':'telegram'})
-            except Exception:
-                _send(from_chat, 'Ошибка запуска группы')
-        return jsonify({'ok': True})
-    if text.startswith('/group_stop'):
-        parts = text.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            gid = int(parts[1])
-            try:
-                from services.zone_control import stop_all_in_group
-                stop_all_in_group(gid, reason='telegram')
-                _send(from_chat, f'⏹ Группа {gid} остановлена')
-                evt.publish({'type':'group_stop','id':gid,'by':'telegram'})
-            except Exception:
-                _send(from_chat, 'Ошибка остановки группы')
-        return jsonify({'ok': True})
-    if text.startswith('/postpone_cancel'):
-        parts = text.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            gid = int(parts[1])
-            try:
-                from app import app as _app
-                with _app.test_request_context(json={'group_id': gid, 'action': 'cancel'}):
-                    from app import api_postpone as _pp
-                    _pp()
-                _send(chat_id, f'Отложенный полив для группы {gid} отменен')
-            except Exception:
-                _send(chat_id, 'Ошибка отмены отложенного полива')
-        else:
-            _send(chat_id, 'Используйте: /postpone_cancel <group_id>')
-        return jsonify({'ok': True})
-    if text.startswith('/postpone'):
-        parts = text.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            gid = int(parts[1])
-            days = 1
-            try:
-                if len(parts) > 2:
-                    days = max(1, min(7, int(parts[2])))
-            except Exception:
-                days = 1
-            try:
-                from app import app as _app
-                with _app.test_request_context(json={'group_id': gid, 'action': 'postpone', 'days': days}):
-                    from app import api_postpone as _pp
-                    _pp()
-                _send(chat_id, f'Полив группы {gid} отложен на {days} дн.')
-            except Exception:
-                _send(chat_id, 'Ошибка установки отложенного полива')
-        else:
-            _send(chat_id, 'Используйте: /postpone <group_id> <days>')
-        return jsonify({'ok': True})
-    if text.startswith('/zone_start'):
-        parts = text.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            zid = int(parts[1])
-            try:
-                from services.zone_control import exclusive_start_zone
-                exclusive_start_zone(zid)
-                _send(chat_id, f'▶ Зона {zid} запущена')
-                evt.publish({'type':'zone_start','id':zid,'by':'telegram'})
-            except Exception:
-                _send(chat_id, 'Ошибка запуска зоны')
-        return jsonify({'ok': True})
-    if text.startswith('/zone_stop'):
-        parts = text.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            zid = int(parts[1])
-            try:
-                from services.zone_control import stop_zone
-                stop_zone(zid, reason='telegram')
-                _send(chat_id, f'⏹ Зона {zid} остановлена')
-                evt.publish({'type':'zone_stop','id':zid,'by':'telegram'})
-            except Exception:
-                _send(chat_id, 'Ошибка остановки зоны')
-        return jsonify({'ok': True})
-    if text.startswith('/report'):
-        period = 'today'
-        parts = text.split()
-        if len(parts) > 1:
-            period = parts[1]
-        txt = build_report_text(period=period, fmt='brief')
-        _send(chat_id, txt)
-        return jsonify({'ok': True})
-    if text.startswith('/whoami'):
-        _send(chat_id, f"chat_id={chat_id}, role={user.get('role','user')}")
-        return jsonify({'ok': True})
-    if text.startswith('/emergency_stop'):
-        if str(user.get('role','user')) != 'admin':
-            _send(chat_id, 'Нет прав')
-            return jsonify({'ok': True})
-        try:
-            from app import app as _app
-            with _app.test_request_context():
-                from app import api_emergency_stop as _es
-                _es()
-            _send(chat_id, '🚨 Аварийная остановка активирована')
-        except Exception:
-            _send(chat_id, 'Ошибка аварийной остановки')
-        return jsonify({'ok': True})
-    if text.startswith('/emergency_resume'):
-        if str(user.get('role','user')) != 'admin':
-            _send(chat_id, 'Нет прав')
-            return jsonify({'ok': True})
-        try:
-            from app import app as _app
-            with _app.test_request_context():
-                from app import api_emergency_resume as _er
-                _er()
-            _send(chat_id, '✅ Аварийная остановка снята')
-        except Exception:
-            _send(chat_id, 'Ошибка снятия аварийной остановки')
-        return jsonify({'ok': True})
-    if text.startswith('/broadcast'):
-        if str(user.get('role','user')) != 'admin':
-            _send(chat_id, 'Нет прав')
-            return jsonify({'ok': True})
-        msg = text[len('/broadcast'):].strip()
-        if not msg:
-            _send(chat_id, 'Текст пуст')
-            return jsonify({'ok': True})
-        try:
-            # naive: broadcast to all authorized users
-            import sqlite3
-            with sqlite3.connect(db.db_path, timeout=5) as conn:
-                conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT chat_id FROM bot_users WHERE is_authorized=1')
-                for r in cur.fetchall():
-                    try:
-                        notifier.send_text(int(r['chat_id']), msg)
-                    except Exception:
-                        pass
-            _send(chat_id, 'Рассылка выполнена')
-        except Exception:
-            _send(chat_id, 'Ошибка рассылки')
-        return jsonify({'ok': True})
-    if text.startswith('/subscribe'):
-        # /subscribe daily brief 08:00   or weekly full 09:00 1111100
-        try:
-            parts = text.split()
-            stype = parts[1] if len(parts)>1 else 'daily'
-            sformat = parts[2] if len(parts)>2 else 'brief'
-            time_local = parts[3] if len(parts)>3 else '08:00'
-            dow = parts[4] if (len(parts)>4 and stype=='weekly') else None
-        except Exception:
-            stype, sformat, time_local, dow = 'daily','brief','08:00',None
-        # map chat->user
-        u = db.get_bot_user_by_chat(int(chat_id))
-        if u:
-            db.create_or_update_subscription(int(u.get('id')), stype, sformat, time_local, dow, True)
-            _send(chat_id, 'Подписка сохранена')
-        return jsonify({'ok': True})
-    if text.startswith('/unsubscribe'):
-        u = db.get_bot_user_by_chat(int(chat_id))
-        if u:
-            # disable all
-            try:
-                db.create_or_update_subscription(int(u.get('id')), 'daily', 'brief', '08:00', None, False)
-                db.create_or_update_subscription(int(u.get('id')), 'weekly', 'brief', '08:00', '1111111', False)
-            except Exception:
-                pass
-        _send(chat_id, 'Подписки отключены')
-        return jsonify({'ok': True})
-    # --- Callback handling ---
-    if callback:
-        try:
-            data = str(callback.get('data') or '')
-            cqid = callback.get('id')
-            from_chat = ((callback.get('message') or {}).get('chat') or {}).get('id') or chat_id
-            if _dedup_cb(int(from_chat), data):
-                try:
-                    notifier.answer_callback(cqid)
-                except Exception:
-                    pass
-                return jsonify({'ok': True})
-            # Acknowledge
-            try:
-                notifier.answer_callback(cqid)
-            except Exception:
-                pass
-            # Try JSON/base64 callbacks first
-            jd = _cb_decode(data)
-            if jd.get('t'):
-                process_callback_json(int(from_chat), jd)
-                return jsonify({'ok': True})
-
-            if data.startswith('menu:'):
-                action = data.split(':',1)[1]
-                if action == 'groups':
-                    gl = db.list_groups_min()
-                    txt = 'Группы:\n' + '\n'.join([f"{g['id']}: {g['name']}" for g in gl])
-                    _send(from_chat, txt)
-                elif action == 'zones':
-                    gl = db.list_groups_min()
-                    if gl:
-                        rows = [[{'text': f"{g['id']}: {g['name']}", 'callback_data': f"zones:{g['id']}"}] for g in gl]
-                        notifier.send_message(from_chat, 'Выберите группу:', _inline_markup(rows))
-                    else:
-                        _send(from_chat, 'Нет групп')
-                elif action == 'postpone':
-                    gl = db.list_groups_min()
-                    if gl:
-                        rows = []
-                        for g in gl:
-                            gid = int(g['id']); name = g['name']
-                            rows.append([
-                                {'text': f"{name}: +1д", 'callback_data': f"grp_postpone:{gid}:1"},
-                                {'text': "+2д", 'callback_data': f"grp_postpone:{gid}:2"},
-                                {'text': "+3д", 'callback_data': f"grp_postpone:{gid}:3"}
-                            ])
-                        notifier.send_message(from_chat, 'Отложить полив по группам:', _inline_markup(rows))
-                    else:
-                        _send(from_chat, 'Нет групп')
-                elif action == 'report':
-                    txt = build_report_text(period='today', fmt='brief')
-                    _send(from_chat, txt)
-                elif action == 'subs':
-                    _send(from_chat, 'Подписки: используйте команды /subscribe и /unsubscribe')
-                elif action == 'notif':
-                    _send(from_chat, 'Настройки уведомлений пока задаются админом на сервере')
-                elif action == 'emergency':
-                    role = _get_role(from_chat)
-                    if not _role_allowed(role, 'admin'):
-                        _send(from_chat, 'Нет прав')
-                    else:
-                        rows = [[{'text':'🚨 Подтвердить остановку','callback_data':'confirm:emergency:on'}],
-                                [{'text':'Отмена','callback_data':'confirm:cancel'}]]
-                        notifier.send_message(from_chat, 'Подтвердите аварийную остановку', _inline_markup(rows))
-                return jsonify({'ok': True})
-            if data.startswith('zones:'):
-                try:
-                    gid = int(data.split(':',1)[1])
-                except Exception:
-                    gid = 0
-                if gid:
-                    zl = db.list_zones_by_group_min(gid)
-                    if zl:
-                        # Покажем клавиатуру для быстрого старта/стопа зон
-                        rows = []
-                        for z in zl:
-                            zid = int(z['id']); name = z['name']
-                            rows.append([
-                                {'text': f"▶ {name}", 'callback_data': f"zone_start:{zid}"},
-                                {'text': f"⏹ {name}", 'callback_data': f"zone_stop:{zid}"}
-                            ])
-                        notifier.send_message(from_chat, f'Группа {gid}: выберите действие по зонам', _inline_markup(rows))
-                    else:
-                        _send(from_chat, f'В группе {gid} нет зон')
-                return jsonify({'ok': True})
-            if data.startswith('zone_start:'):
-                try:
-                    zid = int(data.split(':',1)[1])
-                except Exception:
-                    zid = 0
-                if zid:
-                    role = _get_role(from_chat)
-                    if not _role_allowed(role, 'user'):
-                        _send(from_chat, 'Нет прав')
-                        return jsonify({'ok': True})
-                    try:
-                        from services.zone_control import exclusive_start_zone
-                        exclusive_start_zone(zid)
-                        _send(from_chat, f'▶ Зона {zid} запущена')
-                    except Exception:
-                        _send(from_chat, 'Ошибка запуска зоны')
-                return jsonify({'ok': True})
-            if data.startswith('zone_stop:'):
-                try:
-                    zid = int(data.split(':',1)[1])
-                except Exception:
-                    zid = 0
-                if zid:
-                    role = _get_role(from_chat)
-                    if not _role_allowed(role, 'user'):
-                        _send(from_chat, 'Нет прав')
-                        return jsonify({'ok': True})
-                    try:
-                        from services.zone_control import stop_zone
-                        stop_zone(zid, reason='telegram')
-                        _send(from_chat, f'⏹ Зона {zid} остановлена')
-                    except Exception:
-                        _send(from_chat, 'Ошибка остановки зоны')
-                return jsonify({'ok': True})
-            if data.startswith('grp_start:'):
-                try:
-                    gid = int(data.split(':',1)[1])
-                except Exception:
-                    gid = 0
-                if gid:
-                    role = _get_role(from_chat)
-                    if not _role_allowed(role, 'user'):
-                        _send(from_chat, 'Нет прав')
-                        return jsonify({'ok': True})
-                    try:
-                        from irrigation_scheduler import get_scheduler
-                        s = get_scheduler()
-                        if s:
-                            s.start_group_sequence(gid)
-                        _send(from_chat, f'▶ Группа {gid} запущена')
-                    except Exception:
-                        _send(from_chat, 'Ошибка запуска группы')
-                return jsonify({'ok': True})
-            if data.startswith('grp_stop:'):
-                try:
-                    gid = int(data.split(':',1)[1])
-                except Exception:
-                    gid = 0
-                if gid:
-                    role = _get_role(from_chat)
-                    if not _role_allowed(role, 'user'):
-                        _send(from_chat, 'Нет прав')
-                        return jsonify({'ok': True})
-                    try:
-                        from services.zone_control import stop_all_in_group
-                        stop_all_in_group(gid, reason='telegram')
-                        _send(from_chat, f'⏹ Группа {gid} остановлена')
-                    except Exception:
-                        _send(from_chat, 'Ошибка остановки группы')
-                return jsonify({'ok': True})
-            if data.startswith('grp_postpone:'):
-                parts = data.split(':')
-                gid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                days = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
-                if gid:
-                    role = _get_role(from_chat)
-                    if not _role_allowed(role, 'user'):
-                        _send(from_chat, 'Нет прав')
-                        return jsonify({'ok': True})
-                    try:
-                        from app import app as _app
-                        with _app.test_request_context(json={'group_id': gid, 'action': 'postpone', 'days': days}):
-                            from app import api_postpone as _pp
-                            _pp()
-                        _send(from_chat, f'Группа {gid}: отложен полив на {days} дн.')
-                    except Exception:
-                        _send(from_chat, 'Ошибка отложенного полива')
-                return jsonify({'ok': True})
-            if data == 'confirm:cancel':
-                _send(from_chat, 'Отменено')
-                return jsonify({'ok': True})
-            if data.startswith('confirm:emergency:'):
-                what = data.split(':',2)[2]
-                role = _get_role(from_chat)
-                if not _role_allowed(role, 'admin'):
-                    _send(from_chat, 'Нет прав')
-                    return jsonify({'ok': True})
-                try:
-                    from app import app as _app
-                    with _app.test_request_context():
-                        if what == 'on':
-                            from app import api_emergency_stop as _es
-                            _es()
-                            _send(from_chat, '🚨 Аварийная остановка активирована')
-                        else:
-                            from app import api_emergency_resume as _er
-                            _er()
-                            _send(from_chat, '✅ Аварийная остановка снята')
-                except Exception:
-                    _send(from_chat, 'Ошибка выполнения аварийной операции')
-                return jsonify({'ok': True})
-        except Exception:
-            pass
-    return jsonify({'ok': True})
-
+    # fallback -> главное меню
+    text, markup = _screen_main_menu()
+    if message_id:
+        _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+    else:
+        _notifier.send_message(chat_id, text, reply_markup=markup)
