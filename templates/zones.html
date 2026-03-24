@@ -3037,6 +3037,14 @@
             // Отправляем одним запросом
             const payload = { zones: zonesToImport };
             const resp = await fetch('/api/zones/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            if (resp.status === 401 || resp.status === 403) {
+                const err = await resp.json().catch(() => ({}));
+                const msg = err.error_code === 'PASSWORD_MUST_CHANGE'
+                    ? 'Необходимо сменить пароль перед импортом'
+                    : 'Для импорта требуется авторизация администратора';
+                showNotification(msg, 'error');
+                return;
+            }
             const j = await resp.json();
             
             // Перезагружаем данные
@@ -3044,7 +3052,7 @@
             if (j && j.success) {
                 showNotification(`Импорт: создано ${j.created}, обновлено ${j.updated}, ошибок ${j.failed}`, 'success');
             } else {
-                showNotification('Импорт завершился с ошибкой', 'error');
+                showNotification(j.message || 'Импорт завершился с ошибкой', 'error');
             }
             
         } catch (error) {
