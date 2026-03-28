@@ -5,7 +5,7 @@ services:
     environment:
       - TESTING=0
       - UI_THEME=auto
-      - SECRET_KEY=${SECRET_KEY:-wb-irrigation-secret}
+      - SECRET_KEY=${SECRET_KEY:-}
     ports:
       - "8080:8080"
     volumes:

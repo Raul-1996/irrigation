@@ -156,6 +156,10 @@ venv/
 env/
 .venv/
 
+# Secret key files (auto-generated)
+.secret_key
+.irrig_secret_key
+
 # WB-Irrigation runtime artifacts
 backups/
 server.out
