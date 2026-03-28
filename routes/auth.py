@@ -2,6 +2,7 @@ from flask import Blueprint, render_template, request, jsonify, session, redirec
 import time
 from flask_wtf.csrf import CSRFProtect
 from services.auth_service import verify_password
+from services.rate_limiter import login_limiter
 
 auth_bp = Blueprint('auth_bp', __name__)
 
@@ -20,24 +21,22 @@ def login_page():
 def api_login():
     data = request.get_json(silent=True) or {}
     password = (data.get('password') or '').strip()
-    # Простейший rate limit по IP/сеансу: не чаще 1 попытки в 2 секунды
-    # Минимальный rate-limit без задержек
-    try:
-        now = time.time()
-        last = float(session.get('_last_login_try', 0))
-        session['_last_login_try'] = now
-        if (now - last) < 0.5:
-            return jsonify({'success': False, 'message': 'Слишком часто. Повторите позже.'}), 429
-    except Exception:
-        pass
+
+    # IP-based rate limiting (TASK-009)
+    ip = request.remote_addr or '0.0.0.0'
+    allowed, retry_after = login_limiter.check(ip)
+    if not allowed:
+        return jsonify({'success': False, 'message': f'Слишком много попыток. Повторите через {retry_after}с'}), 429
 
     success, role = verify_password(password)
-    
+
     if success:
+        login_limiter.reset(ip)
         session['logged_in'] = True
         session['role'] = role
         return jsonify({'success': True, 'role': role})
-    
+
+    login_limiter.record_failure(ip)
     return jsonify({'success': False, 'message': 'Неверный пароль'}), 401
 
 
