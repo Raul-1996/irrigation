@@ -16,7 +16,7 @@ class LoginRateLimiter:
 
     def __init__(self, max_attempts: int = LOGIN_MAX_ATTEMPTS,
                  window_sec: int = LOGIN_WINDOW_SEC,
-                 lockout_sec: int = LOGIN_LOCKOUT_SEC):
+                 lockout_sec: int = LOGIN_LOCKOUT_SEC) -> None:
         """
         Args:
             max_attempts: Maximum failed attempts before lockout.

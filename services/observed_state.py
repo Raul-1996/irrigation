@@ -130,7 +130,7 @@ class StateVerifier:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _expected_payloads(expected: str) -> set:
+    def _expected_payloads(expected: str) -> set[str]:
         """Return set of MQTT payloads that satisfy the expected state."""
         e = expected.lower().strip()
         if e in ('on', '1'):
@@ -138,7 +138,7 @@ class StateVerifier:
         else:
             return {'0', 'off', 'OFF', 'false', 'False', 'FALSE'}
 
-    def _subscribe_and_wait(self, server: dict, topic: str, expected_payloads: set,
+    def _subscribe_and_wait(self, server: dict, topic: str, expected_payloads: set[str],
                             timeout: float) -> bool:
         """Create a temporary MQTT client, subscribe, and wait for matching payload."""
         result = threading.Event()

@@ -2,15 +2,18 @@ import sqlite3
 import functools
 import time
 import logging
+from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
+F = TypeVar('F', bound=Callable[..., Any])
 
-def retry_on_busy(max_retries=3, initial_backoff=0.1):
+
+def retry_on_busy(max_retries: int = 3, initial_backoff: float = 0.1) -> Callable[[F], F]:
     """Decorator to retry SQLite operations on 'database is locked' errors."""
-    def decorator(func):
+    def decorator(func: F) -> F:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
@@ -20,17 +23,17 @@ def retry_on_busy(max_retries=3, initial_backoff=0.1):
                         logger.warning("SQLite BUSY retry %d/%d for %s", attempt + 1, max_retries, func.__name__)
                     else:
                         raise
-        return wrapper
+        return wrapper  # type: ignore[return-value]
     return decorator
 
 
 class BaseRepository:
     """Base class for all database repositories."""
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, db_path: str) -> None:
+        self.db_path: str = db_path
 
-    def _connect(self):
+    def _connect(self) -> sqlite3.Connection:
         """Create a new SQLite connection with WAL mode and foreign keys."""
         conn = sqlite3.connect(self.db_path, timeout=5)
         conn.execute('PRAGMA journal_mode=WAL')

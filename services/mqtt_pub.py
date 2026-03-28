@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import Optional, Dict, Tuple
+from typing import Any, Optional, Dict, Tuple
 
 try:
     import paho.mqtt.client as mqtt
@@ -29,7 +29,7 @@ from constants import MQTT_CACHE_TTL_SEC
 _SERVER_CACHE_TTL = float(MQTT_CACHE_TTL_SEC)
 
 
-def get_or_create_mqtt_client(server: dict):
+def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
     if mqtt is None:
         return None
     try:
