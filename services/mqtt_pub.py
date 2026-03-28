@@ -209,3 +209,22 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
     except Exception:
         logger.exception('publish_mqtt_value failed')
         return False
+
+
+# ── Graceful shutdown ──────────────────────────────────────────────────────
+import atexit
+
+
+def _shutdown_mqtt_clients() -> None:
+    """Disconnect all cached MQTT clients on process exit."""
+    for sid, cl in list(_MQTT_CLIENTS.items()):
+        try:
+            cl.loop_stop()
+            cl.disconnect()
+            logger.info("MQTT client disconnected for server %s", sid)
+        except Exception as e:
+            logger.debug("MQTT shutdown error for %s: %s", sid, e)
+    _MQTT_CLIENTS.clear()
+
+
+atexit.register(_shutdown_mqtt_clients)
