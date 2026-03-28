@@ -19,6 +19,12 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+# Record build-time git info into VERSION (best-effort, .git may be absent)
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+RUN printf '\ngit_commit=%s\ngit_branch=%s\nbuild_date=%s\n' \
+    "$GIT_COMMIT" "$GIT_BRANCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> VERSION || true
+
 # Create non-root user and ensure writable directories
 RUN adduser --disabled-password --gecos '' appuser \
  && mkdir -p /app/media /app/backups \

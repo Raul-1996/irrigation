@@ -87,12 +87,12 @@ except (TypeError, ValueError) as e:
 # ── App version ────────────────────────────────────────────────────────────
 def _compute_app_version() -> str:
     try:
-        import subprocess
-        cnt = subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=os.getcwd())
-        return f"1.{int((cnt or b'0').decode().strip() or '0')}"
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        logger.debug("git version detection failed: %s", e)
-        return '1.0'
+        version_file = os.path.join(os.path.dirname(__file__), 'VERSION')
+        with open(version_file, 'r') as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.debug("VERSION file read failed: %s", e)
+        return '2.0.0'
 
 APP_VERSION = _compute_app_version()
 
