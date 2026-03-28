@@ -53,6 +53,7 @@ try:
 except Exception:
     pass
 from services.locks import snapshot_all_locks as _locks_snapshot
+from services import sse_hub as _sse_hub
 from collections import deque
 
 # Unified API error helpers
@@ -200,12 +201,21 @@ except Exception:
     pass
 
 app = Flask(__name__)
-# Глобальный буфер последних meta-сообщений для health-панели
-_SSE_META_BUFFER = deque(maxlen=100)
 app.config.from_object(Config)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024  # 2 MB upload limit
 app.db = db  # Добавляем атрибут db для тестов
 csrf = CSRFProtect(app)
+
+# Initialise the SSE hub with injected dependencies (no circular imports)
+_sse_hub.init(
+    db=db,
+    mqtt_module=mqtt,
+    app_config=app.config,
+    publish_mqtt_value=_publish_mqtt_value,
+    normalize_topic=normalize_topic,
+    get_scheduler=get_scheduler,
+)
+
 # Долгое кеширование статики (ускоряет первую загрузку)
 try:
     app.config.setdefault('SEND_FILE_MAX_AGE_DEFAULT', 60 * 60 * 24 * 7)
@@ -302,7 +312,7 @@ def api_health_details():
         except Exception:
             pass
         try:
-            meta_tail = list(globals().get('_SSE_META_BUFFER', []))
+            meta_tail = _sse_hub.get_meta_buffer()
         except Exception:
             meta_tail = []
         payload = {
@@ -3458,207 +3468,15 @@ def api_zone_watering_time(zone_id):
 
 @app.route('/api/mqtt/zones-sse')
 def api_mqtt_zones_sse():
-    # Единый хаб подписки на MQTT для всех SSE клиентов
+    """Единый хаб подписки на MQTT для всех SSE клиентов (delegated to services.sse_hub)."""
     if mqtt is None:
-        # В тестовом режиме допускаем 200 со стандартным телом для проверок
         if app.config.get('TESTING'):
             return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
         return api_error('MQTT_LIB_MISSING', 'paho-mqtt not installed', 500)
     try:
-        # Глобальные структуры хаба
-        global _SSE_HUB_STARTED
-        try:
-            _SSE_HUB_STARTED
-        except NameError:
-            _SSE_HUB_STARTED = False
-        global _SSE_HUB_LOCK
-        try:
-            _SSE_HUB_LOCK
-        except NameError:
-            _SSE_HUB_LOCK = threading.Lock()
-        global _SSE_HUB_CLIENTS
-        try:
-            _SSE_HUB_CLIENTS
-        except NameError:
-            _SSE_HUB_CLIENTS = []  # list[queue.Queue]
-        global _SSE_HUB_MQTT
-        try:
-            _SSE_HUB_MQTT
-        except NameError:
-            _SSE_HUB_MQTT = {}
+        _sse_hub.ensure_hub_started()
 
-        def _rebuild_subscriptions():
-            zones = db.get_zones()
-            groups = db.get_groups() or []
-            zone_topics = {}
-            mv_topics = {}
-            for z in zones:
-                sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
-                if not sid or not topic:
-                    continue
-                t = topic if str(topic).startswith('/') else '/' + str(topic)
-                zone_topics.setdefault(int(sid), {}).setdefault(t, []).append(int(z['id']))
-            for g in groups:
-                try:
-                    if int(g.get('use_master_valve') or 0) != 1:
-                        continue
-                except Exception:
-                    continue
-                mtopic = (g.get('master_mqtt_topic') or '').strip()
-                msid = g.get('master_mqtt_server_id')
-                if not mtopic or not msid:
-                    continue
-                t = mtopic if str(mtopic).startswith('/') else '/' + str(mtopic)
-                mv_topics.setdefault(int(msid), {}).setdefault(t, []).append(int(g.get('id')))
-            return zone_topics, mv_topics
-
-        # Буфер последних meta-сообщений на сервере (для health-панели)
-        try:
-            global _SSE_META_BUFFER
-        except NameError:
-            _SSE_META_BUFFER = deque(maxlen=100)
-
-        def _ensure_hub_started():
-            global _SSE_HUB_STARTED, _SSE_HUB_CLIENTS, _SSE_HUB_MQTT, _SSE_META_BUFFER
-            with _SSE_HUB_LOCK:
-                if _SSE_HUB_STARTED:
-                    return
-                zone_topics, mv_topics = _rebuild_subscriptions()
-                for sid, topics in zone_topics.items():
-                    server = db.get_mqtt_server(int(sid))
-                    if not server:
-                        continue
-                    try:
-                        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get('client_id') or None))
-                        if server.get('username'):
-                            client.username_pw_set(server.get('username'), server.get('password') or None)
-                        def _on_message(cl, userdata, msg, sid_local=int(sid)):
-                            t = str(getattr(msg, 'topic', '') or '')
-                            if not t.startswith('/'):
-                                t = '/' + t
-                            try:
-                                payload = msg.payload.decode('utf-8', errors='ignore').strip()
-                            except Exception:
-                                payload = str(msg.payload)
-                            # Обработка meta-топика: /meta
-                            if t.endswith('/meta'):
-                                try:
-                                    _SSE_META_BUFFER.append({'topic': t, 'payload': payload, 'ts': datetime.now().strftime('%H:%M:%S')})
-                                except Exception:
-                                    pass
-                                return
-                            zone_ids = zone_topics.get(sid_local, {}).get(t) or []
-                            mv_group_ids = mv_topics.get(sid_local, {}).get(t) or []
-                            # Если это мастер-клапан: шлём отдельное событие и фиксируем наблюдаемое состояние
-                            if mv_group_ids:
-                                mv_state = 'open' if payload in ('1','true','ON','on') else 'closed'
-                                for gid in mv_group_ids:
-                                    try:
-                                        db.update_group_fields(int(gid), {'master_valve_observed': mv_state})
-                                    except Exception:
-                                        pass
-                                    data_mv = json.dumps({'mv_group_id': int(gid), 'mv_state': mv_state})
-                                    with _SSE_HUB_LOCK:
-                                        for q in list(_SSE_HUB_CLIENTS):
-                                            try:
-                                                q.put_nowait(data_mv)
-                                            except Exception:
-                                                pass
-                                # Продолжаем обработку: МК не является зоной
-                                return
-                            new_state = 'on' if payload in ('1','true','ON','on') else 'off'
-                            # Аварийный стоп
-                            if app.config.get('EMERGENCY_STOP') and new_state == 'on':
-                                new_state = 'off'
-                                try:
-                                    srv = db.get_mqtt_server(int(sid_local))
-                                    if srv:
-                                        _publish_mqtt_value(srv, t, '0')
-                                except Exception:
-                                    pass
-                            # Окно анти-ре-старта
-                            try:
-                                for zid in list(zone_ids):
-                                    if new_state == 'on' and _recently_stopped(int(zid), window_sec=5):
-                                        new_state = 'off'
-                                        try:
-                                            srv2 = db.get_mqtt_server(int(sid_local))
-                                            if srv2:
-                                                _publish_mqtt_value(srv2, t, '0')
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-                            # Обновление БД и планировщика
-                            for zid in zone_ids:
-                                try:
-                                    z = db.get_zone(int(zid)) or {}
-                                    updates = {'state': new_state}
-                                    if new_state == 'on':
-                                        if not z.get('watering_start_time'):
-                                            updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                            updates['watering_start_source'] = 'remote'
-                                        try:
-                                            sched = get_scheduler()
-                                            if sched:
-                                                dur = int(z.get('duration') or 0)
-                                                if dur > 0:
-                                                    sched.cancel_zone_jobs(int(zid))
-                                                    sched.schedule_zone_stop(int(zid), dur, command_id=str(int(time.time())))
-                                        except Exception:
-                                            pass
-                                    else:
-                                        if z.get('watering_start_time'):
-                                            updates['last_watering_time'] = z.get('watering_start_time')
-                                        updates['watering_start_time'] = None
-                                        try:
-                                            sched = get_scheduler()
-                                            if sched:
-                                                sched.cancel_zone_jobs(int(zid))
-                                        except Exception:
-                                            pass
-                                    try:
-                                        updates2 = updates.copy()
-                                    except Exception:
-                                        updates2 = dict(updates)
-                                    updates2['observed_state'] = new_state
-                                    db.update_zone(int(zid), updates2)
-                                except Exception:
-                                    pass
-                                data = json.dumps({'zone_id': int(zid), 'topic': t, 'payload': payload, 'state': new_state})
-                                # Фан-аут события всем подписчикам
-                                with _SSE_HUB_LOCK:
-                                    for q in list(_SSE_HUB_CLIENTS):
-                                        try:
-                                            q.put_nowait(data)
-                                        except Exception:
-                                            pass
-                        client.on_message = _on_message
-                        client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                        # Подписываемся на зонные топики
-                        for t in topics.keys():
-                            try:
-                                client.subscribe(t, qos=0)
-                            except Exception:
-                                pass
-                        # Подписываемся на топики мастер-клапанов этого сервера
-                        for t_mv in mv_topics.get(int(sid), {}).keys():
-                            try:
-                                client.subscribe(t_mv, qos=0)
-                            except Exception:
-                                pass
-                        client.loop_start()
-                        _SSE_HUB_MQTT[int(sid)] = client
-                    except Exception:
-                        continue
-                _SSE_HUB_STARTED = True
-
-        _ensure_hub_started()
-
-        # Регистрируем очередь клиента в хабе и отдаём SSE
-        msg_queue = queue.Queue(maxsize=10000)
-        with _SSE_HUB_LOCK:
-            _SSE_HUB_CLIENTS.append(msg_queue)
+        msg_queue = _sse_hub.register_client()
 
         @stream_with_context
         def _gen():
@@ -3671,11 +3489,7 @@ def api_mqtt_zones_sse():
                     except queue.Empty:
                         yield 'event: ping\n' + 'data: {}\n\n'
             finally:
-                with _SSE_HUB_LOCK:
-                    try:
-                        _SSE_HUB_CLIENTS.remove(msg_queue)
-                    except Exception:
-                        pass
+                _sse_hub.unregister_client(msg_queue)
         return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     except Exception as e:
         logger.error(f"zones SSE failed: {e}")
@@ -3884,24 +3698,9 @@ def api_zone_mqtt_stop(zone_id: int):
         logger.error(f"MQTT publish stop failed: {e}")
         return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
 
-# Анти-ре-старт: запоминаем ручные остановки, чтобы игнорировать мгновенные ON
-_LAST_MANUAL_STOP: dict[int, float] = {}
-_LAST_STOP_LOCK = threading.Lock()
-
-def _mark_zone_stopped(zone_id: int) -> None:
-    try:
-        with _LAST_STOP_LOCK:
-            _LAST_MANUAL_STOP[int(zone_id)] = time.time()
-    except Exception:
-        pass
-
-def _recently_stopped(zone_id: int, window_sec: int = 5) -> bool:
-    try:
-        with _LAST_STOP_LOCK:
-            ts = _LAST_MANUAL_STOP.get(int(zone_id))
-        return (ts is not None) and ((time.time() - ts) < max(0, int(window_sec)))
-    except Exception:
-        return False
+# Anti-restart helpers delegated to sse_hub
+_mark_zone_stopped = _sse_hub.mark_zone_stopped
+_recently_stopped = _sse_hub.recently_stopped
 
 @app.route('/api/groups/<int:group_id>/master-valve/<action>', methods=['POST'])
 def api_master_valve_toggle(group_id, action):
@@ -3990,11 +3789,8 @@ def api_master_valve_toggle(group_id, action):
             except Exception:
                 pass
             try:
-                # SSE broadcast if available
-                with _SSE_HUB_LOCK:
-                    for q in list(_SSE_HUB_CLIENTS or []):  # type: ignore[name-defined]
-                        try: q.put_nowait(payload)
-                        except Exception: pass
+                # SSE broadcast via hub
+                _sse_hub.broadcast(payload)
             except Exception:
                 pass
         except Exception:
