@@ -203,6 +203,7 @@ app = Flask(__name__)
 # Глобальный буфер последних meta-сообщений для health-панели
 _SSE_META_BUFFER = deque(maxlen=100)
 app.config.from_object(Config)
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024  # 2 MB upload limit
 app.db = db  # Добавляем атрибут db для тестов
 csrf = CSRFProtect(app)
 # Долгое кеширование статики (ускоряет первую загрузку)
@@ -384,6 +385,12 @@ def _perf_add_server_timing(resp: Response):
             resp.headers['Server-Timing'] = f"app;dur={dur_ms}"
     except Exception:
         pass
+    return resp
+
+@app.after_request
+def add_security_headers(resp):
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
     return resp
 
 # Настройки хранения медиафайлов

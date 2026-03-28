@@ -19,6 +19,11 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+# Create non-root user and ensure writable directories
+RUN adduser --disabled-password --gecos '' appuser \
+ && mkdir -p /app/media /app/backups \
+ && chown -R appuser:appuser /app
+
 EXPOSE 8080
 
 # Healthcheck to /health (optional)
@@ -26,6 +31,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/ || exit 1
 
 ENV TESTING=0
+
+USER appuser
 
 CMD ["python","run.py"]
 
