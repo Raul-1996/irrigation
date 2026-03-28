@@ -21,6 +21,15 @@ class RainMonitor:
         self.is_rain: Optional[bool] = None
         self._cfg: dict | None = None
 
+    def stop(self):
+        try:
+            if self.client is not None:
+                self.client.loop_stop()
+                self.client.disconnect()
+        except Exception:
+            logger.exception('RainMonitor stop failed')
+        self.client = None
+
     def start(self, cfg: dict):
         try:
             enabled = bool(cfg.get('enabled'))
@@ -167,13 +176,32 @@ class EnvMonitor:
         self.hum_client = None
         self.temp_value: Optional[float] = None
         self.hum_value: Optional[float] = None
+        self.cfg = None
+        self.last_temp_rx_ts: float = 0.0
+        self.last_hum_rx_ts: float = 0.0
         self._lock = threading.Lock()
 
+    def stop(self):
+        for cl in (self.temp_client, self.hum_client):
+            try:
+                if cl is not None:
+                    cl.loop_stop()
+                    cl.disconnect()
+            except Exception:
+                pass
+        self.temp_client = None
+        self.hum_client = None
+        self.last_temp_rx_ts = 0.0
+        self.last_hum_rx_ts = 0.0
+
     def start(self, cfg: dict):
+        self.stop()
+        self.cfg = cfg or {}
         try:
             if mqtt is None:
                 logger.warning('EnvMonitor start skipped: paho-mqtt not available')
                 return
+            logger.info(f"EnvMonitor starting with cfg={cfg}")
             tcfg = cfg.get('temp') or {}
             hcfg = cfg.get('hum') or {}
             if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
@@ -191,21 +219,41 @@ class EnvMonitor:
             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
             if server.get('username'):
                 cl.username_pw_set(server.get('username'), server.get('password') or None)
+            import time as _time
             def _on_message(c, u, msg):
                 try:
-                    p = msg.payload.decode('utf-8', errors='ignore').strip()
+                    p = msg.payload.decode('utf-8', errors='ignore').strip().replace(',', '.')
                     try:
-                        val = float(p)
+                        val = round(float(p))
                         with self._lock:
                             self.temp_value = val
+                        self.last_temp_rx_ts = _time.time()
+                        logger.info(f"EnvMonitor temp RX topic={getattr(msg, 'topic', topic)} value={val}")
                     except Exception:
                         logger.exception('EnvMonitor temp parse failed')
                 except Exception:
                     logger.exception('EnvMonitor temp RX failed')
+            def _on_connect_temp(c, u, flags, reason_code, properties=None):
+                try:
+                    c.subscribe(topic, qos=0)
+                    logger.info(f"EnvMonitor temp subscribed {topic}")
+                except Exception:
+                    logger.exception('EnvMonitor temp subscribe failed')
+            def _on_disconnect_temp(c, u, rc, properties=None):
+                try:
+                    self.temp_client = None
+                    logger.info(f"EnvMonitor temp disconnected: rc={rc}")
+                except Exception:
+                    pass
             cl.on_message = _on_message
-            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 10)
-            cl.subscribe(topic, qos=0)
+            cl.on_connect = _on_connect_temp
+            cl.on_disconnect = _on_disconnect_temp
+            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
             cl.loop_start()
+            try:
+                cl.subscribe(topic, qos=0)
+            except Exception:
+                logger.exception('EnvMonitor temp immediate subscribe failed')
             self.temp_client = cl
         except Exception:
             logger.exception('EnvMonitor temp start failed')
@@ -218,21 +266,41 @@ class EnvMonitor:
             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
             if server.get('username'):
                 cl.username_pw_set(server.get('username'), server.get('password') or None)
+            import time as _time
             def _on_message(c, u, msg):
                 try:
-                    p = msg.payload.decode('utf-8', errors='ignore').strip()
+                    p = msg.payload.decode('utf-8', errors='ignore').strip().replace(',', '.')
                     try:
-                        val = float(p)
+                        val = round(float(p))
                         with self._lock:
                             self.hum_value = val
+                        self.last_hum_rx_ts = _time.time()
+                        logger.info(f"EnvMonitor hum RX topic={getattr(msg, 'topic', topic)} value={val}")
                     except Exception:
                         logger.exception('EnvMonitor hum parse failed')
                 except Exception:
                     logger.exception('EnvMonitor hum RX failed')
+            def _on_connect_hum(c, u, flags, reason_code, properties=None):
+                try:
+                    c.subscribe(topic, qos=0)
+                    logger.info(f"EnvMonitor hum subscribed {topic}")
+                except Exception:
+                    logger.exception('EnvMonitor hum subscribe failed')
+            def _on_disconnect_hum(c, u, rc, properties=None):
+                try:
+                    self.hum_client = None
+                    logger.info(f"EnvMonitor hum disconnected: rc={rc}")
+                except Exception:
+                    pass
             cl.on_message = _on_message
-            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 10)
-            cl.subscribe(topic, qos=0)
+            cl.on_connect = _on_connect_hum
+            cl.on_disconnect = _on_disconnect_hum
+            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
             cl.loop_start()
+            try:
+                cl.subscribe(topic, qos=0)
+            except Exception:
+                logger.exception('EnvMonitor hum immediate subscribe failed')
             self.hum_client = cl
         except Exception:
             logger.exception('EnvMonitor hum start failed')
@@ -445,3 +513,38 @@ def start_water_monitor():
         water_monitor.start()
     except Exception:
         logger.exception('start_water_monitor failed')
+
+
+def probe_env_values(cfg: dict) -> None:
+    """One-shot subscribe to fetch retained env values (temp/hum) from MQTT brokers."""
+    try:
+        if mqtt is None:
+            return
+        logger.info('EnvProbe: starting')
+        topics = []
+        tcfg = (cfg.get('temp') or {})
+        hcfg = (cfg.get('hum') or {})
+        if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
+            topics.append((int(tcfg['server_id']), (tcfg['topic'] or '').strip(), 'temp'))
+        if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
+            topics.append((int(hcfg['server_id']), (hcfg['topic'] or '').strip(), 'hum'))
+        for sid, topic, kind in topics:
+            server = db.get_mqtt_server(int(sid))
+            if not server or not topic:
+                continue
+            try:
+                logger.info(f"EnvProbe: connect sid={sid} host={server.get('host')} port={server.get('port')} topic={topic} kind={kind}")
+                from services.mqtt_pub import get_or_create_mqtt_client
+                cl = get_or_create_mqtt_client(server)
+                if cl is None:
+                    logger.warning(f"EnvProbe: could not get client for sid={sid}")
+                    continue
+                # Subscribe to fetch retained value (the EnvMonitor's on_message will pick it up)
+                try:
+                    cl.subscribe(topic, qos=0)
+                except Exception:
+                    logger.exception(f'EnvProbe: subscribe failed for {topic}')
+            except Exception:
+                logger.exception(f'EnvProbe: failed for sid={sid} topic={topic}')
+    except Exception:
+        logger.exception('EnvProbe: outer failed')

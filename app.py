@@ -43,7 +43,7 @@ try:
 except Exception:
     reports_bp = None
 from werkzeug.security import check_password_hash
-from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor
+from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor, probe_env_values
 try:
     from services.telegram_bot import subscribe_to_events as _tg_subscribe
     _tg_subscribe()
@@ -578,279 +578,6 @@ def _warm_mqtt_clients() -> None:
         except Exception:
             pass
 
-class RainMonitor:
-    def __init__(self):
-        self.client = None
-        self.cfg = None
-        self.is_rain = None
-
-    def stop(self):
-        try:
-            if self.client is not None:
-                self.client.loop_stop()
-                self.client.disconnect()
-        except Exception:
-            logger.exception('manual-start: schedule_zone_stop failed')
-        self.client = None
-
-    def start(self, cfg: dict):
-        self.stop()
-        self.cfg = cfg or {}
-        if not self.cfg.get('enabled'):
-            return
-        if mqtt is None:
-            return
-        try:
-            topic = (self.cfg.get('topic') or '').strip()
-            sid = self.cfg.get('server_id')
-            if not topic or not sid:
-                return
-            server = db.get_mqtt_server(int(sid))
-            if not server:
-                return
-            cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-            if server.get('username'):
-                cl.username_pw_set(server.get('username'), server.get('password') or None)
-            cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-            cl.on_message = self._on_message
-            cl.on_connect = lambda c, u, f=None, rc=0, p=None: self._on_connect(c, topic)
-            self.client = cl
-            cl.loop_start()
-            logger.info("RainMonitor started")
-        except Exception:
-            logger.exception('RainMonitor start failed')
-
-    def _on_connect(self, client, topic: str):
-        try:
-            try:
-                options = mqtt.SubscribeOptions(qos=0, noLocal=False)
-                client.subscribe(topic, options=options)
-            except Exception:
-                client.subscribe(topic, qos=0)
-            logger.info(f"RainMonitor subscribed {topic}")
-        except Exception:
-            logger.exception('RainMonitor subscribe failed')
-
-    def _interpret_payload(self, payload: str) -> Optional[bool]:
-        s = (payload or '').strip().lower()
-        val = None
-        if s in ('1', 'true', 'on', 'yes'):
-            val = True
-        elif s in ('0', 'false', 'off', 'no'):
-            val = False
-        else:
-            try:
-                val = bool(int(s))
-            except Exception:
-                val = None
-        if val is None:
-            return None
-        sensor_type = (self.cfg.get('type') or 'NO').upper()
-        # NO: дождь -> вход True; NC: дождь -> вход False
-        return (not val) if sensor_type == 'NC' else val
-
-    def _on_message(self, client, u, msg):
-        try:
-            try:
-                payload = msg.payload.decode('utf-8', 'ignore')
-            except Exception:
-                payload = str(msg.payload)
-            rain_now = self._interpret_payload(payload)
-            if rain_now is None:
-                return
-            self.is_rain = bool(rain_now)
-            if self.is_rain:
-                self._apply_rain_postpone()
-        except Exception:
-            logger.exception('RainMonitor on_message failed')
-
-    def _apply_rain_postpone(self):
-        try:
-            groups = db.get_groups()
-            target_groups = [int(g['id']) for g in groups if db.get_group_use_rain(int(g['id'])) and int(g['id']) != 999]
-            if not target_groups:
-                return
-            postpone_until = datetime.now().strftime('%Y-%m-%d 23:59:59')
-            zones = db.get_zones()
-            for z in zones:
-                if int(z.get('group_id') or 0) in target_groups:
-                    db.update_zone_postpone(int(z['id']), postpone_until, 'rain')
-            scheduler = get_scheduler()
-            if scheduler:
-                for gid in target_groups:
-                    try:
-                        scheduler.cancel_group_jobs(int(gid))
-                    except Exception:
-                        pass
-            # Публикуем OFF и сбрасываем state
-            for z in zones:
-                try:
-                    if int(z.get('group_id') or 0) not in target_groups:
-                        continue
-                    sid = z.get('mqtt_server_id')
-                    topic = (z.get('topic') or '').strip()
-                    if mqtt and sid and topic:
-                        t = normalize_topic(topic)
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
-                    db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
-                except Exception:
-                    pass
-            try:
-                db.add_log('rain_postpone', json.dumps({'groups': target_groups, 'until': postpone_until}))
-            except Exception:
-                pass
-        except Exception:
-            logger.exception('RainMonitor apply postpone failed')
-
-rain_monitor = RainMonitor()
-
-class EnvMonitor:
-    def __init__(self):
-        self.temp_client = None
-        self.hum_client = None
-        self.temp_value = None
-        self.hum_value = None
-        self.cfg = None
-        self.last_temp_rx_ts = 0.0
-        self.last_hum_rx_ts = 0.0
-
-    def stop(self):
-        for cl in (self.temp_client, self.hum_client):
-            try:
-                if cl is not None:
-                    cl.loop_stop(); cl.disconnect()
-            except Exception:
-                pass
-        self.temp_client = None; self.hum_client = None
-        self.last_temp_rx_ts = 0.0
-        self.last_hum_rx_ts = 0.0
-
-    def start(self, cfg: dict):
-        self.stop(); self.cfg = cfg or {}
-        if mqtt is None:
-            try:
-                logger.warning('EnvMonitor start skipped: paho.mqtt not available')
-            except Exception:
-                pass
-            return
-        try:
-            logger.info(f"EnvMonitor starting with cfg={cfg}")
-        except Exception:
-            pass
-        # Temperature
-        tcfg = (self.cfg.get('temp') or {})
-        if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
-            server = db.get_mqtt_server(int(tcfg['server_id']))
-            if server:
-                try:
-                    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                    if server.get('username'):
-                        cl.username_pw_set(server.get('username'), server.get('password') or None)
-                    topic_t = (tcfg['topic'] or '').strip()
-                    try:
-                        logger.info(f"EnvMonitor temp connecting host={server.get('host')} port={server.get('port')} topic={topic_t}")
-                    except Exception:
-                        pass
-                    def _on_msg_temp(c, u, msg):
-                        try:
-                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip().replace(',', '.')
-                            self.temp_value = round(float(s))
-                            try:
-                                self.last_temp_rx_ts = time.time()
-                            except Exception:
-                                pass
-                            logger.info(f"EnvMonitor temp RX topic={getattr(msg,'topic',topic_t)} value={self.temp_value}")
-                        except Exception:
-                            logger.exception('EnvMonitor temp parse failed')
-                    def _on_connect_temp(c, u, flags, reason_code, properties=None):
-                        try:
-                            c.subscribe(topic_t, qos=0)
-                            logger.info(f"EnvMonitor temp subscribed {topic_t}")
-                        except Exception:
-                            logger.exception('EnvMonitor temp subscribe failed')
-                    def _on_disconnect_temp(c, u, rc, properties=None):
-                        try:
-                            self.temp_client = None
-                            logger.info(f"EnvMonitor temp disconnected: rc={rc}")
-                        except Exception:
-                            pass
-                    cl.on_message = _on_msg_temp
-                    cl.on_connect = _on_connect_temp
-                    cl.on_disconnect = _on_disconnect_temp
-                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                    cl.loop_start()
-                    # Also subscribe immediately in case already connected
-                    try:
-                        cl.subscribe(topic_t, qos=0)
-                    except Exception:
-                        logger.exception('EnvMonitor temp immediate subscribe failed')
-                    self.temp_client = cl
-                except Exception:
-                    logger.exception('EnvMonitor temp start failed')
-                    # В случае ошибки старта не блокируем будущие попытки
-                    self.temp_client = None
-        # Humidity
-        hcfg = (self.cfg.get('hum') or {})
-        if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
-            server = db.get_mqtt_server(int(hcfg['server_id']))
-            if server:
-                try:
-                    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                    if server.get('username'):
-                        cl.username_pw_set(server.get('username'), server.get('password') or None)
-                    topic_h = (hcfg['topic'] or '').strip()
-                    try:
-                        logger.info(f"EnvMonitor hum connecting host={server.get('host')} port={server.get('port')} topic={topic_h}")
-                    except Exception:
-                        pass
-                    def _on_msg_hum(c, u, msg):
-                        try:
-                            s = (msg.payload.decode('utf-8', 'ignore') or '').strip().replace(',', '.')
-                            self.hum_value = round(float(s))
-                            try:
-                                self.last_hum_rx_ts = time.time()
-                            except Exception:
-                                pass
-                            logger.info(f"EnvMonitor hum RX topic={getattr(msg,'topic',topic_h)} value={self.hum_value}")
-                        except Exception:
-                            logger.exception('EnvMonitor hum parse failed')
-                    def _on_connect_hum(c, u, flags, reason_code, properties=None):
-                        try:
-                            c.subscribe(topic_h, qos=0)
-                            logger.info(f"EnvMonitor hum subscribed {topic_h}")
-                        except Exception:
-                            logger.exception('EnvMonitor hum subscribe failed')
-                    def _on_disconnect_hum(c, u, rc, properties=None):
-                        try:
-                            self.hum_client = None
-                            logger.info(f"EnvMonitor hum disconnected: rc={rc}")
-                        except Exception:
-                            pass
-                    cl.on_message = _on_msg_hum
-                    cl.on_connect = _on_connect_hum
-                    cl.on_disconnect = _on_disconnect_hum
-                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-                    cl.loop_start()
-                    try:
-                        cl.subscribe(topic_h, qos=0)
-                    except Exception:
-                        logger.exception('EnvMonitor hum immediate subscribe failed')
-                    self.hum_client = cl
-                except Exception:
-                    logger.exception('EnvMonitor hum start failed')
-                    # В случае ошибки старта не блокируем будущие попытки
-                    self.hum_client = None
-
-env_monitor = EnvMonitor()
-# Rebind monitors to consolidated implementations from services.monitors
-try:
-    from services.monitors import rain_monitor as _svc_rain_monitor, env_monitor as _svc_env_monitor
-    rain_monitor = _svc_rain_monitor
-    env_monitor = _svc_env_monitor
-except Exception:
-    pass
 
 @app.before_request
 def _init_scheduler_before_request():
@@ -1045,7 +772,7 @@ def _init_scheduler_before_request():
             env_monitor.start(ecfg)
             # Разово пробуем получить retained-значения после старта, чтобы данные появились сразу
             try:
-                _probe_env_values(ecfg)
+                probe_env_values(ecfg)
             except Exception:
                 logger.exception('EnvMonitor probe call failed')
             _ENV_MONITOR_STARTED = True
@@ -2986,7 +2713,7 @@ def api_env_config():
                 cfg = db.get_env_config()
                 env_monitor.start(cfg)
                 # best-effort probe
-                _probe_env_values(cfg)
+                probe_env_values(cfg)
             except Exception:
                 pass
             return jsonify({'success': True})
@@ -3008,7 +2735,7 @@ def api_env_config():
         try:
             cfg = db.get_env_config()
             env_monitor.start(cfg)
-            _probe_env_values(cfg)
+            probe_env_values(cfg)
         except Exception:
             pass
         return jsonify({'success': bool(ok)})
@@ -4149,66 +3876,6 @@ def api_zone_mqtt_stop(zone_id: int):
     except Exception as e:
         logger.error(f"MQTT publish stop failed: {e}")
         return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
-
-def _probe_env_values(cfg: dict) -> None:
-    try:
-        if mqtt is None:
-            return
-        # Subscribe one-shot to fetch retained values
-        try:
-            logger.info('EnvProbe: starting')
-        except Exception:
-            pass
-        topics = []
-        tcfg = (cfg.get('temp') or {})
-        hcfg = (cfg.get('hum') or {})
-        if tcfg.get('enabled') and tcfg.get('topic') and tcfg.get('server_id'):
-            topics.append((int(tcfg['server_id']), (tcfg['topic'] or '').strip(), 'temp'))
-        if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
-            topics.append((int(hcfg['server_id']), (hcfg['topic'] or '').strip(), 'hum'))
-        for sid, topic, kind in topics:
-            server = db.get_mqtt_server(int(sid))
-            if not server or not topic:
-                continue
-            try:
-                logger.info(f"EnvProbe: connect sid={sid} host={server.get('host')} port={server.get('port')} topic={topic} kind={kind}")
-                cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                if server.get('username'):
-                    cl.username_pw_set(server.get('username'), server.get('password') or None)
-                # TLS options
-                try:
-                    if int(server.get('tls_enabled') or 0) == 1:
-                        import ssl
-                        ca = server.get('tls_ca_path') or None
-                        cert = server.get('tls_cert_path') or None
-                        key = server.get('tls_key_path') or None
-                        tls_ver = (server.get('tls_version') or '').upper().strip()
-                        version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ('', 'TLS', 'TLS_CLIENT') else ssl.PROTOCOL_TLS
-                        cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
-                        if int(server.get('tls_insecure') or 0) == 1:
-                            cl.tls_insecure_set(True)
-                except Exception:
-                    logger.exception('MQTT TLS setup failed')
-                host = server.get('host') or '127.0.0.1'
-                port = int(server.get('port') or 1883)
-                try:
-                    cl.connect(host, port, 30)
-                except Exception:
-                    # не кэшируем неудачное подключение
-                    return None
-                def _on_disconnect(c, u, rc, properties=None):
-                    try:
-                        with _MQTT_CLIENTS_LOCK:
-                            if _MQTT_CLIENTS.get(sid) is c:
-                                _MQTT_CLIENTS.pop(sid, None)
-                    except Exception:
-                        pass
-                cl.on_disconnect = _on_disconnect
-                _MQTT_CLIENTS[sid] = cl
-            except Exception:
-                return None
-    except Exception:
-        logger.exception('EnvProbe: outer failed')
 
 # Анти-ре-старт: запоминаем ручные остановки, чтобы игнорировать мгновенные ON
 _LAST_MANUAL_STOP: dict[int, float] = {}
