@@ -1,6 +1,8 @@
 import typing as _t
 import os
 import base64
+import secrets
+import stat
 
 
 def normalize_topic(topic: _t.Optional[str]) -> str:
@@ -31,20 +33,50 @@ def normalize_topic(topic: _t.Optional[str]) -> str:
 
 
 # --- Simple symmetric encryption helpers for secrets ---
-def _get_secret_key() -> bytes:
-    key = os.getenv('IRRIG_SECRET_KEY')
-    if key:
-        try:
-            return base64.urlsafe_b64decode(key + '===')
-        except Exception:
-            pass
-    # fallback from hostname (weak, but better than plain)
+
+def _get_hostname_key() -> bytes:
+    """Compute the old hostname-based key (for migration only)."""
     try:
         host = os.uname().nodename
     except Exception:
         host = 'irrigation'
     b = (host or 'irrigation').encode('utf-8')
     return (b * 4)[:32]
+
+
+def _get_secret_key() -> bytes:
+    """Load or generate IRRIG_SECRET_KEY.
+
+    Priority:
+    1. Environment variable IRRIG_SECRET_KEY (base64-encoded)
+    2. File .irrig_secret_key (raw 32 bytes)
+    3. Generate new random 32 bytes, persist to file
+    """
+    _SECRET_KEY_FILE = '.irrig_secret_key'
+
+    # 1. Check environment variable
+    key = os.getenv('IRRIG_SECRET_KEY')
+    if key:
+        try:
+            return base64.urlsafe_b64decode(key + '===')
+        except Exception:
+            pass
+
+    # 2. Try reading from file
+    try:
+        with open(_SECRET_KEY_FILE, 'rb') as f:
+            data = f.read()
+        if len(data) >= 32:
+            return data[:32]
+    except FileNotFoundError:
+        pass
+
+    # 3. Generate new key and persist
+    new_key = secrets.token_bytes(32)
+    with open(_SECRET_KEY_FILE, 'wb') as f:
+        f.write(new_key)
+    os.chmod(_SECRET_KEY_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    return new_key
 
 def encrypt_secret(plaintext: _t.Optional[str]) -> _t.Optional[str]:
     if plaintext is None:

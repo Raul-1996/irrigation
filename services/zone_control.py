@@ -95,11 +95,11 @@ def exclusive_start_zone(zone_id: int) -> bool:
                                 except Exception:
                                     mode = 'NC'
                                 open_val = '0' if mode == 'NO' else '1'
-                                publish_mqtt_value(mserver, normalize_topic(mtopic), open_val, min_interval_sec=0.0)
+                                publish_mqtt_value(mserver, normalize_topic(mtopic), open_val, min_interval_sec=0.0, qos=2, retain=True)
                 if sid and topic:
                     server = db.get_mqtt_server(int(sid))
                     if server:
-                        publish_mqtt_value(server, normalize_topic(topic), '1', min_interval_sec=0.0, meta={'cmd': str(command_id) if 'command_id' in locals() and command_id else None, 'ver': str((z.get('version') or 0) + 1)})
+                        publish_mqtt_value(server, normalize_topic(topic), '1', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': str(command_id) if 'command_id' in locals() and command_id else None, 'ver': str((z.get('version') or 0) + 1)})
                         # transition to on
                         _versioned_update(zone_id, {'state': 'on'})
             except Exception:

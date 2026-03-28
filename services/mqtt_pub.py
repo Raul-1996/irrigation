@@ -122,11 +122,12 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             logger.warning("MQTT publish: client unavailable, dropping message")
             return False
         # Publish to base topic with retries to handle slow async connect
+        effective_qos = max(0, min(2, int(qos or 0)))
         try:
             attempts = 0
             while attempts < 10:
                 attempts += 1
-                res = cl.publish(t, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
+                res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
                 try:
                     rc = getattr(res, 'rc', 0)
                 except Exception:
@@ -142,6 +143,26 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             if attempts >= 10 and rc != 0:
                 logger.error('MQTT publish failed after retries')
                 return False
+            # For QoS >= 1: wait for broker acknowledgement with retry + backoff
+            if effective_qos >= 1:
+                backoff_delays = [1, 2, 4]
+                published = False
+                for retry_idx, delay in enumerate(backoff_delays):
+                    try:
+                        res.wait_for_publish(timeout=5.0)
+                        published = True
+                        break
+                    except (ValueError, RuntimeError, Exception) as wfp_err:
+                        logger.warning(f"MQTT wait_for_publish failed (attempt {retry_idx + 1}/3) topic={t}: {wfp_err}")
+                        time.sleep(delay)
+                        # Re-publish on retry
+                        try:
+                            res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
+                        except Exception:
+                            pass
+                if not published:
+                    logger.critical(f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={t} value={value}")
+                    return False
         except Exception:
             logger.exception('MQTT publish failed')
             return False
