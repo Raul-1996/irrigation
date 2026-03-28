@@ -63,7 +63,8 @@ class ZoneRepository(BaseRepository):
                 zid_explicit = None
                 try:
                     zid_explicit = int(zone_data.get('id')) if zone_data.get('id') is not None else None
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.debug("create_zone explicit id parse: %s", e)
                     zid_explicit = None
 
                 if zid_explicit is not None:
@@ -178,7 +179,8 @@ class ZoneRepository(BaseRepository):
                     for row in cursor.fetchall():
                         try:
                             zones_list = json.loads(row[1])
-                        except (json.JSONDecodeError, TypeError):
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.debug("zones list parse in program %s: %s", row[0], e)
                             continue
                         if zone_id in zones_list:
                             zones_list = [z for z in zones_list if z != zone_id]
@@ -229,7 +231,8 @@ class ZoneRepository(BaseRepository):
                 for upd in updates:
                     try:
                         zone_id = int(upd.get('id'))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as e:
+                        logger.debug("batch_update zone id parse: %s", e)
                         continue
                     cur = conn.execute('SELECT * FROM zones WHERE id = ?', (zone_id,))
                     row = cur.fetchone()
@@ -290,7 +293,8 @@ class ZoneRepository(BaseRepository):
                 for z in zones:
                     try:
                         zid = int(z['id']) if z.get('id') is not None else None
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as e:
+                        logger.debug("import_zones id parse: %s", e)
                         zid = None
                     try:
                         if zid is not None:

@@ -1,104 +1,72 @@
-# Stage 6: Code Review (итерация 1)
+# Stage 6b: Code Review — wb-irrigation refactor/v2
 
-**Дата:** 2026-03-28 20:38
+**Дата:** 2026-03-28
 
-## Общая статистика рефакторинга
+## Общая статистика diff
 
-### Изменения размера файлов
-| Файл | До | После | Изменение |
-|------|-----|-------|-----------|
-| app.py | 4411 строк | 356 строк | **-92%** ⬇️ |
-| database.py | 2359 строк | 306 строк | **-87%** ⬇️ |
-| **Итого** | 6770 строк | 662 строки | **-90%** ⬇️ |
-
-### Архитектурные изменения
-- **Модулей:** 5 → 73 модулей (+1360%)
-- **Маршруты:** 79 endpoints разнесены по routes/
-- **Новые сервисы:** 8 новых (rate_limiter, watchdog, sse_hub, app_init, observed_state, helpers, logging_setup)
-- **DB репозитории:** 8 специализированных (zones, groups, programs, mqtt, settings, telegram, logs, migrations)
-
-## Проверка ключевых модулей
-
-### ✅ routes/*.py - Blueprint регистрация
-Проверены все маршруты:
-- **auth.py**: ✅ Корректные imports, auth blueprint
-- **groups_api.py**: ✅ 19KB, API endpoints для групп
-- **mqtt_api.py**: ✅ 11KB, MQTT сервер управление  
-- **programs_api.py**: ✅ 4.9KB, программы полива
-- **system_api.py**: ✅ 45KB, системные API
-- **zones_api.py**: ✅ 55KB, управление зонами
-- **telegram.py**: ✅ 9KB, telegram bot интеграция
-
-**Итого endpoints:** 79 маршрутов корректно разнесены
-
-### ✅ db/*.py - Proxy методы в database.py
-Проверены репозитории:
-- **zones.py**: 29KB, ✅ proxy методы в database.py
-- **programs.py**: 12KB, ✅ proxy методы в database.py  
-- **groups.py**: 6.7KB, ✅ proxy методы в database.py
-- **mqtt.py**: 5.4KB, ✅ proxy методы в database.py
-- **settings.py**: 10KB, ✅ proxy методы в database.py
-- **telegram.py**: 11KB, ✅ proxy методы в database.py
-- **logs.py**: 8.6KB, ✅ proxy методы в database.py
-- **migrations.py**: 33KB, ✅ централизованные миграции
-
-**Facade pattern:** ✅ Все методы корректно проксированы через database.py
-
-### ✅ services/*.py - Circular imports
-Проверены новые сервисы:
-- **app_init.py**: ✅ Инициализация приложения
-- **rate_limiter.py**: ✅ Лимитирование запросов
-- **watchdog.py**: ✅ Мониторинг процессов
-- **sse_hub.py**: ✅ Server-Sent Events
-- **observed_state.py**: ✅ Отслеживание состояний устройств
-- **logging_setup.py**: ✅ Централизованное логирование
-
-**Circular imports:** ✅ Не обнаружено проблем
-
-## Проверка доступности endpoints
-
-### Blueprint регистрация в app.py
-```python
-# Проверено: все blueprints зарегистрированы корректно
-app.register_blueprint(auth_bp)
-app.register_blueprint(groups_bp)
-app.register_blueprint(mqtt_bp)
-app.register_blueprint(programs_bp)
-app.register_blueprint(settings_bp)
-app.register_blueprint(system_bp)
-app.register_blueprint(telegram_bp)
-app.register_blueprint(zones_bp)
+```
+68 files changed, 8047 insertions(+), 6863 deletions(-)
 ```
 
-**Статус:** ✅ **66+ endpoints доступны** (все blueprint'ы корректно зарегистрированы)
+## Структура после рефакторинга
 
-## Качество кода после рефакторинга
+### app.py (356 → 361 строк)
+- ✅ Содержит только ядро: Flask app creation, config, logging, middleware, blueprint registration
+- ✅ Blueprint registration для page-rendering (7) + API (5) + optional (telegram, reports, mqtt)
+- ✅ Middleware: perf timing, security headers, session cookies, auth guard, mutation guard
+- ✅ Group exclusivity watchdog остался в app.py (логически связан с core)
+- ⚠️ `_force_group_exclusive` и `_enforce_group_exclusive_all_groups` — 100+ строк бизнес-логики в app.py. Кандидат на вынос в `services/`
 
-### ✅ Преимущества
-1. **Модульность**: Код разделен по доменам (auth, zones, groups, etc.)
-2. **Testability**: Каждый модуль можно тестировать независимо
-3. **Maintainability**: Изменения локализованы в соответствующих модулях
-4. **Separation of Concerns**: Четкое разделение API, бизнес-логики и данных
-5. **Facade Pattern**: database.py обеспечивает обратную совместимость
+### database.py (2359 → 306 строк, -87%)
+- ✅ Facade-паттерн: проксирует все вызовы в `db/` субмодули
+- ✅ Backward-compatible: все `db.get_zones()`, `db.create_program()` работают
 
-### ⚠️ Потенциальные проблемы
-1. **Complexity**: Увеличилось количество файлов (+68 модулей)
-2. **Navigation**: Разработчикам нужно изучать новую структуру
-3. **Import Dependencies**: Больше связей между модулями
+### db/ (новый пакет, 2469 строк)
+- `base.py` — BaseRepository + retry_on_busy decorator
+- `zones.py` (587) — CRUD зон, фото, импорт/экспорт
+- `programs.py` (258) — программы, конфликты, отмены
+- `groups.py` (152) — группы
+- `mqtt.py` (118) — MQTT серверы + шифрование паролей
+- `settings.py` (222) — настройки
+- `telegram.py` (236) — bot users, FSM, idempotency, reminders
+- `logs.py` (201) — логи, backup/restore
+- `migrations.py` (636) — все миграции
 
-### 🔧 Исправления при рефакторинге
-1. ✅ **irrigation_scheduler.py**: Исправлена инициализация logger
-2. ✅ **conftest.py**: Обновлены импорты для новой структуры
+### routes/ (12 файлов, 3327 строк)
+- Page-rendering: `status.py`, `files.py`, `zones.py`, `programs.py`, `groups.py`, `auth.py`, `settings.py`
+- API: `zones_api.py` (1156), `groups_api.py` (367), `programs_api.py` (109), `mqtt_api.py` (269), `system_api.py` (1002)
+- Optional: `telegram.py` (246), `reports.py`
 
-## Результат
+### services/ (16 файлов, 2502 строк)
+- Новые: `app_init.py`, `helpers.py`, `logging_setup.py`, `observed_state.py`, `rate_limiter.py`, `sse_hub.py`, `watchdog.py`
+- Обновлённые: `monitors.py`, `mqtt_pub.py`, `zone_control.py`, `telegram_bot.py`
 
-**Статус:** ✅ **УСПЕШНО**
+## Endpoints
 
-**Ключевые достижения:**
-- Код стал более читаемым и модульным
-- Размер основных файлов уменьшился на 90%
-- Все endpoints остались доступны
-- Новая архитектура следует best practices
-- Не внесены новые критические проблемы
+Обнаружено **81 route decorator** (включая GET/POST/PUT/DELETE variants):
+- zones_api: 16 endpoints
+- system_api: 22 endpoints
+- groups_api: 8 endpoints
+- mqtt_api: 7 endpoints
+- programs_api: 4 endpoints
+- settings: 4 endpoints
+- auth: 2 endpoints
+- telegram: в routes/telegram.py
+- page rendering: /, /status, /zones, /programs, /logs, /mqtt, /map, /water, /settings, /login
+- misc: /sw.js, /ws, /health, /api/reports
 
-**Рекомендация:** Рефакторинг выполнен качественно и готов к production.
+**Все 66+ endpoints доступны.**
+
+## Imports
+
+- ✅ Нет `from app import` в routes/
+- ⚠️ `services/app_init.py:43` — `from app import _start_single_zone_watchdog` (deferred import в функции, не на уровне модуля — circular import не происходит, но архитектурно не идеально)
+- ✅ routes/ импортируют из `database`, `services/`, `utils` — правильно
+- ✅ db/ не импортирует из app.py или routes/
+
+## Потенциальные проблемы
+
+1. **Deferred import из app.py** — `services/app_init.py` импортирует `_start_single_zone_watchdog` из `app.py`. Работает через lazy import, но лучше вынести watchdog в `services/`.
+2. **Group exclusivity в app.py** — 130+ строк бизнес-логики (`_force_group_exclusive`, `_enforce_group_exclusive_all_groups`, `_start_single_zone_watchdog`). Кандидат на вынос в `services/group_watchdog.py`.
+3. **monitors.py qos=0 для subscribe** — все подписки используют QoS 0. Для мониторинга это допустимо (потеря одного сообщения не критична), но для observed_state проверка использует собственную подписку с проверкой доставки.
+4. **Дублирование auth логики** — `_auth_before_request` и `_require_admin_for_mutations` в app.py частично пересекаются. Стоит консолидировать.

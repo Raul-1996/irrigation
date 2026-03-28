@@ -52,7 +52,8 @@ class ProgramRepository(BaseRepository):
             with sqlite3.connect(self.db_path) as conn:
                 try:
                     norm_days = [int(d) for d in program_data['days']]
-                except (TypeError, ValueError, KeyError):
+                except (TypeError, ValueError, KeyError) as e:
+                    logger.debug("create_program days parse: %s", e)
                     norm_days = []
                 if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
                     norm_days = [max(0, min(6, d - 1)) for d in norm_days]
@@ -79,7 +80,8 @@ class ProgramRepository(BaseRepository):
             with sqlite3.connect(self.db_path) as conn:
                 try:
                     norm_days = [int(d) for d in program_data['days']]
-                except (TypeError, ValueError, KeyError):
+                except (TypeError, ValueError, KeyError) as e:
+                    logger.debug("update_program days parse: %s", e)
                     norm_days = []
                 if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
                     norm_days = [max(0, min(6, d - 1)) for d in norm_days]
@@ -135,12 +137,14 @@ class ProgramRepository(BaseRepository):
                 try:
                     program_hour, program_minute = map(int, time.split(':'))
                     program_minutes = program_hour * 60 + program_minute
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError) as e:
+                    logger.debug("check_conflicts time parse: %s", e)
                     return conflicts
 
                 try:
                     norm_days = [int(d) for d in days]
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.debug("check_conflicts days parse: %s", e)
                     norm_days = days
 
                 # Cache durations and groups
@@ -157,13 +161,15 @@ class ProgramRepository(BaseRepository):
                 def _get_dur(zid: int) -> int:
                     try:
                         return int(durations_cache.get(int(zid), 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as e:
+                        logger.debug("_get_dur parse for zone %s: %s", zid, e)
                         return 0
 
                 def _get_gid(zid: int) -> int:
                     try:
                         return int(groups_cache.get(int(zid), 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as e:
+                        logger.debug("_get_gid parse for zone %s: %s", zid, e)
                         return 0
 
                 total_duration = sum(_get_dur(int(zone_id)) for zone_id in zones)
@@ -189,7 +195,8 @@ class ProgramRepository(BaseRepository):
                     try:
                         existing_hour, existing_minute = map(int, program_data['time'].split(':'))
                         existing_minutes = existing_hour * 60 + existing_minute
-                    except (ValueError, AttributeError):
+                    except (ValueError, AttributeError) as e:
+                        logger.debug("check_conflicts existing time parse: %s", e)
                         continue
 
                     existing_total_duration = sum(_get_dur(int(zid)) for zid in program_data['zones'])

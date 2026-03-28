@@ -85,7 +85,8 @@ class TelegramRepository(BaseRepository):
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 try:
                     payload = None if data is None else json.dumps(data, ensure_ascii=False)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.debug("set_user_state JSON encode: %s", e)
                     payload = None
                 conn.execute(
                     'UPDATE bot_users SET fsm_state=?, fsm_data=?, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
@@ -109,7 +110,8 @@ class TelegramRepository(BaseRepository):
                 data = None
                 try:
                     data = json.loads(row['fsm_data']) if row['fsm_data'] else None
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("get_user_state JSON decode: %s", e)
                     data = None
                 return st, data
         except sqlite3.Error as e:
@@ -132,6 +134,7 @@ class TelegramRepository(BaseRepository):
                     conn.commit()
                     return True
                 except sqlite3.IntegrityError:
+                    logger.debug("idempotency token already exists: %s", token)
                     return False
         except sqlite3.Error as e:
             logger.error("Ошибка записи идемпотентного токена %s: %s", token, e)
@@ -202,7 +205,8 @@ class TelegramRepository(BaseRepository):
                             continue
                         try:
                             ok = mask[dow] == '1'
-                        except (IndexError, TypeError):
+                        except (IndexError, TypeError) as e:
+                            logger.debug("dow_mask check failed for reminder: %s", e)
                             ok = False
                         if not ok:
                             continue

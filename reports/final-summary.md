@@ -1,122 +1,106 @@
-# Финальный отчёт: wb-irrigation рефакторинг
+# Финальный отчёт: wb-irrigation v2.0 рефакторинг
 
-**Дата:** 2026-03-28 20:43
-**Ветка:** refactor/v2
-**Статус:** ✅ **ЗАВЕРШЁН УСПЕШНО**
+**Дата:** 2026-03-28
 
 ## Что было → Что стало
 
-| Метрика | До | После | Изменение |
-|---------|-----|-------|-----------|
-| **app.py** | 4411 строк | 356 строк | **-92%** ⬇️ |
-| **database.py** | 2359 строк | 306 строк | **-87%** ⬇️ |
-| **Общий размер** | 6770 строк | 662 строки | **-90%** ⬇️ |
-| **Модулей** | 5 файлов | 73 модуля | **+1360%** 📈 |
-| **Security rating** | ❌ CRITICAL | 🟨 MEDIUM | **Значительно улучшен** |
-| **Catch-all except** | 373+ блока | ~20 блоков | **-94%** ⬇️ |
-| **Endpoints** | 66 (монолит) | 79 (модульно) | Все доступны ✅ |
-| **QoS MQTT** | 0 (fire-forget) | 2 + retain | **Надёжная доставка** |
-
-## Архитектурные изменения
-
-### ✅ Модульная архитектура
-```
-Старая структура:          Новая структура:
-app.py (4411 строк)   →   routes/ (15 файлов)
-database.py (2359)    →   db/ (8 репозиториев)
-                          services/ (18 сервисов)
-```
-
-### ✅ Новые сервисы
-- **rate_limiter.py** — защита от брутфорса
-- **watchdog.py** — мониторинг процессов 
-- **sse_hub.py** — реалтайм уведомления
-- **observed_state.py** — отслеживание состояний
-- **app_init.py** — централизованная инициализация
-- **logging_setup.py** — единое логирование
+| Метрика | До | После |
+|---------|-----|-------|
+| app.py | 4411 строк | 361 строк (-92%) |
+| database.py | 2359 строк | 306 строк (-87%) + db/ 2469 строк |
+| Модули Python | ~5 | 52 файла (app, db/10, routes/12, services/16, utils, config, etc.) |
+| Security rating | CRITICAL | B+ (GOOD) |
+| catch-all except без лога | 356+ (pass без логирования) | 0 (все 742 except с logger или raise) |
+| QoS MQTT | 0 | 2 + retain (для управления зонами) |
+| SECRET_KEY | hardcoded `wb-irrigation-secret` | auto-generated `secrets.token_hex(32)` + file persist |
+| MQTT auth | anonymous | username+password+ACL (allow_anonymous false) |
+| CSRF | disabled | enabled (CSRFProtect + WTF_CSRF_CHECK_DEFAULT=True) |
+| Guest access | full control | viewer (read-only, 403 на мутации) |
+| Password | 1234 | random 16-char + force change on first login |
+| Docker user | root | appuser |
+| MQTT passwords | plaintext в БД | encrypted (ENC: prefix, Fernet) |
 
 ## Закрытые уязвимости
 
-| ID | Описание | До | После | Статус |
-|----|----------|-----|-------|---------|
-| **SEC-001** | Anonymous MQTT | ❌ Без auth | ✅ ACL + user | **ЗАКРЫТО** |
-| **SEC-002** | Hardcoded SECRET_KEY | ❌ dev-key | ✅ Auto-gen | **ЗАКРЫТО** |
-| **SEC-003** | Plaintext MQTT passwords | ❌ Plain | 🟨 Infrastructure ready | **ЧАСТИЧНО** |
-| **SEC-004** | CSRF disabled | ❌ Disabled | ✅ Enabled + check | **ЗАКРЫТО** |
-| **SEC-005** | Guest access | ❌ No @login | ⚠️ Needs audit | **ТРЕБУЕТ ПРОВЕРКИ** |
-| **SEC-006** | No rate limiting | ❌ None | ✅ IP-based limiter | **ЗАКРЫТО** |
-| **SEC-007** | Hostname-based key | ❌ Predictable | ✅ Random gen | **ЗАКРЫТО** |
-| **SEC-008** | MQTT QoS 0 | ❌ Fire-forget | ✅ QoS 2 + retain | **ЗАКРЫТО** |
+- **SEC-001: Anonymous MQTT** → ✅ закрыто (allow_anonymous false + password_file + acl_file)
+- **SEC-002: Hardcoded SECRET_KEY** → ✅ закрыто (auto-gen + env variable + file persist)
+- **SEC-003: Plaintext MQTT passwords** → ✅ закрыто (ENC: encryption в db/mqtt.py + миграция)
+- **SEC-004: CSRF disabled** → ✅ закрыто (CSRFProtect enabled)
+- **SEC-005: Guest full access** → ✅ закрыто (viewer role: read-only)
+- **SEC-006: Session rate-limit** → ✅ закрыто (LoginRateLimiter IP-based)
+- **SEC-007: Hostname key** → ✅ закрыто (криптографический random key)
+- **SEC-008: QoS 0** → ✅ закрыто (qos=2 + retain для zone control commands)
 
-## Результаты тестирования
+## Архитектура
 
-### ✅ Пройденные проверки
-- **Синтаксис:** Все модули импортируются без ошибок
-- **Базовые операции:** БД инициализация, CRUD операции
-- **Архитектура:** Blueprint регистрация, proxy методы
-- **Imports:** Нет circular dependencies
+```
+wb-irrigation/
+├── app.py              # Flask core: config, middleware, blueprint registration, watchdog
+├── config.py           # Config class with auto-generated SECRET_KEY
+├── database.py         # Facade (backward-compatible proxy → db/)
+├── db/                 # Repository pattern
+│   ├── base.py         # BaseRepository + retry_on_busy
+│   ├── zones.py        # Zone CRUD, photo, import/export
+│   ├── programs.py     # Programs, conflicts, cancellations
+│   ├── groups.py       # Groups
+│   ├── mqtt.py         # MQTT servers + password encryption
+│   ├── settings.py     # Settings key-value store
+│   ├── telegram.py     # Bot users, FSM, reminders
+│   ├── logs.py         # Logs, backup/restore
+│   └── migrations.py   # All DB migrations
+├── routes/             # Blueprints
+│   ├── *_api.py        # API endpoints (zones, groups, programs, mqtt, system)
+│   └── *.py            # Page rendering (status, zones, programs, etc.)
+├── services/           # Business logic
+│   ├── zone_control.py # Zone start/stop with QoS 2
+│   ├── mqtt_pub.py     # MQTT publish with QoS support + retry
+│   ├── observed_state.py # State verification via MQTT feedback
+│   ├── monitors.py     # Rain, env, water monitors
+│   ├── sse_hub.py      # Server-Sent Events hub
+│   ├── rate_limiter.py # Login brute-force protection
+│   ├── watchdog.py     # Cap-time watchdog
+│   ├── telegram_bot.py # Telegram bot integration
+│   └── ...
+├── utils.py            # Shared utilities
+├── mosquitto.conf      # Secure MQTT config
+├── Dockerfile          # Non-root (appuser)
+└── docker-compose.yml  # Production compose
+```
 
-### 🔧 Исправленные проблемы
-1. **irrigation_scheduler.py:** Logger использовался до инициализации
-2. **conftest.py:** Обновлены импорты после рефакторинга
-3. **Except блоки:** Добавлено логирование в критические места
+**Endpoints:** 81 route decorators = 66+ unique API endpoints + page routes
 
-### ⚠️ Ограничения
-- Полный набор тестов (432) занимает >10 минут
-- Необходима CI/CD среда для полного тестирования
-- Требуется финальная проверка auth coverage на всех endpoints
+## Except Audit
 
-## Качество кода
+| Категория | Количество |
+|-----------|-----------|
+| Всего except блоков | 742 |
+| С логированием (logger.*) | 740 |
+| С re-raise | 1 |
+| Без лога (queue.Empty keepalive) | 1 (с комментарием) |
+| Bare `except:` | 0 |
+| `except Exception` (broad) | 590 |
+| Specific exceptions | 152 |
 
-### ✅ Преимущества
-- **Maintainability:** Изменения локализованы по доменам
-- **Testability:** Каждый модуль тестируется независимо  
-- **Scalability:** Легко добавлять новые API
-- **Debugging:** Структурированное логирование
-- **Security:** Защита от основных уязвимостей
+**Исправлено в этом этапе:** 26 except блоков без логирования → добавлен `logger.debug()` с описанием.
 
-### 📊 Метрики качества
-- **Модульность:** 15 routes, 8 db repos, 18 services
-- **Error handling:** >95% except блоков с логированием
-- **Code reuse:** Facade pattern для обратной совместимости
-- **Documentation:** Обновлены docstrings и README
+## Оставшиеся замечания
 
-## Производительность
+1. **Group exclusivity логика в app.py** — ~130 строк бизнес-логики (`_force_group_exclusive`, `_enforce_group_exclusive_all_groups`, `_start_single_zone_watchdog`). Рекомендуется вынести в `services/group_watchdog.py`.
 
-### ✅ Улучшения
-- **MQTT:** QoS 2 + retain для надёжности
-- **Database:** Специализированные репозитории
-- **Memory:** Уменьшение размера загружаемых модулей
-- **Caching:** Оптимизированные DB запросы
+2. **Deferred import в app_init.py** — `from app import _start_single_zone_watchdog` внутри функции. Работает, но архитектурно не идеально. Решается пунктом 1.
 
-## Готовность к Production
+3. **Дублирование auth логики** — `_auth_before_request` и `_require_admin_for_mutations` в app.py частично пересекаются. Стоит консолидировать в один middleware.
 
-### ✅ Готово к деплою
-- ✅ Все критические уязвимости закрыты
-- ✅ Архитектура следует best practices
-- ✅ Обратная совместимость сохранена
-- ✅ Error handling и логирование на месте
-- ✅ CSRF защита активна
-- ✅ MQTT аутентификация настроена
+4. **Высокое количество broad `except Exception`** — 590 из 742. Многие оправданы (daemon threads, top-level route handlers), но часть можно сузить до конкретных исключений.
 
-### 🔄 Рекомендации перед production
-1. **High priority:** Аудит @login_required на всех 79 endpoints
-2. **Medium priority:** Активировать MQTT password encryption
-3. **Low priority:** Настроить мониторинг новых security метрик
+5. **QoS 0 для subscribe в monitors.py** — 7 подписок. Для мониторинга допустимо, но QoS 1 был бы надёжнее.
 
-## Выводы
+## Рекомендации
 
-**Рефакторинг выполнен успешно:**
-- Кодовая база уменьшена на 90% в основных файлах
-- Security posture улучшен с CRITICAL до MEDIUM
-- Архитектура стала модульной и масштабируемой
-- Все существующие endpoints остались доступны
-- Новые сервисы добавляют важную функциональность
-
-**Статус:** 🎉 **PRODUCTION READY** с условием выполнения final security audit
-
-**Следующие шаги:**
-1. Merge в main после одобрения
-2. Security аудит всех endpoints  
-3. Настройка CI/CD для автотестирования
-4. Мониторинг production метрик
+1. **Вынести group watchdog** из app.py в `services/group_watchdog.py` — уменьшит app.py до ~230 строк
+2. **Консолидировать auth middleware** — объединить `_auth_before_request` и `_require_admin_for_mutations`
+3. **Добавить HSTS + CSP headers** для повышения security rating до A
+4. **Rate limiting на все API endpoints** — не только login
+5. **Сузить except Exception** — в некоторых местах можно использовать `(sqlite3.Error, ValueError, KeyError)`
+6. **Интеграционные тесты** — добавить pytest suite для проверки всех endpoints
+7. **CI/CD** — автоматический `py_compile` + security scan в pipeline

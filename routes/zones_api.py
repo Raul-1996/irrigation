@@ -934,7 +934,7 @@ def api_mqtt_zones_sse():
                     try:
                         data = msg_queue.get(timeout=0.5)
                         yield f'data: {data}\n\n'
-                    except queue.Empty:
+                    except queue.Empty:  # Expected: send keepalive ping on poll timeout
                         yield 'event: ping\n' + 'data: {}\n\n'
             finally:
                 _sse_hub.unregister_client(msg_queue)

@@ -209,14 +209,16 @@ class MigrationRunner:
                             for d in days:
                                 try:
                                     nd = int(d) - 1
-                                except (TypeError, ValueError):
+                                except (TypeError, ValueError) as e:
+                                    logger.debug("migration day parse skip: %s", e)
                                     continue
                                 if nd < 0: nd = 0
                                 if nd > 6: nd = 6
                                 migrated.append(nd)
                             conn.execute('UPDATE programs SET days = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
                                          (json.dumps(sorted(set(migrated))), pid))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    logger.debug("migration days JSON parse skip for row: %s", e)
                     continue
             conn.commit()
         except sqlite3.Error as e:

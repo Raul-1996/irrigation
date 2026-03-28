@@ -222,7 +222,7 @@ def api_mqtt_scan_sse(server_id: int):
                     try:
                         msg_queue.put_nowait(data)
                     except queue.Full:
-                        pass
+                        logger.debug("scan-sse msg_queue full, dropping message for topic %s", topic)
 
                 client.on_connect = on_connect
                 client.on_message = on_message
@@ -256,7 +256,7 @@ def api_mqtt_scan_sse(server_id: int):
                         data = msg_queue.get(timeout=0.5)
                         yield f'data: {data}\n\n'
                     except queue.Empty:
-                        pass
+                        pass  # Expected: poll timeout, no data yet
                     now = int(_t.time())
                     if now != last_ping:
                         last_ping = now

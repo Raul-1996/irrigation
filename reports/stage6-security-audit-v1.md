@@ -1,143 +1,86 @@
-# Stage 6: Security Audit (итерация 1)
+# Stage 6c: Security Audit — wb-irrigation refactor/v2
 
-**Дата:** 2026-03-28 20:39
+**Дата:** 2026-03-28
 
-## Проверка исправления уязвимостей из Stage 3
+## Проверка закрытия уязвимостей
 
-### ✅ SEC-001: Anonymous MQTT access
-**Статус:** **ЗАКРЫТО** (TASK-003)
-- **До:** MQTT без аутентификации
-- **После:** 
-  - Создан `mosquitto/setup_auth.sh` скрипт
-  - ACL настроены в `mosquitto/acl`
-  - Пользователь `irrigation_app` с правами на `/devices/#`
-
-### ✅ SEC-002: Hardcoded SECRET_KEY  
-**Статус:** **ЗАКРЫТО** (TASK-001)
-- **До:** `SECRET_KEY = 'dev-key-change-in-production'`
-- **После:** 
-  ```python
-  def _load_or_generate_secret(env_var='SECRET_KEY', file_path='.secret_key'):
-      # 1. Env variable, 2. File, 3. Generate new
-  SECRET_KEY = _load_or_generate_secret()
-  ```
-
-### 🔄 SEC-003: Plaintext MQTT passwords
-**Статус:** **ЧАСТИЧНО ЗАКРЫТО** (TASK-004)
-- **Реализована:** Инфраструктура для шифрования в `db/settings.py`
-- **Миграция:** `migrations/reencrypt_secrets.py` для существующих установок
-- **Статус:** Готово к использованию, нужна активация на prod
-
-### ✅ SEC-004: CSRF disabled
-**Статус:** **ЗАКРЫТО** (TASK-005)
-- **До:** `WTF_CSRF_ENABLED = False`
-- **После:**
-  ```python
-  # app.py
-  from flask_wtf.csrf import CSRFProtect
-  csrf = CSRFProtect(app)
-  
-  # config.py
-  WTF_CSRF_ENABLED = True
-  WTF_CSRF_CHECK_DEFAULT = True
-  ```
-
-### ⚠️ SEC-005: Guest access без аутентификации
-**Статус:** **ТРЕБУЕТ ПРОВЕРКИ** (TASK-006)
-- Необходима проверка маршрутов на наличие @login_required
-- Особенно критично: API endpoints в routes/*
-
-### ✅ SEC-006: Session rate limiting
-**Статус:** **ЗАКРЫТО** (TASK-009)
-- **Новый сервис:** `services/rate_limiter.py`
-- **Класс:** `LoginRateLimiter` - thread-safe IP-based limiting
-- **Интеграция:** В auth flow
-
-### 🔄 SEC-007: Hostname-based key
-**Статус:** **ЧАСТИЧНО ЗАКРЫТО** (TASK-002)
-- **SECRET_KEY:** Теперь генерируется случайно (не hostname)
-- **Другие компоненты:** Требует проверки на hostname dependencies
-
-### ✅ SEC-008: MQTT QoS 0
-**Статус:** **ЗАКРЫТО** (TASK-007)
-- **До:** QoS 0 (fire-and-forget)
-- **После:** 
-  ```python
-  # services/mqtt_pub.py
-  effective_qos = max(0, min(2, int(qos or 0)))
-  
-  # services/observed_state.py  
-  publish_mqtt_value(server, topic, value, qos=2, retain=True)
-  ```
-
-## Проверка новых уязвимостей
-
-### ✅ Route-файлы: Auth checks
-**Проверены маршруты в routes/:**
-
-```bash
-# Команда проверки
-grep -r "@login_required\|@require_auth" routes/
+### SEC-001: Anonymous MQTT → ✅ ЗАКРЫТО
+```
+mosquitto.conf: allow_anonymous false
+mosquitto.conf: password_file /mosquitto/config/passwd
+mosquitto.conf: acl_file /mosquitto/config/acl
 ```
 
-**Результат:** Большинство API endpoints имеют защиту. Требуется детальная проверка.
+### SEC-002: Hardcoded SECRET_KEY → ✅ ЗАКРЫТО
+- `config.py` использует `_load_or_generate_secret()`:
+  1. ENV переменная (отклоняет старый `wb-irrigation-secret`)
+  2. Файл `.secret_key`
+  3. Генерация `secrets.token_hex(32)` + persist с `chmod 0600`
+- Упоминание `wb-irrigation-secret` в config.py — только как проверка "не использовать старый ключ"
 
-### ✅ DB модули: SQL injection
-**Проверены репозитории в db/:**
-- Все запросы используют параметризованные queries
-- `.execute(query, params)` pattern корректно применен
-- ORM-like подход минимизирует risk
+### SEC-003: Plaintext MQTT passwords → ✅ ЗАКРЫТО
+- `db/mqtt.py`: пароли шифруются с префиксом `ENC:` при сохранении
+- `db/migrations.py:612-615`: миграция шифрует существующие plaintext пароли
+- Расшифровка через `_decrypt_password()` при чтении
+- Ключ шифрования: `utils.py` → `.mqtt_fernet.key` (Fernet symmetric)
 
-### ✅ Services: Секреты не утекают
-**Проверены новые сервисы:**
-- `services/logging_setup.py` - безопасно
-- `services/rate_limiter.py` - безопасно  
-- `services/watchdog.py` - безопасно
-- `services/observed_state.py` - безопасно
+### SEC-004: CSRF disabled → ✅ ЗАКРЫТО
+```python
+config.py: WTF_CSRF_ENABLED = True
+config.py: WTF_CSRF_CHECK_DEFAULT = True
+app.py: csrf = CSRFProtect(app)
+```
 
-### ⚠️ Потенциальные новые риски
+### SEC-005: Guest full access → ✅ ЗАКРЫТО
+- `app.py _auth_before_request`: viewer role → read-only (403 на POST/PUT/DELETE)
+- `app.py _require_admin_for_mutations`: admin required для мутаций
+- Guest (не залогиненный) → только GET + ограниченные POST (login, env, emergency)
 
-1. **Увеличенная attack surface:**
-   - 79 endpoints vs меньшее количество ранее
-   - Больше модулей = больше потенциальных уязвимостей
+### SEC-006: Session rate-limit → ✅ ЗАКРЫТО
+- `services/rate_limiter.py`: `LoginRateLimiter` — IP-based
+- `routes/auth.py`: интегрирован `login_limiter`
+- Защита от brute-force на login endpoint
 
-2. **Complexity-based уязвимости:**
-   - Сложная архитектура может скрыть проблемы
-   - Межмодульные взаимодействия
+### SEC-007: Hostname key → ✅ ЗАКРЫТО
+- Нет привязки к hostname в SECRET_KEY
+- Ключ генерируется криптографически: `secrets.token_hex(32)`
 
-3. **Configuration drift:**
-   - Новые конфигурационные параметры
-   - Риск misconfiguration при деплое
+### SEC-008: QoS 0 → ✅ ЗАКРЫТО (для управления)
+- `services/zone_control.py`: все publish команды используют `qos=2, retain=True`
+- `services/mqtt_pub.py`: поддержка QoS 0/1/2 с retry для QoS ≥ 1
+- ⚠️ Subscribes в monitors.py используют QoS 0 — допустимо для мониторинга
 
-## Общая оценка security posture
+## Дополнительные проверки
 
-| Критерий | До рефакторинга | После рефакторинга | Статус |
-|----------|----------------|-------------------|---------|
-| **SECRET_KEY** | Hardcoded | Auto-generated | ✅ **Улучшено** |
-| **CSRF** | Disabled | Enabled | ✅ **Улучшено** |
-| **MQTT Auth** | None | ACL + user | ✅ **Улучшено** |
-| **QoS** | 0 | 2 + retain | ✅ **Улучшено** |
-| **Rate Limiting** | None | IP-based | ✅ **Улучшено** |
-| **Auth Coverage** | Partial | Требует проверки | ⚠️ **Нужна проверка** |
-| **Attack Surface** | Medium | Larger | ⚠️ **Увеличена** |
+### Observed State → ✅ ЕСТЬ
+- `services/observed_state.py` (257 строк): StateVerifier
+- Интегрирован в `services/zone_control.py` — verify_async() после start/stop
+- Проверяет что устройство подтвердило состояние через MQTT feedback
 
-## Результат
+### Injection/RCE → ✅ ЧИСТО
+- Нет `os.system()`, `subprocess`, `eval()`, `exec()`, `pickle`, `shell=True` в routes/services
+- SQL через parameterized queries (sqlite3 `?` placeholders)
 
-**Security Rating:** 🟨 **ЗНАЧИТЕЛЬНО УЛУЧШЕН**
+### Security Headers → ✅ ЕСТЬ
+```python
+app.py: X-Content-Type-Options: nosniff
+app.py: X-Frame-Options: SAMEORIGIN
+app.py: SESSION_COOKIE_SAMESITE: Lax
+app.py: SESSION_COOKIE_HTTPONLY: True
+```
 
-**До:** ❌ CRITICAL (5+ критических уязвимостей)
-**После:** 🟨 MEDIUM (базовая защита есть, но нужна дополнительная проверка)
+### Docker → ✅ ЗАКРЫТО
+- Dockerfile: `USER appuser` (не root)
+- `docker-compose.yml`: `SECRET_KEY=${SECRET_KEY:-}` (пустой → auto-generate)
 
-### Критические уязвимости: ЗАКРЫТЫ ✅
-- Hardcoded secrets
-- CSRF disabled  
-- MQTT без аутентификации
-- Низкий QoS
-- Отсутствие rate limiting
+### Новые уязвимости в route-файлах → ✅ НЕ ОБНАРУЖЕНЫ
+- Все inputs валидируются через `int()`, `str()`, `.strip()`
+- File uploads (photo) проверяют content-type и размер
+- SSE endpoints не утекают sensitive data
 
-### Остающиеся задачи:
-1. **Высокий приоритет:** Проверить auth coverage на всех 79 endpoints
-2. **Средний приоритет:** Активировать MQTT password encryption в prod
-3. **Низкий приоритет:** Monitoring для новых security metrics
-
-**Рекомендация:** Готово к production с условием выполнения проверки auth coverage.
+## Общая оценка: **B+ (GOOD)**
+Все 8 критических уязвимостей закрыты. Рекомендации:
+1. Добавить `Strict-Transport-Security` header (HSTS) для HTTPS
+2. Добавить `Content-Security-Policy` header
+3. Rate limiting на все API endpoints (не только login)
+4. QoS 1 для subscribe в monitors.py (опционально)

@@ -70,7 +70,7 @@ def _get_secret_key() -> bytes:
         if len(data) >= 32:
             return data[:32]
     except FileNotFoundError:
-        pass
+        logging.getLogger(__name__).debug("Secret key file not found, will generate new one")
 
     # 3. Generate new key and persist
     new_key = secrets.token_bytes(32)
