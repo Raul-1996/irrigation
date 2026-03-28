@@ -875,6 +875,13 @@ def _init_scheduler_before_request():
         _start_single_zone_watchdog()
     except Exception:
         pass
+    # Запускаем watchdog с контролем cap-времени зон (TASK-010)
+    try:
+        from services.watchdog import start_watchdog as _start_cap_watchdog
+        import services.zone_control as _zc_module
+        _start_cap_watchdog(db, _zc_module, interval=30)
+    except Exception:
+        pass
     # Стартовая синхронизация: единоразово выключаем все зоны и публикуем OFF
     if not _INITIAL_SYNC_DONE and not app.config.get('TESTING'):
         try:
