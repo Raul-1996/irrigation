@@ -1352,18 +1352,23 @@ class IrrigationDB:
             return False
 
     def ensure_password_change_required(self) -> None:
-        """Если пароль используется дефолтный (1234) либо пароль ещё не меняли, выставить флаг обязательной смены."""
+        """Если пароль не установлен — генерируем случайный временный пароль и требуем смену (TASK-013)."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
                 row = cur.fetchone()
                 if not row:
-                    # Нет пароля — требуем смену
+                    # Нет пароля — генерируем случайный начальный пароль вместо '1234'
+                    import secrets
+                    temp_password = secrets.token_urlsafe(12)
+                    from werkzeug.security import generate_password_hash
+                    pw_hash = generate_password_hash(temp_password, method='pbkdf2:sha256')
+                    conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', ('password_hash', pw_hash))
                     conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', ('password_must_change', '1'))
+                    logger.warning("Initial random password generated: %s (change it on first login!)", temp_password)
                 else:
-                    # Если в базе ещё дефолтный хэш (грубая эвристика: допускаем, что 1234 был записан),
-                    # всё равно форсируем смену при первом входе
+                    # Если в базе уже есть хэш, но флаг обязательной смены не установлен — форсируем
                     cur2 = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_must_change',))
                     row2 = cur2.fetchone()
                     if not row2:

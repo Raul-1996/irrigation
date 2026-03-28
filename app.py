@@ -1313,6 +1313,9 @@ def api_logout():
     return redirect(url_for('auth_bp.login_page'))
 
 
+# Password blocklist (TASK-013)
+_PASSWORD_BLOCKLIST = {'1234', '12345678', '0000', 'password', 'admin', 'qwerty'}
+
 @app.route('/api/password', methods=['POST'])
 def api_change_password():
     try:
@@ -1321,10 +1324,15 @@ def api_change_password():
         data = request.get_json() or {}
         old_password = data.get('old_password', '')
         new_password = data.get('new_password', '')
-        if len(new_password) < 4 or len(new_password) > 32:
-            return jsonify({'success': False, 'message': 'Пароль должен быть 4..32 символа'}), 400
+        # Stronger password policy (TASK-013)
+        if len(new_password) < 8:
+            return jsonify({'success': False, 'message': 'Пароль должен быть не менее 8 символов'}), 400
+        if len(new_password) > 32:
+            return jsonify({'success': False, 'message': 'Пароль не может быть длиннее 32 символов'}), 400
         if not new_password:
             return jsonify({'success': False, 'message': 'Новый пароль обязателен'}), 400
+        if new_password.lower() in _PASSWORD_BLOCKLIST:
+            return jsonify({'success': False, 'message': 'Этот пароль слишком простой. Выберите другой.'}), 400
         stored_hash = db.get_password_hash()
         if stored_hash and (app.config.get('TESTING') or check_password_hash(stored_hash, old_password)):
             if db.set_password(new_password):
