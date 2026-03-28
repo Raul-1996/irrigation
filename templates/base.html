@@ -5,6 +5,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block title %}WB-Irrigation{% endblock %}</title>
     
     <!-- Favicon -->
@@ -374,6 +375,41 @@
     <div class="notification-container" id="notification-container"></div>
 
     <script>
+        // CSRF token interceptor: attach token to all non-GET fetch requests
+        (function() {
+            var csrfMeta = document.querySelector('meta[name="csrf-token"]');
+            var csrfToken = csrfMeta ? csrfMeta.content : null;
+            var origFetch = window.fetch;
+            window.fetch = function(url, opts) {
+                opts = opts || {};
+                if (opts.method && opts.method.toUpperCase() !== 'GET') {
+                    if (!opts.headers) opts.headers = {};
+                    // Support both plain object and Headers instance
+                    if (csrfToken) {
+                        if (opts.headers instanceof Headers) {
+                            if (!opts.headers.has('X-CSRFToken')) opts.headers.set('X-CSRFToken', csrfToken);
+                        } else {
+                            if (!opts.headers['X-CSRFToken']) opts.headers['X-CSRFToken'] = csrfToken;
+                        }
+                    }
+                }
+                return origFetch.call(this, url, opts);
+            };
+            // Also patch XMLHttpRequest for legacy code
+            var origOpen = XMLHttpRequest.prototype.open;
+            var origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function(method) {
+                this._csrfMethod = method;
+                return origOpen.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function() {
+                if (this._csrfMethod && this._csrfMethod.toUpperCase() !== 'GET' && csrfToken) {
+                    try { this.setRequestHeader('X-CSRFToken', csrfToken); } catch(e) {}
+                }
+                return origSend.apply(this, arguments);
+            };
+        })();
+
         // Update footer time from server clock to avoid client TZ drift
         let _serverNow = null;
         function _fmt(dt){ const p=n=>String(n).padStart(2,'0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`; }

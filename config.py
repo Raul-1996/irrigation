@@ -40,7 +40,7 @@ def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
 class Config:
     SECRET_KEY = _load_or_generate_secret()
     WTF_CSRF_ENABLED = True
-    WTF_CSRF_CHECK_DEFAULT = False  # по умолчанию не проверяем CSRF для API-запросов
+    WTF_CSRF_CHECK_DEFAULT = True  # CSRF проверка включена для всех POST/PUT/DELETE
     WTF_CSRF_TIME_LIMIT = None
     # Прочие настройки
     EMERGENCY_STOP = False
