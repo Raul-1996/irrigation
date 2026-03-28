@@ -4323,62 +4323,31 @@ def api_master_valve_toggle(group_id, action):
         return jsonify({"success": False, "message": "Ошибка"}), 500
 
 # Boot-time: ensure all zones and master valves are OFF on controller start (mode-aware)
-try:
-    @app.before_first_request
-    def _boot_sync_all_outputs_off():
-        try:
-            if app.config.get('TESTING'):
-                return
-            zones = db.get_zones() or []
-            for z in zones:
-                try:
-                    sid = z.get('mqtt_server_id'); t = (z.get('topic') or '').strip()
-                    if sid and t:
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            # Публикуем OFF с небольшими ретраями на случай неготовности соединения
-                            t_norm = normalize_topic(t)
-                            for attempt in range(3):
-                                ok = _publish_mqtt_value(server, t_norm, '0', min_interval_sec=0.0, retain=True)
-                                if ok:
-                                    break
-                                try:
-                                    time.sleep(0.2 * (attempt + 1))
-                                except Exception:
-                                    pass
-                            try:
-                                time.sleep(0.01)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-            # Close all configured master valves (by unique topic/server)
-            seen = set()
-            for g in (db.get_groups() or []):
-                try:
-                    if int(g.get('use_master_valve') or 0) != 1:
-                        continue
-                except Exception:
-                    continue
-                mtopic = (g.get('master_mqtt_topic') or '').strip()
-                msid = g.get('master_mqtt_server_id')
-                if not mtopic or not msid:
-                    continue
-                key = (int(msid), mtopic)
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    server = db.get_mqtt_server(int(msid))
+# Note: before_first_request was removed in Flask 3.x. Using a one-time flag in before_request instead.
+# The initial sync is already handled in _init_scheduler_before_request (_INITIAL_SYNC_DONE),
+# so this block is kept as a secondary safety net with its own flag.
+_BOOT_SYNC_OUTPUTS_DONE = False
+
+@app.before_request
+def _boot_sync_all_outputs_off():
+    global _BOOT_SYNC_OUTPUTS_DONE
+    if _BOOT_SYNC_OUTPUTS_DONE:
+        return None
+    _BOOT_SYNC_OUTPUTS_DONE = True
+    try:
+        if app.config.get('TESTING'):
+            return None
+        zones = db.get_zones() or []
+        for z in zones:
+            try:
+                sid = z.get('mqtt_server_id'); t = (z.get('topic') or '').strip()
+                if sid and t:
+                    server = db.get_mqtt_server(int(sid))
                     if server:
-                        try:
-                            mode = (g.get('master_mode') or 'NC').strip().upper()
-                        except Exception:
-                            mode = 'NC'
-                        close_val = '1' if mode == 'NO' else '0'
-                        t_norm = normalize_topic(mtopic)
+                        # Публикуем OFF с небольшими ретраями на случай неготовности соединения
+                        t_norm = normalize_topic(t)
                         for attempt in range(3):
-                            ok = _publish_mqtt_value(server, t_norm, close_val, min_interval_sec=0.0, retain=True)
+                            ok = _publish_mqtt_value(server, t_norm, '0', min_interval_sec=0.0, retain=True)
                             if ok:
                                 break
                             try:
@@ -4389,12 +4358,50 @@ try:
                             time.sleep(0.01)
                         except Exception:
                             pass
-                except Exception:
-                    pass
-        except Exception:
-            logger.exception('boot sync OFF failed')
-except Exception:
-    pass
+            except Exception:
+                pass
+        # Close all configured master valves (by unique topic/server)
+        seen = set()
+        for g in (db.get_groups() or []):
+            try:
+                if int(g.get('use_master_valve') or 0) != 1:
+                    continue
+            except Exception:
+                continue
+            mtopic = (g.get('master_mqtt_topic') or '').strip()
+            msid = g.get('master_mqtt_server_id')
+            if not mtopic or not msid:
+                continue
+            key = (int(msid), mtopic)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                server = db.get_mqtt_server(int(msid))
+                if server:
+                    try:
+                        mode = (g.get('master_mode') or 'NC').strip().upper()
+                    except Exception:
+                        mode = 'NC'
+                    close_val = '1' if mode == 'NO' else '0'
+                    t_norm = normalize_topic(mtopic)
+                    for attempt in range(3):
+                        ok = _publish_mqtt_value(server, t_norm, close_val, min_interval_sec=0.0, retain=True)
+                        if ok:
+                            break
+                        try:
+                            time.sleep(0.2 * (attempt + 1))
+                        except Exception:
+                            pass
+                    try:
+                        time.sleep(0.01)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        logger.exception('boot sync OFF failed')
+    return None
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива
