@@ -109,7 +109,7 @@ def job_close_master_valve(group_id: int):
         except Exception:
             mode = 'NC'
         close_val = '1' if mode == 'NO' else '0'
-        publish_mqtt_value(server, normalize_topic(topic), close_val, min_interval_sec=0.0, retain=True, meta={'cmd':'master_cap_close'})
+        publish_mqtt_value(server, normalize_topic(topic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_cap_close'})
         logger.info(f"Master valve cap close: group {group_id}")
     except Exception as e:
         logger.error(f"Ошибка cap-закрытия мастер-клапана для группы {group_id}: {e}")
@@ -368,7 +368,7 @@ class IrrigationScheduler:
                                 if server:
                                     logger.debug(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
                                     from app import _publish_mqtt_value as _pub
-                                    _pub(server, t, '0', min_interval_sec=0.0)
+                                    _pub(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
                         except Exception:
                             pass
                         try:
@@ -818,7 +818,7 @@ class IrrigationScheduler:
                                         except Exception:
                                             mode = 'NC'
                                         from app import _publish_mqtt_value as _pub
-                                        _pub(mserver, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0)
+                                        _pub(mserver, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0, qos=2, retain=True)
                     # Publish zone ON
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')
@@ -827,7 +827,7 @@ class IrrigationScheduler:
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
                             from app import _publish_mqtt_value as _pub
-                            _pub(server, t, '1', min_interval_sec=0.0)
+                            _pub(server, t, '1', min_interval_sec=0.0, qos=2, retain=True)
                 except Exception:
                     pass
                 try:

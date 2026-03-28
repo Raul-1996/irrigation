@@ -120,7 +120,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
                         if osid and otopic:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
-                                publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
+                                publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
                                 last_time = other.get('watering_start_time')
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
                     except Exception:
@@ -143,7 +143,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
                         if osid and otopic:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
-                                publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
+                                publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
                                 last_time = other.get('watering_start_time')
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
                     except Exception:
@@ -228,7 +228,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                 server = db.get_mqtt_server(int(sid))
                 if server:
                     # OFF публикуем с retain=True, чтобы состояние восстанавливалось после перезапуска
-                    publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, retain=True, meta={'cmd':'stop','ver':str((z.get('version') or 0) + 1)})
+                    publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'stop','ver':str((z.get('version') or 0) + 1)})
                     # Delayed master valve close (60s) if no zones ON on the same master topic across peer groups
                     try:
                         gid = int(z.get('group_id') or 0)
@@ -260,7 +260,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                                     except Exception:
                                                         mode = 'NC'
                                                     close_val = '1' if mode == 'NO' else '0'
-                                                    publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True, meta={'cmd':'master_off'})
+                                                    publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_off'})
                                         except Exception:
                                             logger.exception('master valve delayed close failed')
                                     import threading as _th
