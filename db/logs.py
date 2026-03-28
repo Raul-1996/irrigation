@@ -65,6 +65,8 @@ class LogRepository(BaseRepository):
     def get_water_usage(self, days: int = 7, zone_id: int = None) -> List[Dict[str, Any]]:
         """Получить данные расхода воды."""
         try:
+            days = int(days)
+            day_modifier = f'-{days} days'
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 if zone_id:
@@ -72,17 +74,17 @@ class LogRepository(BaseRepository):
                         SELECT w.*, z.name as zone_name
                         FROM water_usage w
                         LEFT JOIN zones z ON w.zone_id = z.id
-                        WHERE w.zone_id = ? AND w.timestamp >= datetime('now', '-{} days')
+                        WHERE w.zone_id = ? AND w.timestamp >= datetime('now', ?)
                         ORDER BY w.timestamp DESC
-                    '''.format(days), (zone_id,))
+                    ''', (zone_id, day_modifier))
                 else:
                     cursor = conn.execute('''
                         SELECT w.*, z.name as zone_name
                         FROM water_usage w
                         LEFT JOIN zones z ON w.zone_id = z.id
-                        WHERE w.timestamp >= datetime('now', '-{} days')
+                        WHERE w.timestamp >= datetime('now', ?)
                         ORDER BY w.timestamp DESC
-                    '''.format(days))
+                    ''', (day_modifier,))
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             logger.error("Ошибка получения данных расхода воды: %s", e)
@@ -106,22 +108,24 @@ class LogRepository(BaseRepository):
     def get_water_statistics(self, days: int = 30) -> Dict[str, Any]:
         """Получить статистику расхода воды."""
         try:
+            days = int(days)
+            day_modifier = f'-{days} days'
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute('''
                     SELECT SUM(liters) as total_liters
                     FROM water_usage
-                    WHERE timestamp >= datetime('now', '-{} days')
-                '''.format(days))
+                    WHERE timestamp >= datetime('now', ?)
+                ''', (day_modifier,))
                 total_liters = cursor.fetchone()[0] or 0
 
                 cursor = conn.execute('''
                     SELECT z.name, SUM(w.liters) as liters
                     FROM water_usage w
                     LEFT JOIN zones z ON w.zone_id = z.id
-                    WHERE w.timestamp >= datetime('now', '-{} days')
+                    WHERE w.timestamp >= datetime('now', ?)
                     GROUP BY w.zone_id, z.name
                     ORDER BY liters DESC
-                '''.format(days))
+                ''', (day_modifier,))
                 zone_usage = [dict(row) for row in cursor.fetchall()]
 
                 cursor = conn.execute('''
@@ -129,10 +133,10 @@ class LogRepository(BaseRepository):
                     FROM (
                         SELECT DATE(timestamp) as date, SUM(liters) as daily_liters
                         FROM water_usage
-                        WHERE timestamp >= datetime('now', '-{} days')
+                        WHERE timestamp >= datetime('now', ?)
                         GROUP BY DATE(timestamp)
                     )
-                '''.format(days))
+                ''', (day_modifier,))
                 avg_daily = cursor.fetchone()[0] or 0
 
                 return {
