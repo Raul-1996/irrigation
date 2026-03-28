@@ -173,7 +173,8 @@ class LogRepository(BaseRepository):
                         c.commit()
                 except sqlite3.Error as e:
                     logger.debug("WAL checkpoint after backup: %s", e)
-            except sqlite3.Error:
+            except sqlite3.Error as e:
+                logger.debug("VACUUM backup failed, using copy: %s", e)
                 shutil.copy2(self.db_path, backup_path)
 
             self._cleanup_old_backups()

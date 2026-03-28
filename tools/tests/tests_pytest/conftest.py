@@ -29,25 +29,20 @@ try:
     # Prepare isolated temporary database path
     _TMPDIR = tempfile.mkdtemp(prefix='wb_irrigation_pytest_')
     _TEST_DB_PATH = os.path.join(_TMPDIR, 'irrigation_test.db')
-    try:
-        database_module.db.db_path = _TEST_DB_PATH
-        database_module.db.init_database()
-    except Exception:
-        from database import IrrigationDB
-        _test_db = IrrigationDB(db_path=_TEST_DB_PATH)
-        _test_db.init_database()
-        database_module.db = _test_db
+    from database import IrrigationDB
+    _test_db = IrrigationDB(db_path=_TEST_DB_PATH)
+    database_module.db = _test_db
 
     # Bind app to test DB and testing mode
     app_module.app.config.update(TESTING=True)
     app_module.db = database_module.db
 
     # Start in-process HTTP server and set WB_BASE_URL
-    if make_server is not None:
+    if make_server is not None and not os.environ.get('WB_BASE_URL'):
         try:
-            _SRV = make_server('127.0.0.1', 8080, app_module.app)
-        except Exception:
             _SRV = make_server('127.0.0.1', 0, app_module.app)
+        except Exception:
+            _SRV = None
         _PORT = getattr(_SRV, 'server_port', 8080)
         os.environ['WB_BASE_URL'] = f'http://127.0.0.1:{_PORT}'
         _THREAD = threading.Thread(target=_SRV.serve_forever, daemon=True)
@@ -75,14 +70,9 @@ def _isolate_test_database(tmp_path_factory):
         test_db_path = str(tmpdir / 'irrigation_test.db')
 
     # Point global DB to temp path and init
-    try:
-        database_module.db.db_path = test_db_path
-        database_module.db.init_database()
-    except Exception:
-        from database import IrrigationDB  # local import to avoid circulars
-        test_db = IrrigationDB(db_path=test_db_path)
-        test_db.init_database()
-        database_module.db = test_db
+    from database import IrrigationDB  # local import to avoid circulars
+    test_db = IrrigationDB(db_path=test_db_path)
+    database_module.db = test_db
 
     # Ensure Flask app uses same DB
     app_module.app.config.update(TESTING=True)
@@ -103,9 +93,10 @@ def _start_http_server(_isolate_test_database):
         yield
         return
     try:
-        srv = make_server('127.0.0.1', 8080, app_module.app)
-    except Exception:
         srv = make_server('127.0.0.1', 0, app_module.app)
+    except Exception:
+        yield
+        return
     port = getattr(srv, 'server_port', 8080)
     os.environ['WB_BASE_URL'] = f'http://127.0.0.1:{port}'
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -167,12 +158,12 @@ def ensure_db():
 @pytest.fixture(autouse=True)
 def _cleanup_media_after_test():
     # Ensure media directories exist
-    from app import UPLOAD_FOLDER, MAP_FOLDER
+    from services.helpers import UPLOAD_FOLDER, MAP_DIR
     try:
         yield
     finally:
         # Remove files created during tests (maps and zone photos)
-        for folder in (MAP_FOLDER, UPLOAD_FOLDER):
+        for folder in (MAP_DIR, UPLOAD_FOLDER):
             try:
                 for name in os.listdir(folder):
                     path = os.path.join(folder, name)

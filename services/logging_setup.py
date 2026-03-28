@@ -2,6 +2,8 @@
 import os
 import logging
 
+logger = logging.getLogger(__name__)
+
 
 class PIIMaskingFilter(logging.Filter):
     SENSITIVE_KEYS = (

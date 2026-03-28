@@ -9,19 +9,22 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import logging
+
+logger = logging.getLogger(__name__)
+
 from database import IrrigationDB
 from utils import normalize_topic
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
 try:
     from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-except Exception as e:
-    logger.debug("Exception in line_18: %s", e)
+except ImportError as e:
+    logger.debug("SQLAlchemyJobStore not available: %s", e)
     SQLAlchemyJobStore = None
 try:
     from apscheduler.jobstores.memory import MemoryJobStore
-except Exception as e:
-    logger.debug("Exception in line_23: %s", e)
+except ImportError as e:
+    logger.debug("MemoryJobStore not available: %s", e)
     MemoryJobStore = None
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -29,13 +32,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 import os
 try:
     from zoneinfo import ZoneInfo  # py3.9+
-except Exception as e:
-    logger.debug("Exception in line_32: %s", e)
+except ImportError as e:
+    logger.debug("ZoneInfo not available: %s", e)
     ZoneInfo = None
 try:
     import paho.mqtt.client as mqtt
-except Exception as e:
-    logger.debug("Exception in line_37: %s", e)
+except ImportError as e:
+    logger.debug("paho.mqtt not available: %s", e)
     mqtt = None
 
 # Настройка логирования: по умолчанию WARNING; можно поднять через env SCHEDULER_LOG_LEVEL=INFO/DEBUG

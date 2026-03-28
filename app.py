@@ -16,10 +16,12 @@ from flask_wtf.csrf import CSRFProtect
 try:
     import paho.mqtt.client as mqtt
 except ImportError:
+    logging.getLogger(__name__).debug("paho.mqtt not available")
     mqtt = None
 try:
     from services import events as _events
 except ImportError:
+    logging.getLogger(__name__).debug("services.events not available")
     _events = None
 import time as _perf_time
 import threading
@@ -262,7 +264,9 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
             return
         def started_key(z):
             try: return datetime.strptime(z.get('watering_start_time') or '', '%Y-%m-%d %H:%M:%S')
-            except (ValueError, TypeError): return datetime.min
+            except (ValueError, TypeError):
+                logger.debug("started_key parse failed for zone %s", z.get('id'))
+                return datetime.min
         on_zones.sort(key=started_key, reverse=True)
         for z in on_zones[1:]:
             try:
@@ -298,7 +302,8 @@ def _enforce_group_exclusive_all_groups() -> None:
                 mv_topic = ''
             def _is_mv(z):
                 try: return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.debug("_is_mv check (enforce_all): %s", e)
                     return False
             if sum(1 for z in arr if str(z.get('state')) == 'on' and not _is_mv(z)) > 1:
                 _force_group_exclusive(gid, 'watchdog')
