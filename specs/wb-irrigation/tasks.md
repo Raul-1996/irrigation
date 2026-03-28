@@ -405,7 +405,8 @@
 - **Оценка:** 3 часа
 - **Зависимости:** TASK-014, TASK-015 (monitors и SSE уже вынесены)
 
-### TASK-017: Вынести routes/zones_api.py
+### TASK-017: Вынести routes/zones_api.py ✅
+- **Статус:** DONE (2026-03-28, commit 59eb90c)
 - **Приоритет:** P2
 - **Файлы:** `routes/zones_api.py` (новый), `app.py`
 - **Описание:**
@@ -432,7 +433,8 @@
 - **Оценка:** 3 часа
 - **Зависимости:** TASK-016 (app_init вынесен, before_request упрощён)
 
-### TASK-018: Вынести routes/groups_api.py
+### TASK-018: Вынести routes/groups_api.py ✅
+- **Статус:** DONE (2026-03-28, commit 59eb90c)
 - **Приоритет:** P2
 - **Файлы:** `routes/groups_api.py` (новый), `app.py`
 - **Описание:**
@@ -449,7 +451,8 @@
 - **Оценка:** 2 часа
 - **Зависимости:** TASK-016
 
-### TASK-019: Вынести routes/programs_api.py
+### TASK-019: Вынести routes/programs_api.py ✅
+- **Статус:** DONE (2026-03-28, commit 59eb90c)
 - **Приоритет:** P2
 - **Файлы:** `routes/programs_api.py` (новый), `app.py`
 - **Описание:**
@@ -461,7 +464,8 @@
 - **Оценка:** 1.5 часа
 - **Зависимости:** TASK-016
 
-### TASK-020: Вынести routes/mqtt_api.py
+### TASK-020: Вынести routes/mqtt_api.py ✅
+- **Статус:** DONE (2026-03-28, commit 59eb90c)
 - **Приоритет:** P2
 - **Файлы:** `routes/mqtt_api.py` (новый), `app.py`
 - **Описание:**
@@ -479,7 +483,8 @@
 - **Оценка:** 3 часа
 - **Зависимости:** TASK-015 (SSE Hub вынесен), TASK-016
 
-### TASK-021: Вынести routes/system_api.py
+### TASK-021: Вынести routes/system_api.py ✅
+- **Статус:** DONE (2026-03-28, commit 59eb90c)
 - **Приоритет:** P2
 - **Файлы:** `routes/system_api.py` (новый), `app.py`
 - **Описание:**
