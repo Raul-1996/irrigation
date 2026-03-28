@@ -35,7 +35,8 @@ class AuthProxy(http.server.BaseHTTPRequestHandler):
             decoded = base64.b64decode(auth[6:]).decode()
             u, p = decoded.split(":", 1)
             return u == USER and p == PASS
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _check_auth: %s", e)
             return False
 
     def _proxy(self):
@@ -77,6 +78,7 @@ class AuthProxy(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(e.read())
         except Exception as e:
+            logger.debug("Exception in line_80: %s", e)
             self.send_response(502)
             self.end_headers()
             self.wfile.write(str(e).encode())

@@ -17,12 +17,14 @@ from services import sse_hub as _sse_hub
 
 try:
     import paho.mqtt.client as mqtt
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_20: %s", e)
     mqtt = None
 
 try:
     from PIL import Image, ImageOps
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_26: %s", e)
     Image = None
     ImageOps = None
 
@@ -44,8 +46,8 @@ def normalize_image(image_data, max_long_side=1024, fmt='WEBP', quality=90, loss
         img = Image.open(io.BytesIO(image_data))
         try:
             img = ImageOps.exif_transpose(img)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in normalize_image: %s", e)
         if img.mode in ('RGBA', 'LA', 'P'):
             img = img.convert('RGB')
         w, h = img.size
@@ -75,7 +77,8 @@ def normalize_image(image_data, max_long_side=1024, fmt='WEBP', quality=90, loss
             ext = '.png'
         out.seek(0)
         return out.getvalue(), ext
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in line_80: %s", e)
         return image_data, '.jpg'
 
 
@@ -104,31 +107,33 @@ def api_zone(zone_id):
                     return jsonify({'success': False, 'message': 'duration must be 1..3600'}), 400
             if 'name' in data and (not str(data['name']).strip()):
                 return jsonify({'success': False, 'message': 'name must be non-empty'}), 400
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in api_zone: %s", e)
             return jsonify({'success': False, 'message': 'invalid zone payload'}), 400
         try:
             is_csv = (request.headers.get('X-Import-Op') == 'csv') or (request.args.get('source') == 'csv')
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in api_zone: %s", e)
             is_csv = False
         if is_csv:
             try:
                 logging.getLogger('import_export').info(f"PUT zone from CSV id={zone_id} payload={json.dumps(data, ensure_ascii=False)}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in api_zone: %s", e)
         zone = db.update_zone(zone_id, data)
         if zone:
             if is_csv:
                 try:
                     logging.getLogger('import_export').info(f"PUT result id={zone_id} OK")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_128: %s", e)
             db.add_log('zone_edit', json.dumps({"zone": zone_id, "changes": data}))
             return jsonify(zone)
         if is_csv:
             try:
                 logging.getLogger('import_export').info(f"PUT result id={zone_id} NOT_FOUND")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_135: %s", e)
         return ('Zone not found', 404)
 
     elif request.method == 'DELETE':
@@ -148,31 +153,33 @@ def api_create_zone():
             return jsonify({'success': False, 'message': 'duration must be 1..3600'}), 400
         if not name:
             return jsonify({'success': False, 'message': 'name must be non-empty'}), 400
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in api_create_zone: %s", e)
         return jsonify({'success': False, 'message': 'invalid zone payload'}), 400
     try:
         is_csv = (request.headers.get('X-Import-Op') == 'csv') or (request.args.get('source') == 'csv')
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in api_create_zone: %s", e)
         is_csv = False
     if is_csv:
         try:
             logging.getLogger('import_export').info(f"POST create zone from CSV payload={json.dumps(data, ensure_ascii=False)}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in api_create_zone: %s", e)
     zone = db.create_zone(data)
     if zone:
         db.add_log('zone_create', json.dumps({"zone": zone['id'], "name": zone['name']}))
         if is_csv:
             try:
                 logging.getLogger('import_export').info(f"POST result id={zone.get('id')} OK")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in api_create_zone: %s", e)
         return jsonify(zone), 201
     if is_csv:
         try:
             logging.getLogger('import_export').info("POST result ERROR")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_181: %s", e)
     return ('Error creating zone', 400)
 
 
@@ -187,8 +194,8 @@ def api_import_zones_bulk():
         stats = db.bulk_upsert_zones(zones)
         try:
             db.add_log('zones_import', json.dumps({'counts': stats}))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in api_import_zones_bulk: %s", e)
         return jsonify({'success': True, **stats})
     except Exception as e:
         logger.error(f"Ошибка импорта зон: {e}")
@@ -230,8 +237,8 @@ def api_zone_next_watering(zone_id):
                 pu_dt = parse_dt(pu)
                 if pu_dt and pu_dt > now:
                     now = pu_dt
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_240: %s", e)
         best_dt = None
         best_payload = None
 
@@ -262,8 +269,8 @@ def api_zone_next_watering(zone_id):
                             run_date = datetime.now().strftime('%Y-%m-%d')
                             if db.is_program_run_cancelled_for_group(int(program['id']), run_date, gid):
                                 continue
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_272: %s", e)
                     if best_dt is None or zone_dt < best_dt:
                         best_dt = zone_dt
                         best_payload = {
@@ -301,7 +308,8 @@ def api_zones_next_watering_bulk():
         for p in programs:
             try:
                 zones_list = sorted([int(x) for x in (p.get('zones') or [])])
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in api_zones_next_watering_bulk: %s", e)
                 zones_list = []
             offsets = {}
             cum = 0
@@ -315,7 +323,8 @@ def api_zones_next_watering_bulk():
             p = pm['prog']
             try:
                 hh, mm = [int(x) for x in str(p.get('time') or '00:00').split(':', 1)]
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in api_zones_next_watering_bulk: %s", e)
                 hh, mm = 0, 0
             best = None
             days = p.get('days') or []
@@ -325,7 +334,8 @@ def api_zones_next_watering_bulk():
             try:
                 zones_list = p.get('zones') or []
                 total_prog_min = sum(int(duration_by_zone.get(int(zid), 0)) for zid in zones_list)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in line_337: %s", e)
                 total_prog_min = 0
             in_progress = False
             elapsed_min = 0
@@ -363,7 +373,8 @@ def api_zones_next_watering_bulk():
                     if gid and pinfo.get('today_start'):
                         run_date = pinfo['today_start'].strftime('%Y-%m-%d')
                         cancelled_today = db.is_program_run_cancelled_for_group(int(p.get('id')), run_date, gid)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_376: %s", e)
                     cancelled_today = False
 
                 if pinfo.get('in_progress') and pinfo.get('today_start') and not cancelled_today:
@@ -391,8 +402,8 @@ def api_zones_next_watering_bulk():
                                     break
                             if ns:
                                 cand = ns + timedelta(minutes=int(offsets.get(zid, 0)))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_405: %s", e)
                 if cand <= now:
                     continue
                 if best_dt is None or cand < best_dt:
@@ -439,7 +450,8 @@ def api_check_zone_duration_conflicts():
                 continue
             try:
                 p_hour, p_min = map(int, program['time'].split(':'))
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in get_zone_group: %s", e)
                 continue
             start_a = p_hour * 60 + p_min
             total_duration_a = 0
@@ -466,7 +478,8 @@ def api_check_zone_duration_conflicts():
                     continue
                 try:
                     oh, om = map(int, other['time'].split(':'))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_481: %s", e)
                     continue
                 start_b = oh * 60 + om
                 total_duration_b = 0
@@ -505,7 +518,8 @@ def api_check_zone_duration_conflicts_bulk():
                 zid = int(ch.get('zone_id'))
                 dur = int(ch.get('new_duration'))
                 normalized.append((zid, dur))
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in api_check_zone_duration_conflicts_bulk: %s", e)
                 continue
         if not normalized:
             return jsonify({'success': False, 'message': 'Нет валидных изменений'}), 400
@@ -523,7 +537,8 @@ def api_check_zone_duration_conflicts_bulk():
                 return 0
             try:
                 return int(z.get('duration') or 0)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in get_zone_duration: %s", e)
                 return 0
 
         results = {}
@@ -536,7 +551,8 @@ def api_check_zone_duration_conflicts_bulk():
                     continue
                 try:
                     p_hour, p_min = map(int, program['time'].split(':'))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in get_zone_duration: %s", e)
                     continue
                 start_a = p_hour * 60 + p_min
                 total_duration_a = 0
@@ -557,7 +573,8 @@ def api_check_zone_duration_conflicts_bulk():
                         continue
                     try:
                         oh, om = map(int, other['time'].split(':'))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_576: %s", e)
                         continue
                     start_b = oh * 60 + om
                     total_duration_b = 0
@@ -600,7 +617,8 @@ def upload_zone_photo(zone_id):
             return jsonify({'success': False, 'message': 'Неподдерживаемый формат файла'}), 400
         try:
             mime = file.mimetype
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in upload_zone_photo: %s", e)
             mime = None
         if not mime or mime not in ALLOWED_MIME_TYPES:
             return jsonify({'success': False, 'message': 'Неподдерживаемый тип содержимого'}), 400
@@ -629,8 +647,8 @@ def upload_zone_photo(zone_id):
                     old_dir = os.path.join(UPLOAD_FOLDER, 'OLD')
                     os.makedirs(old_dir, exist_ok=True)
                     os.replace(old_abs, os.path.join(old_dir, os.path.basename(old_abs)))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_650: %s", e)
 
         base_name = f"ZONE_{zone_id}"
         filename = f"{base_name}{out_ext}"
@@ -679,7 +697,8 @@ def rotate_zone_photo(zone_id):
         try:
             data = request.get_json(silent=True) or {}
             angle = int(data.get('angle', 90))
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in rotate_zone_photo: %s", e)
             angle = 90
         photo_path = zone.get('photo_path')
         if not photo_path:
@@ -697,8 +716,8 @@ def rotate_zone_photo(zone_id):
             return jsonify({'success': False, 'message': 'Ошибка обработки изображения'}), 500
         try:
             db.add_log('photo_rotate', json.dumps({'zone': zone_id, 'angle': angle}))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in rotate_zone_photo: %s", e)
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Ошибка поворота фото: {e}")
@@ -753,8 +772,8 @@ def start_zone(zone_id):
             scheduler = get_scheduler()
             if scheduler:
                 scheduler.cancel_group_jobs(int(zone['group_id']))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in start_zone: %s", e)
 
         # Turn off all other zones in group
         try:
@@ -774,10 +793,10 @@ def start_zone(zone_id):
                         logger.exception("Ошибка публикации MQTT '0' при ручном запуске: выключение соседей")
                     try:
                         db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_796: %s", e)
+        except Exception as e:
+            logger.debug("Handled exception in line_798: %s", e)
 
         try:
             from services.zone_control import exclusive_start_zone as _start_central
@@ -823,8 +842,8 @@ def stop_zone(zone_id):
             db.add_log('zone_stop', json.dumps({
                 "zone": int(zone_id), "group": int(zone.get('group_id') or 0), "source": "manual"
             }))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in stop_zone: %s", e)
         return jsonify({'success': True, 'message': f'Зона {zone_id} остановлена', 'zone_id': zone_id, 'state': 'off'})
     except Exception as e:
         logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
@@ -854,7 +873,8 @@ def api_zone_watering_time(zone_id):
 
         try:
             start_dt = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in api_zone_watering_time: %s", e)
             db.update_zone(zone_id, {'watering_start_time': None})
             resp = jsonify({
                 'success': True, 'zone_id': zone_id, 'is_watering': False,
@@ -952,19 +972,20 @@ def api_zone_mqtt_start(zone_id: int):
                     for p in programs:
                         try:
                             hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in api_zone_mqtt_start: %s", e)
                             hh, mm = 0, 0
                         start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
                         if start_today <= now:
                             db.cancel_program_run_for_group(int(p.get('id')), today, int(gid))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in api_zone_mqtt_start: %s", e)
                 try:
                     db.reschedule_group_to_next_program(int(gid))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_985: %s", e)
+        except Exception as e:
+            logger.debug("Handled exception in line_987: %s", e)
         t1 = time.time()
         # Fast OFF peers in background
         try:
@@ -983,18 +1004,19 @@ def api_zone_mqtt_start(zone_id: int):
                                         server = db.get_mqtt_server(int(sid))
                                         if server:
                                             _publish_mqtt_value(server, tpc, '0', min_interval_sec=0.0)
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug("Handled exception in _off_peer: %s", e)
                                 try:
                                     db.update_zone(int(peer['id']), {'state': 'off', 'watering_start_time': None})
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug("Handled exception in _off_peer: %s", e)
                             list(pool.map(_off_peer, peers_on))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in _off_peer: %s", e)
                         try:
                             logger.exception('fast OFF peers bg failed')
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Handled exception in _off_peer: %s", e)
                 import threading as _th
                 _th.Thread(target=_bg_off, daemon=True).start()
         except Exception:
@@ -1004,12 +1026,14 @@ def api_zone_mqtt_start(zone_id: int):
         try:
             try:
                 gid2 = int(z.get('group_id') or 0)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in line_1029: %s", e)
                 gid2 = 0
             if gid2:
                 try:
                     g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid2), None)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_1035: %s", e)
                     g = None
                 if g and int(g.get('use_master_valve') or 0) == 1:
                     mtopic = (g.get('master_mqtt_topic') or '').strip()
@@ -1019,7 +1043,8 @@ def api_zone_mqtt_start(zone_id: int):
                         if server_mv:
                             try:
                                 mode = (g.get('master_mode') or 'NC').strip().upper()
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("Exception in line_1046: %s", e)
                                 mode = 'NC'
                             _publish_mqtt_value(server_mv, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0)
             sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
@@ -1035,8 +1060,8 @@ def api_zone_mqtt_start(zone_id: int):
         # DB update
         try:
             db.update_zone(int(zone_id), {'state': 'on', 'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'watering_start_source': 'manual', 'commanded_state': 'on'})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_1063: %s", e)
         t4 = time.time()
         # Schedule auto-stop in background
         t5 = time.time()
@@ -1053,7 +1078,8 @@ def api_zone_mqtt_start(zone_id: int):
                     if (not sched) and not current_app.config.get('TESTING'):
                         try:
                             dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in _bg_schedule: %s", e)
                             dur = 0
                         if dur > 0:
                             def _fallback_stop():
@@ -1061,21 +1087,23 @@ def api_zone_mqtt_start(zone_id: int):
                                     time.sleep(max(1, dur * 60))
                                     from services.zone_control import stop_zone as _stop
                                     _stop(int(zone_id), reason='auto_fallback', force=True)
-                                except Exception:
+                                except Exception as e:
+                                    logger.debug("Exception in _fallback_stop: %s", e)
                                     try:
                                         logger.exception('fallback auto-stop failed')
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug("Handled exception in _fallback_stop: %s", e)
                             import threading as _th2
                             _th2.Thread(target=_fallback_stop, daemon=True).start()
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in _fallback_stop: %s", e)
                     try:
                         logger.exception('manual mqtt start: schedule auto-stop failed')
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in _fallback_stop: %s", e)
             threading.Thread(target=_bg_schedule, daemon=True).start()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in _fallback_stop: %s", e)
         try:
             db.add_log('diag_manual_start_timing', json.dumps({
                 'zone': int(zone_id),
@@ -1085,12 +1113,12 @@ def api_zone_mqtt_start(zone_id: int):
                 't_schedule_ms': int((t5 - t4) * 1000),
                 't_total_ms': int((t5 - t0) * 1000)
             }))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_1116: %s", e)
         try:
             db.add_log('zone_start_manual', json.dumps({'zone': int(zone_id), 'group': gid}))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_1120: %s", e)
         return jsonify({'success': True, 'message': f'Зона {int(zone_id)} запущена'})
     except Exception:
         logger.exception('api_zone_mqtt_start failed')
@@ -1120,8 +1148,8 @@ def api_zone_mqtt_stop(zone_id: int):
         _publish_mqtt_value(server, t, '0')
         try:
             db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in api_zone_mqtt_stop: %s", e)
         return jsonify({'success': True, 'message': 'Зона остановлена'})
     except Exception as e:
         logger.error(f"MQTT publish stop failed: {e}")

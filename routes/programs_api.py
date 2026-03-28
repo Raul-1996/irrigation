@@ -29,8 +29,8 @@ def api_program(prog_id):
         try:
             if isinstance(data.get('days'), list):
                 data['days'] = [int(d) for d in data['days']]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in api_program: %s", e)
         try:
             conflicts = db.check_program_conflicts(program_id=prog_id, time=data['time'], zones=data['zones'], days=data['days'])
             if conflicts:
@@ -68,8 +68,8 @@ def api_create_program():
     try:
         if isinstance(data.get('days'), list):
             data['days'] = [int(d) for d in data['days']]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in api_create_program: %s", e)
     try:
         conflicts = db.check_program_conflicts(program_id=None, time=data['time'], zones=data['zones'], days=data['days'])
         if conflicts:

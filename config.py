@@ -1,6 +1,7 @@
 import os
 import secrets
 import stat
+import logging
 from dotenv import load_dotenv
 
 
@@ -27,7 +28,7 @@ def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
         if key:
             return key
     except FileNotFoundError:
-        pass
+        logging.getLogger(__name__).debug("No secret key file found, generating new one")
 
     # Generate new key and persist
     key = secrets.token_hex(32)

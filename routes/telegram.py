@@ -40,35 +40,41 @@ def _cb_decode(data: str) -> Dict:
     if data.startswith('group_start:'):
         try:
             return {"t": "group_start", "gid": int(data.split(':', 1)[1])}
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _cb_decode: %s", e)
             return {}
     if data.startswith('group_stop:'):
         try:
             return {"t": "group_stop", "gid": int(data.split(':', 1)[1])}
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _cb_decode: %s", e)
             return {}
     if data.startswith('group:'):
         try:
             return {"t": "group", "gid": int(data.split(':', 1)[1])}
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _cb_decode: %s", e)
             return {}
     # Совместимость со старым форматом
     if data.startswith('groupsel:'):
         try:
             return {"t": "group", "gid": int(data.split(':', 1)[1])}
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _cb_decode: %s", e)
             return {}
     if data.startswith('postpone:'):
         try:
             _, gid, days = data.split(':', 2)
             return {"t": "postpone", "gid": int(gid), "days": int(days)}
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in line_69: %s", e)
             return {}
     # JSON совместимость (на будущее)
     try:
         jd = json.loads(data)
         return jd if isinstance(jd, dict) else {}
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in line_76: %s", e)
         return {}
 
 
@@ -103,7 +109,8 @@ def _screen_group_actions(group_id: int) -> Tuple[str, dict]:
     try:
         gl = db.list_groups_min() or []
         g = next((gg for gg in gl if int(gg.get('id')) == int(group_id)), {})
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _screen_group_actions: %s", e)
         g = {}
     name = g.get('name') or f"#{group_id}"
     rows = [
@@ -129,7 +136,8 @@ def _do_group_start(group_id: int) -> str:
             return 'Планировщик недоступен'
         ok = s.start_group_sequence(int(group_id))
         return '▶ Запущен полив группы' if ok else 'Не удалось запустить'
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _do_group_start: %s", e)
         return 'Ошибка запуска группы'
 
 
@@ -138,7 +146,8 @@ def _do_group_stop(group_id: int) -> str:
         from services.zone_control import stop_all_in_group
         stop_all_in_group(int(group_id), reason='telegram', force=True)
         return '⏹ Полив группы остановлен'
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _do_group_stop: %s", e)
         return 'Ошибка остановки группы'
 
 
@@ -152,15 +161,16 @@ def _do_group_postpone(group_id: int, days: int) -> str:
             try:
                 if int(z.get('group_id') or 0) == int(group_id):
                     db.update_zone_postpone(int(z['id']), postpone_until, 'manual')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _do_group_postpone: %s", e)
         try:
             from services.zone_control import stop_all_in_group
             stop_all_in_group(int(group_id), reason='manual_postpone', force=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in _do_group_postpone: %s", e)
         return f'⏰ Полив отложен на {days} дн. до {postpone_until}'
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _do_group_postpone: %s", e)
         return 'Ошибка отложки группы'
 
 

@@ -31,11 +31,12 @@ def _is_locked(lock: threading.RLock) -> bool:
             # Мы его не удерживали — отпускаем
             try:
                 lock.release()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _is_locked: %s", e)
             return False
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _is_locked: %s", e)
         return False
 
 

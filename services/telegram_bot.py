@@ -43,7 +43,8 @@ try:
     # aiogram v3
     from aiogram import Bot, Dispatcher, F
     from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup as _AInlineKeyboardMarkup, InlineKeyboardButton as _AInlineKeyboardButton
-except Exception:
+except Exception as e:
+    logger.debug("Exception in _load_routes_module: %s", e)
     Bot = None
     Dispatcher = None
     F = None
@@ -70,8 +71,8 @@ try:
         logger.propagate = True
         logger._telegram_configured = True  # type: ignore[attr-defined]
         logger.info(f"telegram service logger initialized -> {log_path}")
-except Exception:
-    pass
+except Exception as e:
+    logger.debug("Handled exception in line_74: %s", e)
 
 
 def _redact_url(url: str) -> str:
@@ -82,7 +83,8 @@ def _redact_url(url: str) -> str:
                 return a + '/bot***' + '/' + b.split('/', 1)[1]
             return a + '/bot***'
         return url
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _redact_url: %s", e)
         return url
 
 
@@ -120,8 +122,8 @@ class TelegramNotifier:
                 except Exception as e:
                     logger.exception(f"aiogram coroutine failed: {e}")
                     fut.cancel()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in _submit_aiogram: %s", e)
         return False
 
     def send_text(self, chat_id: int, text: str) -> bool:
@@ -134,8 +136,8 @@ class TelegramNotifier:
                     bot = getattr(_aiogram_runner, '_bot', None) if '_aiogram_runner' in globals() else None
                     if bot is not None:
                         return self._submit_aiogram(bot.send_message(chat_id=int(chat_id), text=str(text)))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in send_text: %s", e)
             token = self._ensure_token()
             if not token:
                 return False
@@ -168,8 +170,8 @@ class TelegramNotifier:
                                 logger.exception(f"kb build failed: {e}")
                                 rk = None
                         return self._submit_aiogram(bot.send_message(chat_id=int(chat_id), text=str(text), reply_markup=rk))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in send_message: %s", e)
             token = self._ensure_token()
             if not token:
                 return False
@@ -206,8 +208,8 @@ class TelegramNotifier:
                         return self._submit_aiogram(
                             bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=str(text), reply_markup=rk)
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in edit_message_text: %s", e)
             token = self._ensure_token()
             if not token:
                 return False
@@ -239,8 +241,8 @@ class TelegramNotifier:
                             coro = bot.answer_callback_query(callback_query_id=str(callback_query_id), text=str(text), show_alert=bool(show_alert))
                         self._submit_aiogram(coro)
                         return
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in answer_callback: %s", e)
             token = self._ensure_token()
             if not token:
                 return
@@ -269,19 +271,21 @@ class AiogramBotRunner:
             text = str(message.text or '').strip()
             username = getattr(chat, 'username', None)
             first_name = getattr(chat, 'first_name', None)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in __init__: %s", e)
             return
         try:
             db.upsert_bot_user(int(chat_id), username, first_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in __init__: %s", e)
         try:
             routes = _load_routes_module()
             if hasattr(routes, 'set_notifier'):
                 routes.set_notifier(notifier)
             kb = {'inline_keyboard': [[{'text': 'Группы', 'callback_data': 'menu:groups'}]]}
             notifier.send_message(chat_id, 'Главное меню:', kb)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in __init__: %s", e)
             notifier.send_text(chat_id, 'Главное меню: нажмите «Группы»')
         return
 
@@ -292,7 +296,8 @@ class AiogramBotRunner:
                 sformat = parts[2] if len(parts)>2 else 'brief'
                 time_local = parts[3] if len(parts)>3 else '08:00'
                 dow = parts[4] if (len(parts)>4 and stype=='weekly') else None
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in line_299: %s", e)
                 stype, sformat, time_local, dow = 'daily','brief','08:00',None
             u = db.get_bot_user_by_chat(int(chat_id))
             if u:
@@ -306,8 +311,8 @@ class AiogramBotRunner:
                 try:
                     db.create_or_update_subscription(int(u.get('id')), 'daily', 'brief', '08:00', None, False)
                     db.create_or_update_subscription(int(u.get('id')), 'weekly', 'brief', '08:00', '1111111', False)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_314: %s", e)
             notifier.send_text(chat_id, 'Подписки отключены')
             return
 
@@ -391,8 +396,8 @@ class SimpleHTTPPoller:
             try:
                 logger.info("[telegram] HTTP poller: deleting webhook (fallback mode)")
                 requests.post(f"https://api.telegram.org/bot{token}/deleteWebhook", timeout=10)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _run: %s", e)
             logger.info("[telegram] Starting legacy HTTP polling fallback")
             self._running = True
 
@@ -410,8 +415,8 @@ class SimpleHTTPPoller:
                     for u in (data.get('result') or []):
                         try:
                             self._offset = int(u.get('update_id', 0)) + 1
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Handled exception in _run: %s", e)
 
                         cq = u.get('callback_query') or {}
                         if cq:
@@ -420,8 +425,8 @@ class SimpleHTTPPoller:
                                 if cqid:
                                     try:
                                         notifier.answer_callback(cqid)
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug("Handled exception in line_428: %s", e)
                                 from_chat = ((cq.get('message') or {}).get('chat') or {}).get('id')
                                 msg_id = ((cq.get('message') or {}).get('message_id'))
                                 data_cb = cq.get('data') or ''
@@ -431,10 +436,10 @@ class SimpleHTTPPoller:
                                         if isinstance(jd2, dict) and jd2.get('t'):
                                             routes.process_callback_json(int(from_chat), jd2, message_id=int(msg_id) if msg_id is not None else None)
                                             continue
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
+                                    except Exception as e:
+                                        logger.debug("Handled exception in line_439: %s", e)
+                            except Exception as e:
+                                logger.debug("Handled exception in line_441: %s", e)
 
                         msg = u.get('message') or {}
                         chat = msg.get('chat') or {}
@@ -451,14 +456,16 @@ class SimpleHTTPPoller:
                                     routes.set_notifier(notifier)
                                 kb = {'inline_keyboard': [[{'text': 'Группы', 'callback_data': 'menu:groups'}]]}
                                 notifier.send_message(int(cid), 'Главное меню:', kb)
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("Exception in line_459: %s", e)
                                 try:
                                     notifier.send_text(int(cid), 'Главное меню: нажмите «Группы»')
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug("Handled exception in line_463: %s", e)
                             continue
 
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_467: %s", e)
                     time.sleep(2)
                     continue
         except Exception as e:
@@ -506,7 +513,8 @@ def start_long_polling_if_needed():
 def subscribe_to_events():
     try:
         from services import events as evt
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in subscribe_to_events: %s", e)
         return
 
     def _on_event(ev: dict):
@@ -526,12 +534,12 @@ def subscribe_to_events():
                     txt = f"❗️Критическая ошибка: {code}\n{msg}".strip()
                 try:
                     notifier.send_text(int(admin_chat), txt)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Handled exception in _on_event: %s", e)
+        except Exception as e:
+            logger.debug("Handled exception in _on_event: %s", e)
 
     try:
         evt.subscribe(_on_event)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in _on_event: %s", e)

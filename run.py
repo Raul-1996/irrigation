@@ -17,15 +17,18 @@ if __name__ == '__main__':
         try:
             # Flask 2.3+: has asgi_app
             asgi_app = app.asgi_app  # type: ignore[attr-defined]
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in line_20: %s", e)
             # Wrap WSGI into ASGI for Hypercorn
             try:
                 from hypercorn.middleware.wsgi import WSGIMiddleware
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in line_25: %s", e)
                 from hypercorn.middleware import wsgi as _wsgi
                 WSGIMiddleware = _wsgi.WSGIMiddleware  # type: ignore[attr-defined]
             asgi_app = WSGIMiddleware(app)
         asyncio.run(serve(asgi_app, cfg))
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in line_31: %s", e)
         # Fallback to Flask dev server
         app.run(debug=False, host='0.0.0.0', port=port)

@@ -15,7 +15,8 @@ from services import sse_hub as _sse_hub
 
 try:
     import paho.mqtt.client as mqtt
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_18: %s", e)
     mqtt = None
 
 logger = logging.getLogger(__name__)
@@ -77,8 +78,8 @@ def api_update_group(group_id):
         if k in data:
             try:
                 updates[col] = norm(data.get(k))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_81: %s", e)
     if updates:
         try:
             if 'use_master_valve' in updates and int(updates.get('use_master_valve') or 0) == 1:
@@ -93,8 +94,8 @@ def api_update_group(group_id):
             if 'pressure_unit' in updates:
                 if str(updates['pressure_unit']).lower() not in ('bar', 'kpa', 'psi'):
                     return jsonify({'success': False, 'message': 'pressure_unit должен быть bar|kPa|psi'}), 400
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_97: %s", e)
         ok = db.update_group_fields(group_id, updates)
         updated = updated or ok
     if updated:
@@ -111,8 +112,8 @@ def api_update_group(group_id):
                 if k in data:
                     payload[k] = data.get(k)
             db.add_log('group_edit', json.dumps(payload))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_115: %s", e)
         return jsonify({"success": True})
     return ('Group not found', 404)
 
@@ -151,8 +152,8 @@ def api_stop_group(group_id):
             scheduler.cancel_group_jobs(int(group_id))
             try:
                 db.clear_group_scheduled_starts(group_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in api_stop_group: %s", e)
 
         try:
             programs = db.get_programs() or []
@@ -166,14 +167,15 @@ def api_stop_group(group_id):
                     start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
                     if start_today <= now:
                         db.cancel_program_run_for_group(int(p.get('id')), today, int(group_id))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in api_stop_group: %s", e)
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_173: %s", e)
         try:
             db.reschedule_group_to_next_program(group_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_177: %s", e)
 
         db.add_log('group_stop', json.dumps({"group": group_id}))
         return jsonify({"success": True, "message": f"Группа {group_id} остановлена"})
@@ -190,7 +192,8 @@ def api_start_group_from_first(group_id):
         if not scheduler:
             try:
                 scheduler = init_scheduler(db)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in api_start_group_from_first: %s", e)
                 scheduler = None
         if not scheduler:
             return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
@@ -199,8 +202,8 @@ def api_start_group_from_first(group_id):
             return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
         try:
             db.add_log('group_start_from_first', json.dumps({"group": group_id}))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in api_start_group_from_first: %s", e)
         return jsonify({"success": True, "message": f"Группа {group_id}: запущен последовательный полив"})
     except Exception as e:
         logger.error(f"Ошибка запуска группы {group_id} с первой зоны: {e}")
@@ -243,8 +246,8 @@ def api_start_zone_exclusive(group_id, zone_id):
             logger.exception('schedule zone cap failed')
         try:
             db.clear_scheduled_for_zone_group_peers(int(zone_id), int(group_id))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_249: %s", e)
         try:
             scheduler = get_scheduler()
             if scheduler:
@@ -254,8 +257,8 @@ def api_start_zone_exclusive(group_id, zone_id):
                     dur = int(zrec.get('duration') or 0)
                     if dur > 0:
                         db.update_zone(int(zone_id), {'planned_end_time': (datetime.now() + timedelta(minutes=dur)).strftime('%Y-%m-%d %H:%M:%S')})
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_260: %s", e)
                 if not current_app.config.get('TESTING'):
                     try:
                         dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
@@ -263,8 +266,8 @@ def api_start_zone_exclusive(group_id, zone_id):
                             scheduler.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
                             try:
                                 scheduler.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Handled exception in line_269: %s", e)
                     except Exception:
                         logger.exception('schedule auto-stop failed')
         except Exception:
@@ -287,7 +290,8 @@ def api_master_valve_toggle(group_id, action):
         try:
             if not bool(int(g.get('use_master_valve') or 0)):
                 return jsonify({"success": False, "message": "Мастер-клапан не включён для группы"}), 400
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in api_master_valve_toggle: %s", e)
             return jsonify({"success": False, "message": "Мастер-клапан не включён для группы"}), 400
         topic = (g.get('master_mqtt_topic') or '').strip()
         server_id = g.get('master_mqtt_server_id')
@@ -301,7 +305,8 @@ def api_master_valve_toggle(group_id, action):
         if not want_open:
             try:
                 t_norm = normalize_topic(topic)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in api_master_valve_toggle: %s", e)
                 t_norm = topic if topic.startswith('/') else '/' + str(topic)
             try:
                 related_group_ids = []
@@ -309,7 +314,8 @@ def api_master_valve_toggle(group_id, action):
                     try:
                         if int(gg.get('use_master_valve') or 0) != 1:
                             continue
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_317: %s", e)
                         continue
                     t2 = (gg.get('master_mqtt_topic') or '').strip()
                     if not t2:
@@ -322,9 +328,10 @@ def api_master_valve_toggle(group_id, action):
                             for z in (db.get_zones_by_group(int(gid2)) or []):
                                 if str(z.get('state') or '').lower() == 'on':
                                     return jsonify({"success": False, "message": "Нельзя закрыть мастер-клапан: в одной из связанных групп идёт полив"}), 400
-                        except Exception:
-                            pass
-            except Exception:
+                        except Exception as e:
+                            logger.debug("Handled exception in line_331: %s", e)
+            except Exception as e:
+                logger.debug("Exception in line_333: %s", e)
                 return jsonify({"success": False, "message": "Нельзя закрыть мастер-клапан: проверка состояния групп не выполнена"}), 400
         val = ('0' if want_open else '1') if mode == 'NO' else ('1' if want_open else '0')
         try:
@@ -334,8 +341,8 @@ def api_master_valve_toggle(group_id, action):
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
         try:
             db.update_group_fields(int(group_id), {'master_valve_observed': ('open' if want_open else 'closed')})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_344: %s", e)
         try:
             sched = get_scheduler()
             if sched:
@@ -343,16 +350,16 @@ def api_master_valve_toggle(group_id, action):
                     sched.schedule_master_valve_cap(int(group_id), hours=24)
                 else:
                     sched.cancel_master_valve_cap(int(group_id))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_353: %s", e)
         try:
             payload = json.dumps({'mv_group_id': int(group_id), 'mv_state': ('open' if want_open else 'closed')})
             try:
                 _sse_hub.broadcast(payload)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e:
+                logger.debug("Handled exception in line_359: %s", e)
+        except Exception as e:
+            logger.debug("Handled exception in line_361: %s", e)
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"api_master_valve_toggle failed: {e}")

@@ -15,11 +15,13 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 try:
     from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_18: %s", e)
     SQLAlchemyJobStore = None
 try:
     from apscheduler.jobstores.memory import MemoryJobStore
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_23: %s", e)
     MemoryJobStore = None
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -27,11 +29,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 import os
 try:
     from zoneinfo import ZoneInfo  # py3.9+
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_32: %s", e)
     ZoneInfo = None
 try:
     import paho.mqtt.client as mqtt
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_37: %s", e)
     mqtt = None
 
 # Настройка логирования: по умолчанию WARNING; можно поднять через env SCHEDULER_LOG_LEVEL=INFO/DEBUG
@@ -44,16 +48,16 @@ try:
     for h in logging.getLogger().handlers:
         if isinstance(h, logging.StreamHandler):
             h.setFormatter(fmt)
-except Exception:
-    pass
+except Exception as e:
+    logger.debug("Handled exception in line_51: %s", e)
 # Избегаем записи в stdout/stderr из потоков APScheduler при закрытии пайпов тест-раннером
 logger.propagate = False
 # Урезаем болтливость APScheduler, чтобы в тестах и проде не было лишних сообщений
 try:
     aps_logger = logging.getLogger('apscheduler')
     aps_logger.setLevel(logging.ERROR)
-except Exception:
-    pass
+except Exception as e:
+    logger.debug("Handled exception in line_59: %s", e)
 
 
 # === Module-level job callables for APScheduler persistence ===
@@ -63,8 +67,8 @@ def job_run_program(program_id: int, zones: list, program_name: str):
         s = get_scheduler()
         if s is not None:
             s._run_program_threaded(int(program_id), [int(z) for z in zones], str(program_name))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in job_run_program: %s", e)
 
 
 def job_run_group_sequence(group_id: int, zone_ids: list):
@@ -73,8 +77,8 @@ def job_run_group_sequence(group_id: int, zone_ids: list):
         s = get_scheduler()
         if s is not None:
             s._run_group_sequence(int(group_id), [int(z) for z in zone_ids])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in job_run_group_sequence: %s", e)
 
 
 def job_stop_zone(zone_id: int):
@@ -83,8 +87,8 @@ def job_stop_zone(zone_id: int):
         s = get_scheduler()
         if s is not None:
             s._stop_zone(int(zone_id))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in job_stop_zone: %s", e)
 
 
 def job_close_master_valve(group_id: int):
@@ -106,7 +110,8 @@ def job_close_master_valve(group_id: int):
             return
         try:
             mode = (g.get('master_mode') or 'NC').strip().upper()
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in job_close_master_valve: %s", e)
             mode = 'NC'
         close_val = '1' if mode == 'NO' else '0'
         publish_mqtt_value(server, normalize_topic(topic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_cap_close'})
@@ -121,8 +126,8 @@ def job_clear_expired_postpones():
         s = get_scheduler()
         if s is not None:
             s.clear_expired_postpones()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in job_clear_expired_postpones: %s", e)
 
 def job_dispatch_bot_subscriptions():
     try:
@@ -140,10 +145,10 @@ def job_dispatch_bot_subscriptions():
                 chat_id = int(sub.get('chat_id'))
                 if chat_id:
                     notifier.send_text(chat_id, txt)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                logger.debug("Handled exception in job_dispatch_bot_subscriptions: %s", e)
+    except Exception as e:
+        logger.debug("Handled exception in job_dispatch_bot_subscriptions: %s", e)
 
 
 class IrrigationScheduler:
@@ -159,11 +164,13 @@ class IrrigationScheduler:
                 try:
                     with open('/etc/timezone', 'r') as f:
                         tzname = f.read().strip()
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in __init__: %s", e)
                     tzname = None
             if ZoneInfo and tzname:
                 tz = ZoneInfo(tzname)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in __init__: %s", e)
             tz = None
         # Инициализация APScheduler с SQLAlchemyJobStore (для персистентности), если доступен
         scheduler_kwargs = {}
@@ -175,7 +182,8 @@ class IrrigationScheduler:
                 jobstores['volatile'] = MemoryJobStore()  # для эфемерных задач
             if jobstores:
                 scheduler_kwargs['jobstores'] = jobstores
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in __init__: %s", e)
             # Не критично: работаем без персистентности
             pass
         self.scheduler = BackgroundScheduler(timezone=tz, **scheduler_kwargs) if tz else BackgroundScheduler(**scheduler_kwargs)
@@ -184,7 +192,8 @@ class IrrigationScheduler:
             stores = getattr(self.scheduler, '_jobstores', {}) or {}
             self.has_default_jobstore = 'default' in stores
             self.has_volatile_jobstore = 'volatile' in stores
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in line_195: %s", e)
             self.has_default_jobstore = False
             self.has_volatile_jobstore = False
         self.active_zones: Dict[int, datetime] = {}
@@ -222,7 +231,8 @@ class IrrigationScheduler:
         for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
             try:
                 return datetime.strptime(s, fmt)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in _parse_dt: %s", e)
                 continue
         return None
 
@@ -244,8 +254,8 @@ class IrrigationScheduler:
                     self.db.update_zone_postpone(zone_id, None, None)
                     try:
                         self.db.add_log('postpone_expired', json.dumps({'zone': zone_id}))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in clear_expired_postpones: %s", e)
                 except Exception as e:
                     logger.error(f"Не удалось сбросить отложку для зоны {zone_id}: {e}")
             if expired:
@@ -292,7 +302,8 @@ class IrrigationScheduler:
             try:
                 from services.zone_control import stop_zone as _stop_zone_central
                 _stop_zone_central(zone_id, reason='auto_stop')
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in _stop_zone: %s", e)
                 # Fallback на локальный апдейт, если контроллер недоступен
                 self.db.update_zone(zone_id, {
                     'state': 'off',
@@ -302,8 +313,8 @@ class IrrigationScheduler:
             try:
                 pass  # dlog replaced by logger
                 logger.debug("auto-stop zone=%s", zone_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _stop_zone: %s", e)
             zone = self.db.get_zone(zone_id)
             if zone:
                 self.db.add_log('zone_auto_stop', f'Зона {zone_id} ({zone["name"]}) автоматически остановлена')
@@ -317,8 +328,8 @@ class IrrigationScheduler:
             logger.info(f"Запуск программы {program_id} ({program_name})")
             try:
                 self.db.add_log('program_start', json.dumps({'program_id': program_id, 'program_name': program_name}))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _run_program_threaded: %s", e)
             for i, zone_id in enumerate(zones):
                 zone = self.db.get_zone(zone_id)
                 if not zone:
@@ -334,8 +345,8 @@ class IrrigationScheduler:
                     if _db.is_program_run_cancelled_for_group(int(program_id), today, int(group_id)):
                         logger.info(f"Программа {program_id}: отменена для группы {group_id} на {today}, зона {zone_id} пропущена")
                         continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in _run_program_threaded: %s", e)
                 cancel_event = self.group_cancel_events.get(group_id)
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Программа {program_id}: группа {group_id} отменена, зона {zone_id} пропущена")
@@ -369,21 +380,22 @@ class IrrigationScheduler:
                                     logger.debug(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
                                     from services.mqtt_pub import publish_mqtt_value as _pub
                                     _pub(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Handled exception in line_383: %s", e)
                         try:
                             self.db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as e:
+                            logger.debug("Handled exception in line_387: %s", e)
+                except Exception as e:
+                    logger.debug("Handled exception in line_389: %s", e)
                 # Старт зоны: фиксируем время начала, чтобы таймер в UI работал
                 try:
                     start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     okv = False
                     try:
                         okv = self.db.update_zone_versioned(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_397: %s", e)
                         okv = False
                     if not okv:
                         self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
@@ -391,20 +403,20 @@ class IrrigationScheduler:
                     try:
                         from services.zone_control import exclusive_start_zone as _start_central
                         _start_central(int(zone_id))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_406: %s", e)
                     end_time = datetime.now() + timedelta(minutes=duration)
                     self.active_zones[zone_id] = end_time
                     # write planned_end_time for watchdogs/diagnostics
                     try:
                         self.db.update_zone(zone_id, {'planned_end_time': end_time.strftime('%Y-%m-%d %H:%M:%S')})
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_413: %s", e)
                     # Watchdog job
                     try:
                         self.schedule_zone_hard_stop(zone_id, end_time)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_418: %s", e)
                     self.db.add_log('zone_auto_start', json.dumps({
                         'zone_id': zone_id,
                         'zone_name': zone['name'],
@@ -422,7 +434,8 @@ class IrrigationScheduler:
                 try:
                     from database import db as _db
                     early = int(_db.get_early_off_seconds())
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_437: %s", e)
                     early = 3
                 early = 0 if early < 0 else (15 if early > 15 else early)
                 total_seconds = duration * 60
@@ -442,7 +455,8 @@ class IrrigationScheduler:
                 try:
                     from services.zone_control import stop_zone as _stop_central
                     _stop_central(int(zone_id), reason='auto', force=False)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_458: %s", e)
                     self._stop_zone(zone_id)
                 self.active_zones.pop(zone_id, None)
 
@@ -465,8 +479,8 @@ class IrrigationScheduler:
             logger.info(f"Программа {program_id} ({program_name}) завершена")
             try:
                 self.db.add_log('program_finish', json.dumps({'program_id': program_id, 'program_name': program_name}))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_482: %s", e)
         except Exception as e:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
 
@@ -536,8 +550,8 @@ class IrrigationScheduler:
             for job_id in job_ids:
                 try:
                     self.scheduler.remove_job(job_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in cancel_program: %s", e)
             self.program_jobs[program_id] = []
             logger.info(f"Программа {program_id} отменена")
         except Exception as e:
@@ -552,7 +566,8 @@ class IrrigationScheduler:
             try:
                 from database import db as _db
                 early = int(_db.get_early_off_seconds())
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in schedule_zone_stop: %s", e)
                 early = 3
             if early < 0:
                 early = 0
@@ -639,8 +654,8 @@ class IrrigationScheduler:
             job_id = f"zone_cap_stop:{int(zone_id)}"
             try:
                 self.scheduler.remove_job(job_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in cancel_zone_cap: %s", e)
         except Exception as e:
             logger.error(f"Ошибка отмены cap-стопа зоны {zone_id}: {e}")
 
@@ -671,8 +686,8 @@ class IrrigationScheduler:
             job_id = f"master_cap_close:{int(group_id)}"
             try:
                 self.scheduler.remove_job(job_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in cancel_master_valve_cap: %s", e)
         except Exception as e:
             logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
 
@@ -725,12 +740,12 @@ class IrrigationScheduler:
                 for jid in to_remove:
                     try:
                         self.scheduler.remove_job(jid)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in line_743: %s", e)
                 for zid in zone_ids:
                     self.active_zones.pop(int(zid), None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_747: %s", e)
 
             zone_ids = [z['id'] for z in group_zones]
             # Запускаем последовательность в отдельном джобе прямо сейчас
@@ -752,8 +767,8 @@ class IrrigationScheduler:
             try:
                 pass  # dlog replaced by logger
                 logger.debug("group-seq start group=%s zones=%s", group_id, zone_ids)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_770: %s", e)
             logger.info(f"Группа {group_id}: последовательный полив запущен для зон {zone_ids}")
             return True
         except Exception as e:
@@ -783,29 +798,33 @@ class IrrigationScheduler:
                 try:
                     planned_end = (datetime.now() + timedelta(minutes=duration)).strftime('%Y-%m-%d %H:%M:%S')
                     self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in _run_group_sequence: %s", e)
                     self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
                 try:
                     self.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=duration))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in _run_group_sequence: %s", e)
                 # MQTT publish: pre-open master valve for the group (idempotent), then zone ON
                 try:
                     # Pre-open MV if configured for this zone's group
                     try:
                         gid = int(zone.get('group_id') or 0)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_813: %s", e)
                         gid = 0
                     if gid:
                         try:
                             groups = self.db.get_groups() or []
                             g = next((gg for gg in groups if int(gg.get('id')) == gid), None)
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in line_820: %s", e)
                             g = None
                         if g:
                             try:
                                 use_mv = int(g.get('use_master_valve') or 0) == 1
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("Exception in line_826: %s", e)
                                 use_mv = False
                             if use_mv:
                                 mtopic = (g.get('master_mqtt_topic') or '').strip()
@@ -815,7 +834,8 @@ class IrrigationScheduler:
                                     if mserver:
                                         try:
                                             mode = (g.get('master_mode') or 'NC').strip().upper()
-                                        except Exception:
+                                        except Exception as e:
+                                            logger.debug("Exception in line_837: %s", e)
                                             mode = 'NC'
                                         from services.mqtt_pub import publish_mqtt_value as _pub
                                         _pub(mserver, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0, qos=2, retain=True)
@@ -828,8 +848,8 @@ class IrrigationScheduler:
                         if server:
                             from services.mqtt_pub import publish_mqtt_value as _pub
                             _pub(server, t, '1', min_interval_sec=0.0, qos=2, retain=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_851: %s", e)
                 try:
                     self.db.add_log('group_seq_zone_start', json.dumps({
                         'group_id': group_id,
@@ -837,15 +857,16 @@ class IrrigationScheduler:
                         'zone_name': zone.get('name'),
                         'duration': duration
                     }))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_860: %s", e)
 
                 # Ждем окончание полива зоны, проверяя флаг отмены каждую секунду
                 # Раннее выключение и выравнивание старта следующей зоны
                 try:
                     from database import db as _db
                     early = int(_db.get_early_off_seconds())
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_868: %s", e)
                     early = 3
                 early = 0 if early < 0 else (15 if early > 15 else early)
                 total_seconds = duration * 60
@@ -858,8 +879,8 @@ class IrrigationScheduler:
                         try:
                             pass  # dlog replaced by logger
                             logger.debug("group-seq cancel tick group=%s zone=%s remaining=%s", group_id, zone_id, remaining)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Handled exception in line_882: %s", e)
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")
                         break
                     time.sleep(1)
@@ -868,14 +889,15 @@ class IrrigationScheduler:
                 try:
                     from services.zone_control import stop_zone as _stop_zone_central
                     _stop_zone_central(zone_id, reason='group_sequence')
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_892: %s", e)
                     self._stop_zone(zone_id)
                 self.active_zones.pop(zone_id, None)
                 try:
                     # очищаем planned_end_time у завершенной зоны
                     self.db.update_zone(zone_id, {'planned_end_time': None})
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_899: %s", e)
                 # Добираем ранние секунды, чтобы следующий старт был вовремя
                 if early > 0 and not (cancel_event and cancel_event.is_set()):
                     time.sleep(early)
@@ -887,13 +909,13 @@ class IrrigationScheduler:
             try:
                 # Перестраиваем расписание группы на ближайшее будущее
                 self.db.reschedule_group_to_next_program(group_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_912: %s", e)
 
             try:
                 self.db.add_log('group_seq_complete', json.dumps({'group_id': group_id, 'zones': zone_ids}))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_917: %s", e)
             logger.info(f"Группа {group_id}: последовательный полив завершен")
         except Exception as e:
             logger.error(f"Ошибка выполнения последовательного полива группы {group_id}: {e}")
@@ -905,8 +927,8 @@ class IrrigationScheduler:
                     ev.clear()
                 # Опционально удаляем, чтобы не копилось
                 self.group_cancel_events.pop(group_id, None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_930: %s", e)
 
     def get_active_programs(self) -> Dict[int, Dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
@@ -922,8 +944,8 @@ class IrrigationScheduler:
             try:
                 if group_id in self.group_cancel_events:
                     self.group_cancel_events[group_id].set()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in cancel_group_jobs: %s", e)
 
             # Немедленный OFF всем зонам группы через централизованный контроллер
             try:
@@ -942,8 +964,8 @@ class IrrigationScheduler:
                 try:
                     # Единообразно снимаем все job’ы зоны (включая hard_stop)
                     self.cancel_zone_jobs(int(zone_id))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in cancel_group_jobs: %s", e)
             
             # Отменяем задачи последовательного полива группы
             job_ids_to_remove = []
@@ -955,14 +977,14 @@ class IrrigationScheduler:
             for job_id in job_ids_to_remove:
                 try:
                     self.scheduler.remove_job(job_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_980: %s", e)
 
             # Перестраиваем расписание группы на ближайшую программу
             try:
                 self.db.reschedule_group_to_next_program(group_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_986: %s", e)
             
             logger.info(f"Отменены все задачи планировщика для группы {group_id}")
         except Exception as e:
@@ -980,8 +1002,8 @@ class IrrigationScheduler:
             for job_id in job_ids_to_remove:
                 try:
                     self.scheduler.remove_job(job_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in cancel_zone_jobs: %s", e)
             self.active_zones.pop(int(zone_id), None)
             logger.info(f"Отменены задачи автоостановки для зоны {zone_id}")
         except Exception as e:
@@ -1069,8 +1091,8 @@ class IrrigationScheduler:
             for jid in job_ids_to_remove:
                 try:
                     self.scheduler.remove_job(jid)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in cleanup_jobs_on_boot: %s", e)
             logger.info(f"Boot cleanup: removed {len(job_ids_to_remove)} jobs")
         except Exception as e:
             logger.error(f"Boot cleanup failed: {e}")
@@ -1084,8 +1106,8 @@ class IrrigationScheduler:
                     try:
                         from services.zone_control import stop_zone as _stop
                         _stop(int(z['id']), reason='recovery_boot', force=True)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in stop_on_boot_active_zones: %s", e)
             logger.info("Boot remediation: active zones forced to OFF")
         except Exception as e:
             logger.error(f"Boot remediation failed: {e}")
@@ -1103,25 +1125,25 @@ def init_scheduler(db: IrrigationDB):
         # Очистим истекшие отложки на старте
         try:
             scheduler.clear_expired_postpones()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in init_scheduler: %s", e)
         scheduler.load_programs()
         # После загрузки программ попробуем сделать recovery пропущенных запусков
         try:
             # Локально объявим метод, чтобы не ломать существующие импорты, если его нет
             if hasattr(scheduler, 'recover_missed_runs'):
                 scheduler.recover_missed_runs()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in init_scheduler: %s", e)
         # Boot-time cleanup and stop lingering active zones
         try:
             scheduler.cleanup_jobs_on_boot()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in init_scheduler: %s", e)
         try:
             scheduler.stop_on_boot_active_zones()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in init_scheduler: %s", e)
     return scheduler
 
 

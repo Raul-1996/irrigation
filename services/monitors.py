@@ -8,7 +8,8 @@ from database import db
 
 try:
     import paho.mqtt.client as mqtt
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_11: %s", e)
     mqtt = None
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,8 @@ class RainMonitor:
                     payload = getattr(msg, 'payload', b'')
                     try:
                         payload = payload.decode('utf-8', errors='ignore')
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in _on_message: %s", e)
                         payload = str(payload)
                     self._handle_payload(str(payload))
                 except Exception:
@@ -83,7 +85,8 @@ class RainMonitor:
         # Respect sensor type: NC means inverted logical value
         try:
             sensor_type = str((self._cfg or {}).get('type') or db.get_rain_config().get('type') or 'NO').upper()
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _handle_payload: %s", e)
             sensor_type = 'NO'
         logical_rain = bool(val)
         if sensor_type == 'NC':
@@ -123,15 +126,15 @@ class RainMonitor:
                 if int(z.get('group_id') or 0) in target_groups:
                     try:
                         db.update_zone_postpone(int(z['id']), postpone_until, 'rain')
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Handled exception in _on_rain_start: %s", e)
             # Note: не отменяем сегодняшние запуски программ заранее.
             # Если дождь начался до времени старта — при отсутствии отложки к моменту старта программа отработает.
             # Если дождь начался во время выполнения — оставшиеся зоны пропустятся из-за отложки.
             try:
                 db.add_log('rain_postpone', str({'groups': target_groups, 'until': postpone_until}))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_136: %s", e)
         except Exception:
             logger.exception('RainMonitor on_rain_start failed')
 
@@ -150,8 +153,8 @@ class RainMonitor:
                     # Clear postpone only if it was set due to rain
                     if (z.get('postpone_reason') or '') == 'rain':
                         db.update_zone_postpone(int(z['id']), None, None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in _on_rain_stop: %s", e)
             # После окончания дождя — уберём отмены программ на сегодня для этих групп, чтобы ближайшие вечерние сработали
             try:
                 from datetime import datetime as _dt
@@ -159,14 +162,14 @@ class RainMonitor:
                 for gid in target_groups:
                     try:
                         db.clear_program_cancellations_for_group_on_date(int(gid), today)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except Exception as e:
+                        logger.debug("Handled exception in _on_rain_stop: %s", e)
+            except Exception as e:
+                logger.debug("Handled exception in _on_rain_stop: %s", e)
             try:
                 db.add_log('rain_resume', str({'groups': target_groups}))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_171: %s", e)
         except Exception:
             logger.exception('RainMonitor on_rain_stop failed')
 
@@ -187,8 +190,8 @@ class EnvMonitor:
                 if cl is not None:
                     cl.loop_stop()
                     cl.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in stop: %s", e)
         self.temp_client = None
         self.hum_client = None
         self.last_temp_rx_ts = 0.0
@@ -243,8 +246,8 @@ class EnvMonitor:
                 try:
                     self.temp_client = None
                     logger.info(f"EnvMonitor temp disconnected: rc={rc}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in _on_disconnect_temp: %s", e)
             cl.on_message = _on_message
             cl.on_connect = _on_connect_temp
             cl.on_disconnect = _on_disconnect_temp
@@ -290,8 +293,8 @@ class EnvMonitor:
                 try:
                     self.hum_client = None
                     logger.info(f"EnvMonitor hum disconnected: rc={rc}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in _on_disconnect_hum: %s", e)
             cl.on_message = _on_message
             cl.on_connect = _on_connect_hum
             cl.on_disconnect = _on_disconnect_hum
@@ -388,7 +391,8 @@ class WaterMonitor:
             delta_p = max(0, cur_p - base_p)
             val = base_m3 + (delta_p * liters) / 1000.0
             return round(val, 3)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in get_current_reading_m3: %s", e)
             return None
 
     def get_flow_lpm(self, group_id: int, since_iso: Optional[str]) -> Optional[float]:
@@ -397,7 +401,8 @@ class WaterMonitor:
                 return None
             try:
                 since_ts = datetime.strptime(since_iso, '%Y-%m-%d %H:%M:%S').timestamp()
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in get_flow_lpm: %s", e)
                 return None
             liters = self._pulse_liters.get(int(group_id), 1)
             with self._lock:
@@ -422,7 +427,8 @@ class WaterMonitor:
             dt_sec = max(1.0, ts1 - ts0)
             lpm = (dp * liters) / (dt_sec / 60.0)
             return round(lpm, 2)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in line_430: %s", e)
             return None
 
     def summarize_run(self, group_id: int, since_iso: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
@@ -432,7 +438,8 @@ class WaterMonitor:
                 return (None, None)
             try:
                 since_ts = datetime.strptime(since_iso, '%Y-%m-%d %H:%M:%S').timestamp()
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in summarize_run: %s", e)
                 return (None, None)
             liters_per_pulse = self._pulse_liters.get(int(group_id), 1)
             with self._lock:
@@ -447,7 +454,8 @@ class WaterMonitor:
             dt_min = max(0.001, (ts1 - ts0) / 60.0)
             avg_lpm = total_l / dt_min
             return (round(total_l, 2), round(avg_lpm, 2))
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in summarize_run: %s", e)
             return (None, None)
 
     def get_raw_pulses(self, group_id: int) -> Optional[int]:
@@ -458,7 +466,8 @@ class WaterMonitor:
                 if not dq or len(dq) == 0:
                     return None
                 return int(dq[-1][1])
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in get_raw_pulses: %s", e)
             return None
 
     def get_pulses_at_or_before(self, group_id: int, ts: float) -> Optional[int]:
@@ -475,7 +484,8 @@ class WaterMonitor:
                 else:
                     break
             return int(best) if best is not None else int(arr[0][1]) if arr else None
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in get_pulses_at_or_before: %s", e)
             return None
 
     def get_pulses_at_or_after(self, group_id: int, ts: float) -> Optional[int]:
@@ -489,7 +499,8 @@ class WaterMonitor:
                 if t >= ts:
                     return int(p)
             return int(arr[-1][1]) if arr else None
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in get_pulses_at_or_after: %s", e)
             return None
 
 water_monitor = WaterMonitor()

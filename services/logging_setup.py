@@ -17,8 +17,8 @@ class PIIMaskingFilter(logging.Filter):
                 msg = msg.replace(f"'{k}':'", f"'{key}':'[REDACTED]")
             record.msg = msg
             record.args = ()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in filter: %s", e)
         return True
 
 
@@ -31,8 +31,8 @@ class PIIFilter(logging.Filter):
             if 'Authorization' in msg:
                 msg = msg.replace('Authorization', 'Authorization: ***')
             record.msg = msg
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in filter: %s", e)
         return True
 
 
@@ -59,8 +59,8 @@ def ensure_console_handler():
         for h in (wlg.handlers or []):
             if isinstance(h, logging.StreamHandler):
                 h.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in ensure_console_handler: %s", e)
 
 
 def setup_logging(app_logger):
@@ -73,13 +73,14 @@ def setup_logging(app_logger):
         has_filter = any(isinstance(f, PIIMaskingFilter) for f in getattr(root, 'filters', []))
         if not has_filter:
             root.addFilter(PIIMaskingFilter())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in setup_logging: %s", e)
 
     # Test propagation
     try:
         _IN_TESTS = bool('PYTEST_CURRENT_TEST' in os.environ)
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in setup_logging: %s", e)
         _IN_TESTS = False
     app_logger.propagate = not _IN_TESTS
 
@@ -101,8 +102,8 @@ def setup_logging(app_logger):
             imp_fh.setLevel(logging.INFO)
             imp_fh.setFormatter(fmt)
             imp_logger.addHandler(imp_fh)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in line_105: %s", e)
 
     # Set TZ from system timezone
     try:
@@ -112,21 +113,22 @@ def setup_logging(app_logger):
             try:
                 with open('/etc/timezone', 'r') as _f:
                     _tz_env = _f.read().strip()
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in line_116: %s", e)
                 _tz_env = None
             if _tz_env:
                 os.environ['TZ'] = _tz_env
                 try:
                     _tz_time.tzset()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_123: %s", e)
         try:
             if os.getenv('WB_TZ') != os.getenv('TZ'):
                 os.environ['WB_TZ'] = os.getenv('TZ') or ''
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as e:
+            logger.debug("Handled exception in line_128: %s", e)
+    except Exception as e:
+        logger.debug("Handled exception in line_130: %s", e)
 
 
 def apply_runtime_log_level(db):
@@ -140,5 +142,5 @@ def apply_runtime_log_level(db):
         for lg_name in ('app', 'app', 'apscheduler', 'werkzeug', 'database', 'irrigation_scheduler'):
             lg = logging.getLogger(lg_name)
             lg.setLevel(level if lg_name in ('app', 'database', 'irrigation_scheduler') else (logging.ERROR if not is_debug else logging.INFO))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in apply_runtime_log_level: %s", e)

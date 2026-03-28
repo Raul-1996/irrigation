@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 try:
     import paho.mqtt.client as mqtt
-except Exception:
+except Exception as e:
+    logger.debug("Exception in line_18: %s", e)
     mqtt = None
 
 
@@ -32,8 +33,8 @@ class StateVerifier:
             try:
                 from database import db
                 self._db = db
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in db: %s", e)
         return self._db
 
     @property
@@ -42,8 +43,8 @@ class StateVerifier:
             try:
                 from services.telegram_bot import notifier
                 self._notifier = notifier
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in notifier: %s", e)
         return self._notifier
 
     # ------------------------------------------------------------------
@@ -146,7 +147,8 @@ class StateVerifier:
 
         try:
             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in _subscribe_and_wait: %s", e)
             cl = mqtt.Client(client_id=client_id)
 
         if server.get('username'):
@@ -177,8 +179,8 @@ class StateVerifier:
                 if payload in expected_payloads:
                     confirmed[0] = True
                     result.set()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in on_message: %s", e)
 
         cl.on_connect = on_connect
         cl.on_message = on_message
@@ -198,8 +200,8 @@ class StateVerifier:
             try:
                 cl.loop_stop()
                 cl.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in on_message: %s", e)
 
         return confirmed[0]
 
@@ -235,8 +237,8 @@ class StateVerifier:
                 'code': 'observed_state_fault',
                 'message': alert_text,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_240: %s", e)
 
         # Direct Telegram alert
         try:

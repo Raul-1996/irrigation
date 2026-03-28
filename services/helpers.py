@@ -12,8 +12,8 @@ def api_error(error_code: str, message: str, status: int = 400, extra: dict = No
     if extra:
         try:
             payload.update(extra)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in api_error: %s", e)
     return jsonify(payload), int(status)
 
 
@@ -29,7 +29,8 @@ def parse_dt(s: str):
     for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
         try:
             return datetime.strptime(s, fmt)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in parse_dt: %s", e)
             continue
     return None
 

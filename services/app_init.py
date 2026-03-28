@@ -82,10 +82,10 @@ def _boot_sync(app, db):
             for g in groups:
                 try:
                     _stop_all(int(g['id']), reason='boot_sync', force=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Handled exception in _boot_sync: %s", e)
+        except Exception as e:
+            logger.debug("Handled exception in _boot_sync: %s", e)
 
         # Close master-valves (mode-aware, retain)
         try:
@@ -94,7 +94,8 @@ def _boot_sync(app, db):
                 try:
                     if int(g.get('use_master_valve') or 0) != 1:
                         continue
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in _boot_sync: %s", e)
                     continue
                 mtopic = (g.get('master_mqtt_topic') or '').strip()
                 msid = g.get('master_mqtt_server_id')
@@ -109,7 +110,8 @@ def _boot_sync(app, db):
                     if server:
                         try:
                             mode = (g.get('master_mode') or 'NC').strip().upper()
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in line_113: %s", e)
                             mode = 'NC'
                         close_val = '1' if mode == 'NO' else '0'
                         logger.info(
@@ -137,16 +139,16 @@ def _boot_sync(app, db):
                                     break
                                 try:
                                     time.sleep(0.2 * (attempt + 1))
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug("Handled exception in line_142: %s", e)
                             try:
                                 time.sleep(0.01)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                            except Exception as e:
+                                logger.debug("Handled exception in line_146: %s", e)
+                except Exception as e:
+                    logger.debug("Handled exception in line_148: %s", e)
+        except Exception as e:
+            logger.debug("Handled exception in line_150: %s", e)
 
         # Close all configured master valves with retries (secondary safety net)
         try:
@@ -155,7 +157,8 @@ def _boot_sync(app, db):
                 try:
                     if int(g.get('use_master_valve') or 0) != 1:
                         continue
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_160: %s", e)
                     continue
                 mtopic = (g.get('master_mqtt_topic') or '').strip()
                 msid = g.get('master_mqtt_server_id')
@@ -170,7 +173,8 @@ def _boot_sync(app, db):
                     if server:
                         try:
                             mode = (g.get('master_mode') or 'NC').strip().upper()
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in line_176: %s", e)
                             mode = 'NC'
                         close_val = '1' if mode == 'NO' else '0'
                         t_norm = normalize_topic(mtopic)
@@ -180,14 +184,14 @@ def _boot_sync(app, db):
                                 break
                             try:
                                 time.sleep(0.2 * (attempt + 1))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Handled exception in line_187: %s", e)
                         try:
                             time.sleep(0.01)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as e:
+                            logger.debug("Handled exception in line_191: %s", e)
+                except Exception as e:
+                    logger.debug("Handled exception in line_193: %s", e)
         except Exception:
             logger.exception('boot sync OFF (secondary) failed')
 
@@ -245,8 +249,8 @@ def _warm_mqtt_clients(db):
                 if int(s.get('enabled') or 1) != 1:
                     continue
                 get_or_create_mqtt_client(s)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _warm_mqtt_clients: %s", e)
         logger.info(f'MQTT clients warmed: {len(servers)}')
     except Exception:
         logger.exception('MQTT warm-up failed')

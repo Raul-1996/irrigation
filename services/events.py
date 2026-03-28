@@ -23,10 +23,10 @@ def publish(event: Dict[str, Any]) -> None:
         for cb in subs:
             try:
                 cb(dict(event))
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                logger.debug("Handled exception in publish: %s", e)
+    except Exception as e:
+        logger.debug("Handled exception in publish: %s", e)
 
 def subscribe(callback: Callable[[Dict[str, Any]], None]) -> None:
     with _BUS_LOCK:

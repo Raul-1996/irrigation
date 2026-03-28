@@ -18,7 +18,8 @@ def _versioned_update(zone_id: int, updates: dict) -> None:
     ok = False
     try:
         ok = db.update_zone_versioned(zone_id, updates)
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception in _versioned_update: %s", e)
         ok = False
     if not ok:
         db.update_zone(zone_id, updates)
@@ -58,12 +59,14 @@ def exclusive_start_zone(zone_id: int) -> bool:
                 # Снапшот счётчика воды на старте (если у группы есть счётчик)
                 try:
                     gid = int(z.get('group_id') or 0)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in exclusive_start_zone: %s", e)
                     gid = 0
                 if gid and gid != 999:
                     try:
                         g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_68: %s", e)
                         g = None
                     if g and int(g.get('use_water_meter') or 0) == 1:
                         try:
@@ -75,8 +78,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3)
                         except Exception:
                             logger.exception('start snapshot failed')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in line_81: %s", e)
             try:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                 gid = int(z.get('group_id') or 0)
@@ -84,7 +87,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
                 if gid and gid != 999:
                     try:
                         g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_90: %s", e)
                         g = None
                     if g and int(g.get('use_master_valve') or 0) == 1:
                         mtopic = (g.get('master_mqtt_topic') or '').strip()
@@ -94,7 +98,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             if mserver:
                                 try:
                                     mode = (g.get('master_mode') or 'NC').strip().upper()
-                                except Exception:
+                                except Exception as e:
+                                    logger.debug("Exception in line_101: %s", e)
                                     mode = 'NC'
                                 open_val = '0' if mode == 'NO' else '1'
                                 publish_mqtt_value(mserver, normalize_topic(mtopic), open_val, min_interval_sec=0.0, qos=2, retain=True)
@@ -135,7 +140,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(group_zones)-1))) as pool:
                     pool.map(_stop_peer, group_zones)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in _stop_peer: %s", e)
                 # Fallback to sequential if parallelization fails for any reason
                 for other in group_zones:
                     try:
@@ -159,8 +165,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
             # publish event
             from services import events as _ev
             _ev.publish({'type':'zone_start','id': int(zone_id), 'by':'api'})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_168: %s", e)
         return True
     except Exception:
         logger.exception("exclusive_start_zone failed")
@@ -184,12 +190,14 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     # 1) Если есть открытый run — завершим его по текущим пульсам
                     try:
                         run = db.get_open_zone_run(int(zone_id))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in stop_zone: %s", e)
                         run = None
                     if run:
                         try:
                             end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in stop_zone: %s", e)
                             end_raw = None
                         try:
                             start_raw = run.get('start_raw_pulses')
@@ -208,7 +216,8 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     if (total_liters is None) and (avg_lpm is None):
                         try:
                             since_iso = z.get('last_watering_time') or z.get('watering_start_time')
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("Exception in line_219: %s", e)
                             since_iso = None
                         if since_iso:
                             t_l, a_lpm = water_monitor.summarize_run(gid, since_iso)
@@ -269,7 +278,8 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                                 if mserver:
                                                     try:
                                                         mode = (g.get('master_mode') or 'NC').strip().upper()
-                                                    except Exception:
+                                                    except Exception as e:
+                                                        logger.debug("Exception in _delayed_close: %s", e)
                                                         mode = 'NC'
                                                     close_val = '1' if mode == 'NO' else '0'
                                                     publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_off'})
@@ -292,13 +302,15 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                 # Попробуем быстрый расчёт по снапшотам
                 try:
                     run = db.get_open_zone_run(int(zone_id))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in line_305: %s", e)
                     run = None
                 if run:
                     try:
                         # Берём пульсы на/после момента стопа, чтобы избежать лагов
                         end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception in line_312: %s", e)
                         end_raw = None
                     try:
                         start_raw = run.get('start_raw_pulses')
@@ -330,13 +342,13 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
             logger.exception('stop_zone: water stats update failed')
         try:
             db.add_log('zone_stop', f'{reason}: zone={int(zone_id)}')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_345: %s", e)
         try:
             from services import events as _ev
             _ev.publish({'type':'zone_stop','id': int(zone_id), 'by': reason})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in line_350: %s", e)
         return True
     except Exception:
         logger.exception('stop_zone failed')
@@ -354,8 +366,8 @@ def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool =
                 try:
                     if os.environ.get('TESTING', '0') != '1':
                         time.sleep(0.05)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in stop_all_in_group: %s", e)
             except Exception:
                 logger.exception('stop_all_in_group: stop_zone failed')
     except Exception:

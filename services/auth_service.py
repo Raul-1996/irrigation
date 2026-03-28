@@ -29,15 +29,15 @@ def verify_password(password: str) -> tuple[bool, str]:
                     if ':sha256:' in old_hash and 'pbkdf2' in old_hash and ('260000' in old_hash or '200000' in old_hash or '180000' in old_hash or '120000' in old_hash or '90000' in old_hash):
                         new_hash = generate_password_hash(plain, method='pbkdf2:sha256:60000')
                         db.set_setting_value('password_hash', new_hash)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in _rehash_bg: %s", e)
             try:
                 threading.Thread(target=_rehash_bg, args=(stored_hash, password), daemon=True).start()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Handled exception in _rehash_bg: %s", e)
             return True, 'admin'
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Handled exception in _rehash_bg: %s", e)
     # Дополнительно: если хэш слишком «тяжёлый», можно пере-хэшировать при успешном входе
     try:
         if stored_hash and check_password_hash(stored_hash, password):
@@ -46,10 +46,10 @@ def verify_password(password: str) -> tuple[bool, str]:
                 try:
                     new_hash = generate_password_hash(password, method='pbkdf2:sha256:90000')
                     db.set_setting_value('password_hash', new_hash)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    logger.debug("Handled exception in _rehash_bg: %s", e)
+    except Exception as e:
+        logger.debug("Handled exception in _rehash_bg: %s", e)
     # Backward-compat отключён по умолчанию
     return False, 'guest'
 

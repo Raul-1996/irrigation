@@ -26,8 +26,8 @@ try:
     for h in logging.getLogger().handlers:
         if isinstance(h, logging.StreamHandler):
             h.setFormatter(fmt)
-except Exception:
-    pass
+except (TypeError, ValueError, AttributeError) as _fmt_err:
+    logger.debug("log formatter setup: %s", _fmt_err)
 # В тестах отключаем распространение в root, чтобы не писать в закрытый stdout из фоновых ��отоков
 logger.propagate = False
 

@@ -58,8 +58,8 @@ class ZoneWatchdog(threading.Thread):
             val = self.db.get_setting_value('zone_cap_minutes')
             if val is not None:
                 return max(1, int(val))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Handled exception in _get_zone_cap_minutes: %s", e)
         return DEFAULT_ZONE_CAP_MINUTES
 
     def _check_zones(self) -> None:
@@ -79,7 +79,8 @@ class ZoneWatchdog(threading.Thread):
                 continue
             try:
                 start_dt = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in _check_zones: %s", e)
                 continue
             elapsed_min = (now - start_dt).total_seconds() / 60.0
             if elapsed_min > cap_minutes:
@@ -108,8 +109,8 @@ class ZoneWatchdog(threading.Thread):
                         'elapsed_min': int(elapsed_min),
                         'cap_min': cap_minutes
                     }))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Handled exception in line_112: %s", e)
 
         # Check concurrent count
         if len(on_zones) > MAX_CONCURRENT_ZONES:

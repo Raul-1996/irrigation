@@ -15,11 +15,11 @@ from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value, get_or_
 from flask_wtf.csrf import CSRFProtect
 try:
     import paho.mqtt.client as mqtt
-except Exception:
+except ImportError:
     mqtt = None
 try:
     from services import events as _events
-except Exception:
+except ImportError:
     _events = None
 import time as _perf_time
 import threading
@@ -37,11 +37,13 @@ from routes.auth import auth_bp
 from routes.settings import settings_bp
 try:
     from routes.telegram import telegram_bp
-except Exception:
+except ImportError as e:
+    logging.getLogger(__name__).debug("telegram blueprint not loaded: %s", e)
     telegram_bp = None
 try:
     from routes.reports import reports_bp
-except Exception:
+except ImportError as e:
+    logging.getLogger(__name__).debug("reports blueprint not loaded: %s", e)
     reports_bp = None
 
 # API blueprints
@@ -58,8 +60,8 @@ try:
     _tg_subscribe()
     from services.telegram_bot import start_long_polling_if_needed as _tg_poll_start
     _tg_poll_start()
-except Exception:
-    pass
+except Exception as e:
+    logging.getLogger(__name__).debug("Telegram bot init skipped: %s", e)
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services import sse_hub as _sse_hub
 from services.app_init import initialize_app as _initialize_app
@@ -79,8 +81,8 @@ _sse_hub.init(db=db, mqtt_module=mqtt, app_config=app.config, publish_mqtt_value
 
 try:
     app.config.setdefault('SEND_FILE_MAX_AGE_DEFAULT', 60 * 60 * 24 * 7)
-except Exception:
-    pass
+except (TypeError, ValueError) as e:
+    logger.debug("SEND_FILE_MAX_AGE_DEFAULT config: %s", e)
 
 # ── App version ────────────────────────────────────────────────────────────
 def _compute_app_version() -> str:
@@ -88,7 +90,8 @@ def _compute_app_version() -> str:
         import subprocess
         cnt = subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=os.getcwd())
         return f"1.{int((cnt or b'0').decode().strip() or '0')}"
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        logger.debug("git version detection failed: %s", e)
         return '1.0'
 
 APP_VERSION = _compute_app_version()
@@ -99,7 +102,8 @@ def _inject_app_version():
         sys_name = db.get_setting_value('system_name') or ''
         asset = lambda path: f"{path}?v={APP_VERSION}"
         return {'app_version': APP_VERSION, 'system_name': sys_name, 'asset': asset}
-    except Exception:
+    except Exception as e:
+        logger.debug("context processor fallback: %s", e)
         return {'app_version': '1.0', 'system_name': '', 'asset': (lambda p: p)}
 
 from services.security import admin_required
@@ -109,8 +113,8 @@ from services.security import admin_required
 def _perf_start_timer():
     try:
         request._started_at = _perf_time.time()
-    except Exception:
-        pass
+    except AttributeError as e:
+        logger.debug("perf timer start: %s", e)
 
 @app.after_request
 def _perf_add_server_timing(resp: Response):
@@ -118,8 +122,8 @@ def _perf_add_server_timing(resp: Response):
         t0 = getattr(request, '_started_at', None)
         if t0 is not None:
             resp.headers['Server-Timing'] = f"app;dur={int((_perf_time.time() - t0) * 1000)}"
-    except Exception:
-        pass
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.debug("perf timer end: %s", e)
     return resp
 
 @app.after_request
@@ -134,22 +138,23 @@ try:
     if not Config.TESTING:
         if 'SESSION_COOKIE_SECURE' not in app.config:
             app.config['SESSION_COOKIE_SECURE'] = bool(os.environ.get('SESSION_COOKIE_SECURE', '0') in ('1', 'true', 'True'))
-except Exception:
-    pass
+except (TypeError, KeyError) as e:
+    logger.debug("Session cookie config: %s", e)
 
 # ── Debug logging helpers ──────────────────────────────────────────────────
 def _is_debug_logging_enabled() -> bool:
     try:
         return bool(db.get_logging_debug())
-    except Exception:
+    except Exception as e:
+        logger.debug("debug logging check: %s", e)
         return False
 
 def dlog(msg: str, *args) -> None:
     if _is_debug_logging_enabled():
         try:
             logger.info("DBG: " + msg, *args)
-        except Exception:
-            pass
+        except (TypeError, ValueError) as e:
+            logger.debug("dlog format error: %s", e)
 
 # ── Auth before-request ────────────────────────────────────────────────────
 @app.before_request
@@ -160,8 +165,8 @@ def _auth_before_request():
         if not app.config.get('TESTING'):
             try:
                 db.ensure_password_change_required()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ensure_password_change_required: %s", e)
             if request.path.startswith('/api/'):
                 if request.method == 'GET':
                     return None
@@ -186,8 +191,8 @@ def _auth_before_request():
                     must = db.get_setting_value('password_must_change') if True else None
                     if str(must or '0') == '1' and request.path != '/api/password':
                         return jsonify({'success': False, 'message': 'password change required', 'error_code': 'PASSWORD_MUST_CHANGE'}), 403
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("auth before_request error: %s", e)
 
 # ── Blueprint registration ─────────────────────────────────────────────────
 for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp):
@@ -195,8 +200,8 @@ for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, setti
 try:
     if telegram_bp: app.register_blueprint(telegram_bp)
     if reports_bp: app.register_blueprint(reports_bp)
-except Exception:
-    pass
+except Exception as e:
+    logger.warning("Optional blueprint registration failed: %s", e)
 try:
     from routes.mqtt import mqtt_bp
     app.register_blueprint(mqtt_bp)
@@ -233,7 +238,8 @@ def _require_admin_for_mutations():
                 return False
             if role != 'admin' and not _is_status_action(p):
                 return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
-    except Exception:
+    except Exception as e:
+        logger.warning("mutation guard error: %s", e)
         return None
 
 # ── Group exclusivity watchdog ─────────────────────────────────────────────
@@ -243,17 +249,20 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
         try:
             g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(group_id)), None)
             mv_topic = normalize_topic((g.get('master_mqtt_topic') or '').strip()) if g else ''
-        except Exception:
+        except (TypeError, ValueError, StopIteration) as e:
+            logger.debug("group exclusive mv_topic lookup: %s", e)
             mv_topic = ''
         def _is_mv(z):
             try: return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
-            except Exception: return False
+            except (TypeError, ValueError) as e:
+                logger.debug("_is_mv check: %s", e)
+                return False
         on_zones = [z for z in group_zones if str(z.get('state')) == 'on' and not _is_mv(z)]
         if len(on_zones) <= 1:
             return
         def started_key(z):
             try: return datetime.strptime(z.get('watering_start_time') or '', '%Y-%m-%d %H:%M:%S')
-            except Exception: return datetime.min
+            except (ValueError, TypeError): return datetime.min
         on_zones.sort(key=started_key, reverse=True)
         for z in on_zones[1:]:
             try:
@@ -261,11 +270,14 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                 if mqtt and sid and topic:
                     server = db.get_mqtt_server(int(sid))
                     if server: _publish_mqtt_value(server, normalize_topic(topic), '0')
-            except Exception: pass
+            except (ConnectionError, TimeoutError, OSError) as e:
+                logger.warning("group exclusive mqtt off for zone %s: %s", z.get('id'), e)
             try: db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
-            except Exception: pass
+            except Exception as e:
+                logger.error("group exclusive db update zone %s: %s", z.get('id'), e)
         try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))
-        except Exception: pass
+        except Exception as e:
+            logger.debug("group exclusive log: %s", e)
     except Exception as e:
         logger.error(f"Group exclusivity enforcement failed for group {group_id}: {e}")
 
@@ -281,13 +293,17 @@ def _enforce_group_exclusive_all_groups() -> None:
             try:
                 g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(gid)), None)
                 mv_topic = normalize_topic((g.get('master_mqtt_topic') or '').strip()) if g else ''
-            except Exception: mv_topic = ''
+            except (TypeError, ValueError, StopIteration) as e:
+                logger.debug("enforce_all mv_topic: %s", e)
+                mv_topic = ''
             def _is_mv(z):
                 try: return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
-                except Exception: return False
+                except (TypeError, ValueError):
+                    return False
             if sum(1 for z in arr if str(z.get('state')) == 'on' and not _is_mv(z)) > 1:
                 _force_group_exclusive(gid, 'watchdog')
-    except Exception: pass
+    except Exception as e:
+        logger.exception("enforce_group_exclusive_all: %s", e)
 
 _WATCHDOG_STARTED = False
 _WATCHDOG_STOP_EVENT = threading.Event()
@@ -299,7 +315,8 @@ def _start_single_zone_watchdog():
     def _run():
         while not _WATCHDOG_STOP_EVENT.is_set():
             try: _enforce_group_exclusive_all_groups()
-            except Exception: pass
+            except Exception as e:
+                logger.exception("watchdog loop: %s", e)
             _WATCHDOG_STOP_EVENT.wait(1.0)
     threading.Thread(target=_run, daemon=True).start()
 
@@ -313,7 +330,9 @@ _recently_stopped = _sse_hub.recently_stopped
 @app.errorhandler(404)
 def _not_found(e):
     try: return render_template('404.html'), 404
-    except Exception: return jsonify({'error': 'Not found'}), 404
+    except Exception as e:
+        logger.debug("404 template fallback: %s", e)
+        return jsonify({'error': 'Not found'}), 404
 
 @app.route('/sw.js')
 def service_worker():
@@ -328,7 +347,8 @@ def ws_stub():
 def _publish_mqtt_async(server, topic, value, min_interval_sec=0.0):
     try:
         threading.Thread(target=lambda: _publish_mqtt_value(server, topic, value, min_interval_sec=min_interval_sec), daemon=True).start()
-    except Exception: pass
+    except (RuntimeError, OSError) as e:
+        logger.warning("_publish_mqtt_async thread start: %s", e)
 
 # ── Main ───────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
