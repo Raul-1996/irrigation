@@ -300,8 +300,8 @@ class IrrigationScheduler:
                     'last_watering_time': last_time
                 })
             try:
-                from app import dlog
-                dlog("auto-stop zone=%s", zone_id)
+                pass  # dlog replaced by logger
+                logger.debug("auto-stop zone=%s", zone_id)
             except Exception:
                 pass
             zone = self.db.get_zone(zone_id)
@@ -367,7 +367,7 @@ class IrrigationScheduler:
                                 server = self.db.get_mqtt_server(int(sid))
                                 if server:
                                     logger.debug(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
-                                    from app import _publish_mqtt_value as _pub
+                                    from services.mqtt_pub import publish_mqtt_value as _pub
                                     _pub(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
                         except Exception:
                             pass
@@ -750,8 +750,8 @@ class IrrigationScheduler:
                 **_kwargs,
             )
             try:
-                from app import dlog
-                dlog("group-seq start group=%s zones=%s", group_id, zone_ids)
+                pass  # dlog replaced by logger
+                logger.debug("group-seq start group=%s zones=%s", group_id, zone_ids)
             except Exception:
                 pass
             logger.info(f"Группа {group_id}: последовательный полив запущен для зон {zone_ids}")
@@ -817,7 +817,7 @@ class IrrigationScheduler:
                                             mode = (g.get('master_mode') or 'NC').strip().upper()
                                         except Exception:
                                             mode = 'NC'
-                                        from app import _publish_mqtt_value as _pub
+                                        from services.mqtt_pub import publish_mqtt_value as _pub
                                         _pub(mserver, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0, qos=2, retain=True)
                     # Publish zone ON
                     topic = (zone.get('topic') or '').strip()
@@ -826,7 +826,7 @@ class IrrigationScheduler:
                         t = normalize_topic(topic)
                         server = self.db.get_mqtt_server(int(sid))
                         if server:
-                            from app import _publish_mqtt_value as _pub
+                            from services.mqtt_pub import publish_mqtt_value as _pub
                             _pub(server, t, '1', min_interval_sec=0.0, qos=2, retain=True)
                 except Exception:
                     pass
@@ -856,8 +856,8 @@ class IrrigationScheduler:
                 while remaining > 0:
                     if cancel_event and cancel_event.is_set():
                         try:
-                            from app import dlog
-                            dlog("group-seq cancel tick group=%s zone=%s remaining=%s", group_id, zone_id, remaining)
+                            pass  # dlog replaced by logger
+                            logger.debug("group-seq cancel tick group=%s zone=%s remaining=%s", group_id, zone_id, remaining)
                         except Exception:
                             pass
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")

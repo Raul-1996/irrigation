@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 import time
@@ -351,8 +352,7 @@ def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool =
                 stop_zone(int(z['id']), reason=reason, force=force)
                 # Небольшая пауза, чтобы избежать всплесков при публикации на слабом железе (пропускаем в тестах)
                 try:
-                    from app import app as app_module
-                    if not app_module.config.get('TESTING'):
+                    if os.environ.get('TESTING', '0') != '1':
                         time.sleep(0.05)
                 except Exception:
                     pass
