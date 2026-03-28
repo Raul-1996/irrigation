@@ -54,6 +54,7 @@ except Exception:
     pass
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services import sse_hub as _sse_hub
+from services.app_init import initialize_app as _initialize_app
 from collections import deque
 
 # Unified API error helpers
@@ -561,122 +562,14 @@ def normalize_image(image_data: bytes, max_long_side: int = 1024, fmt: str = 'WE
 # удалены устаревшие функции generate_water_data/login_required/admin_required
 
 
-_SCHEDULER_INIT_DONE = False
-_INITIAL_SYNC_DONE = False
-
-_RAIN_MONITOR_STARTED = False
-_RAIN_MONITOR_CFG_SIG = None
-_ENV_MONITOR_STARTED = False
-_ENV_MONITOR_CFG_SIG = None
-_ENV_MONITOR_LAST_RESTART = 0.0
-_MQTT_WARMED = False
-
-def _warm_mqtt_clients() -> None:
-    global _MQTT_WARMED
-    if _MQTT_WARMED:
-        return
-    try:
-        servers = db.get_mqtt_servers() or []
-        for s in servers:
-            try:
-                if int(s.get('enabled') or 1) != 1:
-                    continue
-                _get_or_create_mqtt_client(s)
-            except Exception:
-                pass
-        _MQTT_WARMED = True
-        try:
-            logger.info(f"MQTT clients warmed: {len(servers)}")
-        except Exception:
-            pass
-    except Exception:
-        try:
-            logger.exception('MQTT warm-up failed')
-        except Exception:
-            pass
-
-
 @app.before_request
-def _init_scheduler_before_request():
-    global _SCHEDULER_INIT_DONE, _INITIAL_SYNC_DONE, _RAIN_MONITOR_STARTED, _RAIN_MONITOR_CFG_SIG, _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG
-    # Default role is "user" (no password)
+def _auth_before_request():
+    """Minimal before_request: session role default + auth/password checks."""
+    # Default role
     if 'role' not in session:
         session['role'] = 'guest'
-    # Не блокировать /api/login тяжёлыми инициализациями
-    try:
-        if (request.path or '') == '/api/login':
-            return None
-    except Exception:
-        pass
-    if not _SCHEDULER_INIT_DONE and not app.config.get('TESTING'):
-        try:
-            init_scheduler(db)
-            _SCHEDULER_INIT_DONE = True
-        except Exception as e:
-            logger.error(f"Ошибка инициализации планировщика: {e}")
-    # Запускаем сторож одновременности зон (один раз)
-    try:
-        _start_single_zone_watchdog()
-    except Exception:
-        pass
-    # Запускаем watchdog с контролем cap-времени зон (TASK-010)
-    try:
-        from services.watchdog import start_watchdog as _start_cap_watchdog
-        import services.zone_control as _zc_module
-        _start_cap_watchdog(db, _zc_module, interval=30)
-    except Exception:
-        pass
-    # Стартовая синхронизация: единоразово выключаем все зоны и публикуем OFF
-    if not _INITIAL_SYNC_DONE and not app.config.get('TESTING'):
-        try:
-            # Централизованная установка OFF через контроллер
-            try:
-                from services.zone_control import stop_all_in_group as _stop_all
-                groups = db.get_groups() or []
-                for g in groups:
-                    try:
-                        _stop_all(int(g['id']), reason='boot_sync', force=True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            # Немедленно закрываем мастер-клапаны (mode-aware, retain), чтобы не ждать отложенного закрытия
-            try:
-                seen = set()
-                for g in (db.get_groups() or []):
-                    try:
-                        if int(g.get('use_master_valve') or 0) != 1:
-                            continue
-                    except Exception:
-                        continue
-                    mtopic = (g.get('master_mqtt_topic') or '').strip()
-                    msid = g.get('master_mqtt_server_id')
-                    if not mtopic or not msid:
-                        continue
-                    key = (int(msid), mtopic)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    try:
-                        server = db.get_mqtt_server(int(msid))
-                        if server:
-                            try:
-                                mode = (g.get('master_mode') or 'NC').strip().upper()
-                            except Exception:
-                                mode = 'NC'
-                            close_val = '1' if mode == 'NO' else '0'
-                            logger.info(f"Boot initial sync: closing master valve sid={msid} topic={mtopic} mode={mode} val={close_val}")
-                            _publish_mqtt_value(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
-                    except Exception:
-                        logger.exception('Boot initial sync: master valve close failed')
-            except Exception:
-                logger.exception('Boot initial sync: master valve sweep failed')
-            _INITIAL_SYNC_DONE = True
-            logger.info("Initial sync: all zones set to OFF and MQTT OFF published")
-        except Exception as e:
-            logger.error(f"Initial sync failed: {e}")
 
-    # Требование смены пароля при первом входе / чистой установке
+    # Auth & password-change enforcement (non-TESTING only)
     try:
         if not app.config.get('TESTING'):
             try:
@@ -684,17 +577,17 @@ def _init_scheduler_before_request():
             except Exception:
                 pass
             if request.path.startswith('/api/'):
-                # Всегда разрешаем GET для гостей/пользователей
+                # GET is always allowed
                 if request.method == 'GET':
                     return None
-                # Viewer (гостевой вход) — запретить ВСЕ мутации кроме login
                 pth = request.path or ''
+                # Viewer: read-only (except login)
                 if session.get('role') == 'viewer' and request.method in ['POST', 'PUT', 'DELETE']:
                     if pth == '/api/login':
-                        pass  # разрешаем логин для повышения привилегий
+                        pass
                     else:
                         return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
-                # Разрешаем гостю/user выполнять действия со страницы Статус
+                # Public POST actions from Status page
                 allowed_public_posts = {
                     '/api/login', '/api/password', '/api/status', '/health', '/api/env',
                     '/api/emergency-stop', '/api/emergency-resume', '/api/postpone',
@@ -704,7 +597,6 @@ def _init_scheduler_before_request():
                     try:
                         if path in allowed_public_posts:
                             return True
-                        # Разрешаем пользователю получать данные о следующем поливе (bulk)
                         if path == '/api/zones/next-watering-bulk':
                             return True
                         if path.startswith('/api/mqtt/'):
@@ -719,88 +611,13 @@ def _init_scheduler_before_request():
                 if session.get('role') != 'admin':
                     if not _is_status_action(pth):
                         return jsonify({'success': False, 'message': 'auth required', 'error_code': 'UNAUTHENTICATED'}), 401
-                if session.get('role') == 'admin' and request.method in ['POST','PUT','DELETE']:
+                if session.get('role') == 'admin' and request.method in ['POST', 'PUT', 'DELETE']:
                     try:
                         must = db.get_setting_value('password_must_change')
                     except Exception:
                         must = None
                     if str(must or '0') == '1' and request.path != '/api/password':
                         return jsonify({'success': False, 'message': 'password change required', 'error_code': 'PASSWORD_MUST_CHANGE'}), 403
-    except Exception:
-        pass
-
-    # Инициализация/перезапуск WaterMonitor и Rain/Env при изменении конфигурации
-    try:
-        # Стартуем WaterMonitor один раз на старте приложения (идемпотентно)
-        if not app.config.get('TESTING'):
-            try:
-                from services.monitors import start_water_monitor as _start_wm
-                _start_wm()
-            except Exception:
-                pass
-        if not app.config.get('TESTING'):
-            cfg = db.get_rain_config()
-            sig = (cfg.get('enabled'), cfg.get('topic'), cfg.get('type'), cfg.get('server_id'))
-            if (not _RAIN_MONITOR_STARTED) or sig != _RAIN_MONITOR_CFG_SIG:
-                rain_monitor.start(cfg)
-                _RAIN_MONITOR_STARTED = True
-                _RAIN_MONITOR_CFG_SIG = sig
-    except Exception:
-        pass
-    # Инициализация/перезапуск EnvMonitor (не зависим от TESTING, чтобы значения появлялись сразу)
-    try:
-        ecfg = db.get_env_config()
-        esig = (
-            ecfg.get('temp',{}).get('enabled'), ecfg.get('temp',{}).get('topic'), ecfg.get('temp',{}).get('server_id'),
-            ecfg.get('hum',{}).get('enabled'), ecfg.get('hum',{}).get('topic'), ecfg.get('hum',{}).get('server_id'),
-        )
-        # Стартуем/перезапускаем монитор, если он ещё не стартовал, поменялась конфигурация
-        # или оба клиента отсутствуют (например, предыдущий старт не удался).
-        try:
-            logger.info(
-                "EnvMonitor check: started=%s cfg_sig=%s esig=%s temp_client=%s hum_client=%s" % (
-                    _ENV_MONITOR_STARTED, _ENV_MONITOR_CFG_SIG, esig,
-                    'ok' if getattr(env_monitor, 'temp_client', None) else 'none',
-                    'ok' if getattr(env_monitor, 'hum_client', None) else 'none',
-                )
-            )
-        except Exception:
-            pass
-        need_start = (not _ENV_MONITOR_STARTED) or (esig != _ENV_MONITOR_CFG_SIG)
-        if not need_start:
-            try:
-                no_clients = (getattr(env_monitor, 'temp_client', None) is None and getattr(env_monitor, 'hum_client', None) is None)
-            except Exception:
-                no_clients = True
-            need_start = no_clients
-        try:
-            logger.info(
-                "EnvMonitor decision: need_start=%s reason=%s" % (
-                    need_start,
-                    ('cfg_changed' if esig != _ENV_MONITOR_CFG_SIG else (
-                        'no_clients' if (getattr(env_monitor, 'temp_client', None) is None and getattr(env_monitor, 'hum_client', None) is None)
-                        else ('not_started' if not _ENV_MONITOR_STARTED else 'none')
-                    ))
-                )
-            )
-        except Exception:
-            pass
-        if need_start:
-            env_monitor.start(ecfg)
-            # Разово пробуем получить retained-значения после старта, чтобы данные появились сразу
-            try:
-                probe_env_values(ecfg)
-            except Exception:
-                logger.exception('EnvMonitor probe call failed')
-            _ENV_MONITOR_STARTED = True
-            _ENV_MONITOR_CFG_SIG = esig
-    except Exception:
-        logger.exception('EnvMonitor before_request failed')
-
-    # One-time warm-up of MQTT publisher clients to avoid first-use latency
-    try:
-        if not app.config.get('TESTING'):
-            _warm_mqtt_clients()
     except Exception:
         pass
 
@@ -824,6 +641,10 @@ try:
     app.register_blueprint(mqtt_bp)
 except Exception as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
+
+# One-time app initialisation (scheduler, boot-sync, monitors, MQTT warm-up)
+_initialize_app(app, db)
+
 @app.before_request
 def _require_admin_for_mutations():
     try:
@@ -1025,10 +846,8 @@ def _not_found(e):
 @app.route('/api/scheduler/init', methods=['POST'])
 def api_scheduler_init():
     """Явная инициализация планировщика для UI/тестов."""
-    global _SCHEDULER_INIT_DONE
     try:
         init_scheduler(db)
-        _SCHEDULER_INIT_DONE = True
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Ошибка явной инициализации планировщика: {e}")
@@ -3800,86 +3619,7 @@ def api_master_valve_toggle(group_id, action):
         logger.error(f"api_master_valve_toggle failed: {e}")
         return jsonify({"success": False, "message": "Ошибка"}), 500
 
-# Boot-time: ensure all zones and master valves are OFF on controller start (mode-aware)
-# Note: before_first_request was removed in Flask 3.x. Using a one-time flag in before_request instead.
-# The initial sync is already handled in _init_scheduler_before_request (_INITIAL_SYNC_DONE),
-# so this block is kept as a secondary safety net with its own flag.
-_BOOT_SYNC_OUTPUTS_DONE = False
-
-@app.before_request
-def _boot_sync_all_outputs_off():
-    global _BOOT_SYNC_OUTPUTS_DONE
-    if _BOOT_SYNC_OUTPUTS_DONE:
-        return None
-    _BOOT_SYNC_OUTPUTS_DONE = True
-    try:
-        if app.config.get('TESTING'):
-            return None
-        zones = db.get_zones() or []
-        for z in zones:
-            try:
-                sid = z.get('mqtt_server_id'); t = (z.get('topic') or '').strip()
-                if sid and t:
-                    server = db.get_mqtt_server(int(sid))
-                    if server:
-                        # Публикуем OFF с небольшими ретраями на случай неготовности соединения
-                        t_norm = normalize_topic(t)
-                        for attempt in range(3):
-                            ok = _publish_mqtt_value(server, t_norm, '0', min_interval_sec=0.0, retain=True)
-                            if ok:
-                                break
-                            try:
-                                time.sleep(0.2 * (attempt + 1))
-                            except Exception:
-                                pass
-                        try:
-                            time.sleep(0.01)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-        # Close all configured master valves (by unique topic/server)
-        seen = set()
-        for g in (db.get_groups() or []):
-            try:
-                if int(g.get('use_master_valve') or 0) != 1:
-                    continue
-            except Exception:
-                continue
-            mtopic = (g.get('master_mqtt_topic') or '').strip()
-            msid = g.get('master_mqtt_server_id')
-            if not mtopic or not msid:
-                continue
-            key = (int(msid), mtopic)
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                server = db.get_mqtt_server(int(msid))
-                if server:
-                    try:
-                        mode = (g.get('master_mode') or 'NC').strip().upper()
-                    except Exception:
-                        mode = 'NC'
-                    close_val = '1' if mode == 'NO' else '0'
-                    t_norm = normalize_topic(mtopic)
-                    for attempt in range(3):
-                        ok = _publish_mqtt_value(server, t_norm, close_val, min_interval_sec=0.0, retain=True)
-                        if ok:
-                            break
-                        try:
-                            time.sleep(0.2 * (attempt + 1))
-                        except Exception:
-                            pass
-                    try:
-                        time.sleep(0.01)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    except Exception:
-        logger.exception('boot sync OFF failed')
-    return None
+# Boot-time sync is now handled by services.app_init.initialize_app() (TASK-016)
 
 if __name__ == '__main__':
     # Инициализируем планировщик полива
