@@ -8,11 +8,15 @@ import threading
 import time
 from typing import Tuple
 
+from constants import LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SEC, LOGIN_LOCKOUT_SEC
+
 
 class LoginRateLimiter:
     """Thread-safe IP-based rate limiter for login attempts."""
 
-    def __init__(self, max_attempts: int = 5, window_sec: int = 300, lockout_sec: int = 900):
+    def __init__(self, max_attempts: int = LOGIN_MAX_ATTEMPTS,
+                 window_sec: int = LOGIN_WINDOW_SEC,
+                 lockout_sec: int = LOGIN_LOCKOUT_SEC):
         """
         Args:
             max_attempts: Maximum failed attempts before lockout.

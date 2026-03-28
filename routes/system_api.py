@@ -13,6 +13,7 @@ from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services.helpers import api_error, api_soft, parse_dt, MAP_DIR, ALLOWED_MIME_TYPES
 from services.security import admin_required
 from services.monitors import rain_monitor, env_monitor, water_monitor, probe_env_values
+from constants import MIN_PASSWORD_LENGTH
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services import sse_hub as _sse_hub
 from werkzeug.utils import secure_filename
@@ -235,8 +236,8 @@ def api_change_password():
         data = request.get_json() or {}
         old_password = data.get('old_password', '')
         new_password = data.get('new_password', '')
-        if len(new_password) < 8:
-            return jsonify({'success': False, 'message': 'Пароль должен быть не менее 8 символов'}), 400
+        if len(new_password) < MIN_PASSWORD_LENGTH:
+            return jsonify({'success': False, 'message': f'Пароль должен быть не менее {MIN_PASSWORD_LENGTH} символов'}), 400
         if len(new_password) > 32:
             return jsonify({'success': False, 'message': 'Пароль не может быть длиннее 32 символов'}), 400
         if not new_password:

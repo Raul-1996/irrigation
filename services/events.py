@@ -2,12 +2,17 @@ import threading
 import queue
 import time
 import json
+import logging
 from typing import Callable, Dict, Any
+
+from constants import DEDUP_SET_MAX_SIZE, DEDUP_TTL_SEC
+
+logger = logging.getLogger(__name__)
 
 _BUS_LOCK = threading.Lock()
 _SUBS = []  # list[Callable[[dict], None]]
 _DEDUP = set()
-_DEDUP_TTL = 300.0
+_DEDUP_TTL = float(DEDUP_TTL_SEC)
 
 def publish(event: Dict[str, Any]) -> None:
     try:
@@ -33,6 +38,6 @@ def subscribe(callback: Callable[[Dict[str, Any]], None]) -> None:
         _SUBS.append(callback)
 
 def _cleanup(now: float) -> None:
-    if len(_DEDUP) > 4096:
+    if len(_DEDUP) > DEDUP_SET_MAX_SIZE:
         _DEDUP.clear()
 

@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 import time
 
+from constants import MASTER_VALVE_CLOSE_DELAY_SEC
 from database import db
 from services.locks import group_lock, zone_lock
 from services.mqtt_pub import publish_mqtt_value
@@ -261,7 +262,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                 if mtopic and msid:
                                     def _delayed_close():
                                         try:
-                                            time.sleep(60)
+                                            time.sleep(MASTER_VALVE_CLOSE_DELAY_SEC)
                                             # Check any ON zone in any group sharing this master topic
                                             any_on = False
                                             for gg in (db.get_groups() or []):

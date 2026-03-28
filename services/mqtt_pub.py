@@ -24,7 +24,9 @@ _MQTT_CLIENTS_LOCK = threading.Lock()
 _TOPIC_LAST_SEND: Dict[Tuple[int, str], Tuple[str, float]] = {}
 _TOPIC_LOCK = threading.Lock()
 _SERVER_CACHE: Dict[int, Tuple[dict, float]] = {}
-_SERVER_CACHE_TTL = 300.0  # seconds
+from constants import MQTT_CACHE_TTL_SEC
+
+_SERVER_CACHE_TTL = float(MQTT_CACHE_TTL_SEC)
 
 
 def get_or_create_mqtt_client(server: dict):

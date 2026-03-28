@@ -11,6 +11,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from constants import OBSERVED_STATE_TIMEOUT_SEC, OBSERVED_STATE_MAX_RETRIES
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -64,7 +66,7 @@ class StateVerifier:
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
     # ------------------------------------------------------------------
-    def verify(self, zone_id: int, expected: str, timeout: float = 10.0, retries: int = 3) -> bool:
+    def verify(self, zone_id: int, expected: str, timeout: float = OBSERVED_STATE_TIMEOUT_SEC, retries: int = OBSERVED_STATE_MAX_RETRIES) -> bool:
         """Subscribe to the zone MQTT topic, wait for observed_state == expected.
 
         On timeout → retry publish.

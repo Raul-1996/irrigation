@@ -12,6 +12,7 @@ from irrigation_scheduler import init_scheduler, get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services.helpers import api_error
 from services import sse_hub as _sse_hub
+from constants import GROUP_DEBOUNCE_SEC, ZONE_CAP_DEFAULT_MIN
 
 try:
     import paho.mqtt.client as mqtt
@@ -27,7 +28,7 @@ groups_api_bp = Blueprint('groups_api', __name__)
 _GROUP_CHANGE_GUARD = {}
 _GROUP_GUARD_LOCK = threading.Lock()
 
-def _should_throttle_group(group_id: int, window_sec: float = 0.8) -> bool:
+def _should_throttle_group(group_id: int, window_sec: float = GROUP_DEBOUNCE_SEC) -> bool:
     now = time.time()
     with _GROUP_GUARD_LOCK:
         last = _GROUP_CHANGE_GUARD.get(group_id, 0)
@@ -241,7 +242,7 @@ def api_start_zone_exclusive(group_id, zone_id):
         try:
             sched = get_scheduler()
             if sched:
-                sched.schedule_zone_cap(int(zone_id), cap_minutes=240)
+                sched.schedule_zone_cap(int(zone_id), cap_minutes=ZONE_CAP_DEFAULT_MIN)
         except Exception:
             logger.exception('schedule zone cap failed')
         try:

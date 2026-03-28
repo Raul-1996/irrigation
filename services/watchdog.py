@@ -10,12 +10,16 @@ import time
 import logging
 from datetime import datetime
 
+from constants import (
+    ZONE_CAP_DEFAULT_MIN,
+    MAX_CONCURRENT_ZONES,
+    WATCHDOG_INTERVAL_SEC,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default zone cap in minutes (can be overridden via settings key 'zone_cap_minutes')
-DEFAULT_ZONE_CAP_MINUTES = 240
-# Maximum reasonable concurrent ON zones across all groups
-MAX_CONCURRENT_ZONES = 10
+DEFAULT_ZONE_CAP_MINUTES = ZONE_CAP_DEFAULT_MIN
 
 
 class ZoneWatchdog(threading.Thread):
@@ -23,7 +27,7 @@ class ZoneWatchdog(threading.Thread):
 
     daemon = True
 
-    def __init__(self, db, zone_control_module, interval: int = 30):
+    def __init__(self, db, zone_control_module, interval: int = WATCHDOG_INTERVAL_SEC):
         """
         Args:
             db: Database instance (database.db).
@@ -141,7 +145,7 @@ _watchdog_instance = None
 _watchdog_lock = threading.Lock()
 
 
-def start_watchdog(db, zone_control_module, interval: int = 30) -> ZoneWatchdog:
+def start_watchdog(db, zone_control_module, interval: int = WATCHDOG_INTERVAL_SEC) -> ZoneWatchdog:
     """Start the watchdog singleton. Idempotent — only starts once."""
     global _watchdog_instance
     with _watchdog_lock:
