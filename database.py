@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import logging
 from werkzeug.security import generate_password_hash, check_password_hash
+from utils import encrypt_secret, decrypt_secret
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -161,6 +162,8 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'telegram_create_bot_audit', self._migrate_create_bot_audit)
                 self._apply_named_migration(conn, 'telegram_add_fsm_and_notif', self._migrate_add_fsm_and_notif)
                 self._apply_named_migration(conn, 'telegram_create_bot_idempotency', self._migrate_create_bot_idempotency)
+                # Security: encrypt plaintext MQTT passwords
+                self._apply_named_migration(conn, 'encrypt_mqtt_passwords', self._migrate_encrypt_mqtt_passwords)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -650,6 +653,26 @@ class IrrigationDB:
             logger.info('Создана таблица bot_idempotency')
         except Exception as e:
             logger.error(f"Ошибка миграции telegram_create_bot_idempotency: {e}")
+
+    def _migrate_encrypt_mqtt_passwords(self, conn):
+        """Encrypt existing plaintext MQTT passwords in-place."""
+        try:
+            cur = conn.execute("SELECT id, password FROM mqtt_servers WHERE password IS NOT NULL AND password != ''")
+            rows = cur.fetchall()
+            count = 0
+            for row_id, pwd in rows:
+                if pwd and not pwd.startswith('ENC:'):
+                    enc = encrypt_secret(pwd)
+                    if enc:
+                        conn.execute('UPDATE mqtt_servers SET password = ? WHERE id = ?', ('ENC:' + enc, row_id))
+                        count += 1
+            if count:
+                conn.commit()
+                logger.info(f"Зашифровано {count} MQTT паролей")
+            else:
+                logger.info("Нет MQTT паролей для шифрования")
+        except Exception as e:
+            logger.error(f"Ошибка миграции encrypt_mqtt_passwords: {e}")
 
     # --- Telegram bot helpers: FSM ---
     def set_bot_fsm(self, chat_id: int, state: Optional[str], data: Optional[dict]) -> bool:
@@ -1635,18 +1658,29 @@ class IrrigationDB:
             return []
 
     # ===== MQTT servers CRUD =====
+    @staticmethod
+    def _decrypt_mqtt_password(server: Dict[str, Any]) -> Dict[str, Any]:
+        """Decrypt MQTT password if it's stored encrypted (ENC: prefix)."""
+        pwd = server.get('password')
+        if pwd and isinstance(pwd, str) and pwd.startswith('ENC:'):
+            server['password'] = decrypt_secret(pwd[4:])
+        return server
+
     def get_mqtt_servers(self) -> List[Dict[str, Any]]:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT * FROM mqtt_servers ORDER BY id')
-                return [dict(row) for row in cur.fetchall()]
+                return [self._decrypt_mqtt_password(dict(row)) for row in cur.fetchall()]
         except Exception as e:
             logger.error(f"Ошибка получения MQTT серверов: {e}")
             return []
 
     def create_mqtt_server(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
+            # Encrypt password before storing
+            raw_password = data.get('password')
+            enc_password = ('ENC:' + encrypt_secret(raw_password)) if raw_password else raw_password
             with sqlite3.connect(self.db_path) as conn:
                 cur = conn.execute('''
                     INSERT INTO mqtt_servers (name, host, port, username, password, client_id, enabled,
@@ -1657,7 +1691,7 @@ class IrrigationDB:
                     data.get('host', 'localhost'),
                     int(data.get('port', 1883)),
                     data.get('username'),
-                    data.get('password'),
+                    enc_password,
                     data.get('client_id'),
                     1 if data.get('enabled', True) else 0,
                     1 if data.get('tls_enabled') else 0,
@@ -1680,13 +1714,16 @@ class IrrigationDB:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT * FROM mqtt_servers WHERE id = ?', (server_id,))
                 row = cur.fetchone()
-                return dict(row) if row else None
+                return self._decrypt_mqtt_password(dict(row)) if row else None
         except Exception as e:
             logger.error(f"Ошибка получения MQTT сервера {server_id}: {e}")
             return None
 
     def update_mqtt_server(self, server_id: int, data: Dict[str, Any]) -> bool:
         try:
+            # Encrypt password before storing
+            raw_password = data.get('password')
+            enc_password = ('ENC:' + encrypt_secret(raw_password)) if raw_password else raw_password
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('''
                     UPDATE mqtt_servers
@@ -1699,7 +1736,7 @@ class IrrigationDB:
                     data.get('host', 'localhost'),
                     int(data.get('port', 1883)),
                     data.get('username'),
-                    data.get('password'),
+                    enc_password,
                     data.get('client_id'),
                     1 if data.get('enabled', True) else 0,
                     1 if data.get('tls_enabled') else 0,
