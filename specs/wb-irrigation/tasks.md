@@ -556,7 +556,7 @@
 - **Оценка:** 4 часа
 - **Зависимости:** TASK-017-021 (маршруты вынесены, database.py стабилен)
 
-### TASK-023: Fix catch-all exceptions (top-100 критичных)
+### TASK-023: ✅ Fix catch-all exceptions (373 fixed)
 - **Приоритет:** P2
 - **Файлы:** `app.py`, `services/zone_control.py`, `services/mqtt_pub.py`, `irrigation_scheduler.py`, `database.py`
 - **Описание:**
@@ -577,7 +577,7 @@
 - **Оценка:** 3 часа
 - **Зависимости:** TASK-017-021 (после выноса маршрутов, чтобы менять меньше кода)
 
-### TASK-024: Fix api_water() + probe_env перезапись
+### TASK-024: ✅ Fix api_water() + probe_env (already fixed in prev wave)
 - **Приоритет:** P2
 - **Файлы:** `routes/system_api.py` (или app.py), `app.py` (_probe_env_values)
 - **Описание:**
@@ -589,7 +589,7 @@
 - **Оценка:** 1.5 часа
 - **Зависимости:** TASK-021 (если api_water уже перенесён в system_api)
 
-### TASK-025: SQLite BUSY retry decorator
+### TASK-025: ✅ SQLite BUSY retry decorator (applied in db/ modules)
 - **Приоритет:** P2
 - **Файлы:** `db/base.py`
 - **Описание:**
