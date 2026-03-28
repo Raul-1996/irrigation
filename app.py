@@ -936,8 +936,14 @@ def _init_scheduler_before_request():
                 # Всегда разрешаем GET для гостей/пользователей
                 if request.method == 'GET':
                     return None
-                # Разрешаем гостю/user выполнять действия со страницы Статус
+                # Viewer (гостевой вход) — запретить ВСЕ мутации кроме login
                 pth = request.path or ''
+                if session.get('role') == 'viewer' and request.method in ['POST', 'PUT', 'DELETE']:
+                    if pth == '/api/login':
+                        pass  # разрешаем логин для повышения привилегий
+                    else:
+                        return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
+                # Разрешаем гостю/user выполнять действия со страницы Статус
                 allowed_public_posts = {
                     '/api/login', '/api/password', '/api/status', '/health', '/api/env',
                     '/api/emergency-stop', '/api/emergency-resume', '/api/postpone',
@@ -1078,6 +1084,12 @@ def _require_admin_for_mutations():
         # Разрешаем все GET-запросы для гостей/пользователей (чтение публичных данных)
         if request.method == 'GET':
             return None
+        # Viewer (гостевой вход) — запретить ВСЕ мутации кроме login
+        role = session.get('role', 'guest')
+        if role == 'viewer' and request.method in ['POST', 'PUT', 'DELETE']:
+            if p == '/api/login':
+                return None
+            return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
         # Мутации — только для админа, кроме разрешённых
         if request.method in ['POST', 'PUT', 'DELETE']:
             if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/') or p == '/api/password':
@@ -1097,7 +1109,7 @@ def _require_admin_for_mutations():
                 except Exception:
                     pass
                 return False
-            if session.get('role') != 'admin':
+            if role != 'admin':
                 if not _is_status_action(p):
                     return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
     except Exception:

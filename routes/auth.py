@@ -8,10 +8,10 @@ auth_bp = Blueprint('auth_bp', __name__)
 
 @auth_bp.route('/login', methods=['GET'])
 def login_page():
-    # Поддержка гостевого входа
+    # Поддержка гостевого входа (viewer — только чтение, без мутаций)
     if request.args.get('guest') == '1':
         session['logged_in'] = True
-        session['role'] = 'guest'
+        session['role'] = 'viewer'
         return redirect(url_for('status_bp.index'))
     return render_template('login.html')
 
