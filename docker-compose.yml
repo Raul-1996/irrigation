@@ -23,6 +23,8 @@ services:
       - "1884:1883" # host 1883 busy; use 1884 on host
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
       - ./mosquitto_data:/mosquitto/data
       - ./mosquitto_log:/mosquitto/log
     restart: unless-stopped
