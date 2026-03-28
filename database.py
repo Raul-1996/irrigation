@@ -164,6 +164,8 @@ class IrrigationDB:
                 self._apply_named_migration(conn, 'telegram_create_bot_idempotency', self._migrate_create_bot_idempotency)
                 # Security: encrypt plaintext MQTT passwords
                 self._apply_named_migration(conn, 'encrypt_mqtt_passwords', self._migrate_encrypt_mqtt_passwords)
+                # Safety: fault tracking columns for observed_state verification
+                self._apply_named_migration(conn, 'zones_add_fault_tracking', self._migrate_add_fault_tracking)
                 
                 logger.info("База данных инициализирована успешно")
                 
@@ -673,6 +675,20 @@ class IrrigationDB:
                 logger.info("Нет MQTT паролей для шифрования")
         except Exception as e:
             logger.error(f"Ошибка миграции encrypt_mqtt_passwords: {e}")
+
+    def _migrate_add_fault_tracking(self, conn):
+        """Add last_fault and fault_count columns to zones for observed_state verification."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'last_fault' not in columns:
+                conn.execute("ALTER TABLE zones ADD COLUMN last_fault TEXT")
+            if 'fault_count' not in columns:
+                conn.execute("ALTER TABLE zones ADD COLUMN fault_count INTEGER DEFAULT 0")
+            conn.commit()
+            logger.info("Добавлены поля last_fault, fault_count в zones")
+        except Exception as e:
+            logger.error(f"Ошибка миграции zones_add_fault_tracking: {e}")
 
     # --- Telegram bot helpers: FSM ---
     def set_bot_fsm(self, chat_id: int, state: Optional[str], data: Optional[dict]) -> bool:

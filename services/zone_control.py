@@ -8,6 +8,7 @@ from services.locks import group_lock, zone_lock
 from services.mqtt_pub import publish_mqtt_value
 from utils import normalize_topic
 from services.monitors import water_monitor
+from services.observed_state import state_verifier
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,11 @@ def exclusive_start_zone(zone_id: int) -> bool:
                         publish_mqtt_value(server, normalize_topic(topic), '1', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': str(command_id) if 'command_id' in locals() and command_id else None, 'ver': str((z.get('version') or 0) + 1)})
                         # transition to on
                         _versioned_update(zone_id, {'state': 'on'})
+                        # Verify observed_state in background thread
+                        try:
+                            state_verifier.verify_async(int(zone_id), 'on')
+                        except Exception:
+                            logger.debug("observed_state verify_async(on) launch failed")
             except Exception:
                 logger.exception("exclusive_start_zone: mqtt on failed")
             # Stop others in parallel to reduce latency
@@ -229,6 +235,11 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                 if server:
                     # OFF публикуем с retain=True, чтобы состояние восстанавливалось после перезапуска
                     publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'stop','ver':str((z.get('version') or 0) + 1)})
+                    # Verify observed_state in background thread
+                    try:
+                        state_verifier.verify_async(int(zone_id), 'off')
+                    except Exception:
+                        logger.debug("observed_state verify_async(off) launch failed")
                     # Delayed master valve close (60s) if no zones ON on the same master topic across peer groups
                     try:
                         gid = int(z.get('group_id') or 0)
