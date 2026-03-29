@@ -11,6 +11,7 @@ from services.mqtt_pub import publish_mqtt_value
 from utils import normalize_topic
 from services.monitors import water_monitor
 from services.observed_state import state_verifier
+import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ def _versioned_update(zone_id: int, updates: dict) -> None:
     ok = False
     try:
         ok = db.update_zone_versioned(zone_id, updates)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("Exception in _versioned_update: %s", e)
         ok = False
     if not ok:
@@ -60,13 +61,13 @@ def exclusive_start_zone(zone_id: int) -> bool:
                 # Снапшот счётчика воды на старте (если у группы есть счётчик)
                 try:
                     gid = int(z.get('group_id') or 0)
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Exception in exclusive_start_zone: %s", e)
                     gid = 0
                 if gid and gid != 999:
                     try:
                         g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
-                    except Exception as e:
+                    except (sqlite3.Error, OSError) as e:
                         logger.debug("Exception in line_68: %s", e)
                         g = None
                     if g and int(g.get('use_water_meter') or 0) == 1:
@@ -77,9 +78,9 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             liters = 100 if pulse == '100l' else 10 if pulse == '10l' else 1
                             base_m3 = float(g.get('water_base_value_m3') or 0.0)
                             db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3)
-                        except Exception:
+                        except (sqlite3.Error, OSError):
                             logger.exception('start snapshot failed')
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in line_81: %s", e)
             try:
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
@@ -88,7 +89,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
                 if gid and gid != 999:
                     try:
                         g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
-                    except Exception as e:
+                    except (sqlite3.Error, OSError) as e:
                         logger.debug("Exception in line_90: %s", e)
                         g = None
                     if g and int(g.get('use_master_valve') or 0) == 1:
@@ -99,7 +100,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             if mserver:
                                 try:
                                     mode = (g.get('master_mode') or 'NC').strip().upper()
-                                except Exception as e:
+                                except (ValueError, TypeError, KeyError) as e:
                                     logger.debug("Exception in line_101: %s", e)
                                     mode = 'NC'
                                 open_val = '0' if mode == 'NO' else '1'
@@ -113,9 +114,9 @@ def exclusive_start_zone(zone_id: int) -> bool:
                         # Verify observed_state in background thread
                         try:
                             state_verifier.verify_async(int(zone_id), 'on')
-                        except Exception:
+                        except (ValueError, TypeError, KeyError):
                             logger.debug("observed_state verify_async(on) launch failed")
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError):
                 logger.exception("exclusive_start_zone: mqtt on failed")
             # Stop others in parallel to reduce latency
             try:
@@ -136,13 +137,13 @@ def exclusive_start_zone(zone_id: int) -> bool:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
                                 last_time = other.get('watering_start_time')
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
-                    except Exception:
+                    except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed")
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(group_zones)-1))) as pool:
                     pool.map(_stop_peer, group_zones)
-            except Exception as e:
-                logger.debug("Exception in _stop_peer: %s", e)
+            except (ImportError, RuntimeError, OSError) as e:
+                logger.warning("Parallel peer stop failed, falling back to sequential: %s", e)
                 # Fallback to sequential if parallelization fails for any reason
                 for other in group_zones:
                     try:
@@ -160,16 +161,16 @@ def exclusive_start_zone(zone_id: int) -> bool:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
                                 last_time = other.get('watering_start_time')
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time})
-                    except Exception:
+                    except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed (sequential)")
         try:
             # publish event
             from services import events as _ev
             _ev.publish({'type':'zone_start','id': int(zone_id), 'by':'api'})
-        except Exception as e:
+        except ImportError as e:
             logger.debug("Handled exception in line_168: %s", e)
         return True
-    except Exception:
+    except Exception:  # catch-all: intentional
         logger.exception("exclusive_start_zone failed")
         return False
 
@@ -191,13 +192,13 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     # 1) Если есть открытый run — завершим его по текущим пульсам
                     try:
                         run = db.get_open_zone_run(int(zone_id))
-                    except Exception as e:
+                    except (sqlite3.Error, OSError) as e:
                         logger.debug("Exception in stop_zone: %s", e)
                         run = None
                     if run:
                         try:
                             end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                        except Exception as e:
+                        except Exception as e:  # catch-all: intentional
                             logger.debug("Exception in stop_zone: %s", e)
                             end_raw = None
                         try:
@@ -211,13 +212,13 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                 dur_sec = max(1.0, end_mono - start_mono)
                                 avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
                             db.finish_zone_run(int(run['id']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), end_mono, end_raw, total_liters, avg_lpm, status='ok')
-                        except Exception:
+                        except (sqlite3.Error, OSError):
                             logger.exception('finish snapshot (already off) failed')
                     # 2) Фоллбэк: по времени последнего полива/старта посчитаем суммарно
                     if (total_liters is None) and (avg_lpm is None):
                         try:
                             since_iso = z.get('last_watering_time') or z.get('watering_start_time')
-                        except Exception as e:
+                        except (KeyError, TypeError, ValueError) as e:
                             logger.debug("Exception in line_219: %s", e)
                             since_iso = None
                         if since_iso:
@@ -232,7 +233,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                             updates['last_total_liters'] = total_liters
                         if updates:
                             db.update_zone(int(zone_id), updates)
-            except Exception:
+            except (sqlite3.Error, OSError, ValueError, TypeError):
                 logger.exception('stop_zone (already off): water stats update failed')
             return True
         last_time = z.get('watering_start_time')
@@ -249,7 +250,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     # Verify observed_state in background thread
                     try:
                         state_verifier.verify_async(int(zone_id), 'off')
-                    except Exception:
+                    except (ValueError, TypeError, KeyError):
                         logger.debug("observed_state verify_async(off) launch failed")
                     # Delayed master valve close (60s) if no zones ON on the same master topic across peer groups
                     try:
@@ -279,20 +280,20 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                                 if mserver:
                                                     try:
                                                         mode = (g.get('master_mode') or 'NC').strip().upper()
-                                                    except Exception as e:
+                                                    except (ValueError, TypeError, KeyError) as e:
                                                         logger.debug("Exception in _delayed_close: %s", e)
                                                         mode = 'NC'
                                                     close_val = '1' if mode == 'NO' else '0'
                                                     publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_off'})
-                                        except Exception:
+                                        except (ConnectionError, TimeoutError, OSError):
                                             logger.exception('master valve delayed close failed')
                                     import os
                                     if not os.environ.get('TESTING'):
                                         import threading as _th
                                         _th.Thread(target=_delayed_close, daemon=True).start()
-                    except Exception:
+                    except Exception:  # catch-all: intentional
                         logger.exception('master valve close scheduling failed')
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
             logger.exception('stop_zone: mqtt off failed')
         # Завершаем переход: stopping -> off
         with zone_lock(zone_id):
@@ -305,14 +306,14 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                 # Попробуем быстрый расчёт по снапшотам
                 try:
                     run = db.get_open_zone_run(int(zone_id))
-                except Exception as e:
+                except (sqlite3.Error, OSError) as e:
                     logger.debug("Exception in line_305: %s", e)
                     run = None
                 if run:
                     try:
                         # Берём пульсы на/после момента стопа, чтобы избежать лагов
                         end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                    except Exception as e:
+                    except Exception as e:  # catch-all: intentional
                         logger.debug("Exception in line_312: %s", e)
                         end_raw = None
                     try:
@@ -326,7 +327,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                             dur_sec = max(1.0, end_mono - start_mono)
                             avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
                         db.finish_zone_run(int(run['id']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), end_mono, end_raw, total_liters, avg_lpm, status='ok')
-                    except Exception:
+                    except (sqlite3.Error, OSError):
                         logger.exception('finish snapshot failed')
                 # Если снапшоты не дали результата — fallback к summarize_run
                 if (total_liters is None) and (avg_lpm is None):
@@ -341,19 +342,19 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     updates['last_total_liters'] = total_liters
                 if updates:
                     db.update_zone(int(zone_id), updates)
-        except Exception:
+        except (sqlite3.Error, OSError, ValueError, TypeError):
             logger.exception('stop_zone: water stats update failed')
         try:
             db.add_log('zone_stop', f'{reason}: zone={int(zone_id)}')
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_345: %s", e)
         try:
             from services import events as _ev
             _ev.publish({'type':'zone_stop','id': int(zone_id), 'by': reason})
-        except Exception as e:
-            logger.debug("Handled exception in line_350: %s", e)
+        except (ImportError, AttributeError) as e:
+            logger.debug("Event publish failed: %s", e)
         return True
-    except Exception:
+    except Exception:  # catch-all: intentional
         logger.exception('stop_zone failed')
         return False
 
@@ -369,9 +370,9 @@ def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool =
                 try:
                     if os.environ.get('TESTING', '0') != '1':
                         time.sleep(0.05)
-                except Exception as e:
+                except (KeyError, TypeError, ValueError) as e:
                     logger.debug("Handled exception in stop_all_in_group: %s", e)
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 logger.exception('stop_all_in_group: stop_zone failed')
-    except Exception:
+    except (sqlite3.Error, OSError):
         logger.exception('stop_all_in_group failed')

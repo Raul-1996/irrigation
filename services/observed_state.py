@@ -5,6 +5,7 @@ and wait for the relay to echo back the expected state. On failure we retry the
 publish, and after exhausting retries we increment fault_count and send a
 Telegram alert.
 """
+import sqlite3
 import logging
 import threading
 import time
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import paho.mqtt.client as mqtt
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_18: %s", e)
     mqtt = None
 
@@ -35,7 +36,7 @@ class StateVerifier:
             try:
                 from database import db
                 self._db = db
-            except Exception as e:
+            except ImportError as e:
                 logger.debug("Handled exception in db: %s", e)
         return self._db
 
@@ -45,7 +46,7 @@ class StateVerifier:
             try:
                 from services.telegram_bot import notifier
                 self._notifier = notifier
-            except Exception as e:
+            except ImportError as e:
                 logger.debug("Handled exception in notifier: %s", e)
         return self._notifier
 
@@ -65,7 +66,7 @@ class StateVerifier:
     def _safe_verify(self, zone_id: int, expected: str) -> None:
         try:
             self.verify(zone_id, expected)
-        except Exception:
+        except Exception:  # catch-all: intentional
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
     # ------------------------------------------------------------------
@@ -124,7 +125,7 @@ class StateVerifier:
                     from services.mqtt_pub import publish_mqtt_value
                     value = '1' if expected.lower() in ('on', '1') else '0'
                     publish_mqtt_value(server, norm_topic, value, min_interval_sec=0.0, qos=2, retain=True)
-                except Exception:
+                except ImportError:
                     logger.exception("StateVerifier: retry publish failed zone=%s", zone_id)
 
         # All retries exhausted → record fault
@@ -152,7 +153,7 @@ class StateVerifier:
 
         try:
             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Exception in _subscribe_and_wait: %s", e)
             cl = mqtt.Client(client_id=client_id)
 
@@ -169,13 +170,13 @@ class StateVerifier:
                 cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
                 if int(server.get('tls_insecure') or 0) == 1:
                     cl.tls_insecure_set(True)
-        except Exception:
+        except ImportError:
             logger.exception("StateVerifier: TLS setup failed")
 
         def on_connect(client, userdata, flags, rc, *args):
             try:
                 client.subscribe(topic, qos=1)
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError):
                 logger.exception("StateVerifier: subscribe failed")
 
         def on_message(client, userdata, msg):
@@ -184,7 +185,7 @@ class StateVerifier:
                 if payload in expected_payloads:
                     confirmed[0] = True
                     result.set()
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Handled exception in on_message: %s", e)
 
         cl.on_connect = on_connect
@@ -200,12 +201,12 @@ class StateVerifier:
 
             cl.loop_stop()
             cl.disconnect()
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception("StateVerifier: MQTT connection failed")
             try:
                 cl.loop_stop()
                 cl.disconnect()
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in on_message: %s", e)
 
         return confirmed[0]
@@ -223,7 +224,7 @@ class StateVerifier:
                 'fault_count': current_faults + 1,
                 'last_fault': now_str,
             })
-        except Exception:
+        except (sqlite3.Error, OSError):
             logger.exception("StateVerifier: failed to update fault_count zone=%s", zone_id)
 
         zone_name = zone.get('name') or f'#{zone_id}'
@@ -242,7 +243,7 @@ class StateVerifier:
                 'code': 'observed_state_fault',
                 'message': alert_text,
             })
-        except Exception as e:
+        except ImportError as e:
             logger.debug("Handled exception in line_240: %s", e)
 
         # Direct Telegram alert
@@ -252,7 +253,7 @@ class StateVerifier:
                 admin_chat = db.get_setting_value('telegram_admin_chat_id')
                 if admin_chat:
                     notifier.send_text(int(admin_chat), alert_text)
-        except Exception:
+        except (sqlite3.Error, OSError):
             logger.exception("StateVerifier: Telegram alert failed")
 
 

@@ -72,7 +72,7 @@ try:
     _start, _end = INPUT_RANGE_ENV.split("-", 1)
     INPUT_INDEX_START = int(_start)
     INPUT_INDEX_END = int(_end)
-except Exception:
+except (ValueError, TypeError, KeyError):
     INPUT_INDEX_START, INPUT_INDEX_END = 0, 6
 
 
@@ -115,13 +115,13 @@ WATER_EMU_ENABLED = (os.getenv("EMULATOR_WATER_ENABLED", "1") == "1")
 try:
     WATER_MIN_SEC = float(os.getenv("EMULATOR_WATER_MIN_SEC", "5"))
     WATER_MAX_SEC = float(os.getenv("EMULATOR_WATER_MAX_SEC", "12"))
-except Exception:
+except (ValueError, TypeError, KeyError):
     WATER_MIN_SEC, WATER_MAX_SEC = 5.0, 12.0
 if WATER_MAX_SEC < WATER_MIN_SEC:
     WATER_MIN_SEC, WATER_MAX_SEC = WATER_MAX_SEC, WATER_MIN_SEC
 try:
     FLOW_COUNTER_INPUT_INDEX = int(os.getenv("EMULATOR_FLOW_COUNTER_INDEX", "2"))
-except Exception:
+except (ValueError, TypeError, KeyError):
     FLOW_COUNTER_INPUT_INDEX = 2
 FLOW_COUNTER_TOPIC = f"/devices/wb-mr6cv3_{INPUT_DEVICE_ID}/controls/Input {FLOW_COUNTER_INPUT_INDEX} counter"
 
@@ -230,7 +230,7 @@ def controller_connect() -> None:
                 controller_client.loop_start()
                 log_event(f"controller: connected to MQTT {BROKER_HOST}:{BROKER_PORT}")
                 return
-            except Exception as exc:
+            except (ConnectionError, TimeoutError, OSError) as exc:
                 log_event(f"controller: connect failed: {exc}; retry in 2s")
                 time.sleep(2)
     threading.Thread(target=_connect_loop, daemon=True).start()
@@ -255,7 +255,7 @@ def device_on_connect(client: mqtt.Client, userdata, flags, reason_code, propert
             # Avoid receiving our own published echoes to further reduce feedback
             options = mqtt.SubscribeOptions(qos=0, noLocal=True)
             client.subscribe(t, options=options)
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             client.subscribe(t, qos=0)
     log_event(f"device: subscribed to {len(RELAY_TOPICS) + len(INPUT_SWITCH_TOPICS) + len(INPUT_COUNTER_TOPICS)} topics (MSW skipped)")
     # Publish current cached state for all topics as retained so broker holds last known values
@@ -267,9 +267,9 @@ def device_on_connect(client: mqtt.Client, userdata, flags, reason_code, propert
                 client.publish(t, payload=v, qos=0, retain=True)
                 if LOG_TX:
                     log_event(f"device: TX retained init topic={t} payload={v}")
-            except Exception as _e:
+            except (ConnectionError, TimeoutError, OSError) as _e:
                 log_event(f"device: retained init publish failed topic={t} err={_e}")
-    except Exception as _e:
+    except (ConnectionError, TimeoutError, OSError) as _e:
         log_event(f"device: retained init error { _e }")
 
 
@@ -277,7 +277,7 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
     topic = normalize_topic(msg.topic)
     try:
         raw = msg.payload.decode('utf-8', 'ignore').strip()
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         raw = str(msg.payload)
 
     # Determine desired state based on topic type
@@ -289,7 +289,7 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
         try:
             # Allow integer values only; fall back to previous if invalid
             want = str(int(raw))
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             with state_lock:
                 want = topic_to_state.get(topic, "0")
     elif topic in MSW_TOPICS_SET:
@@ -315,7 +315,7 @@ def device_on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
     if changed and (topic in RELAY_TOPICS_SET) and (want == "1"):
         try:
             relay_next_due_ts[topic] = time.time() + RELAY_TOPIC_INTERVAL.get(topic, 7.0)
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             relay_next_due_ts[topic] = time.time() + 7.0
 
     # Simulate device switching delay and publish confirmation only if state changed
@@ -348,7 +348,7 @@ def device_connect() -> None:
                 device_client.loop_start()
                 log_event(f"device: connected to MQTT {BROKER_HOST}:{BROKER_PORT}")
                 return
-            except Exception as exc:
+            except (ConnectionError, TimeoutError, OSError) as exc:
                 log_event(f"device: connect failed: {exc}; retry in 2s")
                 time.sleep(2)
     threading.Thread(target=_connect_loop, daemon=True).start()
@@ -366,7 +366,7 @@ def publish_command(topic: str, value: str) -> None:
     elif t in INPUT_COUNTER_TOPICS_SET:
         try:
             v = str(int(raw))
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             with state_lock:
                 v = topic_to_state.get(t, "0")
     elif t in MSW_TOPICS_SET:
@@ -380,7 +380,7 @@ def publish_command(topic: str, value: str) -> None:
     info = None
     try:
         info = controller_client.publish(t, payload=v, qos=0, retain=True)
-    except Exception as exc:
+    except (ConnectionError, TimeoutError, OSError) as exc:
         log_event(f"controller: publish error: {exc}")
     # Mark command origin for diagnostics (emulator controller vs device echo)
     origin = 'emulator_controller'
@@ -388,11 +388,11 @@ def publish_command(topic: str, value: str) -> None:
     # Fallback: if either client isn't connected, or publish failed, apply state locally
     try:
         dev_connected = bool(getattr(device_client, "is_connected")() if hasattr(device_client, "is_connected") else False)
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         dev_connected = False
     try:
         ctrl_connected = bool(getattr(controller_client, "is_connected")() if hasattr(controller_client, "is_connected") else False)
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         ctrl_connected = False
     publish_failed = (info is None) or (getattr(info, 'rc', 0) != 0)
     if (not dev_connected) or (not ctrl_connected) or publish_failed:
@@ -413,7 +413,7 @@ def add_no_cache_headers(resp: Response):
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         pass
     return resp
 
@@ -837,7 +837,7 @@ def api_counter_incr():
     with state_lock:
         try:
             cur = int(topic_to_state.get(t, "0"))
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             cur = 0
         new_val = cur + 1
         topic_to_state[t] = str(new_val)
@@ -903,11 +903,11 @@ def start_msw_autopublish_thread():
         with state_lock:
             try:
                 cur_t = float(topic_to_state.get(MSW_TEMPERATURE_TOPIC, "22.0"))
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 cur_t = 22.0
             try:
                 cur_h = float(topic_to_state.get(MSW_HUMIDITY_TOPIC, "42.0"))
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 cur_h = 42.0
         while True:
             try:
@@ -926,16 +926,16 @@ def start_msw_autopublish_thread():
                     apply_local_state_raw(MSW_TEMPERATURE_TOPIC, t_str)
                     if LOG_TX and LOG_RX_MSW:
                         log_event(f"device: TX echo topic={MSW_TEMPERATURE_TOPIC} payload={t_str}")
-                except Exception as exc:
+                except (ConnectionError, TimeoutError, OSError) as exc:
                     log_event(f"msw-auto: publish temp error {exc}")
                 try:
                     device_client.publish(MSW_HUMIDITY_TOPIC, payload=h_str, qos=0, retain=True)
                     apply_local_state_raw(MSW_HUMIDITY_TOPIC, h_str)
                     if LOG_TX and LOG_RX_MSW:
                         log_event(f"device: TX echo topic={MSW_HUMIDITY_TOPIC} payload={h_str}")
-                except Exception as exc:
+                except (ConnectionError, TimeoutError, OSError) as exc:
                     log_event(f"msw-auto: publish hum error {exc}")
-            except Exception as exc:
+            except (ConnectionError, TimeoutError, OSError) as exc:
                 log_event(f"msw-auto: error {exc}")
             # Enforce a minimum interval of 30 seconds to reduce message noise
             time.sleep(max(30.0, MSW_AUTO_INTERVAL_SECONDS))
@@ -948,13 +948,13 @@ def _increment_flow_counter_once() -> None:
     with state_lock:
         try:
             cur = int(topic_to_state.get(t, "0"))
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             cur = 0
         new_val = cur + 1
         topic_to_state[t] = str(new_val)
     try:
         publish_command(t, str(new_val))
-    except Exception as exc:
+    except (ConnectionError, TimeoutError, OSError) as exc:
         log_event(f"water-emu: publish error {exc}")
 
 
@@ -980,7 +980,7 @@ def start_water_emulation_thread() -> None:
                         relay_next_due_ts[t] = now + RELAY_TOPIC_INTERVAL.get(t, 7.0)
                 # If no relays are on, just idle
                 time.sleep(0.2 if any_on else 0.5)
-            except Exception as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 log_event(f"water-emu: loop error {exc}")
                 time.sleep(0.5)
     threading.Thread(target=_loop, daemon=True).start()

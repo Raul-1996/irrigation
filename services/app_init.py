@@ -4,6 +4,7 @@ One-time application initialisation extracted from before_request (TASK-016).
 Call :func:`initialize_app` once at startup (e.g. inside ``create_app()`` or
 at module level) instead of running heavy init on every HTTP request.
 """
+import sqlite3
 
 import logging
 import time
@@ -39,7 +40,7 @@ def initialize_app(app, db):
         from irrigation_scheduler import init_scheduler
         init_scheduler(db)
         logger.info('Scheduler initialised')
-    except Exception as e:
+    except ImportError as e:
         logger.error(f'Scheduler init failed: {e}')
 
     # ── 2. Single-zone exclusivity watchdog ─────────────────────────
@@ -48,7 +49,7 @@ def initialize_app(app, db):
         # at runtime to avoid circular imports. It is idempotent.
         from app import _start_single_zone_watchdog
         _start_single_zone_watchdog()
-    except Exception:
+    except ImportError:
         logger.exception('single-zone watchdog start failed')
 
     # ── 3. Cap-time watchdog (TASK-010) ─────────────────────────────
@@ -56,7 +57,7 @@ def initialize_app(app, db):
         from services.watchdog import start_watchdog as _start_cap_watchdog
         import services.zone_control as _zc_module
         _start_cap_watchdog(db, _zc_module, interval=30)
-    except Exception:
+    except ImportError:
         logger.exception('cap-time watchdog start failed')
 
     # ── 4. Boot sync: turn OFF all zones + master valves ────────────
@@ -88,9 +89,9 @@ def _boot_sync(app, db):
             for g in groups:
                 try:
                     _stop_all(int(g['id']), reason='boot_sync', force=True)
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in _boot_sync: %s", e)
-        except Exception as e:
+        except ImportError as e:
             logger.debug("Handled exception in _boot_sync: %s", e)
 
         # Close master-valves (mode-aware, retain)
@@ -100,7 +101,7 @@ def _boot_sync(app, db):
                 try:
                     if int(g.get('use_master_valve') or 0) != 1:
                         continue
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Exception in _boot_sync: %s", e)
                     continue
                 mtopic = (g.get('master_mqtt_topic') or '').strip()
@@ -116,16 +117,16 @@ def _boot_sync(app, db):
                     if server:
                         try:
                             mode = (g.get('master_mode') or 'NC').strip().upper()
-                        except Exception as e:
+                        except (ValueError, TypeError, KeyError) as e:
                             logger.debug("Exception in line_113: %s", e)
                             mode = 'NC'
                         close_val = '1' if mode == 'NO' else '0'
                         logger.info(
                             f'Boot sync: closing master valve sid={msid} topic={mtopic} mode={mode} val={close_val}')
                         _publish(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError):
                     logger.exception('Boot sync: master valve close failed')
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('Boot sync: master valve sweep failed')
 
         # Direct MQTT OFF publish per zone (secondary safety net with retries)
@@ -145,15 +146,15 @@ def _boot_sync(app, db):
                                     break
                                 try:
                                     time.sleep(0.2 * (attempt + 1))
-                                except Exception as e:
+                                except Exception as e:  # catch-all: intentional
                                     logger.debug("Handled exception in line_142: %s", e)
                             try:
                                 time.sleep(0.01)
-                            except Exception as e:
+                            except Exception as e:  # catch-all: intentional
                                 logger.debug("Handled exception in line_146: %s", e)
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_148: %s", e)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in line_150: %s", e)
 
         # Close all configured master valves with retries (secondary safety net)
@@ -163,7 +164,7 @@ def _boot_sync(app, db):
                 try:
                     if int(g.get('use_master_valve') or 0) != 1:
                         continue
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Exception in line_160: %s", e)
                     continue
                 mtopic = (g.get('master_mqtt_topic') or '').strip()
@@ -179,7 +180,7 @@ def _boot_sync(app, db):
                     if server:
                         try:
                             mode = (g.get('master_mode') or 'NC').strip().upper()
-                        except Exception as e:
+                        except (ValueError, TypeError, KeyError) as e:
                             logger.debug("Exception in line_176: %s", e)
                             mode = 'NC'
                         close_val = '1' if mode == 'NO' else '0'
@@ -190,19 +191,19 @@ def _boot_sync(app, db):
                                 break
                             try:
                                 time.sleep(0.2 * (attempt + 1))
-                            except Exception as e:
+                            except Exception as e:  # catch-all: intentional
                                 logger.debug("Handled exception in line_187: %s", e)
                         try:
                             time.sleep(0.01)
-                        except Exception as e:
+                        except Exception as e:  # catch-all: intentional
                             logger.debug("Handled exception in line_191: %s", e)
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_193: %s", e)
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('boot sync OFF (secondary) failed')
 
         logger.info('Boot sync: all zones OFF, MQTT OFF published')
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f'Boot sync failed: {e}')
 
 
@@ -215,21 +216,21 @@ def _start_monitors(app, db):
             env_monitor,
             probe_env_values,
         )
-    except Exception:
+    except ImportError:
         logger.exception('Failed to import monitors')
         return
 
     # Water monitor (idempotent)
     try:
         start_water_monitor()
-    except Exception:
+    except Exception:  # catch-all: intentional
         logger.exception('WaterMonitor start failed')
 
     # Rain monitor
     try:
         cfg = db.get_rain_config()
         rain_monitor.start(cfg)
-    except Exception:
+    except (sqlite3.Error, OSError):
         logger.exception('RainMonitor start failed')
 
     # Env monitor
@@ -239,9 +240,9 @@ def _start_monitors(app, db):
         # Probe retained values so data appears immediately
         try:
             probe_env_values(ecfg)
-        except Exception:
+        except Exception:  # catch-all: intentional
             logger.exception('EnvMonitor probe call failed')
-    except Exception:
+    except (sqlite3.Error, OSError):
         logger.exception('EnvMonitor start failed')
 
 
@@ -255,8 +256,8 @@ def _warm_mqtt_clients(db):
                 if int(s.get('enabled') or 1) != 1:
                     continue
                 get_or_create_mqtt_client(s)
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in _warm_mqtt_clients: %s", e)
         logger.info(f'MQTT clients warmed: {len(servers)}')
-    except Exception:
+    except ImportError:
         logger.exception('MQTT warm-up failed')

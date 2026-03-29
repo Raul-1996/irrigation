@@ -68,7 +68,7 @@ class ZoneRepository(BaseRepository):
                         if len(rows) == 1:
                             mqtt_sid = rows[0][0]
                         # 0 or >1 servers: leave mqtt_sid as None, API layer should validate
-                    except Exception:
+                    except (ConnectionError, TimeoutError, OSError):
                         pass
                 zid_explicit = None
                 try:
@@ -581,7 +581,7 @@ class ZoneRepository(BaseRepository):
             if best_dt:
                 return best_dt.strftime('%Y-%m-%d %H:%M:%S')
             return None
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.exception("Ошибка расчета следующего запуска для зоны %s: %s", zone_id, e)
             return None
 
@@ -597,5 +597,5 @@ class ZoneRepository(BaseRepository):
             self.clear_group_scheduled_starts(group_id)
             if schedule:
                 self.set_group_scheduled_starts(group_id, schedule)
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.exception("Ошибка перестройки расписания группы %s: %s", group_id, e)

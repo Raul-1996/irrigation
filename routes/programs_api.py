@@ -7,6 +7,7 @@ from database import db
 from irrigation_scheduler import get_scheduler
 from services.helpers import api_error
 from services.api_rate_limiter import rate_limit
+import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +32,13 @@ def api_program(prog_id):
         try:
             if isinstance(data.get('days'), list):
                 data['days'] = [int(d) for d in data['days']]
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Handled exception in api_program: %s", e)
         try:
             conflicts = db.check_program_conflicts(program_id=prog_id, time=data['time'], zones=data['zones'], days=data['days'])
             if conflicts:
                 return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'})
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.error(f"Ошибка серверной проверки конфликтов: {e}")
         program = db.update_program(prog_id, data)
         if program:
@@ -46,7 +47,7 @@ def api_program(prog_id):
                 scheduler = get_scheduler()
                 if scheduler:
                     scheduler.schedule_program(program['id'], program)
-            except Exception as e:
+            except (KeyError, TypeError, ValueError) as e:
                 logger.error(f"Ошибка перепланирования программы {prog_id}: {e}")
             return jsonify(program)
         return ('Program not found', 404)
@@ -58,7 +59,7 @@ def api_program(prog_id):
                 scheduler = get_scheduler()
                 if scheduler:
                     scheduler.cancel_program(prog_id)
-            except Exception as e:
+            except Exception as e:  # catch-all: intentional
                 logger.error(f"Ошибка отмены программы {prog_id} в планировщике: {e}")
             return ('', 204)
         return jsonify({'success': False, 'message': 'Program not found'}), 404
@@ -75,13 +76,13 @@ def api_create_program():
     try:
         if isinstance(data.get('days'), list):
             data['days'] = [int(d) for d in data['days']]
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.debug("Handled exception in api_create_program: %s", e)
     try:
         conflicts = db.check_program_conflicts(program_id=None, time=data['time'], zones=data['zones'], days=data.get('days', []))
         if conflicts:
             return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка серверной проверки конфликтов (create): {e}")
     program = db.create_program(data)
     if program:
@@ -90,7 +91,7 @@ def api_create_program():
             scheduler = get_scheduler()
             if scheduler:
                 scheduler.schedule_program(program['id'], program)
-        except Exception as e:
+        except (KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка планирования новой программы {program['id']}: {e}")
         return jsonify(program), 201
     return ('Error creating program', 400)
@@ -111,6 +112,6 @@ def check_program_conflicts():
 
         conflicts = db.check_program_conflicts(program_id, time_val, zones, days)
         return jsonify({'success': True, 'conflicts': conflicts, 'has_conflicts': len(conflicts) > 0})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка проверки конфликтов программ: {e}")
         return jsonify({'success': False, 'message': 'Ошибка проверки конфликтов'}), 500

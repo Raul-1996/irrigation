@@ -19,16 +19,17 @@ from services import sse_hub as _sse_hub
 from services.api_rate_limiter import rate_limit
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
+import sqlite3
 
 try:
     import paho.mqtt.client as mqtt
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_23: %s", e)
     mqtt = None
 
 try:
     from services import events as _events
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_29: %s", e)
     _events = None
 
@@ -61,10 +62,10 @@ def api_health_details():
                             'next_run_time': nrt.isoformat() if nrt else None,
                             'jobstore': jstore, 'trigger': trig,
                         })
-                    except Exception as e:
+                    except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Exception in api_health_details: %s", e)
                         continue
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Handled exception in api_health_details: %s", e)
         zones = []
         try:
@@ -83,10 +84,10 @@ def api_health_details():
                             'version': z.get('version'),
                             'planned_end_time': z.get('planned_end_time'),
                         })
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Exception in line_84: %s", e)
                     continue
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_87: %s", e)
         locks = _locks_snapshot()
         group_cancels = []
@@ -95,14 +96,14 @@ def api_health_details():
                 for gid, ev in (sched.group_cancel_events or {}).items():
                     try:
                         group_cancels.append({'group_id': int(gid), 'set': bool(ev.is_set())})
-                    except Exception as e:
+                    except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Exception in line_96: %s", e)
                         continue
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Handled exception in line_99: %s", e)
         try:
             meta_tail = _sse_hub.get_meta_buffer()
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.debug("Exception in line_103: %s", e)
             meta_tail = []
         payload = {
@@ -112,7 +113,7 @@ def api_health_details():
             'group_cancels': group_cancels, 'meta_tail': meta_tail,
         }
         return jsonify(payload)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.exception('health-details failed')
         return api_error('health_details_failed', f'health details error: {e}', 500)
 
@@ -127,10 +128,10 @@ def api_health_cancel_job(job_id):
         try:
             sched.scheduler.remove_job(str(job_id))
             return jsonify({'success': True, 'message': f'job {job_id} removed'})
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in api_health_cancel_job: %s", e)
             return api_error('job_remove_failed', f'failed to remove job: {e}', 400)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.exception('cancel job failed')
         return api_error('cancel_job_failed', f'error: {e}', 500)
 
@@ -150,11 +151,11 @@ def api_health_cancel_group(group_id):
                 sched.group_cancel_events[int(group_id)] = ev
             if hasattr(sched, 'cancel_group_jobs'):
                 sched.cancel_group_jobs(int(group_id))
-        except Exception:
+        except (ValueError, TypeError, RuntimeError):
             logger.exception('group cancel failed')
             return api_error('group_cancel_failed', 'failed to cancel group jobs', 400)
         return jsonify({'success': True, 'message': f'group {group_id} cancelled'})
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.exception('cancel group failed')
         return api_error('cancel_group_failed', f'error: {e}', 500)
 
@@ -165,7 +166,7 @@ def api_scheduler_init():
     try:
         init_scheduler(db)
         return jsonify({'success': True})
-    except Exception as e:
+    except Exception as e:  # catch-all: intentional
         logger.error(f"Ошибка явной инициализации планировщика: {e}")
         return api_error('INTERNAL_ERROR', 'internal error', 500)
 
@@ -184,7 +185,7 @@ def api_scheduler_status():
             'active_zones': {str(k): v.isoformat() for k, v in active_zones.items()},
             'is_running': scheduler.is_running
         })
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.error(f"Ошибка получения статуса планировщика: {e}")
         return jsonify({'error': 'Ошибка получения статуса'}), 500
 
@@ -203,11 +204,11 @@ def api_scheduler_jobs():
                     'next_run_time': None if j.next_run_time is None else j.next_run_time.strftime('%Y-%m-%d %H:%M:%S'),
                     'name': getattr(j, 'name', ''),
                 })
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in api_scheduler_jobs: %s", e)
                 continue
         return jsonify({'success': True, 'jobs': jobs})
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.error(f"scheduler jobs list failed: {e}")
         return jsonify({'success': False, 'jobs': []}), 200
 
@@ -251,7 +252,7 @@ def api_change_password():
                 return jsonify({'success': True})
             return jsonify({'success': False, 'message': 'Не удалось обновить пароль'}), 500
         return jsonify({'success': False, 'message': 'Старый пароль неверен'}), 400
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка смены пароля: {e}")
         return jsonify({'success': False, 'message': 'Ошибка смены пароля'}), 500
 
@@ -270,7 +271,7 @@ def api_map():
                     ext = os.path.splitext(f)[1].lower()
                     if os.path.isfile(p) and ext in allowed_ext:
                         items.append({'name': f, 'path': f"media/maps/{f}", 'mtime': os.path.getmtime(p)})
-                except Exception as e:
+                except (IOError, OSError, PermissionError) as e:
                     logger.debug("Exception in api_map: %s", e)
                     continue
             items.sort(key=lambda x: x['mtime'], reverse=True)
@@ -293,7 +294,7 @@ def api_map():
             save_path = os.path.join(MAP_DIR, filename)
             file.save(save_path)
             return jsonify({'success': True, 'message': 'Карта загружена', 'path': f"media/maps/{filename}"})
-    except Exception as e:
+    except (IOError, OSError, PermissionError) as e:
         logger.error(f"Ошибка работы с картой зон: {e}")
         return jsonify({'success': False, 'message': 'Ошибка работы с картой'}), 500
 
@@ -311,7 +312,7 @@ def api_map_delete(filename):
             return jsonify({'success': False, 'message': 'Файл не найден'}), 404
         os.remove(path)
         return jsonify({'success': True})
-    except Exception as e:
+    except (IOError, OSError, PermissionError) as e:
         logger.error(f"Ошибка удаления карты: {e}")
         return jsonify({'success': False, 'message': 'Ошибка удаления карты'}), 500
 
@@ -324,25 +325,25 @@ def health_check():
         try:
             _ = db.get_zones()
             db_ok = True
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Exception in health_check: %s", e)
             db_ok = False
         try:
             sched = get_scheduler()
             sched_ok = bool(sched is not None)
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.debug("Exception in health_check: %s", e)
             sched_ok = False
         try:
             servers = db.get_mqtt_servers() or []
             mqtt_ok = bool(len(servers) >= 0)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Exception in health_check: %s", e)
             mqtt_ok = False
         overall = db_ok and sched_ok
         code = 200 if overall else 503
         return jsonify({'ok': overall, 'db': db_ok, 'scheduler': sched_ok, 'mqtt_configured': mqtt_ok}), code
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.exception('health check failed')
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -371,10 +372,10 @@ def api_rain_config():
                     if gid == 999:
                         continue
                     db.set_group_use_rain(gid, True)
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in api_rain_config: %s", e)
         return jsonify({'success': bool(ok)})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"rain config failed: {e}")
         return jsonify({'success': False}), 500
 
@@ -395,7 +396,7 @@ def api_env_config():
                 cfg = db.get_env_config()
                 env_monitor.start(cfg)
                 probe_env_values(cfg)
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in api_env_config: %s", e)
             return jsonify({'success': True})
         try:
@@ -408,17 +409,17 @@ def api_env_config():
                 errors['hum_topic'] = 'Требуется MQTT-топик для датчика влажности'
             if errors:
                 return jsonify({'success': False, 'errors': errors}), 400
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in api_env_config: %s", e)
         ok = db.set_env_config(data)
         try:
             cfg = db.get_env_config()
             env_monitor.start(cfg)
             probe_env_values(cfg)
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_416: %s", e)
         return jsonify({'success': bool(ok)})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"env config failed: {e}")
         return jsonify({'success': False}), 500
 
@@ -432,7 +433,7 @@ def api_env_values():
         temperature = None if not temp_enabled else (env_monitor.temp_value if env_monitor.temp_value is not None else 'нет данных')
         humidity = None if not hum_enabled else (env_monitor.hum_value if env_monitor.hum_value is not None else 'нет данных')
         return jsonify({'success': True, 'temperature': temperature, 'humidity': humidity, 'enabled': {'temp': temp_enabled, 'hum': hum_enabled}})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"env values failed: {e}")
         return jsonify({'success': False}), 500
 
@@ -446,7 +447,7 @@ def api_postpone():
     group_id = data.get('group_id')
     try:
         group_id = int(group_id)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.debug("Exception in api_postpone: %s", e)
         return jsonify({"success": False, "message": "Некорректный идентификатор группы"}), 400
     days = data.get('days', 1)
@@ -479,15 +480,15 @@ def api_postpone():
                             server = db.get_mqtt_server(int(sid))
                             if server:
                                 _publish_mqtt_value(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError):
                     logger.exception("Ошибка остановки зоны при установке отложенного полива")
             try:
                 scheduler = get_scheduler()
                 if scheduler:
                     scheduler.cancel_group_jobs(group_id)
-            except Exception:
+            except Exception:  # catch-all: intentional
                 logger.exception("Ошибка отмены заданий планировщика при отложенном поливе группы")
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception("Ошибка массовой остановки зон при отложенном поливе группы")
         db.add_log('postpone_set', json.dumps({"group": group_id, "days": days, "until": postpone_until}))
         return jsonify({"success": True, "message": f"Полив отложен на {days} дней", "postpone_until": postpone_date.strftime('%Y-%m-%d %H:%M:%S')})
@@ -508,9 +509,9 @@ def api_emergency_stop():
             for g in groups:
                 try:
                     _stop_all(int(g['id']), reason='emergency_stop', force=True)
-                except Exception:
+                except (ValueError, TypeError, KeyError):
                     logger.exception('emergency stop: stop_all_in_group failed')
-        except Exception:
+        except (ValueError, TypeError, RuntimeError):
             logger.exception('emergency stop: controller unavailable')
         current_app.config['EMERGENCY_STOP'] = True
         db.add_log('emergency_stop', json.dumps({"active": True}))
@@ -521,17 +522,17 @@ def api_emergency_stop():
                 for g in groups:
                     try:
                         scheduler.cancel_group_jobs(int(g['id']))
-                    except Exception as e:
+                    except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Handled exception in api_emergency_stop: %s", e)
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in api_emergency_stop: %s", e)
         try:
             if _events:
                 _events.publish({'type': 'emergency_on', 'by': 'api'})
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in api_emergency_stop: %s", e)
         return jsonify({"success": True, "message": "Аварийная остановка выполнена"})
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка аварийной остановки: {e}")
         return jsonify({"success": False, "message": "Ошибка аварийной остановки"}), 500
 
@@ -546,10 +547,10 @@ def api_emergency_resume():
         try:
             if _events:
                 _events.publish({'type': 'emergency_off', 'by': 'api'})
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in api_emergency_resume: %s", e)
         return jsonify({"success": True, "message": "Полив возобновлен"})
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка возобновления после аварийной остановки: {e}")
         return jsonify({"success": False, "message": "Ошибка возобновления"}), 500
 
@@ -564,7 +565,7 @@ def api_backup():
             return jsonify({"success": True, "message": "Резервная копия создана", "backup_path": backup_path})
         else:
             return jsonify({"success": False, "message": "Ошибка создания резервной копии"}), 500
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("Exception in api_backup: %s", e)
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -589,7 +590,7 @@ def api_water():
                 # Try to get real water usage data
                 try:
                     usage = db.get_water_usage(group['id']) if hasattr(db, 'get_water_usage') else None
-                except Exception as e:
+                except (sqlite3.Error, OSError) as e:
                     logger.debug("Exception in api_water: %s", e)
                     usage = None
                 if usage:
@@ -615,11 +616,11 @@ def api_water():
                         'zone_usage': zone_usage
                     }
                 }
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.error(f"Ошибка обработки группы {group['id']}: {e}")
                 continue
         return jsonify(water_data)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения данных о воде: {e}")
         return jsonify({'error': 'Ошибка получения данных о воде'}), 500
 
@@ -632,14 +633,14 @@ def api_server_time():
         now = datetime.now()
         try:
             tzname = time.tzname[0] if time.tzname else ''
-        except Exception as e:
+        except (KeyError, TypeError, ValueError) as e:
             logger.debug("Exception in api_server_time: %s", e)
             tzname = ''
         payload = {'now_iso': now.strftime('%Y-%m-%d %H:%M:%S'), 'epoch_ms': int(time.time() * 1000), 'tz': tzname}
         resp = jsonify(payload)
         resp.headers['Cache-Control'] = 'no-store'
         return resp
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.error(f"server-time failed: {e}")
         return jsonify({'now_iso': None, 'epoch_ms': int(time.time() * 1000)}), 200
 
@@ -680,7 +681,7 @@ def api_status():
                 pu_dt = datetime.strptime(pu, '%Y-%m-%d %H:%M')
                 if pu_dt > datetime.now():
                     postponed_zones.append(z)
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in line_679: %s", e)
                 postponed_zones.append(z)
 
@@ -721,7 +722,7 @@ def api_status():
                                 pu_candidates.append(pu_dt)
                     if pu_candidates:
                         search_from = max(pu_candidates)
-                except Exception as e:
+                except (KeyError, TypeError, ValueError) as e:
                     logger.debug("Handled exception in line_720: %s", e)
                 best_dt = None
                 for program in group_programs:
@@ -755,7 +756,7 @@ def api_status():
                     group_postpone_reason = 'manual'
                 elif reasons:
                     group_postpone_reason = reasons[0]
-            except Exception as e:
+            except (KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in line_754: %s", e)
 
         current_zone_source = None
@@ -768,28 +769,28 @@ def api_status():
                         current_zone_source = src
                     else:
                         current_zone_source = 'remote'
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Handled exception in line_767: %s", e)
 
         try:
             use_master_valve = bool(int(group.get('use_master_valve') or 0))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in line_772: %s", e)
             use_master_valve = False
         try:
             mvo = (group.get('master_valve_observed') or '').strip()
             master_valve_state = mvo if mvo in ('open', 'closed') else 'unknown'
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in line_778: %s", e)
             master_valve_state = 'unknown'
         try:
             use_pressure_sensor = bool(int(group.get('use_pressure_sensor') or 0))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in line_783: %s", e)
             use_pressure_sensor = False
         try:
             use_water_meter = bool(int(group.get('use_water_meter') or 0))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in line_788: %s", e)
             use_water_meter = False
         pressure_unit = (group.get('pressure_unit') or 'bar') if use_pressure_sensor else None
@@ -804,11 +805,11 @@ def api_status():
                     try:
                         cz = next((z for z in group_zones if int(z['id']) == int(current_zone)), None)
                         start_iso = cz.get('watering_start_time') if cz else None
-                    except Exception as e:
+                    except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Exception in line_803: %s", e)
                         start_iso = None
                 flow_value = water_monitor.get_flow_lpm(int(group_id), start_iso)
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in line_807: %s", e)
                 meter_value_m3 = None
                 flow_value = None
@@ -832,7 +833,7 @@ def api_status():
                 rain_sensor_status = 'идёт дождь' if rain_monitor.is_rain else 'дождя нет'
             else:
                 rain_sensor_status = 'дождя нет'
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.debug("Exception in line_831: %s", e)
             rain_sensor_status = 'дождя нет'
 
@@ -844,7 +845,7 @@ def api_status():
 
     try:
         servers = db.get_mqtt_servers()
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.debug("Exception in line_843: %s", e)
         servers = []
     mqtt_servers_count = len(servers)
@@ -865,38 +866,38 @@ def api_status():
                     mqtt_connected = True
                     try:
                         client.disconnect()
-                    except Exception as e:
+                    except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in line_862: %s", e)
                     break
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Exception in line_865: %s", e)
                     mqtt_connected = False
         if mqtt_servers_count == 0:
             try:
                 logger.warning('MQTT: нет ни одного сервера в настройках')
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in line_871: %s", e)
             try:
                 db.add_log('mqtt_warn', 'нет ни одного сервера в настройках')
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in line_875: %s", e)
         elif not mqtt_connected:
             try:
                 logger.warning('MQTT: нет связи ни с одним сервером')
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in line_880: %s", e)
             try:
                 db.add_log('mqtt_warn', 'нет связи ни с одним MQTT сервером')
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in line_884: %s", e)
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.debug("Handled exception in line_886: %s", e)
 
     logger.info(f"api_status: temp={temperature} hum={humidity} temp_enabled={temp_enabled} hum_enabled={hum_enabled}")
     try:
         role = session.get('role')
         is_admin = (role == 'admin')
-    except Exception as e:
+    except (KeyError, TypeError, ValueError) as e:
         logger.debug("Exception in line_893: %s", e)
         is_admin = False
     return jsonify({
@@ -937,13 +938,13 @@ def api_logs():
                             to_dt = datetime.strptime(to_date, '%Y-%m-%d').date()
                             if log_date > to_dt:
                                 continue
-                    except Exception as e:
+                    except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Bare exception in api_logs: %s", e)
                         continue
                 filtered_logs.append(log)
             logs = filtered_logs
         return jsonify(logs)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения логов: {e}")
         return jsonify({'error': 'Ошибка получения логов'}), 500
 
@@ -962,7 +963,7 @@ def api_setting_early_off():
             return jsonify({'success': False, 'message': 'seconds must be within 0..15'}), 400
         ok = db.set_early_off_seconds(seconds)
         return jsonify({'success': bool(ok), 'seconds': seconds})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"early-off setting failed: {e}")
         return api_error('INTERNAL_ERROR', 'internal error', 500)
 
@@ -979,7 +980,7 @@ def api_setting_system_name():
         name = (data.get('name') or '').strip()
         ok = db.set_setting_value('system_name', name if name else None)
         return jsonify({'success': bool(ok), 'name': name})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"system-name setting failed: {e}")
         return api_error('INTERNAL_ERROR', 'internal error', 500)
 
@@ -999,9 +1000,9 @@ def api_logging_debug_toggle():
                 level = logging.DEBUG if is_debug else logging.WARNING
                 root = logging.getLogger()
                 root.setLevel(level)
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in api_logging_debug_toggle: %s", e)
         return jsonify({'debug': db.get_logging_debug()})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"api_logging_debug_toggle error: {e}")
         return jsonify({'debug': db.get_logging_debug()}), 500

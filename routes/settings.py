@@ -28,7 +28,7 @@ def api_get_telegram_settings():
             'telegram_webhook_secret_path': db.get_setting_value('telegram_webhook_secret_path') or '',
             'telegram_admin_chat_id': db.get_setting_value('telegram_admin_chat_id') or ''
         })
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("Exception in api_get_telegram_settings: %s", e)
         return jsonify({'error': str(e)}), 500
 
@@ -49,7 +49,7 @@ def api_put_telegram_settings():
                 try:
                     import secrets
                     db.set_setting_value('telegram_webhook_secret_path', secrets.token_urlsafe(16))
-                except Exception as e:
+                except ImportError as e:
                     logger.debug("Handled exception in api_put_telegram_settings: %s", e)
             # Настройка вебхука — только по явному запросу
             if bool(data.get('set_webhook')):
@@ -58,7 +58,7 @@ def api_put_telegram_settings():
                     wh_secret = db.get_setting_value('telegram_webhook_secret_path') or 'any'
                     from services.telegram_bot import notifier
                     notifier.set_webhook(f"{base_url}/telegram/webhook/{wh_secret}")
-                except Exception as e:
+                except ImportError as e:
                     logger.debug("Handled exception in api_put_telegram_settings: %s", e)
         if 'telegram_access_password' in data:
             from werkzeug.security import generate_password_hash
@@ -70,7 +70,7 @@ def api_put_telegram_settings():
         if 'telegram_admin_chat_id' in data:
             ok &= db.set_setting_value('telegram_admin_chat_id', str(data.get('telegram_admin_chat_id') or ''))
         return jsonify({'success': bool(ok)})
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("Exception in line_73: %s", e)
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -106,10 +106,10 @@ def api_test_telegram():
                     return jsonify({'success': False, 'message': 'Не удалось отправить сообщение — проверьте токен'}), 500
             else:
                 return jsonify({'success': True, 'message': 'Токен сохранён. Откройте чат с ботом (/start), затем повторите тест.'})
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Exception in api_test_telegram: %s", e)
             return jsonify({'success': False, 'message': f'Ошибка отправки: {e}'}), 500
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("Exception in api_test_telegram: %s", e)
         return jsonify({'success': False, 'message': str(e)}), 500
 

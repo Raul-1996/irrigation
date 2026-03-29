@@ -31,11 +31,11 @@ def _is_locked(lock: threading.RLock) -> bool:
             # Мы его не удерживали — отпускаем
             try:
                 lock.release()
-            except Exception as e:
+            except Exception as e:  # catch-all: intentional
                 logger.debug("Handled exception in _is_locked: %s", e)
             return False
         return True
-    except Exception as e:
+    except Exception as e:  # catch-all: intentional
         logger.debug("Exception in _is_locked: %s", e)
         return False
 

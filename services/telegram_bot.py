@@ -12,6 +12,7 @@ import asyncio
 import os
 import sys
 import importlib.util
+import sqlite3
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))  # .../irrigation/services
 LOGS_DIR = os.path.join(BASE_DIR, 'logs')
@@ -43,7 +44,7 @@ try:
     # aiogram v3
     from aiogram import Bot, Dispatcher, F
     from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup as _AInlineKeyboardMarkup, InlineKeyboardButton as _AInlineKeyboardButton
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in _load_routes_module: %s", e)
     Bot = None
     Dispatcher = None
@@ -71,7 +72,7 @@ try:
         logger.propagate = True
         logger._telegram_configured = True  # type: ignore[attr-defined]
         logger.info(f"telegram service logger initialized -> {log_path}")
-except Exception as e:
+except (IOError, OSError, PermissionError) as e:
     logger.debug("Handled exception in line_74: %s", e)
 
 
@@ -83,7 +84,7 @@ def _redact_url(url: str) -> str:
                 return a + '/bot***' + '/' + b.split('/', 1)[1]
             return a + '/bot***'
         return url
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.debug("Exception in _redact_url: %s", e)
         return url
 
@@ -107,7 +108,7 @@ class TelegramNotifier:
                 return None
             self._token = token
             return self._token
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.error(f"TelegramNotifier ensure_token failed: {e}")
             return None
 
@@ -119,10 +120,10 @@ class TelegramNotifier:
                 try:
                     res = fut.result(timeout=10)
                     return bool(res)
-                except Exception as e:
+                except Exception as e:  # catch-all: intentional
                     logger.exception(f"aiogram coroutine failed: {e}")
                     fut.cancel()
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             logger.debug("Handled exception in _submit_aiogram: %s", e)
         return False
 
@@ -142,7 +143,7 @@ class TelegramNotifier:
                     bot = getattr(_aiogram_runner, '_bot', None) if '_aiogram_runner' in globals() else None
                     if bot is not None:
                         return self._submit_aiogram(bot.send_message(chat_id=int(chat_id), text=str(text)))
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in send_text: %s", e)
             token = self._ensure_token()
             if not token:
@@ -154,7 +155,7 @@ class TelegramNotifier:
             logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
             data = resp.json() if resp.ok else {}
             return bool(data.get('ok'))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier send_text failed: {e}")
             return False
 
@@ -178,11 +179,11 @@ class TelegramNotifier:
                                 rows = reply_markup.get('inline_keyboard') or []
                                 kb = [[_AInlineKeyboardButton(**btn) for btn in row] for row in rows]
                                 rk = _AInlineKeyboardMarkup(inline_keyboard=kb)
-                            except Exception as e:
+                            except (KeyError, TypeError, ValueError) as e:
                                 logger.exception(f"kb build failed: {e}")
                                 rk = None
                         return self._submit_aiogram(bot.send_message(chat_id=int(chat_id), text=str(text), reply_markup=rk))
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in send_message: %s", e)
             token = self._ensure_token()
             if not token:
@@ -196,7 +197,7 @@ class TelegramNotifier:
             logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
             data = resp.json() if resp.ok else {}
             return bool(data.get('ok'))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier send_message failed: {e}")
             return False
 
@@ -214,13 +215,13 @@ class TelegramNotifier:
                                 rows = reply_markup.get('inline_keyboard') or []
                                 kb = [[_AInlineKeyboardButton(**btn) for btn in row] for row in rows]
                                 rk = _AInlineKeyboardMarkup(inline_keyboard=kb)
-                            except Exception as e:
+                            except (KeyError, TypeError, ValueError) as e:
                                 logger.exception(f"kb build failed: {e}")
                                 rk = None
                         return self._submit_aiogram(
                             bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=str(text), reply_markup=rk)
                         )
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in edit_message_text: %s", e)
             token = self._ensure_token()
             if not token:
@@ -234,7 +235,7 @@ class TelegramNotifier:
             logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
             data = resp.json() if resp.ok else {}
             return bool(data.get('ok'))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier edit_message_text failed: {e}")
             return False
 
@@ -253,7 +254,7 @@ class TelegramNotifier:
                             coro = bot.answer_callback_query(callback_query_id=str(callback_query_id), text=str(text), show_alert=bool(show_alert))
                         self._submit_aiogram(coro)
                         return
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in answer_callback: %s", e)
             token = self._ensure_token()
             if not token:
@@ -264,7 +265,7 @@ class TelegramNotifier:
                 payload['text'] = str(text)
                 payload['show_alert'] = bool(show_alert)
             requests.post(url, json=payload, timeout=10)
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier answer_callback failed: {e}")
 
 
@@ -283,12 +284,12 @@ class AiogramBotRunner:
             text = str(message.text or '').strip()
             username = getattr(chat, 'username', None)
             first_name = getattr(chat, 'first_name', None)
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in __init__: %s", e)
             return
         try:
             db.upsert_bot_user(int(chat_id), username, first_name)
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in __init__: %s", e)
         try:
             routes = _load_routes_module()
@@ -296,7 +297,7 @@ class AiogramBotRunner:
                 routes.set_notifier(notifier)
             kb = {'inline_keyboard': [[{'text': 'Группы', 'callback_data': 'menu:groups'}]]}
             notifier.send_message(chat_id, 'Главное меню:', kb)
-        except Exception as e:
+        except (KeyError, TypeError, ValueError) as e:
             logger.debug("Exception in __init__: %s", e)
             notifier.send_text(chat_id, 'Главное меню: нажмите «Группы»')
         return
@@ -308,7 +309,7 @@ class AiogramBotRunner:
                 sformat = parts[2] if len(parts)>2 else 'brief'
                 time_local = parts[3] if len(parts)>3 else '08:00'
                 dow = parts[4] if (len(parts)>4 and stype=='weekly') else None
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in line_299: %s", e)
                 stype, sformat, time_local, dow = 'daily','brief','08:00',None
             u = db.get_bot_user_by_chat(int(chat_id))
@@ -323,7 +324,7 @@ class AiogramBotRunner:
                 try:
                     db.create_or_update_subscription(int(u.get('id')), 'daily', 'brief', '08:00', None, False)
                     db.create_or_update_subscription(int(u.get('id')), 'weekly', 'brief', '08:00', '1111111', False)
-                except Exception as e:
+                except (sqlite3.Error, OSError) as e:
                     logger.debug("Handled exception in line_314: %s", e)
             notifier.send_text(chat_id, 'Подписки отключены')
             return
@@ -333,7 +334,7 @@ class AiogramBotRunner:
         try:
             notifier.answer_callback(str(cq.id))
             logger.info(f"ack callback id={cq.id} chat_id={getattr(cq.from_user,'id',None)} data={(cq.data or '')[:120]}")
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             logger.exception("callback ack failed")
 
         # 2) Load routes
@@ -341,7 +342,7 @@ class AiogramBotRunner:
             routes = _load_routes_module()
             if hasattr(routes, 'set_notifier'):
                 routes.set_notifier(notifier)
-        except Exception:
+        except Exception:  # catch-all: intentional
             logger.exception("failed to load routes (telegram.py)")
             return
 
@@ -355,7 +356,7 @@ class AiogramBotRunner:
             if isinstance(jd, dict) and jd.get('t'):
                 routes.process_callback_json(int(from_chat), jd, message_id=msg_id)
                 return
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             logger.exception("callback processing failed")
             return
 
@@ -370,12 +371,12 @@ class AiogramBotRunner:
             self._dp = Dispatcher()
             try:
                 await self._bot.delete_webhook(drop_pending_updates=True)
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.warning(f"delete_webhook failed: {e}")
             self._dp.message.register(self._on_message, F.text)
             self._dp.callback_query.register(self._on_callback)
             await self._dp.start_polling(self._bot, allowed_updates=["message", "callback_query"])
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.error(f"Aiogram runner failed: {e}")
 
     def _thread_target(self):
@@ -383,7 +384,7 @@ class AiogramBotRunner:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             self._loop.run_until_complete(self._main())
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.exception(f"Aiogram thread target error: {e}")
 
     def start(self):
@@ -408,7 +409,7 @@ class SimpleHTTPPoller:
             try:
                 logger.info("[telegram] HTTP poller: deleting webhook (fallback mode)")
                 requests.post(f"https://api.telegram.org/bot{token}/deleteWebhook", timeout=10)
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in _run: %s", e)
             logger.info("[telegram] Starting legacy HTTP polling fallback")
             self._running = True
@@ -427,7 +428,7 @@ class SimpleHTTPPoller:
                     for u in (data.get('result') or []):
                         try:
                             self._offset = int(u.get('update_id', 0)) + 1
-                        except Exception as e:
+                        except (ValueError, TypeError, KeyError) as e:
                             logger.debug("Handled exception in _run: %s", e)
 
                         cq = u.get('callback_query') or {}
@@ -437,7 +438,7 @@ class SimpleHTTPPoller:
                                 if cqid:
                                     try:
                                         notifier.answer_callback(cqid)
-                                    except Exception as e:
+                                    except Exception as e:  # catch-all: intentional
                                         logger.debug("Handled exception in line_428: %s", e)
                                 from_chat = ((cq.get('message') or {}).get('chat') or {}).get('id')
                                 msg_id = ((cq.get('message') or {}).get('message_id'))
@@ -448,9 +449,9 @@ class SimpleHTTPPoller:
                                         if isinstance(jd2, dict) and jd2.get('t'):
                                             routes.process_callback_json(int(from_chat), jd2, message_id=int(msg_id) if msg_id is not None else None)
                                             continue
-                                    except Exception as e:
+                                    except (ValueError, TypeError, KeyError) as e:
                                         logger.debug("Handled exception in line_439: %s", e)
-                            except Exception as e:
+                            except (ValueError, TypeError, KeyError) as e:
                                 logger.debug("Handled exception in line_441: %s", e)
 
                         msg = u.get('message') or {}
@@ -468,19 +469,19 @@ class SimpleHTTPPoller:
                                     routes.set_notifier(notifier)
                                 kb = {'inline_keyboard': [[{'text': 'Группы', 'callback_data': 'menu:groups'}]]}
                                 notifier.send_message(int(cid), 'Главное меню:', kb)
-                            except Exception as e:
+                            except (sqlite3.Error, OSError) as e:
                                 logger.debug("Exception in line_459: %s", e)
                                 try:
                                     notifier.send_text(int(cid), 'Главное меню: нажмите «Группы»')
-                                except Exception as e:
+                                except (ValueError, TypeError, KeyError) as e:
                                     logger.debug("Handled exception in line_463: %s", e)
                             continue
 
-                except Exception as e:
+                except (sqlite3.Error, OSError) as e:
                     logger.debug("Exception in line_467: %s", e)
                     time.sleep(2)
                     continue
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.error(f"HTTP poller failed: {e}")
 
     def start(self):
@@ -516,7 +517,7 @@ def start_long_polling_if_needed():
                     _aiogram_runner.start()
                 started = True
                 logger.info("aiogram runner started")
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.error(f"Aiogram start failed: {e}")
             started = False
         if not started:
@@ -524,14 +525,14 @@ def start_long_polling_if_needed():
                 _http_poller = SimpleHTTPPoller()
                 _http_poller.start()
                 logger.info("http poller started")
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, OSError) as e:
         logger.exception(f"start_long_polling_if_needed error: {e}")
 
 
 def subscribe_to_events():
     try:
         from services import events as evt
-    except Exception as e:
+    except ImportError as e:
         logger.debug("Exception in subscribe_to_events: %s", e)
         return
 
@@ -552,12 +553,12 @@ def subscribe_to_events():
                     txt = f"❗️Критическая ошибка: {code}\n{msg}".strip()
                 try:
                     notifier.send_text(int(admin_chat), txt)
-                except Exception as e:
+                except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in _on_event: %s", e)
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in _on_event: %s", e)
 
     try:
         evt.subscribe(_on_event)
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.debug("Handled exception in _on_event: %s", e)

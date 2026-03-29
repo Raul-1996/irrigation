@@ -5,10 +5,11 @@ from typing import Optional, Dict, Deque, Tuple
 from collections import deque
 
 from database import db
+import sqlite3
 
 try:
     import paho.mqtt.client as mqtt
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_11: %s", e)
     mqtt = None
 
@@ -27,7 +28,7 @@ class RainMonitor:
             if self.client is not None:
                 self.client.loop_stop()
                 self.client.disconnect()
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('RainMonitor stop failed')
         self.client = None
 
@@ -43,7 +44,7 @@ class RainMonitor:
             self.topic = topic
             self.server_id = int(server_id)
             self._ensure_client()
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('RainMonitor start failed')
 
     def _ensure_client(self):
@@ -62,18 +63,18 @@ class RainMonitor:
                     payload = getattr(msg, 'payload', b'')
                     try:
                         payload = payload.decode('utf-8', errors='ignore')
-                    except Exception as e:
+                    except Exception as e:  # catch-all: intentional
                         logger.debug("Exception in _on_message: %s", e)
                         payload = str(payload)
                     self._handle_payload(str(payload))
-                except Exception:
+                except (ValueError, TypeError, KeyError):
                     logger.exception('RainMonitor on_message failed')
             cl.on_message = _on_message
             cl.connect(host, port, 30)
             cl.subscribe(self.topic, qos=0)
             cl.loop_start()
             self.client = cl
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('RainMonitor client init failed')
 
     def _handle_payload(self, payload: str):
@@ -85,7 +86,7 @@ class RainMonitor:
         # Respect sensor type: NC means inverted logical value
         try:
             sensor_type = str((self._cfg or {}).get('type') or db.get_rain_config().get('type') or 'NO').upper()
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Exception in _handle_payload: %s", e)
             sensor_type = 'NO'
         logical_rain = bool(val)
@@ -114,9 +115,9 @@ class RainMonitor:
                 for gid in target_groups:
                     try:
                         stop_all_in_group(gid, reason='rain', force=True)
-                    except Exception:
+                    except Exception:  # catch-all: intentional
                         logger.exception('RainMonitor: stop_all_in_group failed')
-            except Exception:
+            except ImportError:
                 logger.exception('RainMonitor: import stop_all_in_group failed')
             # 2) Set postpone for zones in affected groups (until end of day)
             from datetime import datetime as _dt
@@ -126,16 +127,16 @@ class RainMonitor:
                 if int(z.get('group_id') or 0) in target_groups:
                     try:
                         db.update_zone_postpone(int(z['id']), postpone_until, 'rain')
-                    except Exception as e:
+                    except (sqlite3.Error, OSError) as e:
                         logger.debug("Handled exception in _on_rain_start: %s", e)
             # Note: не отменяем сегодняшние запуски программ заранее.
             # Если дождь начался до времени старта — при отсутствии отложки к моменту старта программа отработает.
             # Если дождь начался во время выполнения — оставшиеся зоны пропустятся из-за отложки.
             try:
                 db.add_log('rain_postpone', str({'groups': target_groups, 'until': postpone_until}))
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in line_136: %s", e)
-        except Exception:
+        except ImportError:
             logger.exception('RainMonitor on_rain_start failed')
 
     def _on_rain_stop(self):
@@ -153,7 +154,7 @@ class RainMonitor:
                     # Clear postpone only if it was set due to rain
                     if (z.get('postpone_reason') or '') == 'rain':
                         db.update_zone_postpone(int(z['id']), None, None)
-                except Exception as e:
+                except (sqlite3.Error, OSError) as e:
                     logger.debug("Handled exception in _on_rain_stop: %s", e)
             # После окончания дождя — уберём отмены программ на сегодня для этих групп, чтобы ближайшие вечерние сработали
             try:
@@ -162,15 +163,15 @@ class RainMonitor:
                 for gid in target_groups:
                     try:
                         db.clear_program_cancellations_for_group_on_date(int(gid), today)
-                    except Exception as e:
+                    except (sqlite3.Error, OSError) as e:
                         logger.debug("Handled exception in _on_rain_stop: %s", e)
-            except Exception as e:
+            except ImportError as e:
                 logger.debug("Handled exception in _on_rain_stop: %s", e)
             try:
                 db.add_log('rain_resume', str({'groups': target_groups}))
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in line_171: %s", e)
-        except Exception:
+        except ImportError:
             logger.exception('RainMonitor on_rain_stop failed')
 
 class EnvMonitor:
@@ -190,7 +191,7 @@ class EnvMonitor:
                 if cl is not None:
                     cl.loop_stop()
                     cl.disconnect()
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in stop: %s", e)
         self.temp_client = None
         self.hum_client = None
@@ -211,7 +212,7 @@ class EnvMonitor:
                 self._start_temp(int(tcfg['server_id']), str(tcfg['topic']))
             if hcfg.get('enabled') and hcfg.get('topic') and hcfg.get('server_id'):
                 self._start_hum(int(hcfg['server_id']), str(hcfg['topic']))
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('EnvMonitor start failed')
 
     def _start_temp(self, server_id: int, topic: str):
@@ -232,21 +233,21 @@ class EnvMonitor:
                             self.temp_value = val
                         self.last_temp_rx_ts = _time.time()
                         logger.info(f"EnvMonitor temp RX topic={getattr(msg, 'topic', topic)} value={val}")
-                    except Exception:
+                    except (ValueError, TypeError, KeyError):
                         logger.exception('EnvMonitor temp parse failed')
-                except Exception:
+                except (ValueError, TypeError, KeyError):
                     logger.exception('EnvMonitor temp RX failed')
             def _on_connect_temp(c, u, flags, reason_code, properties=None):
                 try:
                     c.subscribe(topic, qos=0)
                     logger.info(f"EnvMonitor temp subscribed {topic}")
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError):
                     logger.exception('EnvMonitor temp subscribe failed')
             def _on_disconnect_temp(c, u, rc, properties=None):
                 try:
                     self.temp_client = None
                     logger.info(f"EnvMonitor temp disconnected: rc={rc}")
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in _on_disconnect_temp: %s", e)
             cl.on_message = _on_message
             cl.on_connect = _on_connect_temp
@@ -255,10 +256,10 @@ class EnvMonitor:
             cl.loop_start()
             try:
                 cl.subscribe(topic, qos=0)
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError):
                 logger.exception('EnvMonitor temp immediate subscribe failed')
             self.temp_client = cl
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('EnvMonitor temp start failed')
 
     def _start_hum(self, server_id: int, topic: str):
@@ -279,21 +280,21 @@ class EnvMonitor:
                             self.hum_value = val
                         self.last_hum_rx_ts = _time.time()
                         logger.info(f"EnvMonitor hum RX topic={getattr(msg, 'topic', topic)} value={val}")
-                    except Exception:
+                    except (ValueError, TypeError, KeyError):
                         logger.exception('EnvMonitor hum parse failed')
-                except Exception:
+                except (ValueError, TypeError, KeyError):
                     logger.exception('EnvMonitor hum RX failed')
             def _on_connect_hum(c, u, flags, reason_code, properties=None):
                 try:
                     c.subscribe(topic, qos=0)
                     logger.info(f"EnvMonitor hum subscribed {topic}")
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError):
                     logger.exception('EnvMonitor hum subscribe failed')
             def _on_disconnect_hum(c, u, rc, properties=None):
                 try:
                     self.hum_client = None
                     logger.info(f"EnvMonitor hum disconnected: rc={rc}")
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in _on_disconnect_hum: %s", e)
             cl.on_message = _on_message
             cl.on_connect = _on_connect_hum
@@ -302,10 +303,10 @@ class EnvMonitor:
             cl.loop_start()
             try:
                 cl.subscribe(topic, qos=0)
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError):
                 logger.exception('EnvMonitor hum immediate subscribe failed')
             self.hum_client = cl
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('EnvMonitor hum start failed')
 
 rain_monitor = RainMonitor()
@@ -360,7 +361,7 @@ class WaterMonitor:
                             with self._lock:
                                 dq = self._samples.setdefault(_gid, deque(maxlen=256))
                                 dq.append((ts, pulses))
-                        except Exception:
+                        except (ValueError, TypeError, KeyError):
                             logger.exception('WaterMonitor on_message failed')
                     cl.on_message = _on_message
                     cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 10)
@@ -372,9 +373,9 @@ class WaterMonitor:
                         self._server_ids[gid] = int(sid)
                         self._pulse_liters[gid] = liters
                         self._samples.setdefault(gid, deque(maxlen=256))
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError):
                     logger.exception('WaterMonitor start group failed')
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('WaterMonitor start failed')
 
     def get_current_reading_m3(self, group_id: int) -> Optional[float]:
@@ -391,7 +392,7 @@ class WaterMonitor:
             delta_p = max(0, cur_p - base_p)
             val = base_m3 + (delta_p * liters) / 1000.0
             return round(val, 3)
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Exception in get_current_reading_m3: %s", e)
             return None
 
@@ -401,7 +402,7 @@ class WaterMonitor:
                 return None
             try:
                 since_ts = datetime.strptime(since_iso, '%Y-%m-%d %H:%M:%S').timestamp()
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in get_flow_lpm: %s", e)
                 return None
             liters = self._pulse_liters.get(int(group_id), 1)
@@ -427,7 +428,7 @@ class WaterMonitor:
             dt_sec = max(1.0, ts1 - ts0)
             lpm = (dp * liters) / (dt_sec / 60.0)
             return round(lpm, 2)
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in line_430: %s", e)
             return None
 
@@ -438,7 +439,7 @@ class WaterMonitor:
                 return (None, None)
             try:
                 since_ts = datetime.strptime(since_iso, '%Y-%m-%d %H:%M:%S').timestamp()
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in summarize_run: %s", e)
                 return (None, None)
             liters_per_pulse = self._pulse_liters.get(int(group_id), 1)
@@ -454,7 +455,7 @@ class WaterMonitor:
             dt_min = max(0.001, (ts1 - ts0) / 60.0)
             avg_lpm = total_l / dt_min
             return (round(total_l, 2), round(avg_lpm, 2))
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in summarize_run: %s", e)
             return (None, None)
 
@@ -466,7 +467,7 @@ class WaterMonitor:
                 if not dq or len(dq) == 0:
                     return None
                 return int(dq[-1][1])
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in get_raw_pulses: %s", e)
             return None
 
@@ -484,7 +485,7 @@ class WaterMonitor:
                 else:
                     break
             return int(best) if best is not None else int(arr[0][1]) if arr else None
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in get_pulses_at_or_before: %s", e)
             return None
 
@@ -499,7 +500,7 @@ class WaterMonitor:
                 if t >= ts:
                     return int(p)
             return int(arr[-1][1]) if arr else None
-        except Exception as e:
+        except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in get_pulses_at_or_after: %s", e)
             return None
 
@@ -510,19 +511,19 @@ def start_rain_monitor():
         cfg = db.get_rain_config()
         if cfg and bool(cfg.get('enabled')):
             rain_monitor.start(cfg)
-    except Exception:
+    except (sqlite3.Error, OSError):
         logger.exception('start_rain_monitor failed')
 
 def start_env_monitor(cfg: dict):
     try:
         env_monitor.start(cfg or {})
-    except Exception:
+    except Exception:  # catch-all: intentional
         logger.exception('start_env_monitor failed')
 
 def start_water_monitor():
     try:
         water_monitor.start()
-    except Exception:
+    except Exception:  # catch-all: intentional
         logger.exception('start_water_monitor failed')
 
 
@@ -553,9 +554,9 @@ def probe_env_values(cfg: dict) -> None:
                 # Subscribe to fetch retained value (the EnvMonitor's on_message will pick it up)
                 try:
                     cl.subscribe(topic, qos=0)
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError):
                     logger.exception(f'EnvProbe: subscribe failed for {topic}')
-            except Exception:
+            except ImportError:
                 logger.exception(f'EnvProbe: failed for sid={sid} topic={topic}')
-    except Exception:
+    except ImportError:
         logger.exception('EnvProbe: outer failed')

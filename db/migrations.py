@@ -150,7 +150,7 @@ class MigrationRunner:
 
                 logger.info("База данных инициализирована успешно")
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.error("Ошибка инициализации базы данных: %s", e)
             raise
 

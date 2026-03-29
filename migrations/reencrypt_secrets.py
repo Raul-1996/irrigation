@@ -38,7 +38,7 @@ def _decrypt_with_key(ciphertext: str, key: bytes) -> str | None:
             cipher = AES.new(key[:32], AES.MODE_GCM, nonce=iv)
             pt = cipher.decrypt_and_verify(ct, tag)
             return pt.decode('utf-8')
-    except Exception:
+    except ImportError:
         pass
 
     # XOR fallback
@@ -47,7 +47,7 @@ def _decrypt_with_key(ciphertext: str, key: bytes) -> str | None:
             x = base64.urlsafe_b64decode(ciphertext[4:])
             b = bytes([x[i] ^ key[i % len(key)] for i in range(len(x))])
             return b.decode('utf-8')
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         pass
 
     return None

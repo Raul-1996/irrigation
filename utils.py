@@ -38,7 +38,7 @@ def _get_hostname_key() -> bytes:
     """Compute the old hostname-based key (for migration only)."""
     try:
         host = os.uname().nodename
-    except Exception as e:
+    except Exception as e:  # catch-all: intentional
         logger.debug("Exception in _get_hostname_key: %s", e)
         host = 'irrigation'
     b = (host or 'irrigation').encode('utf-8')
@@ -60,7 +60,7 @@ def _get_secret_key() -> bytes:
     if key:
         try:
             return base64.urlsafe_b64decode(key + '===')
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.debug("Handled exception in _get_secret_key: %s", e)
 
     # 2. Try reading from file
@@ -91,7 +91,7 @@ def encrypt_secret(plaintext: _t.Optional[str]) -> _t.Optional[str]:
         ct, tag = cipher.encrypt_and_digest(plaintext.encode('utf-8'))
         blob = b'aes:' + iv + tag + ct
         return base64.urlsafe_b64encode(blob).decode('utf-8')
-    except Exception as e:
+    except ImportError as e:
         logger.debug("Exception in encrypt_secret: %s", e)
         # xor fallback
         b = plaintext.encode('utf-8')
@@ -113,7 +113,7 @@ def decrypt_secret(ciphertext: _t.Optional[str]) -> _t.Optional[str]:
             cipher = AES.new(key[:32], AES.MODE_GCM, nonce=iv)
             pt = cipher.decrypt_and_verify(ct, tag)
             return pt.decode('utf-8')
-    except Exception as e:
+    except ImportError as e:
         logger.debug("Handled exception in decrypt_secret: %s", e)
     # xor fallback
     try:
@@ -122,7 +122,7 @@ def decrypt_secret(ciphertext: _t.Optional[str]) -> _t.Optional[str]:
             k = _get_secret_key()
             b = bytes([x[i] ^ k[i % len(k)] for i in range(len(x))])
             return b.decode('utf-8')
-    except Exception as e:
+    except (KeyError, TypeError, ValueError) as e:
         logger.debug("Exception in decrypt_secret: %s", e)
         return None
     return None

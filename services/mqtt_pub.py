@@ -6,14 +6,14 @@ from typing import Any, Optional, Dict, Tuple
 
 try:
     import paho.mqtt.client as mqtt
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_8: %s", e)
     mqtt = None
 
 from utils import normalize_topic
 try:
     from database import db as _db
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_15: %s", e)
     _db = None
 
@@ -35,7 +35,7 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
         return None
     try:
         sid = int(server.get('id')) if server.get('id') is not None else 0
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         logger.debug("Exception in get_or_create_mqtt_client: %s", e)
         sid = 0
     with _MQTT_CLIENTS_LOCK:
@@ -57,7 +57,7 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
                         cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
                         if int(server.get('tls_insecure') or 0) == 1:
                             cl.tls_insecure_set(True)
-                except Exception:
+                except (ImportError, OSError, ValueError):
                     logger.exception('MQTT TLS setup failed for publisher')
                 host = server.get('host') or '127.0.0.1'
                 port = int(server.get('port') or 1883)
@@ -65,19 +65,19 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
                     # быстрый авто-ре-коннект
                     try:
                         cl.reconnect_delay_set(min_delay=1, max_delay=5)
-                    except Exception as e:
+                    except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in line_65: %s", e)
                     try:
                         cl.max_inflight_messages_set(100)
-                    except Exception as e:
+                    except Exception as e:  # catch-all: intentional
                         logger.debug("Handled exception in line_69: %s", e)
                     # Синхронное подключение (надёжнее для тестов/первой публикации)
                     cl.connect(host, port, 10)
                     try:
                         cl.loop_start()
-                    except Exception as e:
+                    except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in line_75: %s", e)
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Exception in line_77: %s", e)
                     # не кэшируем неудачное подключение
                     return None
@@ -85,11 +85,11 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
                     # оставляем клиента в кеше: loop_start и reconnect_delay_set обеспечат авто-переподключение
                     try:
                         logger.info("MQTT client disconnected sid=%s rc=%s (auto-reconnect active)", sid, rc)
-                    except Exception as e:
+                    except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in _on_disconnect: %s", e)
                 cl.on_disconnect = _on_disconnect
                 _MQTT_CLIENTS[sid] = cl
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Exception in _on_disconnect: %s", e)
                 return None
         return cl
@@ -114,7 +114,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                         _SERVER_CACHE[sid] = (srv, now_ts)
                 if srv:
                     server = srv
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in publish_mqtt_value: %s", e)
         key = (sid or 0, t)
         now = time.time()
@@ -138,7 +138,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
                 try:
                     rc = getattr(res, 'rc', 0)
-                except Exception as e:
+                except (KeyError, TypeError, ValueError) as e:
                     logger.debug("Exception in line_138: %s", e)
                     rc = 0
                 if rc == 0:
@@ -146,7 +146,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 logger.warning(f"MQTT publish rc={rc}, retry {attempts}")
                 try:
                     cl.reconnect()
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_146: %s", e)
                 time.sleep(0.1)
             if attempts >= 10 and rc != 0:
@@ -167,12 +167,12 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                         # Re-publish on retry
                         try:
                             res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
-                        except Exception as e:
+                        except (ConnectionError, TimeoutError, OSError) as e:
                             logger.debug("Handled exception in line_167: %s", e)
                 if not published:
                     logger.critical(f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={t} value={value}")
                     return False
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError):
             logger.exception('MQTT publish failed')
             return False
 
@@ -189,7 +189,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             logger.debug(f"MQTT publish topic={t_on} value={value}")
             res_on = cl.publish(t_on, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
             # Ignore rc here; some brokers may not acknowledge the duplicate fast
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Exception in line_189: %s", e)
             # Soft-fail for '/on' duplication
             pass
@@ -201,13 +201,13 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 payload_meta = ';'.join([f"{k}={v}" for k, v in meta.items() if v is not None])
                 if payload_meta:
                     cl.publish(t_meta, payload=payload_meta, qos=0, retain=False)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Exception in line_201: %s", e)
             # meta is best-effort
             pass
 
         return True
-    except Exception:
+    except Exception:  # catch-all: intentional
         logger.exception('publish_mqtt_value failed')
         return False
 
@@ -223,7 +223,7 @@ def _shutdown_mqtt_clients() -> None:
             cl.loop_stop()
             cl.disconnect()
             logger.info("MQTT client disconnected for server %s", sid)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("MQTT shutdown error for %s: %s", sid, e)
     _MQTT_CLIENTS.clear()
 

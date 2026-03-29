@@ -4,6 +4,7 @@ Background daemon thread that periodically checks for zones that have been ON
 longer than the configured cap (default 240 minutes) and forcefully stops them.
 Also monitors concurrent zone count per group and sends Telegram alerts on anomalies.
 """
+import sqlite3
 
 import threading
 import time
@@ -51,7 +52,7 @@ class ZoneWatchdog(threading.Thread):
         while not self._stop_event.is_set():
             try:
                 self._check_zones()
-            except Exception as e:
+            except Exception as e:  # catch-all: intentional
                 logger.exception("Watchdog error: %s", e)
             self._stop_event.wait(self.interval)
         logger.info("ZoneWatchdog stopped")
@@ -62,7 +63,7 @@ class ZoneWatchdog(threading.Thread):
             val = self.db.get_setting_value('zone_cap_minutes')
             if val is not None:
                 return max(1, int(val))
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in _get_zone_cap_minutes: %s", e)
         return DEFAULT_ZONE_CAP_MINUTES
 
@@ -83,7 +84,7 @@ class ZoneWatchdog(threading.Thread):
                 continue
             try:
                 start_dt = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in _check_zones: %s", e)
                 continue
             elapsed_min = (now - start_dt).total_seconds() / 60.0
@@ -97,7 +98,7 @@ class ZoneWatchdog(threading.Thread):
                 # Force stop the zone
                 try:
                     self.zone_control.stop_zone(zone_id, reason='watchdog_cap', force=True)
-                except Exception:
+                except Exception:  # catch-all: intentional
                     logger.exception("Watchdog: failed to stop zone %d", zone_id)
                 # Send Telegram alert
                 self._send_alert(
@@ -113,7 +114,7 @@ class ZoneWatchdog(threading.Thread):
                         'elapsed_min': int(elapsed_min),
                         'cap_min': cap_minutes
                     }))
-                except Exception as e:
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                     logger.debug("Handled exception in line_112: %s", e)
 
         # Check concurrent count
@@ -136,7 +137,7 @@ class ZoneWatchdog(threading.Thread):
             from services.telegram_bot import notifier
             if notifier:
                 notifier.send_message(int(admin_chat), message)
-        except Exception:
+        except ImportError:
             logger.exception("Watchdog: Telegram alert failed")
 
 

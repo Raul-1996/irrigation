@@ -4,6 +4,7 @@ import logging
 from database import db
 from werkzeug.security import check_password_hash, generate_password_hash
 import threading
+import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def verify_password(password: str) -> tuple[bool, str]:
         stored_hash = db.get_password_hash()
         if stored_hash and check_password_hash(stored_hash, password):
             return True, 'admin'
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("Password check failed: %s", e)
 
     return False, 'guest'

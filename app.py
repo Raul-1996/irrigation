@@ -3,6 +3,7 @@
 All API routes live in routes/*_api.py blueprints.
 This file handles: app creation, config, logging, middleware, blueprint registration, boot-init.
 """
+import sqlite3
 from flask import Flask, render_template, jsonify, request, session, Response
 from datetime import datetime
 import json
@@ -62,7 +63,7 @@ try:
     _tg_subscribe()
     from services.telegram_bot import start_long_polling_if_needed as _tg_poll_start
     _tg_poll_start()
-except Exception as e:
+except ImportError as e:
     logging.getLogger(__name__).debug("Telegram bot init skipped: %s", e)
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services.api_rate_limiter import _is_allowed as _rate_check
@@ -102,7 +103,7 @@ def _compute_app_version() -> str:
         version_file = os.path.join(os.path.dirname(__file__), 'VERSION')
         with open(version_file, 'r') as f:
             return f.read().strip()
-    except Exception as e:
+    except (IOError, OSError, PermissionError) as e:
         logger.debug("VERSION file read failed: %s", e)
         return '2.0.0'
 
@@ -114,7 +115,7 @@ def _inject_app_version():
         sys_name = db.get_setting_value('system_name') or ''
         asset = lambda path: f"{path}?v={APP_VERSION}"
         return {'app_version': APP_VERSION, 'system_name': sys_name, 'asset': asset}
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("context processor fallback: %s", e)
         return {'app_version': '1.0', 'system_name': '', 'asset': (lambda p: p)}
 
@@ -164,7 +165,7 @@ except (TypeError, KeyError) as e:
 def _is_debug_logging_enabled() -> bool:
     try:
         return bool(db.get_logging_debug())
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.debug("debug logging check: %s", e)
         return False
 
@@ -184,7 +185,7 @@ def _auth_before_request():
         if not app.config.get('TESTING'):
             try:
                 db.ensure_password_change_required()
-            except Exception as e:
+            except (sqlite3.Error, OSError) as e:
                 logger.debug("ensure_password_change_required: %s", e)
             if request.path.startswith('/api/'):
                 if request.method == 'GET':
@@ -210,7 +211,7 @@ def _auth_before_request():
                     must = db.get_setting_value('password_must_change') if True else None
                     if str(must or '0') == '1' and request.path != '/api/password':
                         return jsonify({'success': False, 'message': 'password change required', 'error_code': 'PASSWORD_MUST_CHANGE'}), 403
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.warning("auth before_request error: %s", e)
 
 # ── Blueprint registration ─────────────────────────────────────────────────
@@ -219,12 +220,12 @@ for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, setti
 try:
     if telegram_bp: app.register_blueprint(telegram_bp)
     if reports_bp: app.register_blueprint(reports_bp)
-except Exception as e:
+except (ValueError, TypeError, KeyError) as e:
     logger.warning("Optional blueprint registration failed: %s", e)
 try:
     from routes.mqtt import mqtt_bp
     app.register_blueprint(mqtt_bp)
-except Exception as _e:
+except ImportError as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
 
 for bp in (zones_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_api_bp):
@@ -257,7 +258,7 @@ def _require_admin_for_mutations():
                 return False
             if role != 'admin' and not _is_status_action(p):
                 return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.warning("mutation guard error: %s", e)
         return None
 
@@ -294,12 +295,12 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
             except (ConnectionError, TimeoutError, OSError) as e:
                 logger.warning("group exclusive mqtt off for zone %s: %s", z.get('id'), e)
             try: db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
-            except Exception as e:
+            except Exception as e:  # catch-all: intentional
                 logger.error("group exclusive db update zone %s: %s", z.get('id'), e)
         try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))
-        except Exception as e:
+        except Exception as e:  # catch-all: intentional
             logger.debug("group exclusive log: %s", e)
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Group exclusivity enforcement failed for group {group_id}: {e}")
 
 def _enforce_group_exclusive_all_groups() -> None:
@@ -324,7 +325,7 @@ def _enforce_group_exclusive_all_groups() -> None:
                     return False
             if sum(1 for z in arr if str(z.get('state')) == 'on' and not _is_mv(z)) > 1:
                 _force_group_exclusive(gid, 'watchdog')
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.exception("enforce_group_exclusive_all: %s", e)
 
 _WATCHDOG_STARTED = False
@@ -337,7 +338,7 @@ def _start_single_zone_watchdog():
     def _run():
         while not _WATCHDOG_STOP_EVENT.is_set():
             try: _enforce_group_exclusive_all_groups()
-            except Exception as e:
+            except Exception as e:  # catch-all: intentional
                 logger.exception("watchdog loop: %s", e)
             _WATCHDOG_STOP_EVENT.wait(1.0)
     threading.Thread(target=_run, daemon=True).start()
@@ -387,7 +388,7 @@ _recently_stopped = _sse_hub.recently_stopped
 @app.errorhandler(404)
 def _not_found(e):
     try: return render_template('404.html'), 404
-    except Exception as e:
+    except Exception as e:  # catch-all: intentional
         logger.debug("404 template fallback: %s", e)
         return jsonify({'error': 'Not found'}), 404
 

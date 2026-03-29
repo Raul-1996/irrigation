@@ -28,9 +28,9 @@ def publish(event: Dict[str, Any]) -> None:
         for cb in subs:
             try:
                 cb(dict(event))
-            except Exception as e:
+            except (KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in publish: %s", e)
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.debug("Handled exception in publish: %s", e)
 
 def subscribe(callback: Callable[[Dict[str, Any]], None]) -> None:

@@ -11,7 +11,7 @@ from services.helpers import api_error, api_soft
 
 try:
     import paho.mqtt.client as mqtt
-except Exception as e:
+except ImportError as e:
     logger.debug("Exception in line_14: %s", e)
     mqtt = None
 
@@ -26,7 +26,7 @@ mqtt_api_bp = Blueprint('mqtt_api', __name__)
 def api_mqtt_servers_list():
     try:
         return jsonify({'success': True, 'servers': db.get_mqtt_servers()})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка получения MQTT серверов: {e}")
         return jsonify({'success': False, 'message': 'Ошибка получения списка'}), 500
 
@@ -39,7 +39,7 @@ def api_mqtt_server_create():
         if not server:
             return jsonify({'success': False, 'message': 'Не удалось создать сервер'}), 400
         return jsonify({'success': True, 'server': server}), 201
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка создания MQTT сервера: {e}")
         return jsonify({'success': False, 'message': 'Ошибка создания'}), 500
 
@@ -51,7 +51,7 @@ def api_mqtt_server_get(server_id: int):
         if not server:
             return jsonify({'success': False, 'message': 'Сервер не найден'}), 404
         return jsonify({'success': True, 'server': server})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка получения MQTT сервера {server_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка получения'}), 500
 
@@ -64,7 +64,7 @@ def api_mqtt_server_update(server_id: int):
         if not ok:
             return jsonify({'success': False, 'message': 'Не удалось обновить'}), 400
         return jsonify({'success': True, 'server': db.get_mqtt_server(server_id)})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка обновления MQTT сервера {server_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка обновления'}), 500
 
@@ -76,7 +76,7 @@ def api_mqtt_server_delete(server_id: int):
         if not ok:
             return jsonify({'success': False, 'message': 'Не удалось удалить'}), 400
         return ('', 204)
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка удаления MQTT сервера {server_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка удаления'}), 500
 
@@ -115,20 +115,20 @@ def api_mqtt_probe(server_id: int):
             try:
                 cl.subscribe(topic_filter, qos=0)
                 events.append(f"connected rc={reason_code}, subscribed to {topic_filter}")
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Exception in on_connect: %s", e)
                 events.append("subscribe failed")
 
         def on_message(cl, userdata, msg):
             try:
                 topic = msg.topic
-            except Exception as e:
+            except Exception as e:  # catch-all: intentional
                 logger.debug("Exception in on_message: %s", e)
                 topic = getattr(msg, 'topic', '')
             if len(received) < 1000:
                 try:
                     payload = msg.payload.decode('utf-8', errors='ignore')
-                except Exception as e:
+                except Exception as e:  # catch-all: intentional
                     logger.debug("Exception in on_message: %s", e)
                     payload = str(msg.payload)
                 received.append({'topic': topic, 'payload': payload})
@@ -137,7 +137,7 @@ def api_mqtt_probe(server_id: int):
         client.on_message = on_message
         try:
             client.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 5)
-        except Exception as ce:
+        except (ConnectionError, TimeoutError, OSError) as ce:
             logger.debug("Exception in on_message: %s", ce)
             events.append(f"connect error: {ce}")
             return api_soft('MQTT_CONNECT_FAILED', 'connect failed', {'items': [], 'events': events})
@@ -149,12 +149,12 @@ def api_mqtt_probe(server_id: int):
         client.loop_stop()
         try:
             client.disconnect()
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in line_142: %s", e)
         if not received:
             events.append('no messages received')
         return jsonify({'success': True, 'items': received, 'events': events})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"MQTT probe error: {e}")
         return api_soft('PROBE_FAILED', 'probe failed', {'items': [], 'events': [str(e)]})
 
@@ -184,13 +184,13 @@ def api_mqtt_status(server_id: int):
             ok = True
             try:
                 client.disconnect()
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in api_mqtt_status: %s", e)
-        except Exception as _e:
+        except (ConnectionError, TimeoutError, OSError) as _e:
             logger.info(f"MQTT status connection failed for server {server_id}: {_e}")
             ok = False
         return jsonify({'success': True, 'connected': ok})
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"MQTT status error: {e}")
         return jsonify({'success': True, 'connected': False, 'message': 'status failed'}), 200
 
@@ -228,18 +228,18 @@ def api_mqtt_scan_sse(server_id: int):
                 def on_connect(cl, userdata, flags, reason_code, properties=None):
                     try:
                         cl.subscribe(sub_filter, qos=0)
-                    except Exception as e:
+                    except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in on_connect: %s", e)
 
                 def on_message(cl, userdata, msg):
                     try:
                         topic = msg.topic
-                    except Exception as e:
+                    except Exception as e:  # catch-all: intentional
                         logger.debug("Exception in on_message: %s", e)
                         topic = getattr(msg, 'topic', '')
                     try:
                         payload = msg.payload.decode('utf-8', errors='ignore')
-                    except Exception as e:
+                    except Exception as e:  # catch-all: intentional
                         logger.debug("Exception in on_message: %s", e)
                         payload = str(msg.payload)
                     data = json.dumps({'topic': normalize_topic(topic), 'payload': payload})
@@ -261,9 +261,9 @@ def api_mqtt_scan_sse(server_id: int):
                 client.loop_stop()
                 try:
                     client.disconnect()
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_240: %s", e)
-            except Exception as e:
+            except queue.Full as e:
                 logger.error(f"MQTT SSE thread error: {e}")
 
         th = threading.Thread(target=_run_client, daemon=True)
@@ -288,6 +288,6 @@ def api_mqtt_scan_sse(server_id: int):
             finally:
                 stop_event.set()
         return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-    except Exception as e:
+    except (RuntimeError, OSError) as e:
         logger.error(f"MQTT scan SSE error: {e}")
         return api_error('SSE_FAILED', 'sse init failed', 500)
