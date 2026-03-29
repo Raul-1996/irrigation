@@ -151,6 +151,10 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'weather_create_cache', self._migrate_create_weather_cache)
                 self._apply_named_migration(conn, 'weather_create_log', self._migrate_create_weather_log)
                 self._apply_named_migration(conn, 'weather_add_settings', self._migrate_add_weather_settings)
+                # Weather v2: decisions table, extended settings, wind unit migration
+                self._apply_named_migration(conn, 'weather_create_decisions', self._migrate_create_weather_decisions)
+                self._apply_named_migration(conn, 'weather_add_extended_settings', self._migrate_add_extended_weather_settings)
+                self._apply_named_migration(conn, 'weather_wind_kmh_to_ms', self._migrate_wind_kmh_to_ms)
 
                 logger.info("База данных инициализирована успешно")
 
@@ -778,6 +782,77 @@ class MigrationRunner:
         except sqlite3.Error as e:
             logger.error("Ошибка миграции weather_add_settings: %s", e)
 
+    # --- Weather v2 migrations ---
+
+    def _migrate_create_weather_decisions(self, conn):
+        """Create weather_decisions table for tracking irrigation decisions."""
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS weather_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    temperature REAL,
+                    humidity REAL,
+                    precipitation_24h REAL,
+                    wind_speed REAL,
+                    coefficient INTEGER NOT NULL,
+                    decision TEXT NOT NULL,
+                    reason TEXT,
+                    mode TEXT NOT NULL DEFAULT 'auto',
+                    data_sources TEXT DEFAULT '{}',
+                    user_override INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_weather_decisions_date ON weather_decisions(date)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_weather_decisions_created ON weather_decisions(created_at)')
+            conn.commit()
+            logger.info('Создана таблица weather_decisions')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_create_decisions: %s", e)
+
+    def _migrate_add_extended_weather_settings(self, conn):
+        """Add extended weather settings: humidity threshold, per-factor toggles, wind m/s."""
+        try:
+            weather_new_keys = {
+                'weather.wind_threshold_ms': '7.0',
+                'weather.humidity_threshold_pct': '80.0',
+                'weather.humidity_reduction_pct': '30',
+                'weather.factor.rain': '1',
+                'weather.factor.freeze': '1',
+                'weather.factor.wind': '1',
+                'weather.factor.humidity': '1',
+                'weather.factor.heat': '1',
+            }
+            for key, default_val in weather_new_keys.items():
+                cur = conn.execute('SELECT 1 FROM settings WHERE key = ?', (key,))
+                if cur.fetchone() is None:
+                    conn.execute('INSERT INTO settings(key, value) VALUES(?, ?)', (key, default_val))
+            conn.commit()
+            logger.info('Добавлены расширенные настройки погоды в settings')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_add_extended_settings: %s", e)
+
+    def _migrate_wind_kmh_to_ms(self, conn):
+        """Convert wind threshold from km/h to m/s if user had a custom value."""
+        try:
+            cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.wind_threshold_kmh'")
+            row = cur.fetchone()
+            if row and row[0]:
+                kmh = float(row[0])
+                # Only convert if it differs from default 25.0 (meaning user customized it)
+                if abs(kmh - 25.0) > 0.01:
+                    ms = round(kmh / 3.6, 1)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES('weather.wind_threshold_ms', ?)",
+                        (str(ms),)
+                    )
+                    logger.info('Конвертирован порог ветра: %.0f км/ч → %.1f м/с', kmh, ms)
+            conn.commit()
+        except (sqlite3.Error, ValueError, TypeError) as e:
+            logger.error("Ошибка миграции weather_wind_kmh_to_ms: %s", e)
+
     # =====================================================================
     # Downgrade methods for the last 10 migrations
     # =====================================================================
@@ -794,6 +869,9 @@ class MigrationRunner:
         'weather_create_cache': '_down_create_weather_cache',
         'weather_create_log': '_down_create_weather_log',
         'weather_add_settings': '_down_add_weather_settings',
+        'weather_create_decisions': '_down_create_weather_decisions',
+        'weather_add_extended_settings': '_down_add_extended_weather_settings',
+        'weather_wind_kmh_to_ms': '_down_wind_kmh_to_ms',
     }
 
     def _down_create_bot_users(self, conn):
@@ -852,3 +930,29 @@ class MigrationRunner:
             conn.execute('DELETE FROM settings WHERE key = ?', (key,))
         conn.commit()
         logger.info('Downgrade: удалены настройки погоды из settings')
+
+    def _down_create_weather_decisions(self, conn):
+        conn.execute('DROP TABLE IF EXISTS weather_decisions')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица weather_decisions')
+
+    def _down_add_extended_weather_settings(self, conn):
+        extended_keys = [
+            'weather.wind_threshold_ms',
+            'weather.humidity_threshold_pct',
+            'weather.humidity_reduction_pct',
+            'weather.factor.rain',
+            'weather.factor.freeze',
+            'weather.factor.wind',
+            'weather.factor.humidity',
+            'weather.factor.heat',
+        ]
+        for key in extended_keys:
+            conn.execute('DELETE FROM settings WHERE key = ?', (key,))
+        conn.commit()
+        logger.info('Downgrade: удалены расширенные настройки погоды из settings')
+
+    def _down_wind_kmh_to_ms(self, conn):
+        # Nothing to reverse — the km/h value was kept, ms value will be removed
+        # by _down_add_extended_weather_settings
+        logger.info('Downgrade: weather_wind_kmh_to_ms — noop (ms key removed by extended settings downgrade)')
