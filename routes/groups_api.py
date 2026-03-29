@@ -194,7 +194,7 @@ def api_start_group_from_first(group_id):
         if not scheduler:
             try:
                 scheduler = init_scheduler(db)
-            except Exception as e:  # catch-all: intentional
+            except (ValueError, KeyError, RuntimeError) as e:
                 logger.debug("Exception in api_start_group_from_first: %s", e)
                 scheduler = None
         if not scheduler:
@@ -307,7 +307,7 @@ def api_master_valve_toggle(group_id, action):
         if not want_open:
             try:
                 t_norm = normalize_topic(topic)
-            except Exception as e:  # catch-all: intentional
+            except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Exception in api_master_valve_toggle: %s", e)
                 t_norm = topic if topic.startswith('/') else '/' + str(topic)
             try:
@@ -358,7 +358,7 @@ def api_master_valve_toggle(group_id, action):
             payload = json.dumps({'mv_group_id': int(group_id), 'mv_state': ('open' if want_open else 'closed')})
             try:
                 _sse_hub.broadcast(payload)
-            except Exception as e:  # catch-all: intentional
+            except (OSError, ValueError, RuntimeError) as e:
                 logger.debug("Handled exception in line_359: %s", e)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("Handled exception in line_361: %s", e)

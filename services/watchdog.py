@@ -52,7 +52,7 @@ class ZoneWatchdog(threading.Thread):
         while not self._stop_event.is_set():
             try:
                 self._check_zones()
-            except Exception as e:  # catch-all: intentional
+            except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, RuntimeError) as e:  # catch-all: intentional
                 logger.exception("Watchdog error: %s", e)
             self._stop_event.wait(self.interval)
         logger.info("ZoneWatchdog stopped")
@@ -98,7 +98,7 @@ class ZoneWatchdog(threading.Thread):
                 # Force stop the zone
                 try:
                     self.zone_control.stop_zone(zone_id, reason='watchdog_cap', force=True)
-                except Exception:  # catch-all: intentional
+                except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
                     logger.exception("Watchdog: failed to stop zone %d", zone_id)
                 # Send Telegram alert
                 self._send_alert(

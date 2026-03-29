@@ -63,7 +63,7 @@ class RainMonitor:
                     payload = getattr(msg, 'payload', b'')
                     try:
                         payload = payload.decode('utf-8', errors='ignore')
-                    except Exception as e:  # catch-all: intentional
+                    except (UnicodeDecodeError, AttributeError) as e:
                         logger.debug("Exception in _on_message: %s", e)
                         payload = str(payload)
                     self._handle_payload(str(payload))
@@ -115,7 +115,7 @@ class RainMonitor:
                 for gid in target_groups:
                     try:
                         stop_all_in_group(gid, reason='rain', force=True)
-                    except Exception:  # catch-all: intentional
+                    except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
                         logger.exception('RainMonitor: stop_all_in_group failed')
             except ImportError:
                 logger.exception('RainMonitor: import stop_all_in_group failed')
@@ -517,13 +517,13 @@ def start_rain_monitor():
 def start_env_monitor(cfg: dict):
     try:
         env_monitor.start(cfg or {})
-    except Exception:  # catch-all: intentional
+    except (ConnectionError, TimeoutError, OSError, ValueError):
         logger.exception('start_env_monitor failed')
 
 def start_water_monitor():
     try:
         water_monitor.start()
-    except Exception:  # catch-all: intentional
+    except (ConnectionError, TimeoutError, OSError, ValueError):
         logger.exception('start_water_monitor failed')
 
 

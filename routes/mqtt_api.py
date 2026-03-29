@@ -122,13 +122,13 @@ def api_mqtt_probe(server_id: int):
         def on_message(cl, userdata, msg):
             try:
                 topic = msg.topic
-            except Exception as e:  # catch-all: intentional
+            except (AttributeError, ValueError) as e:
                 logger.debug("Exception in on_message: %s", e)
                 topic = getattr(msg, 'topic', '')
             if len(received) < 1000:
                 try:
                     payload = msg.payload.decode('utf-8', errors='ignore')
-                except Exception as e:  # catch-all: intentional
+                except (UnicodeDecodeError, AttributeError) as e:
                     logger.debug("Exception in on_message: %s", e)
                     payload = str(msg.payload)
                 received.append({'topic': topic, 'payload': payload})
@@ -234,12 +234,12 @@ def api_mqtt_scan_sse(server_id: int):
                 def on_message(cl, userdata, msg):
                     try:
                         topic = msg.topic
-                    except Exception as e:  # catch-all: intentional
+                    except (AttributeError, ValueError) as e:
                         logger.debug("Exception in on_message: %s", e)
                         topic = getattr(msg, 'topic', '')
                     try:
                         payload = msg.payload.decode('utf-8', errors='ignore')
-                    except Exception as e:  # catch-all: intentional
+                    except (UnicodeDecodeError, AttributeError) as e:
                         logger.debug("Exception in on_message: %s", e)
                         payload = str(msg.payload)
                     data = json.dumps({'topic': normalize_topic(topic), 'payload': payload})

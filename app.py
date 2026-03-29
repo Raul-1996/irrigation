@@ -295,10 +295,10 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
             except (ConnectionError, TimeoutError, OSError) as e:
                 logger.warning("group exclusive mqtt off for zone %s: %s", z.get('id'), e)
             try: db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
-            except Exception as e:  # catch-all: intentional
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
                 logger.error("group exclusive db update zone %s: %s", z.get('id'), e)
         try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))
-        except Exception as e:  # catch-all: intentional
+        except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError, TypeError, KeyError) as e:
             logger.debug("group exclusive log: %s", e)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Group exclusivity enforcement failed for group {group_id}: {e}")
@@ -338,7 +338,7 @@ def _start_single_zone_watchdog():
     def _run():
         while not _WATCHDOG_STOP_EVENT.is_set():
             try: _enforce_group_exclusive_all_groups()
-            except Exception as e:  # catch-all: intentional
+            except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, RuntimeError) as e:  # catch-all: intentional
                 logger.exception("watchdog loop: %s", e)
             _WATCHDOG_STOP_EVENT.wait(1.0)
     threading.Thread(target=_run, daemon=True).start()
@@ -388,7 +388,7 @@ _recently_stopped = _sse_hub.recently_stopped
 @app.errorhandler(404)
 def _not_found(e):
     try: return render_template('404.html'), 404
-    except Exception as e:  # catch-all: intentional
+    except (OSError, ValueError, RuntimeError) as e:  # catch-all: intentional
         logger.debug("404 template fallback: %s", e)
         return jsonify({'error': 'Not found'}), 404
 

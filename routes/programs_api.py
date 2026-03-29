@@ -59,7 +59,7 @@ def api_program(prog_id):
                 scheduler = get_scheduler()
                 if scheduler:
                     scheduler.cancel_program(prog_id)
-            except Exception as e:  # catch-all: intentional
+            except (ValueError, KeyError, RuntimeError) as e:
                 logger.error(f"Ошибка отмены программы {prog_id} в планировщике: {e}")
             return ('', 204)
         return jsonify({'success': False, 'message': 'Program not found'}), 404

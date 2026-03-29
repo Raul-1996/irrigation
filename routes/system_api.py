@@ -103,7 +103,7 @@ def api_health_details():
             logger.debug("Handled exception in line_99: %s", e)
         try:
             meta_tail = _sse_hub.get_meta_buffer()
-        except Exception as e:  # catch-all: intentional
+        except (OSError, ValueError, RuntimeError) as e:
             logger.debug("Exception in line_103: %s", e)
             meta_tail = []
         payload = {
@@ -166,7 +166,7 @@ def api_scheduler_init():
     try:
         init_scheduler(db)
         return jsonify({'success': True})
-    except Exception as e:  # catch-all: intentional
+    except (ValueError, KeyError, RuntimeError) as e:
         logger.error(f"Ошибка явной инициализации планировщика: {e}")
         return api_error('INTERNAL_ERROR', 'internal error', 500)
 
@@ -331,7 +331,7 @@ def health_check():
         try:
             sched = get_scheduler()
             sched_ok = bool(sched is not None)
-        except Exception as e:  # catch-all: intentional
+        except (ValueError, KeyError, RuntimeError) as e:
             logger.debug("Exception in health_check: %s", e)
             sched_ok = False
         try:
@@ -486,7 +486,7 @@ def api_postpone():
                 scheduler = get_scheduler()
                 if scheduler:
                     scheduler.cancel_group_jobs(group_id)
-            except Exception:  # catch-all: intentional
+            except (ValueError, KeyError, RuntimeError):
                 logger.exception("Ошибка отмены заданий планировщика при отложенном поливе группы")
         except (ConnectionError, TimeoutError, OSError):
             logger.exception("Ошибка массовой остановки зон при отложенном поливе группы")
@@ -833,7 +833,7 @@ def api_status():
                 rain_sensor_status = 'идёт дождь' if rain_monitor.is_rain else 'дождя нет'
             else:
                 rain_sensor_status = 'дождя нет'
-        except Exception as e:  # catch-all: intentional
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.debug("Exception in line_831: %s", e)
             rain_sensor_status = 'дождя нет'
 

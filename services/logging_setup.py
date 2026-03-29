@@ -82,7 +82,7 @@ def setup_logging(app_logger):
     # Test propagation
     try:
         _IN_TESTS = bool('PYTEST_CURRENT_TEST' in os.environ)
-    except Exception as e:  # catch-all: intentional
+    except (KeyError, TypeError) as e:
         logger.debug("Exception in setup_logging: %s", e)
         _IN_TESTS = False
     app_logger.propagate = not _IN_TESTS
@@ -123,7 +123,7 @@ def setup_logging(app_logger):
                 os.environ['TZ'] = _tz_env
                 try:
                     _tz_time.tzset()
-                except Exception as e:  # catch-all: intentional
+                except (IOError, OSError, ValueError) as e:
                     logger.debug("Handled exception in line_123: %s", e)
         try:
             if os.getenv('WB_TZ') != os.getenv('TZ'):

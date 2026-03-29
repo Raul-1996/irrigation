@@ -59,7 +59,7 @@ def get_meta_buffer() -> list:
     """Return a copy of recent meta-messages (for health panel)."""
     try:
         return list(_SSE_META_BUFFER)
-    except Exception as e:  # catch-all: intentional
+    except (OSError, RuntimeError, ValueError) as e:
         logger.debug("Exception in get_meta_buffer: %s", e)
         return []
 
@@ -256,7 +256,7 @@ def ensure_hub_started() -> None:
                                     logger.debug("Handled exception in line_248: %s", e)
                             try:
                                 updates2 = updates.copy()
-                            except Exception as e:  # catch-all: intentional
+                            except (TypeError, AttributeError) as e:
                                 logger.debug("Exception in line_252: %s", e)
                                 updates2 = dict(updates)
                             updates2['observed_state'] = new_state

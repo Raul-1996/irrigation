@@ -38,7 +38,7 @@ def _get_hostname_key() -> bytes:
     """Compute the old hostname-based key (for migration only)."""
     try:
         host = os.uname().nodename
-    except Exception as e:  # catch-all: intentional
+    except (ValueError, TypeError) as e:
         logger.debug("Exception in _get_hostname_key: %s", e)
         host = 'irrigation'
     b = (host or 'irrigation').encode('utf-8')
@@ -60,7 +60,7 @@ def _get_secret_key() -> bytes:
     if key:
         try:
             return base64.urlsafe_b64decode(key + '===')
-        except Exception as e:  # catch-all: intentional
+        except (ValueError, TypeError) as e:
             logger.debug("Handled exception in _get_secret_key: %s", e)
 
     # 2. Try reading from file

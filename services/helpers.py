@@ -12,7 +12,7 @@ def api_error(error_code: str, message: str, status: int = 400, extra: dict = No
     if extra:
         try:
             payload.update(extra)
-        except Exception as e:  # catch-all: intentional
+        except (TypeError, ValueError) as e:
             logger.debug("Handled exception in api_error: %s", e)
     return jsonify(payload), int(status)
 

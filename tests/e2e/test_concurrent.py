@@ -21,7 +21,7 @@ def live_session():
         resp = client.post('/api/login', json={'password': PASSWORD})
         if resp.status_code != 200:
             pytest.skip(f"Cannot login: {resp.status_code}")
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         pytest.skip(f"Cannot connect: {e}")
     
     yield client
@@ -42,7 +42,7 @@ class TestConcurrentRequests:
                 resp = client.get('/api/status')
                 results.append(resp.status_code)
                 client.close()
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 errors.append(str(e))
 
         threads = [threading.Thread(target=fetch_status) for _ in range(5)]
@@ -66,7 +66,7 @@ class TestConcurrentRequests:
                 resp = client.get('/api/zones')
                 results.append(resp.status_code)
                 client.close()
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError):
                 results.append(500)
 
         threads = [threading.Thread(target=read_zones) for _ in range(10)]

@@ -35,7 +35,7 @@ def app(test_db_path):
         import app as app_mod
         importlib.reload(app_mod)
         flask_app = app_mod.app
-    except Exception:
+    except (ImportError, AttributeError, RuntimeError):
         # If app import fails, create a minimal Flask app
         from flask import Flask
         flask_app = Flask(__name__)

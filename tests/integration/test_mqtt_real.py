@@ -20,7 +20,7 @@ def mqtt_client():
     try:
         cl.connect(MQTT_HOST, MQTT_PORT, 10)
         cl.loop_start()
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         pytest.skip(f"Cannot connect to MQTT broker: {e}")
     
     yield cl

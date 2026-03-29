@@ -66,7 +66,7 @@ class StateVerifier:
     def _safe_verify(self, zone_id: int, expected: str) -> None:
         try:
             self.verify(zone_id, expected)
-        except Exception:  # catch-all: intentional
+        except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError):  # catch-all: intentional
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
     # ------------------------------------------------------------------

@@ -120,7 +120,7 @@ class TelegramNotifier:
                 try:
                     res = fut.result(timeout=10)
                     return bool(res)
-                except Exception as e:  # catch-all: intentional
+                except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
                     logger.exception(f"aiogram coroutine failed: {e}")
                     fut.cancel()
         except (RuntimeError, OSError) as e:
@@ -342,7 +342,7 @@ class AiogramBotRunner:
             routes = _load_routes_module()
             if hasattr(routes, 'set_notifier'):
                 routes.set_notifier(notifier)
-        except Exception:  # catch-all: intentional
+        except (ImportError, AttributeError):
             logger.exception("failed to load routes (telegram.py)")
             return
 
@@ -384,7 +384,7 @@ class AiogramBotRunner:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             self._loop.run_until_complete(self._main())
-        except Exception as e:  # catch-all: intentional
+        except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:  # catch-all: intentional
             logger.exception(f"Aiogram thread target error: {e}")
 
     def start(self):
@@ -438,7 +438,7 @@ class SimpleHTTPPoller:
                                 if cqid:
                                     try:
                                         notifier.answer_callback(cqid)
-                                    except Exception as e:  # catch-all: intentional
+                                    except (ConnectionError, TimeoutError, OSError, ValueError) as e:
                                         logger.debug("Handled exception in line_428: %s", e)
                                 from_chat = ((cq.get('message') or {}).get('chat') or {}).get('id')
                                 msg_id = ((cq.get('message') or {}).get('message_id'))
@@ -517,7 +517,7 @@ def start_long_polling_if_needed():
                     _aiogram_runner.start()
                 started = True
                 logger.info("aiogram runner started")
-        except Exception as e:  # catch-all: intentional
+        except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:  # catch-all: intentional
             logger.error(f"Aiogram start failed: {e}")
             started = False
         if not started:

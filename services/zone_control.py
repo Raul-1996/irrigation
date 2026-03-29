@@ -170,7 +170,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
         except ImportError as e:
             logger.debug("Handled exception in line_168: %s", e)
         return True
-    except Exception:  # catch-all: intentional
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError):
         logger.exception("exclusive_start_zone failed")
         return False
 
@@ -198,7 +198,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     if run:
                         try:
                             end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                        except Exception as e:  # catch-all: intentional
+                        except (ValueError, TypeError, AttributeError, OSError) as e:
                             logger.debug("Exception in stop_zone: %s", e)
                             end_raw = None
                         try:
@@ -291,7 +291,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                     if not os.environ.get('TESTING'):
                                         import threading as _th
                                         _th.Thread(target=_delayed_close, daemon=True).start()
-                    except Exception:  # catch-all: intentional
+                    except (ConnectionError, TimeoutError, OSError, RuntimeError):
                         logger.exception('master valve close scheduling failed')
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
             logger.exception('stop_zone: mqtt off failed')
@@ -313,7 +313,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                     try:
                         # Берём пульсы на/после момента стопа, чтобы избежать лагов
                         end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                    except Exception as e:  # catch-all: intentional
+                    except (ValueError, TypeError, AttributeError, OSError) as e:
                         logger.debug("Exception in line_312: %s", e)
                         end_raw = None
                     try:
@@ -354,7 +354,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
         except (ImportError, AttributeError) as e:
             logger.debug("Event publish failed: %s", e)
         return True
-    except Exception:  # catch-all: intentional
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError):
         logger.exception('stop_zone failed')
         return False
 

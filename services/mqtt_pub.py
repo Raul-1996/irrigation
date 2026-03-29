@@ -69,7 +69,7 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
                         logger.debug("Handled exception in line_65: %s", e)
                     try:
                         cl.max_inflight_messages_set(100)
-                    except Exception as e:  # catch-all: intentional
+                    except (ValueError, AttributeError) as e:
                         logger.debug("Handled exception in line_69: %s", e)
                     # Синхронное подключение (надёжнее для тестов/первой публикации)
                     cl.connect(host, port, 10)
@@ -207,7 +207,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
             pass
 
         return True
-    except Exception:  # catch-all: intentional
+    except (ConnectionError, TimeoutError, OSError):
         logger.exception('publish_mqtt_value failed')
         return False
 

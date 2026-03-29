@@ -23,7 +23,7 @@ def live_session():
         resp = client.post('/api/login', json={'password': PASSWORD})
         if resp.status_code != 200:
             pytest.skip(f"Cannot login to controller: {resp.status_code}")
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError) as e:
         pytest.skip(f"Cannot connect to controller: {e}")
     
     yield client

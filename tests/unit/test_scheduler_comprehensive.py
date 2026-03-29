@@ -20,7 +20,7 @@ def scheduler_instance(test_db):
     yield sched
     try:
         sched.stop()
-    except Exception:
+    except (RuntimeError, ValueError):
         pass
     mod.scheduler = None
 

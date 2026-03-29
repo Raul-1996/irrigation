@@ -146,11 +146,11 @@ def _boot_sync(app, db):
                                     break
                                 try:
                                     time.sleep(0.2 * (attempt + 1))
-                                except Exception as e:  # catch-all: intentional
+                                except (ValueError, TypeError, KeyError) as e:
                                     logger.debug("Handled exception in line_142: %s", e)
                             try:
                                 time.sleep(0.01)
-                            except Exception as e:  # catch-all: intentional
+                            except (ValueError, TypeError, KeyError, OSError) as e:
                                 logger.debug("Handled exception in line_146: %s", e)
                 except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_148: %s", e)
@@ -191,11 +191,11 @@ def _boot_sync(app, db):
                                 break
                             try:
                                 time.sleep(0.2 * (attempt + 1))
-                            except Exception as e:  # catch-all: intentional
+                            except (ValueError, TypeError, KeyError) as e:
                                 logger.debug("Handled exception in line_187: %s", e)
                         try:
                             time.sleep(0.01)
-                        except Exception as e:  # catch-all: intentional
+                        except (ValueError, TypeError, KeyError, OSError) as e:
                             logger.debug("Handled exception in line_191: %s", e)
                 except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_193: %s", e)
@@ -223,7 +223,7 @@ def _start_monitors(app, db):
     # Water monitor (idempotent)
     try:
         start_water_monitor()
-    except Exception:  # catch-all: intentional
+    except (OSError, RuntimeError):  # catch-all: intentional
         logger.exception('WaterMonitor start failed')
 
     # Rain monitor
@@ -240,7 +240,7 @@ def _start_monitors(app, db):
         # Probe retained values so data appears immediately
         try:
             probe_env_values(ecfg)
-        except Exception:  # catch-all: intentional
+        except (OSError, RuntimeError, ValueError):  # catch-all: intentional
             logger.exception('EnvMonitor probe call failed')
     except (sqlite3.Error, OSError):
         logger.exception('EnvMonitor start failed')

@@ -23,5 +23,5 @@ def test_db(test_db_path):
         import sqlite3
         conn = sqlite3.connect(test_db_path, timeout=1)
         conn.close()
-    except Exception:
+    except (sqlite3.Error, OSError):
         pass

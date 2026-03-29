@@ -68,7 +68,7 @@ def wait_selector(driver, by, value, timeout=12):
         return WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((by, value))
         )
-    except Exception:  # catch-all: intentional
+    except (ValueError, TypeError, OSError):
         return None
 
 
@@ -134,7 +134,7 @@ def click_if_exists(driver, by, value, slow, shots, out_dir, shot_name):
         if shots:
             screenshot(driver, out_dir, shot_name)
         return True
-    except Exception:  # catch-all: intentional
+    except (ValueError, TypeError, OSError):
         return False
 
 
@@ -177,7 +177,7 @@ def main():
     # Сначала пробуем встроенный Selenium Manager (без webdriver-manager)
     try:
         driver = webdriver.Chrome(options=chrome_options)
-    except Exception:  # catch-all: intentional
+    except (ValueError, TypeError, OSError):  # catch-all: intentional
         # Фолбэк: webdriver-manager
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.implicitly_wait(5)
