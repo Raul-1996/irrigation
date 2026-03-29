@@ -286,8 +286,10 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                                                     publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_off'})
                                         except Exception:
                                             logger.exception('master valve delayed close failed')
-                                    import threading as _th
-                                    _th.Thread(target=_delayed_close, daemon=True).start()
+                                    import os
+                                    if not os.environ.get('TESTING'):
+                                        import threading as _th
+                                        _th.Thread(target=_delayed_close, daemon=True).start()
                     except Exception:
                         logger.exception('master valve close scheduling failed')
         except Exception:

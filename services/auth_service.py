@@ -1,4 +1,5 @@
 from typing import Optional
+import os
 from database import db
 from werkzeug.security import check_password_hash, generate_password_hash
 import threading
@@ -32,7 +33,8 @@ def verify_password(password: str) -> tuple[bool, str]:
                 except Exception as e:
                     logger.debug("Handled exception in _rehash_bg: %s", e)
             try:
-                threading.Thread(target=_rehash_bg, args=(stored_hash, password), daemon=True).start()
+                if not os.environ.get('TESTING'):
+                    threading.Thread(target=_rehash_bg, args=(stored_hash, password), daemon=True).start()
             except Exception as e:
                 logger.debug("Handled exception in _rehash_bg: %s", e)
             return True, 'admin'

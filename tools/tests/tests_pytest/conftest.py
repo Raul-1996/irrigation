@@ -164,6 +164,18 @@ def _session_setup():
     """Session-wide setup: ensure app config is correct."""
     app_module.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield
+    # Force-stop APScheduler instances that block teardown
+    try:
+        import irrigation_scheduler as _isched
+        if _isched.scheduler and hasattr(_isched.scheduler, 'scheduler'):
+            try:
+                _isched.scheduler.scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+        _isched.scheduler = None
+    except Exception:
+        pass
+
     # Force-stop all daemon threads that might block teardown
     try:
         import services.mqtt_pub as _mp
@@ -261,6 +273,23 @@ def ensure_db():
     """Seed fresh data before each test."""
     _reset_seed_data()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_scheduler_after_test():
+    """Shutdown any APScheduler instances created during a test."""
+    yield
+    try:
+        import irrigation_scheduler as _isched
+        if _isched.scheduler and hasattr(_isched.scheduler, 'scheduler'):
+            try:
+                _isched.scheduler.scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            _isched.scheduler.is_running = False
+        _isched.scheduler = None
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
