@@ -1,0 +1,18 @@
+[Unit]
+Description=WB-Irrigation Flask app
+After=network-online.target mosquitto.service
+Wants=network-online.target
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wb-irrigation/irrigation
+Environment=TESTING=0
+Environment=UI_THEME=auto
+ExecStart=/opt/wb-irrigation/irrigation/venv/bin/python run.py
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
