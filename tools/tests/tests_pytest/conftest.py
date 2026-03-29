@@ -210,6 +210,27 @@ try:
 except (ImportError, AttributeError):
     pass
 
+# Speed up password hashing in tests
+try:
+    from werkzeug.security import generate_password_hash as _orig_gen_hash
+    
+    def _fast_generate_hash(password, method='pbkdf2:sha256:1000'):
+        """Fast password hashing for tests (1K iterations instead of 260K)."""
+        return _orig_gen_hash(password, method)
+    
+    import werkzeug.security
+    werkzeug.security.generate_password_hash = _fast_generate_hash
+    
+    # Also patch the import in auth_service if it's already imported
+    try:
+        import services.auth_service as _auth_mod
+        if hasattr(_auth_mod, 'generate_password_hash'):
+            _auth_mod.generate_password_hash = _fast_generate_hash
+    except ImportError:
+        pass
+except ImportError:
+    pass
+
 # Also patch mqtt_pub to clear any cached real clients
 try:
     from services import mqtt_pub as _mqtt_pub_mod
