@@ -23,6 +23,37 @@ def _graceful_shutdown(signum, frame):
     sys.exit(0)
 
 
+def _get_asgi_app(flask_app):
+    """Get ASGI app from Flask, with fallback to WSGIMiddleware."""
+    # Flask 2.3+: native ASGI
+    if hasattr(flask_app, 'asgi_app'):
+        return flask_app.asgi_app
+
+    # Hypercorn WSGIMiddleware (name varies by version)
+    try:
+        from hypercorn.middleware.wsgi import WSGIMiddleware
+        return WSGIMiddleware(flask_app)
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        from hypercorn.middleware.wsgi import AsyncioWSGIMiddleware
+        return AsyncioWSGIMiddleware(flask_app)
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        from hypercorn.middleware import wsgi as _wsgi
+        if hasattr(_wsgi, 'AsyncioWSGIMiddleware'):
+            return _wsgi.AsyncioWSGIMiddleware(flask_app)
+        if hasattr(_wsgi, '_WSGIMiddleware'):
+            return _wsgi._WSGIMiddleware(flask_app)
+    except (ImportError, AttributeError):
+        pass
+
+    raise ImportError("Cannot find WSGI-to-ASGI middleware in hypercorn")
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '8080'))
 
@@ -36,21 +67,9 @@ if __name__ == '__main__':
         import asyncio
         cfg = Config()
         cfg.bind = [f"0.0.0.0:{port}"]
-        try:
-            # Flask 2.3+: has asgi_app
-            asgi_app = app.asgi_app  # type: ignore[attr-defined]
-        except (AttributeError, KeyError, TypeError, ValueError) as e:
-            logger.debug("Flask has no asgi_app, using WSGIMiddleware: %s", e)
-            # Wrap WSGI into ASGI for Hypercorn
-            try:
-                from hypercorn.middleware.wsgi import WSGIMiddleware
-            except ImportError as e:
-                logger.debug("Exception in line_25: %s", e)
-                from hypercorn.middleware import wsgi as _wsgi
-                WSGIMiddleware = _wsgi.WSGIMiddleware  # type: ignore[attr-defined]
-            asgi_app = WSGIMiddleware(app)
+        asgi_app = _get_asgi_app(app)
         asyncio.run(serve(asgi_app, cfg))
-    except ImportError as e:
-        logger.debug("Exception in line_31: %s", e)
+    except ImportError:
         # Fallback to Flask dev server
+        logger.info("Hypercorn not available, using Flask dev server")
         app.run(debug=False, host='0.0.0.0', port=port)
