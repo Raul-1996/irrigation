@@ -39,8 +39,8 @@ if __name__ == '__main__':
         try:
             # Flask 2.3+: has asgi_app
             asgi_app = app.asgi_app  # type: ignore[attr-defined]
-        except (KeyError, TypeError, ValueError) as e:
-            logger.debug("Exception in line_20: %s", e)
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            logger.debug("Flask has no asgi_app, using WSGIMiddleware: %s", e)
             # Wrap WSGI into ASGI for Hypercorn
             try:
                 from hypercorn.middleware.wsgi import WSGIMiddleware
