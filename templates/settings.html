@@ -81,6 +81,52 @@
       </div>
       <div class="settings-msg" id="tg-msg"></div>
     </form>
+    <h3>Погода и коррекция полива</h3>
+    <form id="weather-form" class="settings-form" autocomplete="off" style="margin-bottom:10px">
+      <div class="settings-row">
+        <label style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="weather_enabled"> Включить погодозависимую коррекцию
+        </label>
+      </div>
+      <div class="settings-row">
+        <label for="weather_lat">Широта (lat)</label>
+        <div class="settings-input" style="display:flex; gap:6px; align-items:center;">
+          <input type="text" id="weather_lat" name="weather_lat" placeholder="55.7558" style="flex:1">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="weather_lon">Долгота (lon)</label>
+        <div class="settings-input" style="display:flex; gap:6px; align-items:center;">
+          <input type="text" id="weather_lon" name="weather_lon" placeholder="37.6176" style="flex:1">
+          <button type="button" id="geo-detect" class="settings-btn" style="white-space:nowrap; padding:8px 10px; font-size:12px;">📍 По IP</button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="rain_threshold">Порог дождя (mm за 24ч) → пропуск</label>
+        <div class="settings-input">
+          <input type="number" id="rain_threshold" step="0.5" min="0" max="100" value="5">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="freeze_threshold">Порог заморозка (°C) → пропуск</label>
+        <div class="settings-input">
+          <input type="number" id="freeze_threshold" step="0.5" min="-10" max="10" value="2">
+        </div>
+      </div>
+      <div class="settings-row">
+        <label for="wind_threshold">Порог ветра (км/ч) → отложить</label>
+        <div class="settings-input">
+          <input type="number" id="wind_threshold" step="1" min="5" max="100" value="25">
+        </div>
+      </div>
+      <div class="settings-actions" style="display:flex; gap:8px; align-items:center;">
+        <button type="button" id="weather-save" class="settings-btn">Сохранить</button>
+        <button type="button" id="weather-test" class="settings-btn">Проверить погоду</button>
+      </div>
+      <div class="settings-msg" id="weather-msg"></div>
+      <div id="weather-preview" style="display:none; margin-top:8px; padding:8px; background:rgba(0,0,0,.04); border-radius:8px; font-size:12px;"></div>
+    </form>
+
     <p class="settings-note">Минимальная длина пароля — 4 символа.</p>
     <form id="pwd-form" class="settings-form" autocomplete="off">
       <div class="settings-row">
@@ -222,6 +268,91 @@
     const j = await r.json();
     msg.style.color = (j && j.success)? '#2e7d32' : '#c62828';
     msg.textContent = (j && j.message) ? j.message : ((j && j.success)? 'OK' : 'Ошибка');
+  });
+
+  // --- Weather settings ---
+  (async ()=>{
+    try{
+      // Load location
+      const lr = await fetch('/api/settings/location');
+      const lj = await lr.json();
+      if (lj.latitude) document.getElementById('weather_lat').value = lj.latitude;
+      if (lj.longitude) document.getElementById('weather_lon').value = lj.longitude;
+      // Load weather settings
+      const wr = await fetch('/api/settings/weather');
+      const wj = await wr.json();
+      document.getElementById('weather_enabled').checked = !!wj.enabled;
+      if (wj.rain_threshold_mm !== undefined) document.getElementById('rain_threshold').value = wj.rain_threshold_mm;
+      if (wj.freeze_threshold_c !== undefined) document.getElementById('freeze_threshold').value = wj.freeze_threshold_c;
+      if (wj.wind_threshold_kmh !== undefined) document.getElementById('wind_threshold').value = wj.wind_threshold_kmh;
+    }catch(e){ console.debug('weather settings load:', e); }
+  })();
+
+  // Geo-detect by IP
+  document.getElementById('geo-detect').addEventListener('click', async ()=>{
+    const msg = document.getElementById('weather-msg'); msg.textContent='Определяем...'; msg.style.color='#666';
+    try{
+      const r = await fetch('https://ipapi.co/json/', {timeout:5000});
+      const j = await r.json();
+      if (j.latitude && j.longitude){
+        document.getElementById('weather_lat').value = j.latitude;
+        document.getElementById('weather_lon').value = j.longitude;
+        msg.textContent = `Определено: ${j.city || ''} (${j.latitude}, ${j.longitude})`; msg.style.color='#2e7d32';
+      } else {
+        msg.textContent = 'Не удалось определить'; msg.style.color='#c62828';
+      }
+    }catch(e){ msg.textContent='Ошибка определения: '+e.message; msg.style.color='#c62828'; }
+  });
+
+  // Save weather settings
+  document.getElementById('weather-save').addEventListener('click', async ()=>{
+    const msg = document.getElementById('weather-msg'); msg.textContent='';
+    try{
+      // Save location
+      const lat = document.getElementById('weather_lat').value.trim();
+      const lon = document.getElementById('weather_lon').value.trim();
+      if (lat && lon){
+        await fetch('/api/settings/location', {method:'PUT', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({latitude: parseFloat(lat), longitude: parseFloat(lon)})});
+      }
+      // Save weather settings
+      const r = await fetch('/api/settings/weather', {method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          enabled: document.getElementById('weather_enabled').checked,
+          rain_threshold_mm: parseFloat(document.getElementById('rain_threshold').value),
+          freeze_threshold_c: parseFloat(document.getElementById('freeze_threshold').value),
+          wind_threshold_kmh: parseFloat(document.getElementById('wind_threshold').value),
+        })});
+      const j = await r.json();
+      msg.style.color = j.success ? '#2e7d32' : '#c62828';
+      msg.textContent = j.success ? 'Настройки погоды сохранены' : 'Ошибка сохранения';
+    }catch(e){ msg.textContent='Ошибка: '+e.message; msg.style.color='#c62828'; }
+  });
+
+  // Test weather
+  document.getElementById('weather-test').addEventListener('click', async ()=>{
+    const msg = document.getElementById('weather-msg'); msg.textContent='Запрос...'; msg.style.color='#666';
+    const preview = document.getElementById('weather-preview');
+    try{
+      const r = await fetch('/api/weather/refresh', {method:'POST'});
+      const j = await r.json();
+      if (j.success && j.data){
+        const d = j.data;
+        preview.style.display='block';
+        preview.innerHTML = `
+          <b>🌡 Температура:</b> ${d.temperature !== null ? d.temperature.toFixed(1)+'°C' : '—'}<br>
+          <b>💧 Влажность:</b> ${d.humidity !== null ? d.humidity.toFixed(0)+'%' : '—'}<br>
+          <b>🌧 Осадки 24ч:</b> ${d.precipitation_24h !== null ? d.precipitation_24h.toFixed(1)+'mm' : '—'}<br>
+          <b>🌧 Прогноз 6ч:</b> ${d.precipitation_forecast_6h !== null ? d.precipitation_forecast_6h.toFixed(1)+'mm' : '—'}<br>
+          <b>💨 Ветер:</b> ${d.wind_speed !== null ? d.wind_speed.toFixed(1)+' км/ч' : '—'}<br>
+          <b>🌱 ET₀ (сут):</b> ${d.daily_et0 !== null ? d.daily_et0.toFixed(2)+' мм' : '—'}
+        `;
+        msg.textContent='Данные получены'; msg.style.color='#2e7d32';
+      } else {
+        preview.style.display='none';
+        msg.textContent = j.message || 'Не удалось получить'; msg.style.color='#c62828';
+      }
+    }catch(e){ msg.textContent='Ошибка: '+e.message; msg.style.color='#c62828'; preview.style.display='none'; }
   });
 </script>
 {% endblock %}

@@ -1271,3 +1271,43 @@
             }
         }
     } catch(e) {}
+
+    // --- Weather widget on dashboard ---
+    async function refreshWeatherWidget() {
+        try {
+            const r = await fetch('/api/weather');
+            const j = await r.json();
+            const box = document.getElementById('weather-box');
+            if (!box) return;
+            if (!j || !j.available) { box.style.display = 'none'; return; }
+            box.style.display = '';
+            const tempEl = document.getElementById('weather-temp-val');
+            const humEl = document.getElementById('weather-hum-val');
+            const rainEl = document.getElementById('weather-rain-val');
+            const coeffEl = document.getElementById('weather-coeff');
+            const skipBadge = document.getElementById('weather-skip-badge');
+            if (tempEl) tempEl.textContent = j.temperature !== null ? j.temperature.toFixed(1) : '—';
+            if (humEl) humEl.textContent = j.humidity !== null ? j.humidity.toFixed(0) : '—';
+            if (rainEl) rainEl.textContent = j.precipitation_24h !== null ? j.precipitation_24h.toFixed(1) : '—';
+            if (coeffEl) {
+                coeffEl.textContent = j.coefficient !== null && j.coefficient !== undefined ? j.coefficient : '—';
+                // Color coding
+                const c = j.coefficient || 100;
+                if (c === 0) coeffEl.style.color = '#f44336';
+                else if (c < 80) coeffEl.style.color = '#ff9800';
+                else if (c > 120) coeffEl.style.color = '#2196f3';
+                else coeffEl.style.color = '#4caf50';
+            }
+            if (skipBadge) {
+                if (j.skip) {
+                    skipBadge.style.display = 'inline';
+                    skipBadge.title = j.skip_reason || '';
+                } else {
+                    skipBadge.style.display = 'none';
+                }
+            }
+        } catch (e) { /* ignore weather fetch errors */ }
+    }
+    // Initial load + periodic refresh (every 5 min)
+    refreshWeatherWidget();
+    setInterval(refreshWeatherWidget, 5 * 60 * 1000);
