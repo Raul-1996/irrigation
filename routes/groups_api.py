@@ -336,7 +336,7 @@ def api_master_valve_toggle(group_id, action):
                 return jsonify({"success": False, "message": "Нельзя закрыть мастер-клапан: проверка состояния групп не выполнена"}), 400
         val = ('0' if want_open else '1') if mode == 'NO' else ('1' if want_open else '0')
         try:
-            _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0)
+            _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0, qos=2, retain=True)
         except Exception:
             logger.exception('master valve publish failed')
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500

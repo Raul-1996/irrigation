@@ -282,7 +282,7 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                 sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
                 if mqtt and sid and topic:
                     server = db.get_mqtt_server(int(sid))
-                    if server: _publish_mqtt_value(server, normalize_topic(topic), '0')
+                    if server: _publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, qos=2, retain=True)
             except (ConnectionError, TimeoutError, OSError) as e:
                 logger.warning("group exclusive mqtt off for zone %s: %s", z.get('id'), e)
             try: db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})

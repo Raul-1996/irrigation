@@ -477,7 +477,7 @@ def api_postpone():
                             t = normalize_topic(topic)
                             server = db.get_mqtt_server(int(sid))
                             if server:
-                                _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
+                                _publish_mqtt_value(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
                 except Exception:
                     logger.exception("Ошибка остановки зоны при установке отложенного полива")
             try:

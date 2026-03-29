@@ -788,7 +788,7 @@ def start_zone(zone_id):
                             t = topic if str(topic).startswith('/') else '/' + str(topic)
                             server = db.get_mqtt_server(int(sid))
                             if server:
-                                _publish_mqtt_value(server, t, '0', min_interval_sec=0.0)
+                                _publish_mqtt_value(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
                     except Exception:
                         logger.exception("Ошибка публикации MQTT '0' при ручном запуске: выключение соседей")
                     try:
@@ -1012,7 +1012,7 @@ def api_zone_mqtt_start(zone_id: int):
                                         tpc = normalize_topic(topic)
                                         server = db.get_mqtt_server(int(sid))
                                         if server:
-                                            _publish_mqtt_value(server, tpc, '0', min_interval_sec=0.0)
+                                            _publish_mqtt_value(server, tpc, '0', min_interval_sec=0.0, qos=2, retain=True)
                                 except Exception as e:
                                     logger.debug("Handled exception in _off_peer: %s", e)
                                 try:
@@ -1055,13 +1055,13 @@ def api_zone_mqtt_start(zone_id: int):
                             except Exception as e:
                                 logger.debug("Exception in line_1046: %s", e)
                                 mode = 'NC'
-                            _publish_mqtt_value(server_mv, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0)
+                            _publish_mqtt_value(server_mv, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0, qos=2, retain=True)
             sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
             if mqtt and sid and topic:
                 tpc = normalize_topic(topic)
                 server = db.get_mqtt_server(int(sid))
                 if server:
-                    _publish_mqtt_value(server, tpc, '1', min_interval_sec=0.0)
+                    _publish_mqtt_value(server, tpc, '1', min_interval_sec=0.0, qos=2, retain=True)
         except Exception:
             logger.exception('fast ON publish failed')
             return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
@@ -1076,15 +1076,16 @@ def api_zone_mqtt_start(zone_id: int):
         t5 = time.time()
         try:
             import threading
+            _is_testing = current_app.config.get('TESTING', False)
             def _bg_schedule():
                 try:
                     sched = get_scheduler()
-                    if sched and not current_app.config.get('TESTING'):
+                    if sched and not _is_testing:
                         dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
                         if dur > 0:
                             sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
                             sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
-                    if (not sched) and not current_app.config.get('TESTING'):
+                    if (not sched) and not _is_testing:
                         try:
                             dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
                         except Exception as e:
@@ -1154,7 +1155,7 @@ def api_zone_mqtt_stop(zone_id: int):
         if not server:
             return jsonify({'success': False, 'message': 'MQTT server not found'}), 400
         logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
-        _publish_mqtt_value(server, t, '0')
+        _publish_mqtt_value(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
         try:
             db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
         except Exception as e:

@@ -60,6 +60,15 @@ class ZoneRepository(BaseRepository):
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 topic = (zone_data.get('topic') or '').strip()
+                mqtt_sid = zone_data.get('mqtt_server_id')
+                if mqtt_sid is None:
+                    # Fallback: первый enabled MQTT-сервер
+                    try:
+                        row = conn.execute('SELECT id FROM mqtt_servers WHERE enabled=1 ORDER BY id LIMIT 1').fetchone()
+                        if row:
+                            mqtt_sid = row[0]
+                    except Exception:
+                        pass
                 zid_explicit = None
                 try:
                     zid_explicit = int(zone_data.get('id')) if zone_data.get('id') is not None else None
@@ -79,7 +88,7 @@ class ZoneRepository(BaseRepository):
                             int(zone_data.get('duration') or 10),
                             int(zone_data.get('group_id', zone_data.get('group', 1))),
                             topic,
-                            zone_data.get('mqtt_server_id')
+                            mqtt_sid
                         ))
                         conn.commit()
                         return self.get_zone(zid_explicit)
@@ -95,7 +104,7 @@ class ZoneRepository(BaseRepository):
                     int(zone_data.get('duration') or 10),
                     int(zone_data.get('group_id', zone_data.get('group', 1))),
                     topic,
-                    zone_data.get('mqtt_server_id')
+                    mqtt_sid
                 ))
                 zone_id = cursor.lastrowid
                 conn.commit()
