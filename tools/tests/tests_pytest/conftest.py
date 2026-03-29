@@ -164,6 +164,47 @@ def _session_setup():
     """Session-wide setup: ensure app config is correct."""
     app_module.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield
+    # Force-stop all daemon threads that might block teardown
+    try:
+        import services.mqtt_pub as _mp
+        _mp._MQTT_CLIENTS.clear()
+    except Exception:
+        pass
+
+    try:
+        import services.watchdog as _wd
+        if hasattr(_wd, '_watchdog_instance') and _wd._watchdog_instance:
+            _wd._watchdog_instance._stop_event.set()
+    except Exception:
+        pass
+
+    try:
+        import services.sse_hub as _sh
+        _sh._SSE_HUB_STARTED = False
+        for sid, cl in list(_sh._SSE_HUB_MQTT.items()):
+            try:
+                cl.loop_stop()
+                cl.disconnect()
+            except Exception:
+                pass
+        _sh._SSE_HUB_MQTT.clear()
+        _sh._SSE_HUB_CLIENTS.clear()
+    except Exception:
+        pass
+
+    try:
+        import services.telegram_bot as _tb
+        # Stop any running bot instances
+        for attr in ('_bot_instance', '_updater'):
+            inst = getattr(_tb, attr, None)
+            if inst and hasattr(inst, '_thread') and inst._thread:
+                try:
+                    inst._thread = None
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     # Restore original MQTT Client class
     _real_mqtt.Client = _orig_mqtt_client_cls
 

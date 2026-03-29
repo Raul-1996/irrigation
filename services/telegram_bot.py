@@ -128,6 +128,12 @@ class TelegramNotifier:
 
     def send_text(self, chat_id: int, text: str) -> bool:
         try:
+            # Skip in TESTING mode
+            import os
+            if os.environ.get('TESTING') == '1':
+                logger.debug(f"TESTING mode: skipping send_text to {chat_id}")
+                return True
+                
             logger.info(f"send_text chat_id={int(chat_id)} len={len(str(text) or '')}")
             # Prefer aiogram if running
             if Bot is not None:
@@ -154,6 +160,12 @@ class TelegramNotifier:
 
     def send_message(self, chat_id: int, text: str, reply_markup=None) -> bool:
         try:
+            # Skip in TESTING mode
+            import os
+            if os.environ.get('TESTING') == '1':
+                logger.debug(f"TESTING mode: skipping send_message to {chat_id}")
+                return True
+                
             logger.info(f"send_message chat_id={int(chat_id)} len={len(str(text) or '')} has_kb={bool(reply_markup)}")
             if Bot is not None:
                 try:
@@ -487,6 +499,12 @@ notifier = TelegramNotifier()
 def start_long_polling_if_needed():
     global _aiogram_runner, _http_poller
     try:
+        # Skip in TESTING mode
+        import os
+        if os.environ.get('TESTING') == '1':
+            logger.debug("TESTING mode: skipping telegram long polling")
+            return
+            
         if not notifier._ensure_token():
             logger.error("start_long_polling_if_needed: no token; skip")
             return

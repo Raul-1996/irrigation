@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 _INIT_DONE = False
 
 
+def reset_init():
+    """Allow re-init in tests."""
+    global _INIT_DONE
+    _INIT_DONE = False
+
+
 def initialize_app(app, db):
     """Run once at boot: scheduler, watchdogs, boot-sync, monitors, MQTT warm-up.
 

@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 from typing import Any, Optional, Dict, Tuple
@@ -227,4 +228,5 @@ def _shutdown_mqtt_clients() -> None:
     _MQTT_CLIENTS.clear()
 
 
-atexit.register(_shutdown_mqtt_clients)
+if not os.environ.get('TESTING'):
+    atexit.register(_shutdown_mqtt_clients)
