@@ -147,6 +147,10 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'encrypt_mqtt_passwords', self._migrate_encrypt_mqtt_passwords)
                 # Safety: fault tracking
                 self._apply_named_migration(conn, 'zones_add_fault_tracking', self._migrate_add_fault_tracking)
+                # Weather: tables and settings
+                self._apply_named_migration(conn, 'weather_create_cache', self._migrate_create_weather_cache)
+                self._apply_named_migration(conn, 'weather_create_log', self._migrate_create_weather_log)
+                self._apply_named_migration(conn, 'weather_add_settings', self._migrate_add_weather_settings)
 
                 logger.info("База данных инициализирована успешно")
 
@@ -636,3 +640,62 @@ class MigrationRunner:
             logger.info("Добавлены поля last_fault, fault_count в zones")
         except sqlite3.Error as e:
             logger.error("Ошибка миграции zones_add_fault_tracking: %s", e)
+
+    def _migrate_create_weather_cache(self, conn):
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS weather_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    data TEXT NOT NULL,
+                    fetched_at REAL NOT NULL
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_weather_cache_loc ON weather_cache(latitude, longitude)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_weather_cache_time ON weather_cache(fetched_at)')
+            conn.commit()
+            logger.info('Создана таблица weather_cache')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_create_cache: %s", e)
+
+    def _migrate_create_weather_log(self, conn):
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS weather_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    zone_id INTEGER,
+                    original_duration INTEGER,
+                    adjusted_duration INTEGER,
+                    coefficient INTEGER,
+                    skipped INTEGER DEFAULT 0,
+                    skip_reason TEXT,
+                    weather_data TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_weather_log_zone ON weather_log(zone_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_weather_log_time ON weather_log(created_at)')
+            conn.commit()
+            logger.info('Создана таблица weather_log')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_create_log: %s", e)
+
+    def _migrate_add_weather_settings(self, conn):
+        try:
+            weather_keys = {
+                'weather.enabled': '0',
+                'weather.latitude': None,
+                'weather.longitude': None,
+                'weather.rain_threshold_mm': '5.0',
+                'weather.freeze_threshold_c': '2.0',
+                'weather.wind_threshold_kmh': '25.0',
+            }
+            for key, default_val in weather_keys.items():
+                cur = conn.execute('SELECT 1 FROM settings WHERE key = ?', (key,))
+                if cur.fetchone() is None:
+                    conn.execute('INSERT INTO settings(key, value) VALUES(?, ?)', (key, default_val))
+            conn.commit()
+            logger.info('Добавлены настройки погоды в settings')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_add_settings: %s", e)
