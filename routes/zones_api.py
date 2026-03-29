@@ -167,6 +167,14 @@ def api_create_zone():
         except Exception as e:
             logger.debug("Handled exception in api_create_zone: %s", e)
     zone = db.create_zone(data)
+    if zone and zone.get('mqtt_server_id') is None:
+        # Zone created but no MQTT server assigned — warn caller
+        db.add_log('zone_create', json.dumps({"zone": zone['id'], "name": zone['name'], "warning": "mqtt_server_id is NULL"}))
+        return jsonify({
+            'success': True,
+            'warning': 'MQTT-сервер не выбран. Выберите сервер в настройках зоны для управления реле.',
+            'zone': zone
+        }), 201
     if zone:
         db.add_log('zone_create', json.dumps({"zone": zone['id'], "name": zone['name']}))
         if is_csv:

@@ -62,11 +62,12 @@ class ZoneRepository(BaseRepository):
                 topic = (zone_data.get('topic') or '').strip()
                 mqtt_sid = zone_data.get('mqtt_server_id')
                 if mqtt_sid is None:
-                    # Fallback: первый enabled MQTT-сервер
+                    # Auto-select only when exactly one enabled server exists
                     try:
-                        row = conn.execute('SELECT id FROM mqtt_servers WHERE enabled=1 ORDER BY id LIMIT 1').fetchone()
-                        if row:
-                            mqtt_sid = row[0]
+                        rows = conn.execute('SELECT id FROM mqtt_servers WHERE enabled=1 ORDER BY id LIMIT 2').fetchall()
+                        if len(rows) == 1:
+                            mqtt_sid = rows[0][0]
+                        # 0 or >1 servers: leave mqtt_sid as None, API layer should validate
                     except Exception:
                         pass
                 zid_explicit = None
