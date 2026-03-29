@@ -18,3 +18,38 @@ omit = ["tools/*", "tests/*", "*.venv/*"]
 [tool.coverage.report]
 fail_under = 30
 show_missing = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [".venv", "tools", "migrations", "__pycache__"]
+
+[tool.ruff.lint]
+# Relaxed rules for legacy project — expand gradually
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "RUF",    # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — handled by line-length setting
+    "E741",   # ambiguous variable names (l, I, O)
+    "B008",   # function call in default argument (common in Flask)
+    "B905",   # zip without strict=
+    "SIM108", # ternary operator — readability preference
+    "SIM110", # reimplemented builtin — not always clearer
+    "RUF012", # mutable class attributes — too noisy for Flask
+    "UP035",  # deprecated typing imports — gradual migration
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "config", "database", "db", "routes", "services", "utils", "irrigation_scheduler"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
