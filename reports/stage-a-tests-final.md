@@ -1,64 +1,83 @@
-# Pytest Suite Hanging Issue - RESOLVED
+# Stage A Final Report: pytest Suite Hang Fix
 
-## Problem Summary
-- Full pytest suite with 433 tests hanging after ~33% completion
-- Individual test files also hanging during session teardown
-- Root cause: Telegram bot service making HTTP requests and spawning threads during tests
+## Task
+Fix зависание полного pytest suite — wb-irrigation на ~33% прохождения тестов.
 
-## Root Cause Analysis
-1. **Telegram Bot Service**: `services/telegram_bot.py` had no TESTING guards
-   - `send_text()` and `send_message()` making HTTP requests to Telegram API
-   - `start_long_polling_if_needed()` spawning daemon threads
-   - `/api/settings/telegram/test` route triggering real telegram operations
+## Root Causes Identified & Fixed
 
-2. **Import-time initialization**: Telegram bot services started at `app.py` import time (lines 62-65)
-
-3. **Atexit handlers**: MQTT client cleanup registered but could interfere with test teardown
-
-## Solution Implemented
-1. **Added TESTING guards to telegram_bot.py**:
-   ```python
-   # In send_text() and send_message()
-   if os.environ.get('TESTING') == '1':
-       logger.debug(f"TESTING mode: skipping send_text to {chat_id}")
-       return True
-   
-   # In start_long_polling_if_needed()
-   if os.environ.get('TESTING') == '1':
-       logger.debug("TESTING mode: skipping telegram long polling")
-       return
-   ```
-
-2. **Added TESTING guard to telegram test route** in `routes/settings.py`:
-   ```python
-   if current_app.config.get('TESTING'):
-       return jsonify({'success': True, 'message': 'TESTING mode: telegram test skipped'})
-   ```
-
-## Results
-- **BEFORE**: `test_api_endpoints_full.py` hanging at ~22% (87 tests)
-- **AFTER**: `test_api_endpoints_full.py` completes in ~60s with expected failures (6F/81P)
-- **Status**: Primary hanging issue RESOLVED
-
-## Remaining Minor Issue
-- Individual pytest sessions still hang for 20s during teardown (after tests complete)
-- This is a cleanup issue with daemon threads, not test execution hanging
-- Tests complete successfully, just session teardown is slow
-
-## Test Status Summary
-```
-TESTING=1 python3 -m pytest tools/tests/tests_pytest/test_api_endpoints_full.py --timeout=10 -q
-Result: ........F.F.FF............................................FF............
-        ...............  [100%]
-        6 failed, 81 passed in ~60s
+### 1. ✅ MQTT atexit handlers (mqtt_pub.py)
+**Problem:** `atexit.register(_shutdown_mqtt_clients)` блокировал teardown
+**Fix:** Added TESTING guard:
+```python
+if not os.environ.get('TESTING'):
+    atexit.register(_shutdown_mqtt_clients)
 ```
 
-## Commit
-```
-1963ef6 - fix(tests): add TESTING guards to telegram bot service
+### 2. ✅ APScheduler job threads (irrigation_scheduler.py)  
+**Problem:** `_run_group_sequence()` запускался в APScheduler thread pool с `time.sleep(1)` loops
+**Fix:** Skip execution in TESTING mode:
+```python
+def _run_group_sequence(self, group_id: int, zone_ids: List[int]):
+    if os.environ.get('TESTING') == '1':
+        logger.debug("TESTING mode: skipping _run_group_sequence for group %s", group_id)
+        return
 ```
 
-## Performance
-- Full suite progress: Now reaches 50%+ consistently vs 16-33% before
-- Individual files: Complete but with 20s teardown delay
-- Core hanging issue: **RESOLVED**
+### 3. ✅ Daemon threads in services
+**Fixed:** Added TESTING guards to:
+- `zone_control.py` — delayed master valve close thread
+- `auth_service.py` — background password rehashing thread  
+- `observed_state.py` — async MQTT state verification thread
+
+### 4. ✅ Session-level cleanup (conftest.py)
+**Added:** Aggressive cleanup of schedulers, SSE hub, Telegram bot threads in session teardown
+
+## Current Status: ⚠️ PARTIALLY FIXED
+
+### Improvements Achieved:
+- **Main hang eliminated**: APScheduler `_run_group_sequence` no longer blocks tests
+- **Atexit hang fixed**: MQTT client disconnection no longer blocks teardown
+- **Daemon thread leaks stopped**: Background threads properly guarded
+
+### Remaining Issues:
+Several test files still experience timeouts (>10s):
+- `test_api_endpoints_full.py` — session teardown hangs
+- `test_auth_edge_cases.py` — werkzeug password hashing too slow
+- `test_auth_login_flow.py` — password hashing bottleneck
+- `test_api_settings.py` — unknown cause
+
+### Partial Success:
+Individual test files can run successfully, but the full suite still experiences cumulative slowdowns and timeouts.
+
+## Performance Numbers
+
+**Before fixes:**
+- Full suite: Hung at ~33% (timeout after 3 min)
+- Individual files: Many timeouts
+
+**After fixes:**  
+- Individual working files: Pass in <30s
+- Problem files: Still timeout but for different reasons
+- Full suite: Still timeout due to remaining bottlenecks
+
+## Files Changed & Committed
+```
+git commit 2777a4f: "fix(tests): prevent daemon thread leaks and atexit hang in pytest suite"
+- services/mqtt_pub.py: TESTING guard for atexit
+- services/app_init.py: reset_init() function
+- services/zone_control.py: TESTING guard for daemon thread  
+- services/auth_service.py: TESTING guard for rehash thread
+- services/observed_state.py: TESTING guard for verify_async
+- tools/tests/tests_pytest/conftest.py: session cleanup fixtures
+- irrigation_scheduler.py: TESTING guard for _run_group_sequence
+```
+
+## Recommendations for Complete Fix
+
+1. **Password hashing acceleration**: Replace werkzeug pbkdf2 with faster method in tests
+2. **Session isolation**: Consider pytest-forked for full isolation
+3. **Teardown optimization**: Profile remaining session cleanup bottlenecks
+4. **Test selection**: Run problematic tests separately or with higher timeouts
+
+## Summary
+The primary thread leaks and scheduler hangs have been fixed. The test suite can now complete individual files but still needs optimization for full suite runs due to remaining performance bottlenecks.
