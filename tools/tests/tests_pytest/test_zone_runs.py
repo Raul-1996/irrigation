@@ -40,7 +40,9 @@ class TestZoneRuns:
 
         now = datetime.utcnow().isoformat()
         mono = time.monotonic()
-        run_id = db.create_zone_run(zid, gid, now, mono, program_id=None, raw_pulses=0)
+        # Signature: create_zone_run(zone_id, group_id, start_utc, start_monotonic,
+        #                            start_raw_pulses, pulse_liters_at_start, base_m3_at_start=None)
+        run_id = db.create_zone_run(zid, gid, now, mono, 0, 0.0)
         assert run_id is not None
         assert isinstance(run_id, int)
 
@@ -52,7 +54,7 @@ class TestZoneRuns:
 
         now = datetime.utcnow().isoformat()
         mono = time.monotonic()
-        run_id = db.create_zone_run(zid, gid, now, mono, program_id=None, raw_pulses=0)
+        run_id = db.create_zone_run(zid, gid, now, mono, 0, 0.0)
 
         run = db.get_open_zone_run(zid)
         assert run is not None
@@ -66,11 +68,12 @@ class TestZoneRuns:
 
         now = datetime.utcnow().isoformat()
         mono = time.monotonic()
-        run_id = db.create_zone_run(zid, gid, now, mono, program_id=None, raw_pulses=0)
+        run_id = db.create_zone_run(zid, gid, now, mono, 0, 0.0)
 
         end_time = datetime.utcnow().isoformat()
         end_mono = time.monotonic()
-        db.finish_zone_run(run_id, end_time, end_mono, end_raw_pulses=10, liters=5.0)
+        # Signature: finish_zone_run(run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status='ok')
+        db.finish_zone_run(run_id, end_time, end_mono, 10, 5.0, 1.0)
 
         # Should be closed now
         run = db.get_open_zone_run(zid)

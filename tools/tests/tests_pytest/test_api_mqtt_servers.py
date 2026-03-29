@@ -19,7 +19,8 @@ class TestMQTTServersAPI:
         r = client.get('/api/mqtt/servers')
         assert r.status_code == 200
         data = r.get_json()
-        assert isinstance(data, list)
+        assert data.get('success') == True
+        assert isinstance(data.get('servers'), list)
 
     def test_create_server(self, client):
         r = client.post('/api/mqtt/servers', json={

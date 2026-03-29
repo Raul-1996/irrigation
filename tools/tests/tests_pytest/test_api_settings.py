@@ -90,12 +90,12 @@ class TestBackup:
 
 
 class TestEmergency:
-    @patch('app._publish_mqtt_value', return_value=True)
+    @patch('services.mqtt_pub.publish_mqtt_value', return_value=True)
     def test_emergency_stop(self, mock_pub, client):
         r = client.post('/api/emergency-stop')
         assert r.status_code in (200, 400)
 
-    @patch('app._publish_mqtt_value', return_value=True)
+    @patch('services.mqtt_pub.publish_mqtt_value', return_value=True)
     def test_emergency_resume(self, mock_pub, client):
         r = client.post('/api/emergency-resume')
         assert r.status_code in (200, 400)

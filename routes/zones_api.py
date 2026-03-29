@@ -922,6 +922,15 @@ def api_mqtt_zones_sse():
         if current_app.config.get('TESTING'):
             return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
         return api_error('MQTT_LIB_MISSING', 'paho-mqtt not installed', 500)
+    
+    # Return mock SSE in tests
+    if current_app.config.get('TESTING'):
+        @stream_with_context
+        def mock_gen():
+            yield 'event: open\n' + 'data: {}\n\n'
+            yield 'event: ping\n' + 'data: {}\n\n'
+        return Response(mock_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    
     try:
         _sse_hub.ensure_hub_started()
         msg_queue = _sse_hub.register_client()

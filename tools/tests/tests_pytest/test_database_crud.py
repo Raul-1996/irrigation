@@ -178,39 +178,33 @@ class TestPrograms:
             pass
 
     def test_add_program_via_api(self, db):
-        """Test program CRUD at DB level if method exists."""
-        # Check if add_program method exists
-        if hasattr(db, 'add_program'):
-            result = db.add_program({
-                'name': 'Test Prog',
-                'time': '06:00',
-                'days': json.dumps([0, 1, 2, 3, 4, 5, 6]),
-                'zones': json.dumps([1, 2, 3])
-            })
-            assert result is not None
+        """Test program CRUD at DB level."""
+        result = db.create_program({
+            'name': 'Test Prog',
+            'time': '06:00',
+            'days': json.dumps([0, 1, 2, 3, 4, 5, 6]),
+            'zones': json.dumps([1, 2, 3])
+        })
+        assert result is not None
 
 
 class TestMQTTServers:
     def test_get_mqtt_servers(self, db):
-        if hasattr(db, 'get_mqtt_servers'):
-            servers = db.get_mqtt_servers()
-            assert isinstance(servers, list)
+        servers = db.get_mqtt_servers()
+        assert isinstance(servers, list)
 
     def test_add_mqtt_server(self, db):
-        if hasattr(db, 'add_mqtt_server'):
-            result = db.add_mqtt_server({
-                'name': 'test-broker',
-                'host': '192.168.1.100',
-                'port': 1883,
-                'enabled': 1
-            })
-            assert result is not None
+        result = db.create_mqtt_server({
+            'name': 'test-broker',
+            'host': '192.168.1.100',
+            'port': 1883,
+            'enabled': 1
+        })
+        assert result is not None
 
     def test_get_mqtt_server_by_id(self, db):
-        if hasattr(db, 'get_mqtt_server'):
-            # Nonexistent
-            s = db.get_mqtt_server(99999)
-            assert s is None
+        s = db.get_mqtt_server(99999)
+        assert s is None
 
 
 class TestBotFSM:

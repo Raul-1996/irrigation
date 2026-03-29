@@ -74,7 +74,12 @@ setup_logging(logger)
 
 # ── Flask app ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.config.from_object(Config)
+# Use TestConfig when TESTING=1 to disable CSRF
+if os.environ.get('TESTING') == '1':
+    from config import TestConfig
+    app.config.from_object(TestConfig)
+else:
+    app.config.from_object(Config)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 app.db = db
 csrf = CSRFProtect(app)

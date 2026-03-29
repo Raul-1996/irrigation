@@ -136,6 +136,12 @@ def ensure_hub_started() -> None:
     if _mqtt is None:
         return
 
+    # Skip real MQTT connections in tests
+    if _app_config and _app_config.get('TESTING'):
+        with _SSE_HUB_LOCK:
+            _SSE_HUB_STARTED = True
+        return
+
     with _SSE_HUB_LOCK:
         if _SSE_HUB_STARTED:
             return

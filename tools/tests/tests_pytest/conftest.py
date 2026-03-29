@@ -1,168 +1,238 @@
+"""Test configuration — Flask test_client approach, NO real HTTP server.
+
+Key design decisions:
+1. Redirect DB to temp file BEFORE importing app
+2. Mock paho.mqtt.client.Client at module level BEFORE any app imports
+3. Mock StateVerifier to skip real MQTT verification
+4. Disable CSRF via TestConfig
+5. Seed fresh data before each test
+"""
 import os
 import sys
 import sqlite3
 import json
 import tempfile
 import pytest
-import threading
-import atexit
-try:
-    from werkzeug.serving import make_server
-except Exception:
-    make_server = None
+from unittest.mock import MagicMock
 
+# Set TESTING before any imports
+os.environ['TESTING'] = '1'
+os.environ['WB_BASE_URL'] = 'http://test'
+os.environ['WB_PROTECT_LIVE'] = '0'
 
-os.environ.setdefault("TESTING", "1")
-
-# Ensure project root on path (…/irrigation)
+# Ensure project root on path
 _HERE = os.path.abspath(os.path.dirname(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir, os.pardir))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-import app as app_module  # noqa: E402
-import database as database_module  # noqa: E402
+# ── Create temp DB path BEFORE importing anything ──────────────────────────
+_TEMP_DB_DIR = tempfile.mkdtemp(prefix='wb_irrigation_test_')
+_TEMP_DB_PATH = os.path.join(_TEMP_DB_DIR, 'irrigation_test.db')
+os.environ['TEST_DB_PATH'] = _TEMP_DB_PATH
 
-# Initialize test DB and start HTTP server EARLY (module import time)
-# so that tests reading WB_BASE_URL at import pick it up.
+# ── Patch MQTT before importing app ────────────────────────────────────────
+import paho.mqtt.client as _real_mqtt
+
+_orig_mqtt_client_cls = _real_mqtt.Client
+
+
+class _MockMQTTClient:
+    """Drop-in replacement for paho.mqtt.client.Client that never connects."""
+
+    def __init__(self, *args, **kwargs):
+        self._connected = False
+
+    def connect(self, *a, **kw):
+        self._connected = True
+        return 0
+
+    def disconnect(self, *a, **kw):
+        self._connected = False
+        return 0
+
+    def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
+        m = MagicMock()
+        m.rc = 0
+        m.mid = 1
+        m.is_published.return_value = True
+        m.wait_for_publish = MagicMock()
+        return m
+
+    def subscribe(self, topic, qos=0, **kw):
+        return (0, 1)
+
+    def unsubscribe(self, topic, **kw):
+        return (0, 1)
+
+    def loop_start(self):
+        pass
+
+    def loop_stop(self, force=False):
+        pass
+
+    def loop_forever(self, *a, **kw):
+        pass
+
+    def loop(self, timeout=1.0, max_packets=1):
+        return 0
+
+    def is_connected(self):
+        return self._connected
+
+    def username_pw_set(self, *a, **kw):
+        pass
+
+    def tls_set(self, *a, **kw):
+        pass
+
+    def reconnect(self):
+        return 0
+
+    def enable_logger(self, *a, **kw):
+        pass
+
+    def will_set(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+# Monkey-patch paho.mqtt.client.Client globally
+_real_mqtt.Client = _MockMQTTClient
+
+# ── Now create isolated DB and import app ──────────────────────────────────
+# Create the IrrigationDB with temp path BEFORE importing app module
+from database import IrrigationDB
+import database as database_module
+
+# Replace the global db singleton with a test instance
+_test_db = IrrigationDB(db_path=_TEMP_DB_PATH)
+database_module.db = _test_db
+
+# Now import app - it will pick up our patched database_module.db
+import app as app_module
+app_module.db = database_module.db
+app_module.app.db = database_module.db
+
+# ── Mock StateVerifier to skip MQTT verification ──────────────────────────
 try:
-    # Prepare isolated temporary database path
-    _TMPDIR = tempfile.mkdtemp(prefix='wb_irrigation_pytest_')
-    _TEST_DB_PATH = os.path.join(_TMPDIR, 'irrigation_test.db')
-    from database import IrrigationDB
-    _test_db = IrrigationDB(db_path=_TEST_DB_PATH)
-    database_module.db = _test_db
+    from services import observed_state as _obs_mod
 
-    # Bind app to test DB and testing mode
-    app_module.app.config.update(TESTING=True)
-    app_module.db = database_module.db
+    class _NoOpVerifier:
+        """StateVerifier replacement that does nothing in tests."""
 
-    # Start in-process HTTP server and set WB_BASE_URL
-    if make_server is not None and not os.environ.get('WB_BASE_URL'):
-        try:
-            _SRV = make_server('127.0.0.1', 0, app_module.app)
-        except Exception:
-            _SRV = None
-        _PORT = getattr(_SRV, 'server_port', 8080)
-        os.environ['WB_BASE_URL'] = f'http://127.0.0.1:{_PORT}'
-        _THREAD = threading.Thread(target=_SRV.serve_forever, daemon=True)
-        _THREAD.start()
+        def verify(self, zone_id=None, expected=None, timeout=1, retries=1):
+            return True
 
-        def _shutdown_server():
-            try:
-                _SRV.shutdown()
-            except Exception:
-                pass
+        def verify_async(self, zone_id, expected):
+            pass
 
-        atexit.register(_shutdown_server)
-except Exception:
-    # If early init fails, fixtures below will attempt again
+        def schedule_verify(self, zone_id, expected, delay=0):
+            pass
+
+        def _safe_verify(self, zone_id, expected):
+            pass
+
+    _noop = _NoOpVerifier()
+    _obs_mod.state_verifier = _noop
+
+    try:
+        from services import zone_control as _zc_mod
+        _zc_mod.state_verifier = _noop
+    except (ImportError, AttributeError):
+        pass
+except (ImportError, AttributeError):
+    pass
+
+# Also patch mqtt_pub to clear any cached real clients
+try:
+    from services import mqtt_pub as _mqtt_pub_mod
+    _mqtt_pub_mod._MQTT_CLIENTS = {}
+except (ImportError, AttributeError):
     pass
 
 
+# ── Fixtures ───────────────────────────────────────────────────────────────
+
 @pytest.fixture(scope='session', autouse=True)
-def _isolate_test_database(tmp_path_factory):
-    """Route pytest to a temporary DB to protect the live configuration."""
-    # Choose a temp DB path unless TEST_DB_PATH is provided
-    test_db_path = os.environ.get('TEST_DB_PATH')
-    if not test_db_path:
-        tmpdir = tmp_path_factory.mktemp('pytest_db')
-        test_db_path = str(tmpdir / 'irrigation_test.db')
-
-    # Point global DB to temp path and init
-    from database import IrrigationDB  # local import to avoid circulars
-    test_db = IrrigationDB(db_path=test_db_path)
-    database_module.db = test_db
-
-    # Ensure Flask app uses same DB
-    app_module.app.config.update(TESTING=True)
-    app_module.db = database_module.db
-
-    # Protect against accidental writes to a file named exactly 'irrigation.db'
-    os.environ.setdefault('WB_PROTECT_LIVE', '1')
-
+def _session_setup():
+    """Session-wide setup: ensure app config is correct."""
+    app_module.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield
+    # Restore original MQTT Client class
+    _real_mqtt.Client = _orig_mqtt_client_cls
 
-@pytest.fixture(scope='session', autouse=True)
-def _start_http_server(_isolate_test_database):
-    # If server already started at import-time, just yield
-    if os.environ.get('WB_BASE_URL'):
-        yield
-        return
-    if make_server is None:
-        yield
-        return
-    try:
-        srv = make_server('127.0.0.1', 0, app_module.app)
-    except Exception:
-        yield
-        return
-    port = getattr(srv, 'server_port', 8080)
-    os.environ['WB_BASE_URL'] = f'http://127.0.0.1:{port}'
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    try:
-        yield
-    finally:
-        try:
-            srv.shutdown()
-        except Exception:
-            pass
 
 def _reset_seed_data():
-    # Seed ONLY the test DB referenced by database_module.db
-    target_path = getattr(database_module.db, 'db_path', 'irrigation.db')
-    if os.environ.get('WB_PROTECT_LIVE', '1') == '1' and os.path.basename(target_path) == 'irrigation.db':
-        # Skip seeding when DB path looks like a live DB
-        return
+    """Seed fresh data into the test database."""
+    target_path = _TEMP_DB_PATH
     conn = sqlite3.connect(target_path)
     c = conn.cursor()
-    for tbl in ['zones','groups','programs','logs','water_usage','mqtt_servers','settings']:
+    # Clean all main tables
+    for tbl in ['zones', 'groups', 'programs', 'logs', 'water_usage',
+                'mqtt_servers', 'settings', 'zone_runs']:
         try:
             c.execute(f'DELETE FROM {tbl}')
         except Exception:
             pass
-    # One group (normalized name)
-    c.execute("INSERT INTO groups(id,name) VALUES(1,'Насос-1')")
+    # One group
+    c.execute("INSERT INTO groups(id, name) VALUES(1, 'Насос-1')")
     # MQTT server
-    c.execute("INSERT INTO mqtt_servers(id,name,host,port,enabled) VALUES(1,'local','127.0.0.1',1883,1)")
-    # 30 zones, duration 1, topics 101..105/K1..K6
-    zones = []
-    for zid in range(1,31):
-        dev = 101 + (zid-1)//6
-        ch = 1 + (zid-1)%6
+    c.execute("INSERT INTO mqtt_servers(id, name, host, port, enabled) VALUES(1, 'local', '127.0.0.1', 1883, 1)")
+    # 30 zones — all fields explicitly set to clean state
+    for zid in range(1, 31):
+        dev = 101 + (zid - 1) // 6
+        ch = 1 + (zid - 1) % 6
         topic = f"/devices/wb-mr6cv3_{dev}/controls/K{ch}"
-        zones.append((zid,'off',f'Зона {zid}','🌿',1,1,topic,1))
-    c.executemany("INSERT INTO zones(id,state,name,icon,duration,group_id,topic,mqtt_server_id) VALUES(?,?,?,?,?,?,?,?)", zones)
-    # two programs 04:00 and 20:00 with all zones
-    all_z = json.dumps(list(range(1,31)))
-    days = json.dumps([0,1,2,3,4,5,6])
-    c.execute("INSERT INTO programs(id,name,time,days,zones) VALUES(1,'Утренний','04:00',?,?)", (days, all_z))
-    c.execute("INSERT INTO programs(id,name,time,days,zones) VALUES(2,'Вечерний','20:00',?,?)", (days, all_z))
-    # password default
+        c.execute(
+            """INSERT INTO zones(id, state, name, icon, duration, group_id, topic, mqtt_server_id,
+               postpone_until, postpone_reason, watering_start_time, last_watering_time,
+               scheduled_start_time, watering_start_source, commanded_state, observed_state,
+               version, fault_count, last_fault)
+               VALUES(?, 'off', ?, '🌿', 1, 1, ?, 1,
+               NULL, NULL, NULL, NULL,
+               NULL, NULL, 'off', NULL,
+               0, 0, NULL)""",
+            (zid, f'Зона {zid}', topic))
+    # Two programs
+    all_z = json.dumps(list(range(1, 31)))
+    days = json.dumps([0, 1, 2, 3, 4, 5, 6])
+    c.execute("INSERT INTO programs(id, name, time, days, zones) VALUES(1, 'Утренний', '04:00', ?, ?)", (days, all_z))
+    c.execute("INSERT INTO programs(id, name, time, days, zones) VALUES(2, 'Вечерний', '20:00', ?, ?)", (days, all_z))
+    # Password default
     try:
         from werkzeug.security import generate_password_hash
-        c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('password_hash',?)", (generate_password_hash('1234', method='pbkdf2:sha256'),))
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('password_hash', ?)",
+                  (generate_password_hash('1234', method='pbkdf2:sha256'),))
     except Exception:
         pass
     conn.commit()
     conn.close()
 
+
 @pytest.fixture(autouse=True)
 def ensure_db():
-    # Force initialization by accessing DB
-    database_module.db.get_zones()
+    """Seed fresh data before each test."""
     _reset_seed_data()
     yield
 
+
 @pytest.fixture(autouse=True)
 def _cleanup_media_after_test():
-    # Ensure media directories exist
-    from services.helpers import UPLOAD_FOLDER, MAP_DIR
+    """Ensure media directories exist and clean up after tests."""
+    try:
+        from services.helpers import UPLOAD_FOLDER, MAP_DIR
+    except ImportError:
+        yield
+        return
     try:
         yield
     finally:
-        # Remove files created during tests (maps and zone photos)
         for folder in (MAP_DIR, UPLOAD_FOLDER):
             try:
                 for name in os.listdir(folder):
@@ -175,8 +245,10 @@ def _cleanup_media_after_test():
             except Exception:
                 pass
 
+
 @pytest.fixture()
 def client():
-    app_module.app.config.update(TESTING=True)
+    """Flask test client — NO real server needed."""
+    app_module.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     with app_module.app.test_client() as c:
         yield c
