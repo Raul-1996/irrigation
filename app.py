@@ -80,7 +80,7 @@ if os.environ.get('TESTING') == '1':
     app.config.from_object(TestConfig)
 else:
     app.config.from_object(Config)
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB (route-level MAX_FILE_SIZE enforces 5MB)
 app.db = db
 csrf = CSRFProtect(app)
 
