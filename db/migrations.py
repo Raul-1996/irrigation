@@ -198,6 +198,84 @@ class MigrationRunner:
         except sqlite3.Error as e:
             logger.error("Ошибка применения миграции %s: %s", name, e)
 
+    def rollback_migration(self, name: str) -> bool:
+        """Rollback (downgrade) a single named migration.
+
+        Returns True if rollback succeeded, False otherwise.
+        The migration must be in the DOWNGRADE_REGISTRY and must have been applied.
+        """
+        method_name = self.DOWNGRADE_REGISTRY.get(name)
+        if method_name is None:
+            logger.error("Миграция %s не поддерживает downgrade", name)
+            return False
+        down_func = getattr(self, method_name, None)
+        if down_func is None:
+            logger.error("Метод %s не найден для миграции %s", method_name, name)
+            return False
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute('PRAGMA foreign_keys=OFF')
+                cur = conn.execute('SELECT name FROM migrations WHERE name = ? LIMIT 1', (name,))
+                if cur.fetchone() is None:
+                    logger.warning("Миграция %s не была применена, пропуск rollback", name)
+                    return False
+                down_func(conn)
+                conn.execute('DELETE FROM migrations WHERE name = ?', (name,))
+                conn.execute('PRAGMA foreign_keys=ON')
+                conn.commit()
+                logger.info("Миграция %s откачена успешно", name)
+                return True
+        except sqlite3.Error as e:
+            logger.error("Ошибка отката миграции %s: %s", name, e)
+            return False
+
+    @staticmethod
+    def _recreate_table_without_columns(conn, table: str, drop_columns: list):
+        """SQLite-compatible DROP COLUMN via table recreation.
+
+        Reads existing schema, removes specified columns, recreates the table
+        and copies data back. Works on all SQLite versions.
+        """
+        cur = conn.execute("PRAGMA table_info(%s)" % table)
+        columns_info = cur.fetchall()
+        # columns_info: (cid, name, type, notnull, dflt_value, pk)
+        keep = [c for c in columns_info if c[1] not in drop_columns]
+        if not keep:
+            logger.error("_recreate_table_without_columns: cannot drop ALL columns from %s", table)
+            return
+        keep_names = [c[1] for c in keep]
+        col_defs = []
+        for c in keep:
+            cid, name, ctype, notnull, dflt, pk = c
+            parts = [name, ctype or 'TEXT']
+            if pk:
+                parts.append('PRIMARY KEY')
+                # Check if the PK column is AUTOINCREMENT
+                # We need to check the original CREATE TABLE SQL
+                try:
+                    schema_cur = conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    )
+                    schema_row = schema_cur.fetchone()
+                    if schema_row and schema_row[0] and 'AUTOINCREMENT' in schema_row[0].upper() and name.lower() == 'id':
+                        parts.append('AUTOINCREMENT')
+                except sqlite3.Error:
+                    pass
+            if notnull and not pk:
+                parts.append('NOT NULL')
+            if dflt is not None and not pk:
+                parts.append('DEFAULT %s' % dflt)
+            col_defs.append(' '.join(parts))
+        cols_csv = ', '.join(keep_names)
+        defs_csv = ', '.join(col_defs)
+        tmp = table + '__down_tmp'
+        conn.execute('DROP TABLE IF EXISTS %s' % tmp)
+        conn.execute('CREATE TABLE %s (%s)' % (tmp, defs_csv))
+        conn.execute('INSERT INTO %s (%s) SELECT %s FROM %s' % (tmp, cols_csv, cols_csv, table))
+        conn.execute('DROP TABLE %s' % table)
+        conn.execute('ALTER TABLE %s RENAME TO %s' % (tmp, table))
+        conn.commit()
+
     # --- All migration methods ---
 
     def _migrate_days_format(self, conn):
@@ -699,3 +777,78 @@ class MigrationRunner:
             logger.info('Добавлены настройки погоды в settings')
         except sqlite3.Error as e:
             logger.error("Ошибка миграции weather_add_settings: %s", e)
+
+    # =====================================================================
+    # Downgrade methods for the last 10 migrations
+    # =====================================================================
+
+    # Registry: migration_name -> method_name (resolved at runtime via getattr)
+    DOWNGRADE_REGISTRY = {
+        'telegram_create_bot_users': '_down_create_bot_users',
+        'telegram_create_bot_subscriptions': '_down_create_bot_subscriptions',
+        'telegram_create_bot_audit': '_down_create_bot_audit',
+        'telegram_add_fsm_and_notif': '_down_add_fsm_and_notif',
+        'telegram_create_bot_idempotency': '_down_create_bot_idempotency',
+        'encrypt_mqtt_passwords': '_down_encrypt_mqtt_passwords',
+        'zones_add_fault_tracking': '_down_add_fault_tracking',
+        'weather_create_cache': '_down_create_weather_cache',
+        'weather_create_log': '_down_create_weather_log',
+        'weather_add_settings': '_down_add_weather_settings',
+    }
+
+    def _down_create_bot_users(self, conn):
+        conn.execute('DROP TABLE IF EXISTS bot_users')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица bot_users')
+
+    def _down_create_bot_subscriptions(self, conn):
+        conn.execute('DROP TABLE IF EXISTS bot_subscriptions')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица bot_subscriptions')
+
+    def _down_create_bot_audit(self, conn):
+        conn.execute('DROP TABLE IF EXISTS bot_audit')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица bot_audit')
+
+    def _down_add_fsm_and_notif(self, conn):
+        drop_cols = ['fsm_state', 'fsm_data', 'notif_critical', 'notif_emergency',
+                     'notif_postpone', 'notif_zone_events', 'notif_rain']
+        self._recreate_table_without_columns(conn, 'bot_users', drop_cols)
+        logger.info('Downgrade: удалены FSM/notif колонки из bot_users')
+
+    def _down_create_bot_idempotency(self, conn):
+        conn.execute('DROP TABLE IF EXISTS bot_idempotency')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица bot_idempotency')
+
+    def _down_encrypt_mqtt_passwords(self, conn):
+        # Decrypting passwords is not safely reversible — mark migration as rolled back
+        # but leave data as-is (encrypted passwords will fail on connect; user must re-enter)
+        logger.warning('Downgrade: encrypt_mqtt_passwords — зашифрованные пароли НЕ расшифрованы. '
+                        'Пользователь должен ввести пароли заново.')
+
+    def _down_add_fault_tracking(self, conn):
+        self._recreate_table_without_columns(conn, 'zones', ['last_fault', 'fault_count'])
+        logger.info('Downgrade: удалены поля last_fault, fault_count из zones')
+
+    def _down_create_weather_cache(self, conn):
+        conn.execute('DROP TABLE IF EXISTS weather_cache')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица weather_cache')
+
+    def _down_create_weather_log(self, conn):
+        conn.execute('DROP TABLE IF EXISTS weather_log')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица weather_log')
+
+    def _down_add_weather_settings(self, conn):
+        weather_keys = [
+            'weather.enabled', 'weather.latitude', 'weather.longitude',
+            'weather.rain_threshold_mm', 'weather.freeze_threshold_c',
+            'weather.wind_threshold_kmh',
+        ]
+        for key in weather_keys:
+            conn.execute('DELETE FROM settings WHERE key = ?', (key,))
+        conn.commit()
+        logger.info('Downgrade: удалены настройки погоды из settings')
