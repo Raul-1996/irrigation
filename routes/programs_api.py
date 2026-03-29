@@ -65,13 +65,17 @@ def api_program(prog_id):
 @programs_api_bp.route('/api/programs', methods=['POST'])
 def api_create_program():
     data = request.get_json() or {}
+    # Validate required fields
+    missing = [f for f in ('name', 'time', 'zones') if f not in data]
+    if missing:
+        return jsonify({'success': False, 'message': f'Missing required fields: {", ".join(missing)}'}), 400
     try:
         if isinstance(data.get('days'), list):
             data['days'] = [int(d) for d in data['days']]
     except Exception as e:
         logger.debug("Handled exception in api_create_program: %s", e)
     try:
-        conflicts = db.check_program_conflicts(program_id=None, time=data['time'], zones=data['zones'], days=data['days'])
+        conflicts = db.check_program_conflicts(program_id=None, time=data['time'], zones=data['zones'], days=data.get('days', []))
         if conflicts:
             return jsonify({'success': False, 'has_conflicts': True, 'conflicts': conflicts, 'message': 'Обнаружены конфликты программ'})
     except Exception as e:
