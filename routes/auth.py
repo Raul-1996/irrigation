@@ -1,10 +1,12 @@
 from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for
 import time
-from flask_wtf.csrf import CSRFProtect
 from services.auth_service import verify_password
 from services.rate_limiter import login_limiter
 
 auth_bp = Blueprint('auth_bp', __name__)
+
+# Will be set by app.py after csrf is created
+csrf = None
 
 
 @auth_bp.route('/login', methods=['GET'])

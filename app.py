@@ -84,6 +84,10 @@ app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB (route-level MAX_FIL
 app.db = db
 csrf = CSRFProtect(app)
 
+# Exempt login endpoint from CSRF — login page doesn't include CSRF token
+from routes.auth import api_login as _api_login_view
+csrf.exempt(_api_login_view)
+
 _sse_hub.init(db=db, mqtt_module=mqtt, app_config=app.config, publish_mqtt_value=_publish_mqtt_value, normalize_topic=normalize_topic, get_scheduler=get_scheduler)
 
 try:
