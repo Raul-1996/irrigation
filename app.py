@@ -50,7 +50,9 @@ except ImportError as e:
     reports_bp = None
 
 # API blueprints
-from routes.zones_api import zones_api_bp
+from routes.zones_crud_api import zones_crud_api_bp
+from routes.zones_photo_api import zones_photo_api_bp
+from routes.zones_watering_api import zones_watering_api_bp
 from routes.groups_api import groups_api_bp
 from routes.programs_api import programs_api_bp
 from routes.mqtt_api import mqtt_api_bp
@@ -228,7 +230,7 @@ try:
 except ImportError as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
 
-for bp in (zones_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_api_bp):
+for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_api_bp):
     app.register_blueprint(bp)
 
 _initialize_app(app, db)
