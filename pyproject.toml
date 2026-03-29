@@ -1,7 +1,20 @@
 [tool.pytest.ini_options]
-timeout = 5
-testpaths = ["tools/tests/tests_pytest"]
+timeout = 10
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 python_classes = "Test*"
 addopts = "--tb=short -q"
+markers = [
+    "mqtt_real: requires real MQTT broker on 10.2.5.244",
+    "e2e: end-to-end tests against live controller",
+    "slow: tests that take >5 seconds",
+]
+
+[tool.coverage.run]
+source = ["app", "database", "irrigation_scheduler", "services", "routes", "db", "utils", "config"]
+omit = ["tools/*", "tests/*", "*.venv/*"]
+
+[tool.coverage.report]
+fail_under = 30
+show_missing = true
