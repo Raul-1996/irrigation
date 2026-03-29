@@ -6,6 +6,7 @@ import logging
 from database import db
 from irrigation_scheduler import get_scheduler
 from services.helpers import api_error
+from services.api_rate_limiter import rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ def api_programs():
 
 
 @programs_api_bp.route('/api/programs/<int:prog_id>', methods=['GET', 'PUT', 'DELETE'])
+@rate_limit('programs', max_requests=20, window_sec=60)
 def api_program(prog_id):
     if request.method == 'GET':
         program = db.get_program(prog_id)
@@ -63,6 +65,7 @@ def api_program(prog_id):
 
 
 @programs_api_bp.route('/api/programs', methods=['POST'])
+@rate_limit('programs', max_requests=20, window_sec=60)
 def api_create_program():
     data = request.get_json() or {}
     # Validate required fields

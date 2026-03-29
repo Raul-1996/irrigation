@@ -14,6 +14,7 @@ from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services.helpers import api_error, api_soft, parse_dt, UPLOAD_FOLDER, ZONE_MEDIA_SUBDIR, ALLOWED_EXTENSIONS, ALLOWED_MIME_TYPES, MAX_FILE_SIZE
 from services.security import admin_required
 from services import sse_hub as _sse_hub
+from services.api_rate_limiter import rate_limit
 
 try:
     import paho.mqtt.client as mqtt
@@ -966,6 +967,7 @@ def api_mqtt_zones_sse():
 # ---- Zone MQTT start/stop ----
 
 @zones_api_bp.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
+@rate_limit('mqtt_control', max_requests=10, window_sec=60)
 def api_zone_mqtt_start(zone_id: int):
     t0 = time.time()
     try:
@@ -1144,6 +1146,7 @@ def api_zone_mqtt_start(zone_id: int):
 
 
 @zones_api_bp.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
+@rate_limit('mqtt_control', max_requests=10, window_sec=60)
 def api_zone_mqtt_stop(zone_id: int):
     z = db.get_zone(zone_id)
     if not z:

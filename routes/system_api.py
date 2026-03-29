@@ -16,6 +16,7 @@ from services.monitors import rain_monitor, env_monitor, water_monitor, probe_en
 from constants import MIN_PASSWORD_LENGTH
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services import sse_hub as _sse_hub
+from services.api_rate_limiter import rate_limit
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
 
@@ -497,6 +498,7 @@ def api_postpone():
 # ===== Emergency =====
 
 @system_api_bp.route('/api/emergency-stop', methods=['POST'])
+@rate_limit('emergency', max_requests=5, window_sec=60)
 def api_emergency_stop():
     """Emergency stop all zones."""
     try:
@@ -535,6 +537,7 @@ def api_emergency_stop():
 
 
 @system_api_bp.route('/api/emergency-resume', methods=['POST'])
+@rate_limit('emergency', max_requests=5, window_sec=60)
 def api_emergency_resume():
     """Resume after emergency stop."""
     try:

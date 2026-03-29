@@ -65,6 +65,7 @@ try:
 except Exception as e:
     logging.getLogger(__name__).debug("Telegram bot init skipped: %s", e)
 from services.locks import snapshot_all_locks as _locks_snapshot
+from services.api_rate_limiter import _is_allowed as _rate_check
 from services import sse_hub as _sse_hub
 from services.app_init import initialize_app as _initialize_app
 
@@ -343,6 +344,41 @@ def _start_single_zone_watchdog():
 
 import atexit
 atexit.register(lambda: _WATCHDOG_STOP_EVENT.set())
+
+# ── General API rate limiter ────────────────────────────────────────────────
+@app.before_request
+def _general_api_rate_limit():
+    """Apply a general 30 req/min rate limit to all mutating API endpoints
+    not already covered by endpoint-specific rate_limit decorators."""
+    if app.config.get('TESTING'):
+        return None
+    p = request.path or ''
+    if not p.startswith('/api/') or request.method == 'GET':
+        return None
+    # Skip paths that have their own decorators (mqtt_control, emergency, programs)
+    # or non-mutable paths
+    skip_paths = {'/api/login', '/api/password', '/api/status', '/health', '/api/env'}
+    if p in skip_paths:
+        return None
+    # Specific groups already have their own limits applied via decorators
+    if '/mqtt/start' in p or '/mqtt/stop' in p:
+        return None
+    if p in ('/api/emergency-stop', '/api/emergency-resume'):
+        return None
+    if p.startswith('/api/programs'):
+        return None
+    ip = request.remote_addr or '0.0.0.0'
+    allowed, retry_after = _rate_check(ip, 'general_mutation', 30, 60)
+    if not allowed:
+        resp = jsonify({
+            'success': False,
+            'message': 'Too many requests',
+            'error_code': 'RATE_LIMITED',
+            'retry_after': retry_after,
+        })
+        resp.status_code = 429
+        resp.headers['Retry-After'] = str(retry_after)
+        return resp
 
 _mark_zone_stopped = _sse_hub.mark_zone_stopped
 _recently_stopped = _sse_hub.recently_stopped
