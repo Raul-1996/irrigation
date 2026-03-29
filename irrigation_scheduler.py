@@ -204,6 +204,8 @@ class IrrigationScheduler:
         self.program_jobs: Dict[int, List[str]] = {}  # program_id -> list(job_id)
         self.is_running = False
         self.group_cancel_events: Dict[int, threading.Event] = {}
+        # Shutdown event: set to interrupt all sleeping threads for graceful stop
+        self._shutdown_event = threading.Event()
 
     def start(self):
         if self.is_running:
@@ -223,6 +225,8 @@ class IrrigationScheduler:
     def stop(self):
         if not self.is_running:
             return
+        # Signal all sleeping threads to wake up immediately
+        self._shutdown_event.set()
         self.scheduler.shutdown(wait=False)
         self.is_running = False
         logger.info("Планировщик полива остановлен")
@@ -525,7 +529,9 @@ class IrrigationScheduler:
                     if cancel_event and cancel_event.is_set():
                         logger.info(f"Программа {program_id}: отмена группы {group_id}, досрочно останавливаем зону {zone_id}")
                         break
-                    time.sleep(1)
+                    if self._shutdown_event.wait(timeout=1):
+                        logger.info(f"Программа {program_id}: shutdown, досрочно останавливаем зону {zone_id}")
+                        break
                     remaining -= 1
 
                 # Centralized stop to ensure MV delayed close
@@ -544,7 +550,8 @@ class IrrigationScheduler:
                         cancel_event = self.group_cancel_events.get(group_id)
                         if cancel_event and cancel_event.is_set():
                             break
-                        time.sleep(1)
+                        if self._shutdown_event.wait(timeout=1):
+                            break
                         waited += 1
 
                 # Если отмена — пропускаем оставшиеся зоны этой группы, но не мешаем другим группам
@@ -991,7 +998,9 @@ class IrrigationScheduler:
                             logger.debug("Handled exception in line_882: %s", e)
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")
                         break
-                    time.sleep(1)
+                    if self._shutdown_event.wait(timeout=1):
+                        logger.info(f"Группа {group_id}: shutdown, досрочно останавливаем зону {zone_id}")
+                        break
                     remaining -= 1
                 # Централизованный OFF и снятие активности
                 try:
@@ -1008,7 +1017,7 @@ class IrrigationScheduler:
                     logger.debug("Handled exception in line_899: %s", e)
                 # Добираем ранние секунды, чтобы следующий старт был вовремя
                 if early > 0 and not (cancel_event and cancel_event.is_set()):
-                    time.sleep(early)
+                    self._shutdown_event.wait(timeout=early)
                 # Если отменено — выходим из последовательности
                 if cancel_event and cancel_event.is_set():
                     break
