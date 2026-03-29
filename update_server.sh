@@ -109,6 +109,20 @@ if [[ -f requirements-dev.txt ]]; then
 fi
 ok "Dependencies installed"
 
+# 3.5) Update systemd unit if changed
+SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+REPO_UNIT="${REPO_DIR}/wb-irrigation.service"
+if [[ -f "$REPO_UNIT" ]]; then
+  if ! cmp -s "$REPO_UNIT" "$SERVICE_FILE" 2>/dev/null; then
+    info "Updating systemd unit file..."
+    cp "$REPO_UNIT" "$SERVICE_FILE"
+    systemctl daemon-reload
+    ok "Systemd unit updated and daemon-reloaded"
+  else
+    info "Systemd unit file unchanged, skipping"
+  fi
+fi
+
 # 4) Restart service
 info "Restarting service: $SERVICE"
 if systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then

@@ -67,24 +67,8 @@ seed_mqtt_row() {
 }
 
 write_service() {
-  cat >"${SERVICE_FILE}" <<EOF
-[Unit]
-Description=WB-Irrigation Flask app
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${APP_DIR}
-Environment=TESTING=0
-Environment=UI_THEME=auto
-ExecStart=${APP_DIR}/venv/bin/python run.py
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  # Copy versioned systemd unit from the repository
+  cp "${APP_DIR}/wb-irrigation.service" "${SERVICE_FILE}"
 }
 
 enable_service() {
