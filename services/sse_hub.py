@@ -283,13 +283,13 @@ def ensure_hub_started() -> None:
                 # Subscribe to zone topics
                 for t in topics.keys():
                     try:
-                        client.subscribe(t, qos=0)
+                        client.subscribe(t, qos=1)
                     except Exception as e:
                         logger.debug("Handled exception in line_281: %s", e)
                 # Subscribe to master-valve topics for this server
                 for t_mv in mv_topics.get(int(sid), {}).keys():
                     try:
-                        client.subscribe(t_mv, qos=0)
+                        client.subscribe(t_mv, qos=1)
                     except Exception as e:
                         logger.debug("Handled exception in line_287: %s", e)
                 client.loop_start()
