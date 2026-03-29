@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WB-Irrigation — Экспертный аудит v2.0</title>
+<style>
+/* ═══════════════════ CSS Variables & Theme ═══════════════════ */
+:root {
+  --bg: #f8f9fa; --bg2: #ffffff; --fg: #1a1a2e; --fg2: #555;
+  --accent: #2563eb; --accent2: #7c3aed; --green: #16a34a; --yellow: #d97706; --red: #dc2626;
+  --border: #e2e8f0; --shadow: 0 1px 3px rgba(0,0,0,.08);
+  --radius: 8px; --sidebar-w: 260px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+}
+@media(prefers-color-scheme:dark){
+  :root{--bg:#0f172a;--bg2:#1e293b;--fg:#e2e8f0;--fg2:#94a3b8;--border:#334155;--shadow:0 1px 3px rgba(0,0,0,.3);--accent:#60a5fa;--accent2:#a78bfa;--green:#4ade80;--yellow:#fbbf24;--red:#f87171}
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:15px}
+body{font-family:var(--font);background:var(--bg);color:var(--fg);line-height:1.65}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ═══════════════════ Layout ═══════════════════ */
+.wrapper{display:flex;min-height:100vh}
+.sidebar{position:fixed;top:0;left:0;width:var(--sidebar-w);height:100vh;overflow-y:auto;background:var(--bg2);border-right:1px solid var(--border);padding:1.2rem .8rem;z-index:100;font-size:.85rem}
+.sidebar h2{font-size:1rem;margin-bottom:.8rem;color:var(--accent)}
+.sidebar ul{list-style:none}
+.sidebar li{margin-bottom:.15rem}
+.sidebar a{display:block;padding:.3rem .5rem;border-radius:4px;color:var(--fg2);transition:all .15s}
+.sidebar a:hover,.sidebar a.active{background:var(--accent);color:#fff;text-decoration:none}
+.sidebar .score-badge{display:inline-block;background:var(--accent2);color:#fff;padding:2px 8px;border-radius:12px;font-weight:700;font-size:1.1rem;margin:0 0 .8rem}
+.content{margin-left:var(--sidebar-w);flex:1;padding:2rem 2.5rem;max-width:1000px}
+@media(max-width:900px){
+  .sidebar{position:relative;width:100%;height:auto;border-right:none;border-bottom:1px solid var(--border)}
+  .content{margin-left:0;padding:1rem}
+  .wrapper{flex-direction:column}
+}
+
+/* ═══════════════════ Typography ═══════════════════ */
+h1{font-size:1.8rem;margin:0 0 .3rem;color:var(--accent)}
+h2{font-size:1.4rem;margin:2rem 0 .8rem;padding-bottom:.4rem;border-bottom:2px solid var(--accent);color:var(--fg)}
+h3{font-size:1.15rem;margin:1.5rem 0 .5rem;color:var(--fg)}
+h4{font-size:1rem;margin:1rem 0 .3rem}
+p,li{margin-bottom:.4rem}
+.subtitle{color:var(--fg2);font-size:.95rem;margin-bottom:1.5rem}
+
+/* ═══════════════════ Components ═══════════════════ */
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:1.2rem;margin-bottom:1rem;box-shadow:var(--shadow)}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.8rem;font-weight:600;color:#fff;vertical-align:middle}
+.badge-red{background:var(--red)}.badge-yellow{background:var(--yellow);color:#000}.badge-green{background:var(--green)}
+.tag{display:inline-block;background:var(--border);color:var(--fg2);padding:1px 8px;border-radius:4px;font-size:.78rem;margin:0 2px}
+code{font-family:var(--mono);background:var(--border);padding:1px 5px;border-radius:3px;font-size:.85em}
+pre{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:.8rem;overflow-x:auto;font-family:var(--mono);font-size:.82rem;line-height:1.5;margin:.5rem 0 1rem}
+blockquote{border-left:3px solid var(--accent);padding:.5rem 1rem;margin:.5rem 0;color:var(--fg2);background:var(--bg)}
+
+/* Score gauge */
+.score-container{text-align:center;margin:1.5rem 0}
+.score-ring{position:relative;width:140px;height:140px;margin:0 auto}
+.score-ring svg{transform:rotate(-90deg)}
+.score-ring circle{fill:none;stroke-width:10}
+.score-ring .bg{stroke:var(--border)}
+.score-ring .fg{stroke:var(--accent);stroke-linecap:round;transition:stroke-dashoffset .8s}
+.score-num{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:2.2rem;font-weight:800;color:var(--accent)}
+
+/* Tables */
+table{width:100%;border-collapse:collapse;margin:.8rem 0;font-size:.88rem}
+th,td{padding:.55rem .7rem;text-align:left;border-bottom:1px solid var(--border)}
+th{background:var(--bg);font-weight:600;position:sticky;top:0;cursor:pointer;user-select:none}
+th:hover{background:var(--border)}
+tr:hover td{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.table-wrap{overflow-x:auto;margin:.5rem 0;border:1px solid var(--border);border-radius:var(--radius)}
+.table-wrap table{margin:0}
+
+/* Timeline */
+.timeline{position:relative;padding-left:2rem;margin:1rem 0}
+.timeline::before{content:'';position:absolute;left:.8rem;top:0;bottom:0;width:2px;background:var(--border)}
+.timeline-item{position:relative;margin-bottom:1.2rem}
+.timeline-item::before{content:'';position:absolute;left:-1.45rem;top:.4rem;width:12px;height:12px;border-radius:50%;border:2px solid var(--accent);background:var(--bg2)}
+.timeline-item.green::before{border-color:var(--green);background:var(--green)}
+.timeline-item.yellow::before{border-color:var(--yellow);background:var(--yellow)}
+.timeline-item.red::before{border-color:var(--red);background:var(--red)}
+
+/* Meter bars */
+.meter{height:8px;background:var(--border);border-radius:4px;overflow:hidden;margin:.3rem 0}
+.meter-fill{height:100%;border-radius:4px;transition:width .4s}
+
+/* Print */
+@media print{
+  .sidebar{display:none}
+  .content{margin-left:0;max-width:100%}
+  .card{break-inside:avoid}
+  body{font-size:11pt}
+}
+
+/* Collapsible */
+details{margin:.5rem 0}
+details summary{cursor:pointer;font-weight:600;padding:.3rem 0;color:var(--accent)}
+details summary:hover{text-decoration:underline}
+
+/* Grid for stats */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.8rem;margin:1rem 0}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;text-align:center}
+.stat-card .num{font-size:1.8rem;font-weight:800;color:var(--accent)}
+.stat-card .label{font-size:.82rem;color:var(--fg2)}
+</style>
+</head>
+<body>
+<div class="wrapper">
+
+<!-- ═══════════════════ SIDEBAR ═══════════════════ -->
+<nav class="sidebar">
+  <h2>💧 WB-Irrigation Audit</h2>
+  <div class="score-badge">5.5 / 10</div>
+  <ul>
+    <li><a href="#summary">1. Executive Summary</a></li>
+    <li><a href="#overview">2. Обзор проекта</a></li>
+    <li><a href="#strengths">3. Сильные стороны</a></li>
+    <li><a href="#weaknesses">4. Слабые стороны</a></li>
+    <li><a href="#live-test">5. Живое тестирование</a></li>
+    <li><a href="#comparison">6. Сравнение с конкурентами</a></li>
+    <li><a href="#competitors-detail">7. Детальный разбор</a></li>
+    <li><a href="#recommendations">8. Рекомендации</a></li>
+    <li><a href="#unique">9. Уникальные преимущества</a></li>
+    <li><a href="#roadmap">10. Дорожная карта</a></li>
+    <li><a href="#conclusion">11. Заключение</a></li>
+  </ul>
+  <hr style="margin:1rem 0;border:none;border-top:1px solid var(--border)">
+  <div style="font-size:.75rem;color:var(--fg2)">
+    Дата: 29 марта 2026<br>
+    Версия проекта: 2.0.0<br>
+    Платформа: Wirenboard 8<br>
+    Кодовая база: ~31K строк
+  </div>
+</nav>
+
+<!-- ═══════════════════ CONTENT ═══════════════════ -->
+<main class="content">
+
+<!-- ═══ 1. EXECUTIVE SUMMARY ═══ -->
+<section id="summary">
+<h1>Экспертный аудит WB-Irrigation v2.0</h1>
+<p class="subtitle">Независимый анализ от IoT/Web-разработчика и специалиста по системам орошения</p>
+
+<div class="score-container">
+  <div class="score-ring">
+    <svg viewBox="0 0 160 160" width="140" height="140">
+      <circle class="bg" cx="80" cy="80" r="65"/>
+      <circle class="fg" cx="80" cy="80" r="65" stroke-dasharray="408" stroke-dashoffset="184"/>
+    </svg>
+    <div class="score-num">5.5</div>
+  </div>
+  <p style="color:var(--fg2);margin-top:.3rem">Общая оценка из 10 (было 5.0)</p>
+</div>
+
+<div class="stat-grid">
+  <div class="stat-card"><div class="num">24</div><div class="label">Зоны полива</div></div>
+  <div class="stat-card"><div class="num">~31K</div><div class="label">Строк кода</div></div>
+  <div class="stat-card"><div class="num">112</div><div class="label">Python-файлов</div></div>
+  <div class="stat-card"><div class="num">728</div><div class="label">except Exception</div></div>
+  <div class="stat-card"><div class="num">226ms</div><div class="label">Время /health</div></div>
+  <div class="stat-card"><div class="num">1</div><div class="label">Разработчик</div></div>
+</div>
+
+<div class="card">
+<h3>Ключевые выводы</h3>
+<p><span class="badge badge-green">✓</span> <strong>Прогресс с прошлого аудита:</strong> SECRET_KEY автогенерация, CSRF включён, MQTT пароли зашифрованы (AES-GCM), QoS 2 для команд реле, observed state verification, fault tracking.</p>
+<p><span class="badge badge-green">✓</span> <strong>Архитектура рефакторена:</strong> app.py 370 строк (было 4411), database.py — фасад над 9 репозиториями, 30 именованных миграций, boot-sync, watchdog.</p>
+<p><span class="badge badge-red">✗</span> <strong>Критическое:</strong> 728 catch-all <code>except Exception</code> (было 356 — удвоилось!), дефолтный пароль '1234' при первом запуске, SSE-подписка на QoS 0 (read-path), отсутствие rate-limiting на API.</p>
+<p><span class="badge badge-yellow">!</span> <strong>Архитектурный долг:</strong> zones_api.py 1174 строки, status.html 1897 строк, zones.html 3113 строк, дублирование логики start/stop в 4+ местах.</p>
+</div>
+</section>
+
+<!-- ═══ 2. OVERVIEW ═══ -->
+<section id="overview">
+<h2>2. Обзор проекта</h2>
+<div class="card">
+<h3>Стек технологий</h3>
+<table>
+<tr><th style="width:30%">Компонент</th><th>Технология</th></tr>
+<tr><td>Бэкенд</td><td>Python 3.11, Flask 3.1, Hypercorn (ASGI)</td></tr>
+<tr><td>База данных</td><td>SQLite (WAL mode, параметризованные запросы)</td></tr>
+<tr><td>Планировщик</td><td>APScheduler 3.10 + SQLAlchemyJobStore</td></tr>
+<tr><td>MQTT</td><td>paho-mqtt 2.1 (CallbackAPIVersion.VERSION2)</td></tr>
+<tr><td>Шаблоны</td><td>Jinja2, vanilla JS, CSS Variables</td></tr>
+<tr><td>Реальное время</td><td>SSE (Server-Sent Events), централизованный SSE Hub</td></tr>
+<tr><td>Telegram</td><td>aiogram v3 (long polling) + HTTP fallback</td></tr>
+<tr><td>Шифрование</td><td>AES-256-GCM (pycryptodome) + XOR fallback</td></tr>
+<tr><td>ASGI-сервер</td><td>Hypercorn + WSGIMiddleware</td></tr>
+<tr><td>Hardware</td><td>Wirenboard 8 (ARM), 4× wb-mr6cv3 (24 реле)</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3>Архитектура</h3>
+<pre>
+wb-irrigation/
+├── app.py                 (370 строк — ядро Flask, middleware, watchdog)
+├── config.py              (53 — конфигурация, auto-генерация SECRET_KEY)
+├── constants.py           (25 — централизованные константы)
+├── utils.py               (108 — normalize_topic, AES encrypt/decrypt)
+├── database.py            (306 — фасад IrrigationDB)
+├── irrigation_scheduler.py (1173 — APScheduler, программы, группы)
+├── run.py                 (32 — Hypercorn/WSGI запуск)
+├── db/                    (9 модулей, ~2497 строк)
+│   ├── migrations.py      (638 — 30 именованных миграций)
+│   ├── zones.py           (601) — groups.py (152) — programs.py (265)
+│   ├── settings.py (222) — telegram.py (240) — logs.py (202)
+│   └── mqtt.py (118) — base.py (42)
+├── services/              (17 модулей, ~3236 строк)
+│   ├── zone_control.py    (377 — exclusive start/stop, MV logic)
+│   ├── mqtt_pub.py        (232 — publish + retry + QoS 2)
+│   ├── sse_hub.py         (317 — MQTT→SSE fan-out)
+│   ├── telegram_bot.py    (563 — aiogram + HTTP polling)
+│   ├── monitors.py        (561 — rain, env, water)
+│   ├── observed_state.py  (260 — relay verification)
+│   ├── watchdog.py        (157 — cap enforcement)
+│   └── app_init.py (262) — и другие
+├── routes/                (15 модулей, ~3443 строк)
+│   ├── zones_api.py       (1174 — самый большой файл!)
+│   ├── system_api.py      (1004 — status, emergency, settings)
+│   ├── groups_api.py      (367) — и другие
+├── templates/             (10 файлов, ~8213 строк)
+│   ├── zones.html         (3113!) — status.html (1897)
+│   ├── base.html (751) — programs.html (884)
+│   └── остальные
+└── tools/tests/           (тесты + MQTT эмулятор)
+</pre>
+</div>
+</section>
+
+<!-- ═══ 3. STRENGTHS ═══ -->
+<section id="strengths">
+<h2>3. Анализ сильных сторон</h2>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Безопасность: SECRET_KEY автогенерация</h3>
+<p><code>config.py:12-30</code> — <code>_load_or_generate_secret()</code> генерирует 64-символьный hex-ключ, сохраняет в файл <code>.secret_key</code> с <code>chmod 0o600</code>. Старый хардкод <code>'wb-irrigation-secret'</code> игнорируется.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> MQTT пароли зашифрованы (AES-256-GCM)</h3>
+<p><code>utils.py:82-116</code> — <code>encrypt_secret()</code> / <code>decrypt_secret()</code> с 12-байт nonce и GCM-тегом. Ключ шифрования генерируется в <code>.irrig_secret_key</code> (32 random bytes, <code>0o600</code>). Миграция <code>encrypt_mqtt_passwords</code> в <code>db/migrations.py</code> автоматически шифрует plaintext пароли.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> CSRF включён глобально</h3>
+<p><code>config.py:43-45</code> — <code>WTF_CSRF_ENABLED = True</code>, <code>WTF_CSRF_CHECK_DEFAULT = True</code>. CSRF-токен в мета-теге, автоматический interceptor для fetch/XHR в <code>base.html</code>. Login endpoint корректно исключён.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> QoS 2 для команд реле</h3>
+<p>Все критические MQTT-публикации (<code>zone_control.py</code>, <code>routes/zones_api.py</code>, <code>groups_api.py</code>) используют <code>qos=2, retain=True</code>. Retry с backoff в <code>mqtt_pub.py:130-170</code> (до 10 попыток connect + 3 retry для wait_for_publish).</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Observed State Verification</h3>
+<p><code>services/observed_state.py</code> — после каждой публикации ON/OFF создаётся временный MQTT-клиент, который подписывается на топик зоны и ждёт подтверждения. При таймауте — retry publish до 3 раз. При полном провале — инкремент <code>fault_count</code>, Telegram-алерт. Профессиональный подход уровня промышленных SCADA.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Параметризованные SQL-запросы</h3>
+<p>Все SQL в <code>db/*.py</code> используют <code>?</code>-параметры. Прямого конкатенации SQL не обнаружено. SQLite WAL mode + <code>PRAGMA foreign_keys=ON</code>, <code>synchronous=NORMAL</code>.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Хеширование паролей (pbkdf2:sha256)</h3>
+<p><code>db/settings.py</code> — <code>werkzeug.security.generate_password_hash</code> с <code>pbkdf2:sha256</code>. Минимум 8 символов, blocklist простых паролей, принудительная смена при первом входе.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Модульная архитектура</h3>
+<p>Рефакторинг app.py (4411→370) и database.py (2359→306) через Repository Pattern. Зависимости SSE Hub инжектируются через <code>init()</code>. Boot-time инициализация вынесена в <code>services/app_init.py</code>.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Comprehensive watchdog system</h3>
+<p>Три уровня защиты: 1) <code>services/watchdog.py</code> — cap-time (дефолт 240 мин), concurrent zone monitoring; 2) <code>app.py:_enforce_group_exclusive_all_groups</code> — каждую секунду; 3) APScheduler hard-stop jobs. Telegram-алерты при аномалиях.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-green">✓</span> Приятные детали</h3>
+<ul>
+<li>Server-Timing header для диагностики (<code>app.py:_perf_add_server_timing</code>)</li>
+<li>Service Worker для offline-кеширования</li>
+<li>Health panel (клавиша 'h') и Stopwatch panel (клавиша 's') для диагностики</li>
+<li>Photo upload с auto-rotate EXIF, resize и WebP conversion</li>
+<li>Bulk API endpoints (next-watering-bulk, import, duration-conflicts-bulk)</li>
+<li>Boot-sync: все зоны и мастер-клапаны OFF при старте</li>
+<li>Early-off configurable (0-15 сек) для плавных переходов</li>
+<li>Dark theme через <code>@media prefers-color-scheme</code></li>
+</ul>
+</div>
+</section>
+
+<!-- ═══ 4. WEAKNESSES ═══ -->
+<section id="weaknesses">
+<h2>4. Анализ слабых сторон</h2>
+
+<div class="card">
+<h3><span class="badge badge-red">🔴</span> 728 catch-all <code>except Exception</code></h3>
+<p>Удвоилось с 356 (прошлый аудит). Многие ловят всё подряд и молча проглатывают ошибки через <code>logger.debug</code>. Это маскирует реальные баги и делает отладку невозможной.</p>
+<p><strong>Худшие файлы:</strong> irrigation_scheduler.py (92), zones_api.py (82), system_api.py (77), monitors.py (48).</p>
+<p>Пример из <code>irrigation_scheduler.py:397</code>:</p>
+<pre>try:
+    okv = self.db.update_zone_versioned(...)
+except Exception as e:
+    logger.debug("Exception in line_397: %s", e)
+    okv = False</pre>
+<p>Проблема: если <code>update_zone_versioned</code> падает из-за corrupted DB, зона запустится с некорректным состоянием.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-red">🔴</span> Дефолтный пароль '1234' при первом запуске</h3>
+<p><code>db/migrations.py:_insert_initial_data</code> — при пустой базе устанавливается <code>generate_password_hash('1234')</code>. Хотя есть blocklist и принудительная смена, пользователь может просто игнорировать предупреждение.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-red">🔴</span> SSE-подписка на QoS 0</h3>
+<p><code>services/sse_hub.py:281</code> — <code>client.subscribe(t, qos=0)</code>. Если MQTT-брокер перегружен, SSE-хаб может пропустить критическое изменение состояния реле. Для read-path это менее критично, но для observed state consistency — плохо.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-red">🔴</span> Дублирование логики start/stop</h3>
+<p>Логика запуска зоны дублируется минимум в 4 местах:</p>
+<ul>
+<li><code>services/zone_control.py:exclusive_start_zone</code></li>
+<li><code>routes/zones_api.py:api_zone_mqtt_start</code> (1000+ строк!)</li>
+<li><code>routes/zones_api.py:start_zone</code></li>
+<li><code>irrigation_scheduler.py:_run_group_sequence</code></li>
+</ul>
+<p>Каждое место имеет свою версию MV-логики, peer-off, scheduling. При баге в одном месте — другие не исправлены.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-yellow">🟡</span> Огромные файлы</h3>
+<table>
+<tr><th>Файл</th><th>Строк</th><th>Рекомендуемый максимум</th></tr>
+<tr><td>templates/zones.html</td><td>3113</td><td>~500</td></tr>
+<tr><td>templates/status.html</td><td>1897</td><td>~400</td></tr>
+<tr><td>irrigation_scheduler.py</td><td>1173</td><td>~300</td></tr>
+<tr><td>routes/zones_api.py</td><td>1174</td><td>~200</td></tr>
+<tr><td>routes/system_api.py</td><td>1004</td><td>~200</td></tr>
+<tr><td>templates/programs.html</td><td>884</td><td>~400</td></tr>
+<tr><td>templates/base.html</td><td>751</td><td>~200</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-yellow">🟡</span> Отсутствие rate-limiting на API</h3>
+<p><code>services/rate_limiter.py</code> существует (86 строк), но не подключён ни к одному route. Любой клиент может безлимитно дёргать <code>/api/zones/{id}/mqtt/start</code>. На ARM-контроллере (Wirenboard 8) это может привести к DoS.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-yellow">🟡</span> Нет тестового покрытия в CI</h3>
+<p>Есть 12+ тестовых файлов в <code>tools/tests/</code>, но нет CI-пайплайна (GitHub Actions / GitLab CI). Тесты нужно запускать вручную. Нет coverage-отчётов.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-yellow">🟡</span> HTTPS не настроен</h3>
+<p>Приложение слушает HTTP на порту 8080. В локальной сети Wirenboard это приемлемо, но пароли и CSRF-токены передаются в открытом виде. <code>SESSION_COOKIE_SECURE</code> выключен по умолчанию.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-yellow">🟡</span> Нет миграций «вниз» (downgrade)</h3>
+<p>30 миграций — только вверх. Откатить невозможно, кроме как восстановить из бэкапа SQLite.</p>
+</div>
+
+<div class="card">
+<h3><span class="badge badge-yellow">🟡</span> time.sleep в потоках планировщика</h3>
+<p><code>irrigation_scheduler.py</code> — в <code>_run_program_threaded</code> и <code>_run_group_sequence</code> используется <code>time.sleep(1)</code> в цикле для ожидания. Это блокирует поток APScheduler. Если нужно параллельно 4 группы — нужно 4 потока, каждый с блокирующим sleep.</p>
+</div>
+</section>
+
+<!-- ═══ 5. LIVE TESTING ═══ -->
+<section id="live-test">
+<h2>5. Результаты живого тестирования</h2>
+<p>Тестирование проведено 29 марта 2026, контроллер <code>10.2.5.244:8080</code>. Только GET-запросы.</p>
+
+<div class="card">
+<h3>Время отклика API (read-only)</h3>
+<div class="table-wrap">
+<table>
+<tr><th>Endpoint</th><th>HTTP</th><th>Время, мс</th><th>Размер</th><th>Оценка</th></tr>
+<tr><td><code>/health</code></td><td>200</td><td>226</td><td>62 B</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/</code> (главная)</td><td>200</td><td>529</td><td>126 KB</td><td><span class="badge badge-yellow">Медленно</span></td></tr>
+<tr><td><code>/api/status</code></td><td>200</td><td>259</td><td>668 B</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/zones</code></td><td>200</td><td>333</td><td>16.7 KB</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/groups</code></td><td>200</td><td>217</td><td>1.07 KB</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/programs</code></td><td>200</td><td>227</td><td>3 B (пусто)</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/env/values</code></td><td>200</td><td>230</td><td>89 B</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/scheduler/status</code></td><td>200</td><td>214</td><td>59 B</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/server-time</code></td><td>200</td><td>215</td><td>70 B</td><td><span class="badge badge-green">OK</span></td></tr>
+<tr><td><code>/api/logs</code></td><td>200</td><td>587</td><td>102 KB</td><td><span class="badge badge-yellow">Медленно</span></td></tr>
+</table>
+</div>
+<p><strong>Примечание:</strong> ~200ms baseline — это сетевой RTT до контроллера + WSGI-overhead через WSGIMiddleware. Для ARM-устройства это нормально.</p>
+</div>
+
+<div class="card">
+<h3>SSE-поток</h3>
+<p>SSE-endpoint <code>/api/mqtt/zones-sse</code> работает корректно: <code>event: open</code> при подключении, <code>event: ping</code> keepalive каждые 0.5 сек. Переподключение с exponential backoff в клиенте.</p>
+</div>
+
+<div class="card">
+<h3>Состояние системы</h3>
+<ul>
+<li>Здоровье: <code>{"db": true, "mqtt_configured": true, "ok": true, "scheduler": true}</code></li>
+<li>Зоны: 24 (все в группе «Насос-1», state: off)</li>
+<li>Программы: 0 (не настроены)</li>
+<li>MQTT: 1 сервер, подключён</li>
+<li>Аварийная остановка: выключена</li>
+<li>Датчики: нет (rain disabled, env disabled)</li>
+<li>Timezone: UTC+5 (Asia/Yekaterinburg, судя по server-time 13:41 vs UTC 08:41)</li>
+</ul>
+</div>
+</section>
+
+<!-- ═══ 6. COMPARISON TABLE ═══ -->
+<section id="comparison">
+<h2>6. Сравнительная таблица с конкурентами</h2>
+<p>Нажмите на заголовок столбца для сортировки.</p>
+
+<div class="table-wrap">
+<table id="comp-table">
+<thead>
+<tr>
+<th>Продукт</th>
+<th>Макс. зон</th>
+<th>Цена, $</th>
+<th>Подписка</th>
+<th>Offline</th>
+<th>API</th>
+<th>Датчик дождя</th>
+<th>ET/Weather</th>
+<th>Flow</th>
+<th>Mobile</th>
+<th>Open Source</th>
+</tr>
+</thead>
+<tbody>
+<tr><td><strong>WB-Irrigation</strong></td><td>24 (расш.)</td><td>~100*</td><td>Нет</td><td><span class="badge badge-green">Да</span></td><td><span class="badge badge-green">REST</span></td><td>Да</td><td>Нет</td><td>Да</td><td>TG бот</td><td><span class="badge badge-green">Да</span></td></tr>
+<tr><td>Hunter Hydrawise</td><td>32</td><td>300-500</td><td>Бесплатный/Pro</td><td>Частично</td><td>Закрытый</td><td>Да</td><td><span class="badge badge-green">ET</span></td><td>Да</td><td>iOS/Android</td><td>Нет</td></tr>
+<tr><td>Rain Bird ESP-TM2</td><td>12</td><td>106-350</td><td>Нет</td><td><span class="badge badge-green">Да</span></td><td>Нет</td><td>Да</td><td>Нет</td><td>Нет</td><td>App+LNK2</td><td>Нет</td></tr>
+<tr><td>Rachio 3</td><td>16</td><td>200-250</td><td>Нет</td><td>Нет</td><td>REST (cloud)</td><td>Skip</td><td><span class="badge badge-green">WI+</span></td><td>Wired</td><td>iOS/Android</td><td>Нет</td></tr>
+<tr><td>OpenSprinkler</td><td>72</td><td>140-183</td><td>Нет</td><td><span class="badge badge-green">Да</span></td><td><span class="badge badge-green">REST</span></td><td>Да</td><td>Zimmerman</td><td>Нет</td><td>Web/App</td><td><span class="badge badge-green">Да</span></td></tr>
+<tr><td>Netro Sprite</td><td>12</td><td>120-150</td><td>Бесплатная</td><td>Нет</td><td>Нет</td><td>Skip</td><td>Plant Intel</td><td>Нет</td><td>iOS/Android</td><td>Нет</td></tr>
+<tr><td>Orbit B-hyve</td><td>16</td><td>90-200</td><td>Нет</td><td>Частично</td><td>Ограниченный</td><td>Да</td><td>NOAA</td><td>Нет</td><td>iOS/Android</td><td>Нет</td></tr>
+<tr><td>Gardena Smart</td><td>6</td><td>150-300</td><td>Нет</td><td>Частично</td><td>Нет</td><td>Датчик влажн.</td><td>App</td><td>Нет</td><td>iOS/Android</td><td>Нет</td></tr>
+<tr><td>RainMachine</td><td>16</td><td>169-350</td><td>Нет</td><td><span class="badge badge-green">Да</span></td><td><span class="badge badge-green">REST</span></td><td>Да</td><td><span class="badge badge-green">Multi-src</span></td><td>Нет</td><td>Touch+App</td><td>Частично</td></tr>
+</tbody>
+</table>
+</div>
+<p style="font-size:.82rem;color:var(--fg2)">* Стоимость WB-Irrigation — только софт (бесплатно) + Wirenboard 8 + 4×wb-mr6cv3 (ориг. стоимость ~$100 за реле-модули).</p>
+</section>
+
+<!-- ═══ 7. COMPETITORS DETAIL ═══ -->
+<section id="competitors-detail">
+<h2>7. Детальный разбор конкурентов</h2>
+
+<details><summary><strong>Hunter Hydrawise</strong> — профессиональный стандарт</summary>
+<div class="card">
+<p><strong>Зоны:</strong> Pro-HC: 6/12/24; HPC: до 32 модульно. <strong>Цена:</strong> $300-500.</p>
+<p><strong>Главное преимущество:</strong> ET-based predictive watering с интеграцией The Weather Company. Flow monitoring + electrical diagnostics. Contractor portal для профессионалов.</p>
+<p><strong>Чего нет у WB-Irrigation:</strong> ET-расчёт, предиктивный полив, multi-site management, cloud analytics, WaterSense сертификация.</p>
+<p><strong>Слабости Hydrawise:</strong> Зависимость от облака, закрытая экосистема, нет интеграции с Wirenboard/Modbus, высокая цена.</p>
+</div>
+</details>
+
+<details><summary><strong>Rachio 3</strong> — лучший UX для потребителя</summary>
+<div class="card">
+<p><strong>Зоны:</strong> 8 или 16. <strong>Цена:</strong> $200-250.</p>
+<p><strong>Главное:</strong> Weather Intelligence Plus (hyperlocal, 36 feet accuracy), HomeKit/Alexa/Google, no subscription.</p>
+<p><strong>Чего нет у WB-Irrigation:</strong> Smart home integration, hyperlocal weather, native mobile app, leak detection.</p>
+<p><strong>Слабости Rachio:</strong> Полная зависимость от облака (без интернета не работает), максимум 16 зон, нет Modbus/промышленных протоколов.</p>
+</div>
+</details>
+
+<details><summary><strong>OpenSprinkler</strong> — ближайший аналог (open source)</summary>
+<div class="card">
+<p><strong>Зоны:</strong> До 72 с экспандерами. <strong>Цена:</strong> $140-183.</p>
+<p><strong>Главное:</strong> Open source, локальный REST API, Zimmerman weather, community-driven.</p>
+<p><strong>Сравнение с WB-Irrigation:</strong> OpenSprinkler ближе всего по философии, но использует собственное hardware. WB-Irrigation выигрывает интеграцией с Wirenboard (профессиональный DIN-rail контроллер с десятками I/O модулей).</p>
+<p><strong>Слабости OS:</strong> Proprietary hardware (нет DIN-rail), нет MQTT нативно, слабый UI на мобильных.</p>
+</div>
+</details>
+
+<details><summary><strong>RainMachine</strong> — лучший offline-контроллер</summary>
+<div class="card">
+<p><strong>Зоны:</strong> 8/12/16. <strong>Цена:</strong> $169-350.</p>
+<p><strong>Главное:</strong> Полная автономность, HD touchscreen, multi-source weather (MetNo, NOAA, Netatmo), HomeKit.</p>
+<p><strong>Чего нет у WB-Irrigation:</strong> Touchscreen на контроллере, multi-source weather aggregation, HomeKit.</p>
+</div>
+</details>
+
+<details><summary><strong>Rain Bird ESP-TM2, Netro Sprite, Orbit B-hyve, Gardena Smart</strong></summary>
+<div class="card">
+<p><strong>Rain Bird:</strong> Надёжный, до 12 зон, требует LNK2 WiFi-модуль ($140) для smart-функций. Дорого за ограниченные возможности.</p>
+<p><strong>Netro Sprite:</strong> До 12 зон, plant intelligence для 1000+ видов, EPA WaterSense. Слабая офлайн-поддержка.</p>
+<p><strong>Orbit B-hyve:</strong> Дешёвый ($90-200), до 16 зон, NOAA weather. Проблемы с Wi-Fi стабильностью по отзывам.</p>
+<p><strong>Gardena:</strong> До 6 зон, экосистема для европейских садов, требует gateway. Не подходит для промышленного применения.</p>
+</div>
+</details>
+</section>
+
+<!-- ═══ 8. RECOMMENDATIONS ═══ -->
+<section id="recommendations">
+<h2>8. Рекомендации по развитию</h2>
+
+<h3>🟢 Quick Wins (1-3 дня)</h3>
+<div class="card">
+<table>
+<tr><th style="width:5%">P</th><th style="width:40%">Что</th><th>Зачем</th><th>Конкурент-ref</th></tr>
+<tr><td><strong>1</strong></td><td>Заменить 50+ <code>except Exception</code> на конкретные типы в critical-path (zone_control, mqtt_pub, scheduler)</td><td>Прекратить маскировать баги. Начать с файлов zone_control.py и mqtt_pub.py</td><td>Все — у всех нормальный error handling</td></tr>
+<tr><td><strong>1</strong></td><td>Генерировать случайный пароль при первом запуске вместо '1234'</td><td>Безопасность. Выводить в логи или на экран при первом старте</td><td>OpenSprinkler, RainMachine</td></tr>
+<tr><td><strong>2</strong></td><td>Подключить rate_limiter.py к мутирующим API-эндпоинтам</td><td>Защита ARM-контроллера от DoS</td><td>Rachio — cloud rate limiting</td></tr>
+<tr><td><strong>2</strong></td><td>SSE-подписка на QoS 1 вместо 0</td><td>Гарантия доставки состояний в браузер</td><td>Hydrawise — event transparency</td></tr>
+<tr><td><strong>3</strong></td><td>Добавить <code>X-Content-Security-Policy</code> header</td><td>Защита от XSS через инъекцию скриптов</td><td>Best practice</td></tr>
+</table>
+</div>
+
+<h3>🟡 Среднесрочные (1-4 недели)</h3>
+<div class="card">
+<table>
+<tr><th style="width:5%">P</th><th style="width:40%">Что</th><th>Зачем</th><th>Конкурент-ref</th></tr>
+<tr><td><strong>1</strong></td><td>Вынести логику start/stop в единый <code>zone_control.py</code>, удалить дубликаты из routes</td><td>SRP, один источник правды. Сейчас 4 версии одной логики</td><td>Архитектура OpenSprinkler</td></tr>
+<tr><td><strong>2</strong></td><td>Разбить zones_api.py (1174 строк) на zones_crud.py, zones_photo.py, zones_watering.py</td><td>Файлы >300 строк — технический долг</td><td>SOLID</td></tr>
+<tr><td><strong>2</strong></td><td>Вынести JS из templates в отдельные .js файлы (status.html 1897 строк!)</td><td>Cacheability, testability, readability</td><td>Rachio — SPA</td></tr>
+<tr><td><strong>2</strong></td><td>Weather API интеграция (Open-Meteo, бесплатный)</td><td>ET-based scheduling, rain forecast skip, freeze skip</td><td>Rachio WI+, Hydrawise, RainMachine</td></tr>
+<tr><td><strong>3</strong></td><td>CI/CD pipeline (GitHub Actions): lint, pytest, deploy</td><td>Качество кода, автотесты при каждом push</td><td>Best practice</td></tr>
+<tr><td><strong>3</strong></td><td>HTTPS через reverse proxy (nginx/caddy) или Let's Encrypt</td><td>Шифрование трафика, secure cookies</td><td>Все — HTTPS обязателен</td></tr>
+<tr><td><strong>3</strong></td><td>Логирование в structured JSON</td><td>Парсинг логов, мониторинг, алерты</td><td>Промышленный стандарт</td></tr>
+</table>
+</div>
+
+<h3>🔴 Стратегические (1-6 месяцев)</h3>
+<div class="card">
+<table>
+<tr><th style="width:5%">P</th><th style="width:40%">Что</th><th>Зачем</th><th>Конкурент-ref</th></tr>
+<tr><td><strong>1</strong></td><td>ET-based smart watering (эвапотранспирация)</td><td>Экономия воды 30-50%, главная фича всех конкурентов. Open-Meteo API бесплатный, FAO Penman-Monteith формула.</td><td>Hydrawise, Rachio, RainMachine</td></tr>
+<tr><td><strong>2</strong></td><td>Soil moisture sensor integration (Modbus через Wirenboard)</td><td>Wirenboard нативно поддерживает Modbus. Можно подключить промышленные датчики влажности почвы</td><td>Gardena Smart, Hydrawise</td></tr>
+<tr><td><strong>2</strong></td><td>Multi-controller support (несколько Wirenboard)</td><td>Масштабирование на большие объекты (парки, фермы)</td><td>Hydrawise multi-site</td></tr>
+<tr><td><strong>3</strong></td><td>PWA / mobile app (React Native или Flutter)</td><td>Нативный мобильный опыт, push-уведомления</td><td>Rachio, Hydrawise, B-hyve</td></tr>
+<tr><td><strong>3</strong></td><td>Home Assistant интеграция (MQTT discovery)</td><td>Экосистема умного дома, огромное community</td><td>OpenSprinkler HA addon</td></tr>
+<tr><td><strong>4</strong></td><td>Исторические графики расхода воды (Chart.js / ECharts)</td><td>Визуализация трендов, обнаружение утечек</td><td>Hydrawise analytics, Rachio history</td></tr>
+<tr><td><strong>4</strong></td><td>Миграция на async (FastAPI + asyncio)</td><td>Убрать blocking sleep, native async MQTT, SSE через asyncio</td><td>Архитектурная зрелость</td></tr>
+</table>
+</div>
+</section>
+
+<!-- ═══ 9. UNIQUE ADVANTAGES ═══ -->
+<section id="unique">
+<h2>9. Уникальные преимущества WB-Irrigation</h2>
+
+<div class="card">
+<h3>🏆 Чего нет ни у одного коммерческого аналога</h3>
+
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin-top:.8rem">
+
+<div class="card" style="border-left:4px solid var(--green)">
+<h4>1. Промышленное реле через Modbus/MQTT</h4>
+<p>Wirenboard wb-mr6cv3 — это DIN-rail реле промышленного класса с 24V питанием, защитой от КЗ, и Modbus-RTU/MQTT интерфейсом. Ни один потребительский контроллер не может управлять реле через Modbus.</p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--green)">
+<h4>2. 24 зоны на реальном hardware</h4>
+<p>4×6-канальных модуля. Hydrawise поддерживает 32, но за $500+. WB-Irrigation даёт 24 зоны на $100 hardware.</p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--green)">
+<h4>3. Полный контроль и open source</h4>
+<p>Нет облака, нет подписки, нет vendor lock-in. Код можно модифицировать под любые нужды. Единственный аналог — OpenSprinkler, но у него нет Modbus.</p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--green)">
+<h4>4. Экосистема Wirenboard</h4>
+<p>Через один контроллер WB8 можно управлять не только поливом, но и: освещением, отоплением, вентиляцией, датчиками (температура, влажность почвы, CO2). Ни один irrigation controller так не может.</p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--green)">
+<h4>5. Observed State Verification</h4>
+<p>Уникальная фича: после каждой команды приложение подписывается на MQTT и ждёт подтверждения от реле. Если реле не ответило — retry + Telegram алерт + fault counter. У коммерческих аналогов — fire-and-forget.</p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--green)">
+<h4>6. Telegram-бот вместо app</h4>
+<p>Не нужно устанавливать приложение. Управление через Telegram — мессенджер, который уже у всех. Inline-кнопки, подписки на отчёты, алерты.</p>
+</div>
+
+</div>
+</div>
+
+<div class="card">
+<h3>Рыночная ниша</h3>
+<p>WB-Irrigation занимает уникальную нишу на пересечении <strong>«промышленное оборудование» + «DIY smart home» + «open source»</strong>. Коммерческие контроллеры (Rachio, Hydrawise) — closed source с ограниченным hardware. OpenSprinkler — open source, но без промышленного hardware.</p>
+<blockquote>WB-Irrigation — единственная open-source система автоматического полива на промышленном DIN-rail контроллере с Modbus/MQTT и observed state verification.</blockquote>
+</div>
+</section>
+
+<!-- ═══ 10. ROADMAP ═══ -->
+<section id="roadmap">
+<h2>10. Дорожная карта развития</h2>
+
+<div class="timeline">
+
+<div class="timeline-item green">
+<h4>Фаза 1: Стабилизация (Апрель 2026)</h4>
+<ul>
+<li>Замена 100+ catch-all except на конкретные типы</li>
+<li>Рандомный пароль при первом запуске</li>
+<li>Rate limiting на API</li>
+<li>SSE подписка QoS 1</li>
+<li>Разбиение zones_api.py на 3 файла</li>
+</ul>
+</div>
+
+<div class="timeline-item green">
+<h4>Фаза 2: Quality (Май 2026)</h4>
+<ul>
+<li>CI/CD pipeline (GitHub Actions)</li>
+<li>Test coverage >60% для critical path</li>
+<li>Единая логика start/stop в zone_control.py</li>
+<li>JS вынесен из templates в static/</li>
+<li>HTTPS через reverse proxy</li>
+</ul>
+</div>
+
+<div class="timeline-item yellow">
+<h4>Фаза 3: Smart Features (Июнь-Июль 2026)</h4>
+<ul>
+<li>Weather API (Open-Meteo): ET-расчёт, rain skip, freeze skip</li>
+<li>Soil moisture sensor через Modbus/MQTT (Wirenboard)</li>
+<li>Исторические графики расхода воды</li>
+<li>Structured JSON logging</li>
+</ul>
+</div>
+
+<div class="timeline-item yellow">
+<h4>Фаза 4: Интеграции (Август-Сентябрь 2026)</h4>
+<ul>
+<li>Home Assistant MQTT discovery</li>
+<li>Multi-controller support</li>
+<li>PWA с push-уведомлениями</li>
+<li>Расширенный Telegram-бот (inline-графики, voice-команды)</li>
+</ul>
+</div>
+
+<div class="timeline-item red">
+<h4>Фаза 5: Production-Grade (Q4 2026)</h4>
+<ul>
+<li>Миграция на FastAPI + async</li>
+<li>PostgreSQL опция для крупных инсталляций</li>
+<li>Multi-user с RBAC</li>
+<li>Docker Compose stack с Mosquitto + Grafana</li>
+<li>Документация для community (docs site)</li>
+</ul>
+</div>
+
+</div>
+</section>
+
+<!-- ═══ 11. CONCLUSION ═══ -->
+<section id="conclusion">
+<h2>11. Заключение</h2>
+
+<div class="card">
+<p><strong>WB-Irrigation v2.0</strong> — это амбициозный MVP-проект одного разработчика, который уже сейчас решает реальную задачу управления 24 зонами полива на промышленном оборудовании Wirenboard.</p>
+
+<h4>Что улучшилось с прошлого аудита (5.0 → 5.5):</h4>
+<ul>
+<li>✅ SECRET_KEY автогенерация (было: hardcoded)</li>
+<li>✅ CSRF включён (было: отключён)</li>
+<li>✅ MQTT пароли зашифрованы AES-GCM (было: plaintext)</li>
+<li>✅ QoS 2 для команд (было: QoS 0)</li>
+<li>✅ Observed state verification (было: нет)</li>
+<li>✅ Watchdog с тремя уровнями защиты (было: нет)</li>
+<li>✅ Модульная архитектура с Repository Pattern</li>
+</ul>
+
+<h4>Что мешает дать 7+:</h4>
+<ul>
+<li>❌ 728 catch-all except — вдвое больше, чем было</li>
+<li>❌ Дублирование start/stop в 4 местах</li>
+<li>❌ Огромные файлы (zones.html 3113, status.html 1897)</li>
+<li>❌ Нет weather integration (ET-based watering)</li>
+<li>❌ Нет CI/CD и систематического тестирования</li>
+<li>❌ Нет rate limiting на API</li>
+</ul>
+
+<h4>Главная рекомендация:</h4>
+<blockquote>Перестать добавлять новые фичи на 2-3 недели. Провести «Фазу стабилизации»: убрать дублирование, заменить 100+ catch-all except, добавить rate limiting, разбить крупные файлы. Это даст базу для устойчивого роста до 7-8/10.</blockquote>
+
+<p style="margin-top:1rem">Для MVP одного разработчика с AI-ассистентом — это <strong>достойный результат</strong>. Проект решает реальную задачу, работает на боевом оборудовании, и имеет уникальную нишу, которую не закрывает ни один коммерческий аналог. С фокусом на качество кода и добавлением weather intelligence, WB-Irrigation может стать reference implementation для Wirenboard-based автоматизации.</p>
+</div>
+</section>
+
+</main>
+</div>
+
+<!-- ═══════════════════ JAVASCRIPT ═══════════════════ -->
+<script>
+// Sortable table
+document.querySelectorAll('#comp-table th').forEach((th, idx) => {
+  let asc = true;
+  th.addEventListener('click', () => {
+    const tbody = th.closest('table').querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a, b) => {
+      const av = a.children[idx]?.textContent.trim() || '';
+      const bv = b.children[idx]?.textContent.trim() || '';
+      const an = parseFloat(av.replace(/[^0-9.-]/g, ''));
+      const bn = parseFloat(bv.replace(/[^0-9.-]/g, ''));
+      if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+      return asc ? av.localeCompare(bv, 'ru') : bv.localeCompare(av, 'ru');
+    });
+    rows.forEach(r => tbody.appendChild(r));
+    asc = !asc;
+    th.style.color = asc ? '' : 'var(--accent)';
+  });
+});
+
+// Active sidebar link
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      document.querySelectorAll('.sidebar a').forEach(a => a.classList.remove('active'));
+      const link = document.querySelector(`.sidebar a[href="#${e.target.id}"]`);
+      if (link) link.classList.add('active');
+    }
+  });
+}, { rootMargin: '-20% 0px -60% 0px' });
+document.querySelectorAll('section[id]').forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
