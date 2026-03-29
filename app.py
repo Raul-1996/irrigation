@@ -56,7 +56,9 @@ from routes.zones_watering_api import zones_watering_api_bp
 from routes.groups_api import groups_api_bp
 from routes.programs_api import programs_api_bp
 from routes.mqtt_api import mqtt_api_bp
-from routes.system_api import system_api_bp
+from routes.system_status_api import system_status_api_bp
+from routes.system_config_api import system_config_api_bp
+from routes.system_emergency_api import system_emergency_api_bp
 
 from werkzeug.security import check_password_hash
 from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor, probe_env_values
@@ -230,7 +232,7 @@ try:
 except ImportError as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
 
-for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_api_bp):
+for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp):
     app.register_blueprint(bp)
 
 _initialize_app(app, db)
