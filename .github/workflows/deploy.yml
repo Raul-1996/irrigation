@@ -1,0 +1,31 @@
+name: Deploy to Wirenboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type "deploy" to confirm deployment'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirmation == 'deploy'
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.WB_HOST }}
+          username: ${{ secrets.WB_USER }}
+          password: ${{ secrets.WB_PASSWORD }}
+          proxy_host: ${{ secrets.JUMP_HOST }}
+          proxy_username: ${{ secrets.JUMP_USER }}
+          proxy_key: ${{ secrets.JUMP_SSH_KEY }}
+          script: |
+            cd /opt/wb-irrigation/irrigation
+            git pull origin main
+            pip3 install -r requirements.txt
+            systemctl restart wb-irrigation
+            sleep 3
+            systemctl is-active wb-irrigation && echo "✅ Deploy OK" || echo "❌ Deploy FAILED"
