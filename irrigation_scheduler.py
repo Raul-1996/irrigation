@@ -326,6 +326,65 @@ class IrrigationScheduler:
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
             logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
 
+    def _check_weather_skip(self, zone_id: int, program_id: int = 0) -> dict:
+        """Check if watering should be skipped due to weather. Returns skip info dict."""
+        try:
+            from services.weather_adjustment import get_weather_adjustment
+            adj = get_weather_adjustment(self.db.db_path)
+            if not adj.is_enabled():
+                return {'skip': False}
+            skip_info = adj.should_skip()
+            if skip_info.get('skip'):
+                reason = skip_info.get('reason', 'weather')
+                logger.info(f"Weather skip: zone={zone_id} program={program_id} reason={reason}")
+                try:
+                    self.db.add_log('weather_skip', json.dumps({
+                        'zone_id': zone_id, 'program_id': program_id,
+                        'reason': reason, 'details': skip_info.get('details', {}),
+                    }))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                    logger.debug("Weather skip log error: %s", e)
+                # Send Telegram notification for weather skip
+                try:
+                    from services.telegram_bot import notifier
+                    chat_id = self.db.get_setting_value('telegram_admin_chat_id')
+                    if chat_id:
+                        skip_type = skip_info.get('details', {}).get('type', 'weather')
+                        emoji = {'rain': '🌧', 'rain_forecast': '🌧', 'freeze': '❄️', 'wind': '💨'}.get(skip_type, '⛅')
+                        notifier.send_text(int(chat_id), f"{emoji} Полив пропущен: {reason}")
+                except (ImportError, OSError, ValueError, TypeError) as e:
+                    logger.debug("Weather skip telegram: %s", e)
+                # Log to weather_log
+                try:
+                    adj.log_adjustment(zone_id, 0, 0, 0, True, reason)
+                except (sqlite3.Error, OSError) as e:
+                    logger.debug("Weather log error: %s", e)
+            return skip_info
+        except (ImportError, OSError, ValueError, TypeError) as e:
+            logger.debug("Weather check error: %s", e)
+            return {'skip': False}
+
+    def _get_weather_adjusted_duration(self, zone_id: int, base_duration: int) -> int:
+        """Get weather-adjusted zone duration."""
+        try:
+            from services.weather_adjustment import get_weather_adjustment
+            adj = get_weather_adjustment(self.db.db_path)
+            if not adj.is_enabled():
+                return base_duration
+            coeff = adj.get_coefficient()
+            adjusted = int(round(base_duration * coeff / 100.0))
+            adjusted = max(1, adjusted) if adjusted > 0 else base_duration
+            if adjusted != base_duration:
+                logger.info(f"Weather adjustment: zone={zone_id} base={base_duration}min adjusted={adjusted}min (coeff={coeff}%)")
+                try:
+                    adj.log_adjustment(zone_id, base_duration, adjusted, coeff, False)
+                except (sqlite3.Error, OSError) as e:
+                    logger.debug("Weather log error: %s", e)
+            return adjusted
+        except (ImportError, OSError, ValueError, TypeError) as e:
+            logger.debug("Weather adjustment error: %s", e)
+            return base_duration
+
     def _run_program_threaded(self, program_id: int, zones: List[int], program_name: str):
         """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler"""
         try:
@@ -334,6 +393,20 @@ class IrrigationScheduler:
                 self.db.add_log('program_start', json.dumps({'program_id': program_id, 'program_name': program_name}))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in _run_program_threaded: %s", e)
+
+            # Weather check before program: skip entire program if conditions are bad
+            skip_info = self._check_weather_skip(zones[0] if zones else 0, program_id)
+            if skip_info.get('skip'):
+                logger.info(f"Программа {program_id} ({program_name}) пропущена из-за погоды: {skip_info.get('reason')}")
+                try:
+                    self.db.add_log('program_weather_skip', json.dumps({
+                        'program_id': program_id, 'program_name': program_name,
+                        'reason': skip_info.get('reason', ''),
+                    }))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                    logger.debug("Program weather skip log error: %s", e)
+                return
+
             for i, zone_id in enumerate(zones):
                 zone = self.db.get_zone(zone_id)
                 if not zone:
@@ -367,7 +440,7 @@ class IrrigationScheduler:
                         logger.info(f"Зона {zone_id} отложена до {postpone_until}")
                         continue
 
-                duration = int(zone['duration'])
+                duration = self._get_weather_adjusted_duration(zone_id, int(zone['duration']))
 
                 # БЕЗУСЛОВНО выключаем все зоны этой группы перед стартом текущей
                 try:
@@ -801,6 +874,18 @@ class IrrigationScheduler:
                 break  # Only start the first zone in TESTING mode
             return
         try:
+            # Weather check before group sequence
+            skip_info = self._check_weather_skip(zone_ids[0] if zone_ids else 0, 0)
+            if skip_info.get('skip'):
+                logger.info(f"Группа {group_id}: последовательный полив пропущен из-за погоды: {skip_info.get('reason')}")
+                try:
+                    self.db.add_log('group_weather_skip', json.dumps({
+                        'group_id': group_id, 'reason': skip_info.get('reason', ''),
+                    }))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                    logger.debug("Group weather skip log error: %s", e)
+                return
+
             cancel_event = self.group_cancel_events.get(group_id)
             for zone_id in zone_ids:
                 if cancel_event and cancel_event.is_set():
@@ -811,7 +896,7 @@ class IrrigationScheduler:
                     logger.warning(f"Группа {group_id}: зона {zone_id} не найдена, пропуск")
                     continue
 
-                duration = int(zone.get('duration') or 0)
+                duration = self._get_weather_adjusted_duration(zone_id, int(zone.get('duration') or 0))
                 if duration <= 0:
                     logger.info(f"Группа {group_id}: зона {zone_id} имеет нулевую длительность, пропуск")
                     continue
