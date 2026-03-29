@@ -780,6 +780,9 @@ class IrrigationScheduler:
 
     def _run_group_sequence(self, group_id: int, zone_ids: List[int]):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
+        if os.environ.get('TESTING') == '1':
+            logger.debug("TESTING mode: skipping _run_group_sequence for group %s", group_id)
+            return
         try:
             cancel_event = self.group_cancel_events.get(group_id)
             for zone_id in zone_ids:

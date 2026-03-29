@@ -31,6 +31,67 @@ _TEMP_DB_DIR = tempfile.mkdtemp(prefix='wb_irrigation_test_')
 _TEMP_DB_PATH = os.path.join(_TEMP_DB_DIR, 'irrigation_test.db')
 os.environ['TEST_DB_PATH'] = _TEMP_DB_PATH
 
+# ── Patch APScheduler before importing anything that uses it ───────────────
+import apscheduler.schedulers.background as _real_bg_sched
+
+
+class _MockBackgroundScheduler:
+    """Drop-in BackgroundScheduler that never spawns threads."""
+
+    def __init__(self, *args, **kwargs):
+        self._jobs = {}
+        self._running = False
+        self.timezone = kwargs.get('timezone', None)
+
+    def start(self, paused=False):
+        self._running = True
+
+    def shutdown(self, wait=True):
+        self._running = False
+
+    def add_job(self, func, trigger=None, **kwargs):
+        job_id = kwargs.get('id', f'mock-{len(self._jobs)}')
+        mock_job = MagicMock()
+        mock_job.id = job_id
+        mock_job.next_run_time = None
+        self._jobs[job_id] = mock_job
+        return mock_job
+
+    def remove_job(self, job_id, jobstore='default'):
+        self._jobs.pop(job_id, None)
+
+    def get_jobs(self, jobstore=None):
+        return list(self._jobs.values())
+
+    def get_job(self, job_id, jobstore='default'):
+        return self._jobs.get(job_id)
+
+    def remove_all_jobs(self, jobstore=None):
+        self._jobs.clear()
+
+    def reschedule_job(self, job_id, **kwargs):
+        return self._jobs.get(job_id, MagicMock())
+
+    def pause_job(self, job_id, jobstore='default'):
+        return self._jobs.get(job_id, MagicMock())
+
+    def resume_job(self, job_id, jobstore='default'):
+        return self._jobs.get(job_id, MagicMock())
+
+    @property
+    def running(self):
+        return self._running
+
+
+_orig_bg_sched_cls = _real_bg_sched.BackgroundScheduler
+_real_bg_sched.BackgroundScheduler = _MockBackgroundScheduler
+
+# Also patch irrigation_scheduler module directly since it uses
+# `from apscheduler.schedulers.background import BackgroundScheduler`
+# which creates a local reference that survives the module-level patch above.
+import irrigation_scheduler as _isched_module
+_isched_module.BackgroundScheduler = _MockBackgroundScheduler
+
 # ── Patch MQTT before importing app ────────────────────────────────────────
 import paho.mqtt.client as _real_mqtt
 
@@ -217,8 +278,21 @@ def _session_setup():
     except Exception:
         pass
 
-    # Restore original MQTT Client class
+    try:
+        # Force-stop any scheduler that might be running
+        import irrigation_scheduler as _sched_mod
+        if hasattr(_sched_mod, 'scheduler') and _sched_mod.scheduler:
+            try:
+                _sched_mod.scheduler.scheduler.shutdown(wait=False)
+                _sched_mod.scheduler = None
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Restore original classes
     _real_mqtt.Client = _orig_mqtt_client_cls
+    _real_bg_sched.BackgroundScheduler = _orig_bg_sched_cls
 
 
 def _reset_seed_data():
@@ -273,6 +347,17 @@ def ensure_db():
     """Seed fresh data before each test."""
     _reset_seed_data()
     yield
+    # Clean up any scheduler that may have started during the test
+    try:
+        import irrigation_scheduler as _sched_mod
+        if hasattr(_sched_mod, 'scheduler') and _sched_mod.scheduler:
+            try:
+                _sched_mod.scheduler.scheduler.shutdown(wait=False)
+                _sched_mod.scheduler = None
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
