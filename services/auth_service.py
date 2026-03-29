@@ -1,8 +1,11 @@
 from typing import Optional
 import os
+import logging
 from database import db
 from werkzeug.security import check_password_hash, generate_password_hash
 import threading
+
+logger = logging.getLogger(__name__)
 
 
 def verify_admin(password: str) -> bool:
