@@ -4,7 +4,10 @@
 """
 
 import os
+import logging
 from app import app
+
+logger = logging.getLogger(__name__)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '8080'))
