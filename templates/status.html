@@ -469,6 +469,251 @@
         .group-info-grid { grid-template-columns: 1fr; }
     }
 
+    /* === Weather Widget === */
+    #weather-widget {
+        margin-bottom: 1rem;
+    }
+    .weather-card {
+        background: var(--card-background, #fff);
+        border-radius: 8px;
+        padding: 0.8rem;
+        margin-bottom: 0.5rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .weather-summary {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .weather-summary-left {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .weather-icon {
+        font-size: 2rem;
+    }
+    .weather-temp {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: var(--text-color, #333);
+    }
+    .weather-unit {
+        font-size: 0.9rem;
+        font-weight: 400;
+        color: #999;
+    }
+    .weather-desc {
+        font-size: 0.8rem;
+        color: #999;
+    }
+    .weather-coeff {
+        text-align: right;
+    }
+    .weather-coeff-val {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: var(--success-color, #4caf50);
+    }
+    .weather-coeff-val.skip {
+        color: var(--danger-color, #f44336);
+    }
+    .weather-coeff-label {
+        font-size: 0.65rem;
+        color: #999;
+    }
+    .weather-metrics {
+        display: flex;
+        gap: 0.8rem;
+        margin-top: 0.4rem;
+        font-size: 0.8rem;
+        color: #999;
+    }
+    .weather-source {
+        font-size: 0.6rem;
+        color: #999;
+        margin-top: 0.3rem;
+    }
+    .weather-section-title {
+        font-size: 0.75rem;
+        color: #999;
+        margin: 0.6rem 0 0.3rem;
+        font-weight: 600;
+    }
+    .weather-hours {
+        display: flex;
+        gap: 0.4rem;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.3rem;
+    }
+    .weather-hour {
+        flex-shrink: 0;
+        text-align: center;
+        min-width: 54px;
+        background: rgba(33,150,243,0.08);
+        border-radius: 8px;
+        padding: 0.35rem 0.25rem;
+        font-size: 0.72rem;
+    }
+    .weather-hour-time {
+        color: #999;
+        font-size: 0.65rem;
+    }
+    .weather-hour-icon {
+        font-size: 1.1rem;
+        margin: 0.1rem 0;
+    }
+    .weather-hour-temp {
+        font-weight: 600;
+        color: var(--text-color, #333);
+    }
+    .weather-hour-detail {
+        font-size: 0.6rem;
+        color: #999;
+    }
+    .weather-hours-legend {
+        font-size: 0.6rem;
+        color: #999;
+        text-align: center;
+        margin-top: 0.15rem;
+    }
+    .weather-days {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .weather-day {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.35rem 0.5rem;
+        background: rgba(33,150,243,0.08);
+        border-radius: 8px;
+        font-size: 0.8rem;
+        color: var(--text-color, #333);
+    }
+    .weather-day-dow {
+        font-weight: 600;
+        min-width: 24px;
+    }
+    .weather-day-icon {
+        font-size: 1.1rem;
+    }
+    .weather-day-temps {
+        flex: 1;
+    }
+    .weather-day-rain {
+        color: #999;
+        font-size: 0.75rem;
+    }
+    /* Weather details/summary */
+    .weather-card details {
+        border-top: 1px solid var(--border-color, #e0e0e0);
+        margin-top: 0.5rem;
+    }
+    .weather-card details + details {
+        margin-top: 0;
+    }
+    .weather-card summary {
+        padding: 0.6rem 0;
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: var(--text-color, #333);
+    }
+    .weather-card summary::-webkit-details-marker { display: none; }
+    .weather-card summary::after {
+        content: '▼';
+        font-size: 0.6rem;
+        color: #999;
+        margin-left: auto;
+        transition: transform 0.2s;
+    }
+    .weather-card details[open] summary::after {
+        transform: rotate(180deg);
+    }
+    .weather-details-content {
+        padding: 0 0 0.5rem;
+    }
+    .weather-params {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.2rem 0.5rem;
+        font-size: 0.78rem;
+    }
+    .weather-params-label {
+        color: #999;
+    }
+    .weather-params-val {
+        font-weight: 500;
+        text-align: right;
+        color: var(--text-color, #333);
+    }
+    .weather-factor {
+        padding: 0.4rem 0;
+        border-bottom: 1px solid var(--border-color, #e0e0e0);
+    }
+    .weather-factor:last-child {
+        border-bottom: none;
+    }
+    .weather-factor-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.8rem;
+    }
+    .weather-factor-name {
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+        color: var(--text-color, #333);
+    }
+    .weather-factor-status {
+        font-size: 0.75rem;
+    }
+    .weather-factor-status.wf-ok { color: var(--success-color, #4caf50); }
+    .weather-factor-status.wf-warn { color: var(--warning-color, #ff9800); }
+    .weather-factor-status.wf-danger { color: var(--danger-color, #f44336); }
+    .weather-factor-desc {
+        font-size: 0.68rem;
+        color: #999;
+        margin-top: 0.15rem;
+    }
+    .weather-hist-item {
+        display: flex;
+        gap: 0.4rem;
+        align-items: baseline;
+        padding: 0.25rem 0;
+        font-size: 0.75rem;
+        border-bottom: 1px solid var(--border-color, #e0e0e0);
+        color: var(--text-color, #333);
+    }
+    .weather-hist-item:last-child { border-bottom: none; }
+    .weather-hist-date {
+        color: #999;
+        min-width: 40px;
+        font-size: 0.7rem;
+    }
+    .weather-badge {
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+        font-size: 0.65rem;
+        font-weight: 600;
+    }
+    .weather-badge-skip { background: rgba(244,67,54,0.15); color: var(--danger-color, #f44336); }
+    .weather-badge-adj { background: rgba(255,152,0,0.15); color: var(--warning-color, #ff9800); }
+    .weather-badge-ok { background: rgba(76,175,80,0.15); color: var(--success-color, #4caf50); }
+    @media (prefers-color-scheme: dark) {
+        .weather-card { background: #2d2d2d; }
+        .weather-hour { background: rgba(33,150,243,0.12); }
+        .weather-day { background: rgba(33,150,243,0.12); }
+    }
+
     /* Модальное окно для просмотра фотографий */
     .photo-modal {
         display: none; /* показ включаем через JS как flex */
@@ -548,13 +793,63 @@
     <div class="info-box" id="rain-box" style="display:none;">
         <strong>Датчик дождя:</strong> <span id="rain-value">—</span>
     </div>
-    <div class="info-box" id="weather-box" style="display:none;">
-        <strong>⛅ Погода:</strong> <span id="weather-temp-val">—</span>°C,
-        <span id="weather-hum-val">—</span>%,
-        🌧<span id="weather-rain-val">—</span>mm
-        <br><strong>Коэфф:</strong> <span id="weather-coeff" style="font-weight:700;">—</span>%
-        <span id="weather-skip-badge" style="display:none; background:#f44336; color:#fff; padding:1px 6px; border-radius:10px; font-size:0.75rem; margin-left:4px;">SKIP</span>
+</div>
+
+<!-- Weather Widget -->
+<div id="weather-widget" style="display:none;">
+  <!-- СВОДКА -->
+  <div class="weather-card">
+    <div class="weather-summary">
+      <div class="weather-summary-left">
+        <span class="weather-icon" id="w-icon">🌡️</span>
+        <div>
+          <div class="weather-temp"><span id="w-temp">—</span><span class="weather-unit">°C</span></div>
+          <div class="weather-desc" id="w-desc"></div>
+        </div>
+      </div>
+      <div class="weather-coeff">
+        <div class="weather-coeff-val" id="w-coeff">—</div>
+        <div class="weather-coeff-label">полив</div>
+      </div>
     </div>
+    <div class="weather-metrics" id="w-metrics">
+      <span>💧 —%</span>
+      <span>💨 — м/с</span>
+      <span>🌧 — мм</span>
+    </div>
+    <div class="weather-source" id="w-source"></div>
+  </div>
+
+  <!-- ПРОГНОЗ 24Ч -->
+  <div class="weather-card">
+    <div class="weather-section-title">Прогноз на 24 часа</div>
+    <div class="weather-hours" id="w-hours"></div>
+    <div class="weather-hours-legend">осадки мм · ветер м/с</div>
+  </div>
+
+  <!-- ПРОГНОЗ 3 ДНЯ -->
+  <div class="weather-card">
+    <div class="weather-section-title">Прогноз на 3 дня</div>
+    <div class="weather-days" id="w-days"></div>
+  </div>
+
+  <!-- ДЕТАЛИ -->
+  <div class="weather-card">
+    <details>
+      <summary>📊 Подробнее</summary>
+      <div class="weather-details-content" id="w-details"></div>
+    </details>
+
+    <details>
+      <summary>⚙️ Погодокоррекция</summary>
+      <div class="weather-details-content" id="w-factors"></div>
+    </details>
+
+    <details>
+      <summary>📋 История решений</summary>
+      <div class="weather-details-content" id="w-history"></div>
+    </details>
+  </div>
 </div>
 
 <div class="status-grid" id="groups-container">
