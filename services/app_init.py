@@ -126,7 +126,7 @@ def _boot_sync(app, db):
                         close_val = '1' if mode == 'NO' else '0'
                         logger.info(
                             f'Boot sync: closing master valve sid={msid} topic={mtopic} mode={mode} val={close_val}')
-                        _publish(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True)
+                        _publish(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True, qos=2)
                 except (ConnectionError, TimeoutError, OSError):
                     logger.exception('Boot sync: master valve close failed')
         except (ConnectionError, TimeoutError, OSError):
@@ -144,7 +144,7 @@ def _boot_sync(app, db):
                         if server:
                             t_norm = normalize_topic(t)
                             for attempt in range(3):
-                                ok = _publish(server, t_norm, '0', min_interval_sec=0.0, retain=True)
+                                ok = _publish(server, t_norm, '0', min_interval_sec=0.0, retain=True, qos=2)
                                 if ok:
                                     break
                                 try:
@@ -189,7 +189,7 @@ def _boot_sync(app, db):
                         close_val = '1' if mode == 'NO' else '0'
                         t_norm = normalize_topic(mtopic)
                         for attempt in range(3):
-                            ok = _publish(server, t_norm, close_val, min_interval_sec=0.0, retain=True)
+                            ok = _publish(server, t_norm, close_val, min_interval_sec=0.0, retain=True, qos=2)
                             if ok:
                                 break
                             try:
