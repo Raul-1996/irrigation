@@ -267,122 +267,18 @@ def _warm_mqtt_clients(db):
 
 
 # ---------------------------------------------------------------------------
-# Graceful shutdown: send OFF to ALL zones before MQTT disconnect
+# Graceful shutdown: delegate to services.shutdown
 # ---------------------------------------------------------------------------
 import atexit
 import signal
 import os
 
-_SHUTDOWN_DONE = False
+from services.shutdown import shutdown_all_zones_off, reset_shutdown
 
 
 def shutdown_all_zones(db=None) -> None:
-    """Send OFF (QoS 2, retain=True) to ALL zone MQTT topics.
-
-    This is a safety measure — we send OFF to every zone regardless of its
-    current state.  Called on SIGTERM / SIGINT / atexit before MQTT clients
-    are disconnected.
-    """
-    global _SHUTDOWN_DONE
-    if _SHUTDOWN_DONE:
-        return
-    _SHUTDOWN_DONE = True
-
-    if db is None:
-        try:
-            from database import db as _default_db
-            db = _default_db
-        except ImportError:
-            logger.error('Shutdown: cannot import database')
-            return
-
-    try:
-        from utils import normalize_topic
-        from services.mqtt_pub import get_or_create_mqtt_client
-    except ImportError:
-        logger.error('Shutdown: cannot import mqtt_pub / utils')
-        return
-
-    try:
-        import paho.mqtt.client as _mqtt
-    except ImportError:
-        logger.error('Shutdown: paho.mqtt not available')
-        return
-
-    zones = []
-    try:
-        zones = db.get_zones() or []
-    except (sqlite3.Error, OSError) as e:
-        logger.error('Shutdown: cannot read zones from DB: %s', e)
-        return
-
-    logger.info('Shutdown: sending OFF to all %d zones with QoS 2 + retain', len(zones))
-
-    # Collect (server_obj, normalized_topic) pairs — deduplicate
-    publish_tasks = []
-    server_cache = {}
-    for z in zones:
-        sid = z.get('mqtt_server_id')
-        topic_raw = (z.get('topic') or '').strip()
-        if not sid or not topic_raw:
-            continue
-        sid = int(sid)
-        if sid not in server_cache:
-            try:
-                server_cache[sid] = db.get_mqtt_server(sid)
-            except (sqlite3.Error, OSError):
-                server_cache[sid] = None
-        server = server_cache.get(sid)
-        if not server:
-            continue
-        t = normalize_topic(topic_raw)
-        publish_tasks.append((server, t, sid))
-
-    if not publish_tasks:
-        logger.warning('Shutdown: no zone MQTT topics found — nothing to send')
-        return
-
-    # Ensure clients are connected
-    inflight = []
-    for server, topic, sid in publish_tasks:
-        try:
-            cl = get_or_create_mqtt_client(server)
-            if cl is None:
-                logger.warning('Shutdown: MQTT client unavailable for server %s, skipping topic %s', sid, topic)
-                continue
-            # Publish to base topic
-            res = cl.publish(topic, payload='0', qos=2, retain=True)
-            inflight.append((topic, res))
-            # Also publish to /on topic for Wirenboard compatibility
-            try:
-                res_on = cl.publish(topic + '/on', payload='0', qos=2, retain=True)
-                inflight.append((topic + '/on', res_on))
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug('Shutdown: /on publish error for %s: %s', topic, e)
-        except (ConnectionError, TimeoutError, OSError) as e:
-            logger.error('Shutdown: publish error for %s: %s', topic, e)
-
-    # Wait for all publishes to complete (max 10 seconds total)
-    success = 0
-    failed = 0
-    for topic, res in inflight:
-        try:
-            res.wait_for_publish(timeout=10.0)
-            success += 1
-        except (ValueError, RuntimeError, OSError) as e:
-            logger.warning('Shutdown: wait_for_publish failed for %s: %s', topic, e)
-            failed += 1
-        except Exception as e:
-            logger.warning('Shutdown: wait_for_publish unexpected error for %s: %s', topic, e)
-            failed += 1
-
-    logger.info('Shutdown: OFF sent to %d topics (%d confirmed, %d failed)', len(inflight), success, failed)
-
-
-def reset_shutdown():
-    """Allow re-shutdown in tests."""
-    global _SHUTDOWN_DONE
-    _SHUTDOWN_DONE = False
+    """Backward-compatible wrapper — delegates to services.shutdown."""
+    shutdown_all_zones_off(db=db)
 
 
 def _register_shutdown_handlers(db=None):
@@ -396,13 +292,13 @@ def _register_shutdown_handlers(db=None):
 
     def _signal_handler(signum, frame):
         logger.info('Shutdown: received signal %s', signum)
-        shutdown_all_zones(db)
+        shutdown_all_zones_off(db=db)
         # Re-raise default handler so process actually exits
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
     # atexit runs on normal exit and some signal scenarios
-    atexit.register(shutdown_all_zones, db)
+    atexit.register(shutdown_all_zones_off, db=db)
 
     # SIGTERM (systemctl stop, docker stop)
     try:

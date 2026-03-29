@@ -4,13 +4,32 @@
 """
 
 import os
+import signal
+import sys
 import logging
 from app import app
 
 logger = logging.getLogger(__name__)
 
+
+def _graceful_shutdown(signum, frame):
+    """Handle SIGTERM/SIGINT: send OFF to all zones, then exit."""
+    logger.info('Received signal %s, initiating graceful shutdown...', signum)
+    try:
+        from services.shutdown import shutdown_all_zones_off
+        shutdown_all_zones_off()
+    except Exception as exc:
+        logger.warning('Graceful shutdown error: %s', exc)
+    sys.exit(0)
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '8080'))
+
+    # Register signal handlers before starting the server
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
+
     try:
         from hypercorn.asyncio import serve
         from hypercorn.config import Config

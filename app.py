@@ -351,6 +351,10 @@ def _start_single_zone_watchdog():
 import atexit
 atexit.register(lambda: _WATCHDOG_STOP_EVENT.set())
 
+# ── Graceful shutdown: atexit fallback ──────────────────────────────────────
+from services.shutdown import shutdown_all_zones_off
+atexit.register(shutdown_all_zones_off, timeout_sec=5)
+
 # ── General API rate limiter ────────────────────────────────────────────────
 @app.before_request
 def _general_api_rate_limit():
