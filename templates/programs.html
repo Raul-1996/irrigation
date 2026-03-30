@@ -882,6 +882,20 @@ const ZONE_NAMES = [
 
 const COLORS = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350", "#ab47bc", "#26c6da", "#78909c", "#8d6e63"];
 
+// CSRF token from base.html meta tag
+function getCsrfToken() {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta ? meta.getAttribute('content') : '';
+}
+
+function apiHeaders(json = true) {
+  const h = {};
+  if (json) h['Content-Type'] = 'application/json';
+  const csrf = getCsrfToken();
+  if (csrf) h['X-CSRFToken'] = csrf;
+  return h;
+}
+
 // Load data
 async function loadPrograms() {
   try {
@@ -1014,7 +1028,7 @@ async function toggleEnabled(id) {
     
     const resp = await fetch(`/api/programs/${id}/enabled`, {
       method: 'PATCH',
-      headers: {'Content-Type': 'application/json'},
+      headers: apiHeaders(),
       body: JSON.stringify({enabled: newEnabled})
     });
     
@@ -1031,7 +1045,7 @@ async function toggleEnabled(id) {
 
 async function duplicateProgram(id) {
   try {
-    const resp = await fetch(`/api/programs/${id}/duplicate`, {method: 'POST'});
+    const resp = await fetch(`/api/programs/${id}/duplicate`, {method: 'POST', headers: apiHeaders(false)});
     if (resp.ok) {
       await loadPrograms();
       showToast('📋 Программа скопирована', 'success');
@@ -1047,7 +1061,7 @@ async function runProgram(id) {
     const prog = programs.find(p => p.id === id);
     const resp = await fetch('/api/run', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: apiHeaders(),
       body: JSON.stringify({zones: prog.zones, name: prog.name})
     });
     
@@ -1065,7 +1079,7 @@ async function deleteProgram(id) {
   if (!confirm('Удалить программу?')) return;
   
   try {
-    const resp = await fetch(`/api/programs/${id}`, {method: 'DELETE'});
+    const resp = await fetch(`/api/programs/${id}`, {method: 'DELETE', headers: apiHeaders(false)});
     if (resp.ok) {
       programs = programs.filter(p => p.id !== id);
       renderList();
@@ -1308,7 +1322,7 @@ async function saveWizard() {
   try {
     const resp = await fetch('/api/programs', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: apiHeaders(),
       body: JSON.stringify(wizardData)
     });
     
