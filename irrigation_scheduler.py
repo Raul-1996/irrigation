@@ -570,14 +570,27 @@ class IrrigationScheduler:
 
     def schedule_program(self, program_id: int, program_data: Dict[str, Any]):
         try:
+            # Проверка enabled — если выключена, отменяем и выходим
+            if not program_data.get('enabled', True):
+                logger.info(f"Программа {program_id} выключена (enabled=0), отменяем расписание")
+                self.cancel_program(program_id)
+                return
+
             time_str = program_data['time']  # 'HH:MM'
             hours, minutes = map(int, time_str.split(':'))
-            days: List[int] = program_data['days']  # 0-6, где 0=Пн
             zones: List[int] = list(program_data['zones'])
             zones.sort()
 
-            if not days or not zones:
-                logger.warning(f"Программа {program_id} имеет пустые дни или зоны, пропуск")
+            if not zones:
+                logger.warning(f"Программа {program_id} имеет пустые зоны, пропуск")
+                return
+
+            schedule_type = program_data.get('schedule_type', 'weekdays')
+            days: List[int] = program_data.get('days', [])  # 0-6, где 0=Пн
+
+            # Для weekdays нужны дни, для interval/even-odd — нет
+            if schedule_type == 'weekdays' and not days:
+                logger.warning(f"Программа {program_id} имеет schedule_type=weekdays но пустые дни, пропуск")
                 return
 
             # Удаляем прежние задания программы
@@ -603,12 +616,70 @@ class IrrigationScheduler:
                 logger.error(f"Ошибка расчета плановых стартов для программы {program_id}: {e}")
 
             job_ids: List[str] = []
-            # APScheduler CronTrigger: day_of_week принимает 0-6, 0=Monday
-            for day in days:
-                trigger = CronTrigger(day_of_week=day, hour=hours, minute=minutes)
+
+            # Основное время старта
+            self._schedule_single_time(program_id, program_data, time_str, 'main', job_ids)
+
+            # Дополнительные времена (extra_times)
+            extra_times = program_data.get('extra_times', [])
+            if isinstance(extra_times, str):
+                try:
+                    extra_times = json.loads(extra_times)
+                except (json.JSONDecodeError, TypeError):
+                    extra_times = []
+            
+            for idx, extra_time in enumerate(extra_times):
+                self._schedule_single_time(program_id, program_data, extra_time, f'extra:{idx}', job_ids)
+
+            self.program_jobs[program_id] = job_ids
+            logger.info(f"Программа {program_id} ({program_data['name']}) запланирована: {schedule_type}, {len(job_ids)} jobs")
+        except (sqlite3.Error, OSError, KeyError, ValueError) as e:
+            logger.error(f"Ошибка планирования программы {program_id}: {e}")
+
+    def _schedule_single_time(self, program_id: int, program_data: Dict[str, Any], time_str: str, suffix: str, job_ids: List[str]):
+        """Создать jobs для одного времени старта (main или extra_times)."""
+        try:
+            hours, minutes = map(int, time_str.split(':'))
+            zones: List[int] = list(program_data['zones'])
+            zones.sort()
+            schedule_type = program_data.get('schedule_type', 'weekdays')
+            days: List[int] = program_data.get('days', [])
+
+            if schedule_type == 'weekdays':
+                # Текущая логика: CronTrigger для каждого дня
+                for day in days:
+                    trigger = CronTrigger(day_of_week=day, hour=hours, minute=minutes)
+                    _kwargs = dict(
+                        args=[program_id, zones, program_data['name']],
+                        id=f"program:{program_id}:{suffix}:d{day}",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        coalesce=False,
+                        max_instances=1,
+                    )
+                    if getattr(self, 'has_default_jobstore', False):
+                        _kwargs['jobstore'] = 'default'
+                    job = self.scheduler.add_job(
+                        job_run_program,
+                        trigger,
+                        **_kwargs,
+                    )
+                    job_ids.append(job.id)
+
+            elif schedule_type == 'interval':
+                # IntervalTrigger: каждые N дней
+                interval_days = int(program_data.get('interval_days', 1))
+                # Первый запуск — сегодня в указанное время (если ещё не прошло) или завтра
+                now = datetime.now()
+                start_date = datetime(now.year, now.month, now.day, hours, minutes, 0, 0)
+                if start_date <= now:
+                    # Если время уже прошло сегодня — первый запуск завтра
+                    start_date += timedelta(days=1)
+                
+                trigger = IntervalTrigger(days=interval_days, start_date=start_date)
                 _kwargs = dict(
                     args=[program_id, zones, program_data['name']],
-                    id=f"program:{program_id}:d{day}",
+                    id=f"program:{program_id}:{suffix}",
                     replace_existing=True,
                     misfire_grace_time=3600,
                     coalesce=False,
@@ -623,10 +694,34 @@ class IrrigationScheduler:
                 )
                 job_ids.append(job.id)
 
-            self.program_jobs[program_id] = job_ids
-            logger.info(f"Программа {program_id} ({program_data['name']}) запланирована на дни {days} в {time_str}")
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Ошибка планирования программы {program_id}: {e}")
+            elif schedule_type == 'even-odd':
+                # CronTrigger с днями месяца (чётные/нечётные)
+                even_odd = program_data.get('even_odd', 'even')
+                if even_odd == 'even':
+                    day_str = '2,4,6,8,10,12,14,16,18,20,22,24,26,28,30'
+                else:
+                    day_str = '1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31'
+                
+                trigger = CronTrigger(day=day_str, hour=hours, minute=minutes)
+                _kwargs = dict(
+                    args=[program_id, zones, program_data['name']],
+                    id=f"program:{program_id}:{suffix}",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    coalesce=False,
+                    max_instances=1,
+                )
+                if getattr(self, 'has_default_jobstore', False):
+                    _kwargs['jobstore'] = 'default'
+                job = self.scheduler.add_job(
+                    job_run_program,
+                    trigger,
+                    **_kwargs,
+                )
+                job_ids.append(job.id)
+
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error(f"Ошибка планирования времени {time_str} для программы {program_id}: {e}")
 
     def cancel_program(self, program_id: int):
         try:

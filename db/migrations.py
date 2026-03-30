@@ -157,6 +157,8 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'weather_wind_kmh_to_ms', self._migrate_wind_kmh_to_ms)
                 # Queue & float support (spec v1.1)
                 self._apply_named_migration(conn, 'queue_and_float_support', self._migrate_queue_and_float_support)
+                # Programs v2: new fields (type, schedule_type, interval_days, even_odd, color, enabled, extra_times)
+                self._apply_named_migration(conn, 'programs_v2_fields', self._migrate_programs_v2_fields)
 
                 logger.info("База данных инициализирована успешно")
 
@@ -949,6 +951,32 @@ class MigrationRunner:
         conn.execute("DELETE FROM settings WHERE key IN ('max_queue_wait_minutes', 'max_weather_coefficient')")
         conn.commit()
         logger.info('Downgrade: queue_and_float_support откачена')
+
+    def _migrate_programs_v2_fields(self, conn):
+        """Add v2 fields to programs table: type, schedule_type, interval_days, even_odd, color, enabled, extra_times."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(programs)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            migrations = [
+                ('type', "ALTER TABLE programs ADD COLUMN type TEXT DEFAULT 'time-based'"),
+                ('schedule_type', "ALTER TABLE programs ADD COLUMN schedule_type TEXT DEFAULT 'weekdays'"),
+                ('interval_days', "ALTER TABLE programs ADD COLUMN interval_days INTEGER DEFAULT NULL"),
+                ('even_odd', "ALTER TABLE programs ADD COLUMN even_odd TEXT DEFAULT NULL"),
+                ('color', "ALTER TABLE programs ADD COLUMN color TEXT DEFAULT '#42a5f5'"),
+                ('enabled', "ALTER TABLE programs ADD COLUMN enabled INTEGER DEFAULT 1"),
+                ('extra_times', "ALTER TABLE programs ADD COLUMN extra_times TEXT DEFAULT '[]'"),
+            ]
+            
+            for col_name, ddl in migrations:
+                if col_name not in columns:
+                    conn.execute(ddl)
+                    logger.info(f"Добавлено поле {col_name} в таблицу programs")
+            
+            conn.commit()
+            logger.info("Миграция programs v2 fields завершена")
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции programs v2 fields: %s", e)
 
     # =====================================================================
     # Downgrade methods for the last 10 migrations

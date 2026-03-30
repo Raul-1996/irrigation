@@ -139,6 +139,9 @@ class IrrigationDB:
     def delete_program(self, program_id: int) -> bool:
         return self.programs.delete_program(program_id)
 
+    def duplicate_program(self, program_id: int) -> Optional[Dict[str, Any]]:
+        return self.programs.duplicate_program(program_id)
+
     def check_program_conflicts(self, program_id=None, time=None, zones=None, days=None):
         return self.programs.check_program_conflicts(program_id, time, zones, days)
 

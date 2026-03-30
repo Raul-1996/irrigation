@@ -115,3 +115,98 @@ def check_program_conflicts():
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка проверки конфликтов программ: {e}")
         return jsonify({'success': False, 'message': 'Ошибка проверки конфликтов'}), 500
+
+
+@programs_api_bp.route('/api/programs/<int:prog_id>/duplicate', methods=['POST'])
+@rate_limit('programs', max_requests=10, window_sec=60)
+def api_duplicate_program(prog_id):
+    """Duplicate program (create copy with '(копия)' suffix)."""
+    try:
+        new_program = db.duplicate_program(prog_id)
+        if new_program:
+            db.add_log('prog_duplicate', json.dumps({"original": prog_id, "copy": new_program['id']}))
+            try:
+                scheduler = get_scheduler()
+                if scheduler:
+                    scheduler.schedule_program(new_program['id'], new_program)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.error(f"Ошибка планирования дубликата программы {new_program['id']}: {e}")
+            return jsonify({'success': True, 'program': new_program}), 201
+        return jsonify({'success': False, 'message': 'Program not found'}), 404
+    except (sqlite3.Error, OSError) as e:
+        logger.error(f"Ошибка дублирования программы {prog_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка дублирования программы'}), 500
+
+
+@programs_api_bp.route('/api/programs/<int:prog_id>/enabled', methods=['PATCH'])
+@rate_limit('programs', max_requests=20, window_sec=60)
+def api_toggle_program_enabled(prog_id):
+    """Toggle program enabled/disabled state."""
+    try:
+        data = request.get_json() or {}
+        enabled = data.get('enabled')
+        if enabled is None:
+            return jsonify({'success': False, 'message': 'enabled field is required'}), 400
+        
+        program = db.update_program(prog_id, {'enabled': bool(enabled)})
+        if program:
+            db.add_log('prog_toggle', json.dumps({"prog": prog_id, "enabled": bool(enabled)}))
+            try:
+                scheduler = get_scheduler()
+                if scheduler:
+                    if program.get('enabled'):
+                        scheduler.schedule_program(prog_id, program)
+                    else:
+                        scheduler.cancel_program(prog_id)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.error(f"Ошибка перепланирования программы {prog_id} после toggle: {e}")
+            return jsonify({'success': True, 'program': program})
+        return jsonify({'success': False, 'message': 'Program not found'}), 404
+    except (sqlite3.Error, OSError) as e:
+        logger.error(f"Ошибка toggle enabled для программы {prog_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка обновления программы'}), 500
+
+
+@programs_api_bp.route('/api/programs/<int:prog_id>/log', methods=['GET'])
+def api_program_log(prog_id):
+    """Get watering log for specific program."""
+    try:
+        program = db.get_program(prog_id)
+        if not program:
+            return jsonify({'success': False, 'message': 'Program not found'}), 404
+        
+        period = request.args.get('period', 'today')
+        limit = int(request.args.get('limit', 50))
+        
+        # TODO: implement actual log fetching from zone_runs + logs tables
+        # For now return stub
+        log_entries = []
+        
+        return jsonify({'success': True, 'log': log_entries})
+    except (ValueError, sqlite3.Error, OSError) as e:
+        logger.error(f"Ошибка получения журнала программы {prog_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка получения журнала'}), 500
+
+
+@programs_api_bp.route('/api/programs/<int:prog_id>/stats', methods=['GET'])
+def api_program_stats(prog_id):
+    """Get statistics for specific program."""
+    try:
+        program = db.get_program(prog_id)
+        if not program:
+            return jsonify({'success': False, 'message': 'Program not found'}), 404
+        
+        # TODO: implement actual stats aggregation from zone_runs table
+        # For now return stub
+        stats = {
+            'total_runs': 0,
+            'total_water_calc': 0,
+            'total_water_fact': 0,
+            'avg_duration_min': 0,
+            'last_run': None
+        }
+        
+        return jsonify({'success': True, 'stats': stats})
+    except (sqlite3.Error, OSError) as e:
+        logger.error(f"Ошибка получения статистики программы {prog_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка получения статистики'}), 500

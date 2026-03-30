@@ -22,6 +22,9 @@ class ProgramRepository(BaseRepository):
                     program = dict(row)
                     program['days'] = [int(d) for d in json.loads(program['days'])]
                     program['zones'] = json.loads(program['zones'])
+                    # v2 fields
+                    program['extra_times'] = json.loads(program.get('extra_times', '[]'))
+                    program['enabled'] = bool(program.get('enabled', 1))
                     programs.append(program)
                 return programs
         except sqlite3.Error as e:
@@ -39,6 +42,9 @@ class ProgramRepository(BaseRepository):
                     program = dict(row)
                     program['days'] = [int(d) for d in json.loads(program['days'])]
                     program['zones'] = json.loads(program['zones'])
+                    # v2 fields
+                    program['extra_times'] = json.loads(program.get('extra_times', '[]'))
+                    program['enabled'] = bool(program.get('enabled', 1))
                     return program
                 return None
         except sqlite3.Error as e:
@@ -51,20 +57,30 @@ class ProgramRepository(BaseRepository):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 try:
-                    norm_days = [int(d) for d in program_data['days']]
+                    norm_days = [int(d) for d in program_data.get('days', [])]
                 except (TypeError, ValueError, KeyError) as e:
                     logger.debug("create_program days parse: %s", e)
                     norm_days = []
                 if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
                     norm_days = [max(0, min(6, d - 1)) for d in norm_days]
+                
+                # v2 fields with defaults
                 cursor = conn.execute('''
-                    INSERT INTO programs (name, time, days, zones)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO programs (name, time, days, zones, type, schedule_type, 
+                                          interval_days, even_odd, color, enabled, extra_times)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     program_data['name'],
                     program_data['time'],
                     json.dumps(norm_days),
-                    json.dumps(program_data['zones'])
+                    json.dumps(program_data['zones']),
+                    program_data.get('type', 'time-based'),
+                    program_data.get('schedule_type', 'weekdays'),
+                    program_data.get('interval_days'),
+                    program_data.get('even_odd'),
+                    program_data.get('color', '#42a5f5'),
+                    1 if program_data.get('enabled', True) else 0,
+                    json.dumps(program_data.get('extra_times', []))
                 ))
                 program_id = cursor.lastrowid
                 conn.commit()
@@ -78,24 +94,61 @@ class ProgramRepository(BaseRepository):
         """Обновить программу."""
         try:
             with sqlite3.connect(self.db_path) as conn:
-                try:
-                    norm_days = [int(d) for d in program_data['days']]
-                except (TypeError, ValueError, KeyError) as e:
-                    logger.debug("update_program days parse: %s", e)
-                    norm_days = []
-                if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
-                    norm_days = [max(0, min(6, d - 1)) for d in norm_days]
-                conn.execute('''
-                    UPDATE programs 
-                    SET name = ?, time = ?, days = ?, zones = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                ''', (
-                    program_data['name'],
-                    program_data['time'],
-                    json.dumps(norm_days),
-                    json.dumps(program_data['zones']),
-                    program_id
-                ))
+                # Build dynamic UPDATE based on provided fields
+                updates = []
+                params = []
+                
+                # Core fields
+                if 'name' in program_data:
+                    updates.append('name = ?')
+                    params.append(program_data['name'])
+                if 'time' in program_data:
+                    updates.append('time = ?')
+                    params.append(program_data['time'])
+                if 'days' in program_data:
+                    try:
+                        norm_days = [int(d) for d in program_data['days']]
+                        if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
+                            norm_days = [max(0, min(6, d - 1)) for d in norm_days]
+                        updates.append('days = ?')
+                        params.append(json.dumps(norm_days))
+                    except (TypeError, ValueError, KeyError) as e:
+                        logger.debug("update_program days parse: %s", e)
+                if 'zones' in program_data:
+                    updates.append('zones = ?')
+                    params.append(json.dumps(program_data['zones']))
+                
+                # v2 fields
+                if 'type' in program_data:
+                    updates.append('type = ?')
+                    params.append(program_data['type'])
+                if 'schedule_type' in program_data:
+                    updates.append('schedule_type = ?')
+                    params.append(program_data['schedule_type'])
+                if 'interval_days' in program_data:
+                    updates.append('interval_days = ?')
+                    params.append(program_data['interval_days'])
+                if 'even_odd' in program_data:
+                    updates.append('even_odd = ?')
+                    params.append(program_data['even_odd'])
+                if 'color' in program_data:
+                    updates.append('color = ?')
+                    params.append(program_data['color'])
+                if 'enabled' in program_data:
+                    updates.append('enabled = ?')
+                    params.append(1 if program_data['enabled'] else 0)
+                if 'extra_times' in program_data:
+                    updates.append('extra_times = ?')
+                    params.append(json.dumps(program_data['extra_times']))
+                
+                if not updates:
+                    return self.get_program(program_id)
+                
+                updates.append('updated_at = CURRENT_TIMESTAMP')
+                sql = f"UPDATE programs SET {', '.join(updates)} WHERE id = ?"
+                params.append(program_id)
+                
+                conn.execute(sql, params)
                 conn.commit()
                 return self.get_program(program_id)
         except sqlite3.Error as e:
@@ -113,6 +166,25 @@ class ProgramRepository(BaseRepository):
         except sqlite3.Error as e:
             logger.error("Ошибка удаления программы %s: %s", program_id, e)
             return False
+
+    @retry_on_busy()
+    def duplicate_program(self, program_id: int) -> Optional[Dict[str, Any]]:
+        """Дублировать программу (создать копию с суффиксом '(копия)')."""
+        try:
+            original = self.get_program(program_id)
+            if not original:
+                logger.error("Программа %s не найдена для дублирования", program_id)
+                return None
+            
+            # Копируем все поля кроме id, created_at, updated_at
+            copy_data = {k: v for k, v in original.items() 
+                        if k not in ('id', 'created_at', 'updated_at')}
+            copy_data['name'] = original['name'] + ' (копия)'
+            
+            return self.create_program(copy_data)
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error("Ошибка дублирования программы %s: %s", program_id, e)
+            return None
 
     def check_program_conflicts(self, program_id: int = None, time: str = None,
                                 zones: List[int] = None, days: List[str] = None,

@@ -5,365 +5,1340 @@
 
 {% block extra_css %}
 <style>
-    .float-add {
-        display: block;
-        margin: 0 auto 1rem;
-        background: #2196f3;
-        color: #fff;
-        border: none;
-        padding: 0.6rem 1rem;
-        border-radius: 5px;
-        cursor: pointer;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-        font-size: 1rem;
-        transition: all 0.2s;
-    }
-    .float-add:hover {
-        background: #1976d2;
-        transform: translateY(-1px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
-    }
-    
-    .prog-table {
-        width: 100%;
-        border-collapse: collapse;
-        background: #fff;
-        border-radius: 8px;
-        overflow: hidden;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    .prog-table th, .prog-table td {
-        border: 1px solid #ccc;
-        padding: 0.6rem;
-        text-align: center;
-        font-size: 0.9rem;
-        color: #333;
-    }
-    .prog-table th {
-        background: #e0e0e0;
-        font-weight: bold;
-        color: #333;
-    }
-    .prog-table tr:hover {
-        background-color: #f5f5f5;
-    }
-    
-    .edit-btn, .del-btn {
-        padding: 0.4rem 0.8rem;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.9rem;
-        transition: all 0.2s;
-    }
-    .edit-btn {
-        background: #ffc107;
-        color: #000;
-        margin-right: 0.4rem;
-    }
-    .edit-btn:hover {
-        background: #ffb300;
-    }
-    .del-btn {
-        background: #f44336;
-        color: #fff;
-    }
-    .del-btn:hover {
-        background: #d32f2f;
-    }
-    
-    .modal {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0,0,0,0.5);
-        justify-content: center;
-        align-items: center;
-        z-index: 1000;
-    }
-    .modal-content {
-        background: #fff;
-        padding: 2rem;
-        border-radius: 6px;
-        max-width: 600px;
-        width: 90%;
-        max-height: 90%;
-        overflow: auto;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .modal-content h3 {
-        margin-top: 0;
-        color: #333;
-    }
-    
-    .wizard-step {
-        display: none;
-    }
-    .wizard-step.active {
-        display: block;
-    }
-    
-    .wizard-nav {
-        display: flex;
-        justify-content: space-between;
-        margin-top: 1rem;
-        padding-top: 1rem;
-        border-top: 1px solid #eee;
-    }
-    .wizard-nav button {
-        background: #4caf50;
-        color: #fff;
-        padding: 0.6rem 1rem;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        transition: background-color 0.2s;
-    }
-    .wizard-nav button:hover {
-        background: #45a049;
-    }
-    .wizard-nav .cancel {
-        background: #ccc;
-        color: #333;
-    }
-    .wizard-nav .cancel:hover {
-        background: #bbb;
-    }
-    .wizard-nav button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-    
-    .field {
-        margin-bottom: 1rem;
-        text-align: left;
-    }
-    .field label {
-        display: block;
-        margin-bottom: 0.3rem;
-        font-weight: bold;
-        color: #555;
-    }
-    .field input[type=text], 
-    .field input[type=time], 
-    .field select {
-        width: 100%;
-        padding: 0.5rem;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        font-size: 0.9rem;
-        box-sizing: border-box;
-    }
-    .field input:focus, .field select:focus {
-        outline: none;
-        border-color: #2196f3;
-        box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
-    }
-    
-    .select-days {
-        margin-bottom: 0.5rem;
-        padding: 0.4rem 0.8rem;
-        background: #f0f0f0;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.9rem;
-        transition: background-color 0.2s;
-    }
-    .select-days:hover {
-        background: #e0e0e0;
-    }
-    
-    .zone-selector {
-        border: 1px solid #ccc;
-        padding: 1rem;
-        border-radius: 4px;
-        max-height: 70vh;
-        overflow: auto;
-        margin-bottom: 1rem;
-        background: #f9f9f9;
-    }
-    
-    .group-block {
-        margin-bottom: 0.75rem;
-        padding: 0.5rem;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        background: white;
-    }
-    .group-block > label {
-        font-weight: bold;
-        display: block;
-        margin-bottom: 0.5rem;
-        cursor: pointer;
-        color: #333;
-    }
-    
-    .zone-item {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-        grid-gap: 0.5rem;
-        padding-left: 1.5rem;
-    }
-    .zone-item label {
-        display: flex;
-        align-items: center;
-        gap: 0.3rem;
-        cursor: pointer;
-        font-size: 0.9rem;
-        color: #333 !important;
-    }
-    .zone-item input[type="checkbox"] {
-        margin: 0;
-    }
-    
-    .select-all {
-        display: block;
-        margin-bottom: 1rem;
-        font-weight: bold;
-        cursor: pointer;
-        padding: 0.5rem;
-        background: #e3f2fd;
-        border-radius: 4px;
-        color: #1976d2;
-    }
-    .select-all:hover {
-        background: #bbdefb;
-    }
-    
-    /* Стили для программ полива */
-    .prog-table th, .prog-table td {
-        border: 1px solid #ccc;
-        padding: 0.6rem;
-        text-align: center;
-        font-size: 0.9rem;
-        color: #333;
-    }
-    .prog-table th {
-        background: #e0e0e0;
-        font-weight: bold;
-        color: #333;
-    }
-    
-    /* Стили для модального окна выбора зон */
-    .zone-selection {
-        max-height: 300px;
-        overflow-y: auto;
-        border: 1px solid #ddd;
-        padding: 1rem;
-        background: white;
-        color: #333;
-    }
-    
-    .zone-selection label {
-        display: block;
-        margin: 0.5rem 0;
-        color: #333 !important;
-        font-weight: normal;
-    }
-    
-    .zone-selection input[type="checkbox"] {
-        margin-right: 0.5rem;
-    }
-    
-    .zone-selection .zone-item {
-        padding: 0.3rem;
-        border-bottom: 1px solid #eee;
-        color: #333 !important;
-    }
-    
-    .zone-selection .zone-item:hover {
-        background: #f5f5f5;
-    }
-    
-    @media(max-width:768px) {
-        .prog-table {
-            font-size: 0.8rem;
-        }
-        .prog-table th, .prog-table td {
-            padding: 0.4rem;
-        }
-        .zone-item {
-            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-        }
-    }
+/* CSS Variables */
+:root {
+  --fab-primary: #1976d2;
+  --fab-hover: #1565c0;
+  --shadow: 0 2px 8px rgba(0,0,0,0.08);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,0.12);
+}
+
+[data-theme="dark"] {
+  --shadow: 0 2px 8px rgba(0,0,0,0.4);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,0.6);
+}
+
+/* Navigation pills */
+.nav-pills {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: 4px 0;
+}
+
+.nav-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.nav-pill {
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.nav-pill.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.nav-pill:hover {
+  background: var(--border-color);
+}
+
+/* Tab content */
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+  animation: fadeIn 0.3s;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Sort buttons */
+.sort-buttons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.sort-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--card-background);
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.sort-btn.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.sort-btn:hover:not(.active) {
+  background: var(--border-color);
+}
+
+/* Program card */
+.program-card {
+  background: var(--card-background);
+  border-radius: 12px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow);
+  border-left: 4px solid var(--primary-color);
+  overflow: hidden;
+  transition: all 0.3s;
+  position: relative;
+}
+
+.program-card:hover {
+  box-shadow: var(--shadow-lg);
+}
+
+.program-header {
+  padding: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.program-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.program-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 16px;
+  flex: 1;
+}
+
+.badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.badge.time-based {
+  background: #e3f2fd;
+  color: #1976d2;
+}
+
+.badge.smart {
+  background: #e8f5e9;
+  color: #4caf50;
+}
+
+[data-theme="dark"] .badge.time-based {
+  background: #0d47a1;
+  color: #90caf9;
+}
+
+[data-theme="dark"] .badge.smart {
+  background: #1b5e20;
+  color: #a5d6a7;
+}
+
+/* Toggle switch */
+.toggle-switch {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: #ccc;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-switch.active {
+  background: var(--success-color);
+}
+
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  background: white;
+  border-radius: 50%;
+  top: 2px;
+  left: 2px;
+  transition: left 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.toggle-switch.active::after {
+  left: 22px;
+}
+
+.program-time {
+  font-size: 14px;
+  color: var(--text-secondary, #757575);
+  margin-bottom: 8px;
+}
+
+.program-days {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.day-pill {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--border-color);
+  color: var(--text-secondary, #757575);
+}
+
+.day-pill.active {
+  background: var(--primary-color);
+  color: white;
+}
+
+.program-stats {
+  font-size: 13px;
+  color: var(--text-secondary, #757575);
+}
+
+/* Program details (expandable) */
+.program-details {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s, opacity 0.3s;
+  opacity: 0;
+}
+
+.program-details.expanded {
+  max-height: 2000px;
+  opacity: 1;
+}
+
+.program-details-content {
+  padding: 0 16px 16px 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.zone-list {
+  margin: 16px 0;
+}
+
+.zone-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
+.zone-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+}
+
+.zone-duration {
+  margin-left: auto;
+  color: var(--text-secondary, #757575);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.program-info {
+  font-size: 13px;
+  color: var(--text-secondary, #757575);
+  margin-bottom: 8px;
+}
+
+.program-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.icon-btn {
+  flex: 1;
+  min-width: calc(50% - 4px);
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--background-color);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--text-color);
+}
+
+.icon-btn:hover {
+  background: var(--border-color);
+  transform: translateY(-1px);
+}
+
+.icon-btn.danger:hover {
+  background: var(--danger-color);
+  color: white;
+  border-color: var(--danger-color);
+}
+
+/* FAB button */
+.fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--fab-primary);
+  color: white;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s, box-shadow 0.2s;
+  z-index: 90;
+}
+
+.fab:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+  background: var(--fab-hover);
+}
+
+.fab:active {
+  transform: scale(0.95);
+}
+
+/* Modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+
+.modal-overlay.active {
+  display: flex;
+}
+
+.modal {
+  background: var(--card-background);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+  animation: modalSlideIn 0.3s ease-out;
+}
+
+@keyframes modalSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 600px) {
+  .modal {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+  }
+}
+
+.modal-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-body {
+  padding: 20px;
+  max-height: calc(90vh - 160px);
+  overflow-y: auto;
+}
+
+.modal-footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+/* Step indicator */
+.step-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.step-circle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  background: #ccc;
+  color: white;
+}
+
+.step-circle.done {
+  background: var(--success-color);
+}
+
+.step-circle.active {
+  background: var(--primary-color);
+}
+
+.step-line {
+  width: 40px;
+  height: 2px;
+  background: #ccc;
+}
+
+.step-line.done {
+  background: var(--success-color);
+}
+
+/* Wizard steps */
+.wizard-step {
+  display: none;
+}
+
+.wizard-step.active {
+  display: block;
+  animation: fadeIn 0.3s;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.form-input, .form-select {
+  width: 100%;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--card-background);
+  color: var(--text-color);
+  font-size: 16px;
+  font-family: inherit;
+}
+
+.form-input:focus, .form-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(25, 118, 210, 0.1);
+}
+
+/* Radio cards */
+.radio-cards {
+  display: grid;
+  gap: 12px;
+}
+
+.radio-card {
+  padding: 16px;
+  border-radius: 8px;
+  border: 2px solid var(--border-color);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.radio-card:hover {
+  border-color: var(--primary-color);
+}
+
+.radio-card.selected {
+  border-color: var(--primary-color);
+  background: rgba(25, 118, 210, 0.05);
+}
+
+.radio-card-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.radio-card-desc {
+  font-size: 13px;
+  color: var(--text-secondary, #757575);
+}
+
+/* Color picker */
+.color-picker {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.color-option {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 3px solid transparent;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 16px;
+}
+
+.color-option:hover {
+  transform: scale(1.1);
+}
+
+.color-option.selected {
+  border-color: var(--text-color);
+}
+
+/* Schedule tabs */
+.schedule-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.schedule-tab {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--background-color);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  font-size: 14px;
+  text-align: center;
+  transition: all 0.2s;
+}
+
+.schedule-tab.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.schedule-tab:hover:not(.active) {
+  background: var(--border-color);
+}
+
+/* Weekday buttons */
+.weekdays {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.weekday-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--background-color);
+  border: 2px solid var(--border-color);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  color: var(--text-color);
+}
+
+.weekday-btn.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.weekday-btn:hover:not(.active) {
+  background: var(--border-color);
+}
+
+/* Zone row */
+.zone-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: var(--background-color);
+  transition: all 0.3s;
+}
+
+.zone-row.enabled {
+  background: rgba(25, 118, 210, 0.05);
+}
+
+.zone-row.disabled {
+  opacity: 0.5;
+}
+
+.zone-info {
+  flex: 1;
+  font-size: 14px;
+}
+
+.zone-number {
+  font-size: 12px;
+  color: var(--text-secondary, #757575);
+}
+
+.zone-duration-input {
+  width: 70px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--card-background);
+  color: var(--text-color);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* Summary card */
+.summary-card {
+  background: var(--background-color);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.summary-section {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.summary-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.summary-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--text-secondary, #757575);
+  margin-bottom: 8px;
+}
+
+.summary-value {
+  font-size: 15px;
+}
+
+/* Button */
+.btn {
+  padding: 12px 24px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.btn-primary {
+  background: var(--primary-color);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--fab-hover);
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+}
+
+.btn-outline:hover {
+  background: var(--border-color);
+}
+
+/* Toast notification */
+.toast {
+  position: fixed;
+  bottom: -100px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--card-background);
+  color: var(--text-color);
+  padding: 16px 24px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  z-index: 300;
+  transition: bottom 0.3s;
+  max-width: 90%;
+}
+
+.toast.show {
+  bottom: 24px;
+}
+
+.toast.success {
+  background: var(--success-color);
+  color: white;
+}
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary, #757575);
+}
+
+.empty-state svg {
+  width: 120px;
+  height: 120px;
+  margin-bottom: 20px;
+  opacity: 0.3;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .program-actions {
+    flex-direction: column;
+  }
+  
+  .icon-btn {
+    min-width: 100%;
+  }
+  
+  .weekdays {
+    gap: 4px;
+  }
+  
+  .weekday-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 12px;
+  }
+  
+  .fab {
+    bottom: 16px;
+    right: 16px;
+  }
+}
 </style>
 {% endblock %}
 
 {% block content %}
-<button class="float-add" onclick="openWizard()">➕ Новая программа</button>
-
-<div style="overflow-x: auto;">
-    <table class="prog-table">
-        <thead>
-            <tr>
-                <th>#</th>
-                <th>Название</th>
-                <th>Время старта</th>
-                <th>Финиш</th>
-                <th>Дни недели</th>
-                <th>Зоны</th>
-                <th>Действия</th>
-            </tr>
-        </thead>
-        <tbody id="prog-body">
-            <!-- Программы будут загружены через JavaScript -->
-        </tbody>
-    </table>
+<!-- Navigation pills -->
+<div class="nav-pills">
+  <button class="nav-pill active" onclick="switchTab('list')">Список</button>
+  <button class="nav-pill" onclick="switchTab('execution')">Выполнение</button>
+  <button class="nav-pill" onclick="switchTab('log')">Журнал</button>
 </div>
 
-<!-- Модальное окно мастера программ -->
-<div class="modal" id="wizardModal">
-    <div class="modal-content">
-        <div class="wizard-step" id="step1">
-            <h3>Шаг 1: Имя, время и дни</h3>
-            <div class="field">
-                <label>Название программы *</label>
-                <input id="progName" type="text" required placeholder="Введите название программы"/>
-            </div>
-            <div class="field">
-                <label>Время старта * (мин. шаг 5)</label>
-                <input id="progTime" type="time" step="300" required/>
-            </div>
-            <div class="field">
-                <label>Дни недели *</label>
-                <button type="button" class="select-days" onclick="selectAllDays()">Выбрать все дни</button>
-                <select id="progDays" multiple required size="7">
-                    <option value="0">Понедельник (0)</option>
-                    <option value="1">Вторник (1)</option>
-                    <option value="2">Среда (2)</option>
-                    <option value="3">Четверг (3)</option>
-                    <option value="4">Пятница (4)</option>
-                    <option value="5">Суббота (5)</option>
-                    <option value="6">Воскресенье (6)</option>
-                </select>
-            </div>
-        </div>
-        
-        <div class="wizard-step" id="step2">
-            <h3>Шаг 2: Выбор зон или групп</h3>
-            <label class="select-all">
-                <input type="checkbox" id="selectAllZones" onclick="toggleAllZones(this)"> 
-                Выбрать все группы и зоны
-            </label>
-            <div class="zone-selector" id="zoneSelector">
-                <!-- Зоны будут загружены через JavaScript -->
-            </div>
-        </div>
-        
-        <div class="wizard-nav">
-            <button id="prevBtn" onclick="prevStep()" disabled>Назад</button>
-            <button id="nextBtn" onclick="nextStep()">Далее</button>
-            <button id="saveBtn" onclick="saveProg()" style="display:none;">Сохранить</button>
-            <button class="cancel" onclick="closeWizard()">Отмена</button>
-        </div>
+<!-- Tab: List -->
+<div id="tab-list" class="tab-content active">
+  <div id="list-content">
+    <div class="empty-state">
+      <p>Загрузка программ...</p>
     </div>
+  </div>
 </div>
+
+<!-- Tab: Execution -->
+<div id="tab-execution" class="tab-content">
+  <div id="execution-content">
+    <div class="empty-state">
+      <svg viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="30" fill="none" stroke="currentColor" stroke-width="4"/>
+        <path d="M50 30v20l15 10" stroke="currentColor" stroke-width="4" fill="none"/>
+      </svg>
+      <h3>Нет активного полива</h3>
+    </div>
+  </div>
+</div>
+
+<!-- Tab: Log -->
+<div id="tab-log" class="tab-content">
+  <div id="log-content">
+    <div class="empty-state">
+      <p>История поливов появится после запуска программ</p>
+    </div>
+  </div>
+</div>
+
+<!-- FAB button -->
+<button class="fab" onclick="openWizard()">+</button>
+
+<!-- Wizard Modal -->
+<div id="wizardModal" class="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="step-indicator" id="step-indicator"></div>
+    </div>
+    <div class="modal-body">
+      <div id="wizard-steps"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="wizardPrev()" id="prev-btn">← Назад</button>
+      <button class="btn btn-primary" onclick="wizardNext()" id="next-btn">Далее →</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
 {% endblock %}
 
 {% block extra_js %}
-<script src="{{ asset('static/js/programs.js') }}"></script>
+<script>
+// Global state
+let currentTab = 'list';
+let currentSort = 'time';
+let wizardStep = 1;
+let wizardData = {};
+let programs = [];
+let zones = [];
+
+const ZONE_NAMES = [
+  "Газон передний", "Газон задний", "Газон боковой", "Цветник парадный",
+  "Цветник задний", "Розарий", "Живая изгородь", "Альпийская горка",
+  "Огород", "Теплица", "Фруктовые деревья", "Ягодные кусты",
+  "Патио горшки", "Балкон", "Дорожки", "Площадка",
+  "Газон спорт", "Детская площадка", "Зона отдыха", "Бассейн зелень",
+  "Въезд", "Парковка зелень", "Компост зона", "Резерв"
+];
+
+const COLORS = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350", "#ab47bc", "#26c6da", "#78909c", "#8d6e63"];
+
+// Load data
+async function loadPrograms() {
+  try {
+    const resp = await fetch('/api/programs');
+    programs = await resp.json();
+    renderList();
+  } catch (err) {
+    console.error('Load programs error:', err);
+    showToast('Ошибка загрузки программ');
+  }
+}
+
+async function loadZones() {
+  try {
+    const resp = await fetch('/api/zones');
+    zones = await resp.json();
+  } catch (err) {
+    console.error('Load zones error:', err);
+  }
+}
+
+// Tabs
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.nav-pill').forEach(p => p.classList.remove('active'));
+  document.getElementById(`tab-${tab}`).classList.add('active');
+  document.querySelectorAll('.nav-pill')[['list','execution','log'].indexOf(tab)].classList.add('active');
+  
+  if (tab === 'list') renderList();
+}
+
+// List rendering
+function renderList() {
+  const container = document.getElementById('list-content');
+  
+  if (programs.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 100 100">
+          <circle cx="50" cy="70" r="3" fill="currentColor"/>
+          <path d="M50 70Q30 60 30 40L50 20L70 40Q70 60 50 70z" fill="none" stroke="currentColor" stroke-width="2"/>
+        </svg>
+        <h3>Нет программ полива</h3>
+        <p>Создайте первую программу</p>
+      </div>
+    `;
+    return;
+  }
+
+  const sorted = [...programs].sort((a, b) => {
+    if (currentSort === 'time') return a.time.localeCompare(b.time);
+    return a.name.localeCompare(b.name);
+  });
+
+  let html = `
+    <div class="sort-buttons">
+      <button class="sort-btn ${currentSort === 'time' ? 'active' : ''}" onclick="setSort('time')">По времени</button>
+      <button class="sort-btn ${currentSort === 'name' ? 'active' : ''}" onclick="setSort('name')">По имени</button>
+    </div>
+  `;
+
+  sorted.forEach(p => {
+    const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const days = p.days || [];
+    
+    html += `
+      <div class="program-card" style="border-left-color: ${p.color || '#42a5f5'}">
+        <div class="program-header" onclick="toggleDetails(${p.id})">
+          <div class="program-title">
+            <div class="program-name">
+              <span>${p.name}</span>
+              <span class="badge ${p.type || 'time-based'}">${p.type === 'smart' ? 'Smart' : 'Time-Based'}</span>
+            </div>
+            <div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>
+          </div>
+          <div class="program-time">⏰ ${p.time}</div>
+          <div class="program-days">
+            ${dayNames.map((name, i) => 
+              `<div class="day-pill ${days.includes(i) ? 'active' : ''}">${name}</div>`
+            ).join('')}
+          </div>
+          <div class="program-stats">${(p.zones || []).length} зон</div>
+        </div>
+        
+        <div class="program-details" id="details-${p.id}">
+          <div class="program-details-content">
+            <div class="zone-list">
+              ${(p.zones || []).map(zid => {
+                const zone = zones.find(z => z.id === zid) || {name: `Зона ${zid}`, duration: 10};
+                return `
+                  <div class="zone-item">
+                    <span class="zone-icon">💧</span>
+                    <span>${zone.name}</span>
+                    <span class="zone-duration">${zone.duration} мин</span>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+            
+            <div class="program-actions">
+              <button class="icon-btn" onclick="editProgram(${p.id})">✏️ Редактировать</button>
+              <button class="icon-btn" onclick="duplicateProgram(${p.id})">📋 Дублировать</button>
+              <button class="icon-btn" onclick="runProgram(${p.id})">▶️ Запустить</button>
+              <button class="icon-btn danger" onclick="deleteProgram(${p.id})">🗑 Удалить</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html;
+}
+
+function setSort(sort) {
+  currentSort = sort;
+  renderList();
+}
+
+function toggleDetails(id) {
+  const details = document.getElementById(`details-${id}`);
+  details.classList.toggle('expanded');
+}
+
+async function toggleEnabled(id) {
+  try {
+    const prog = programs.find(p => p.id === id);
+    const newEnabled = prog.enabled ? 0 : 1;
+    
+    const resp = await fetch(`/api/programs/${id}/enabled`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: newEnabled})
+    });
+    
+    if (resp.ok) {
+      prog.enabled = newEnabled;
+      renderList();
+      showToast(newEnabled ? '✅ Программа включена' : '⏸ Программа выключена', 'success');
+    }
+  } catch (err) {
+    console.error('Toggle enabled error:', err);
+    showToast('Ошибка переключения программы');
+  }
+}
+
+async function duplicateProgram(id) {
+  try {
+    const resp = await fetch(`/api/programs/${id}/duplicate`, {method: 'POST'});
+    if (resp.ok) {
+      await loadPrograms();
+      showToast('📋 Программа скопирована', 'success');
+    }
+  } catch (err) {
+    console.error('Duplicate error:', err);
+    showToast('Ошибка дублирования');
+  }
+}
+
+async function runProgram(id) {
+  try {
+    const prog = programs.find(p => p.id === id);
+    const resp = await fetch('/api/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({zones: prog.zones, name: prog.name})
+    });
+    
+    if (resp.ok) {
+      showToast('▶️ Полив запущен', 'success');
+      switchTab('execution');
+    }
+  } catch (err) {
+    console.error('Run program error:', err);
+    showToast('Ошибка запуска');
+  }
+}
+
+async function deleteProgram(id) {
+  if (!confirm('Удалить программу?')) return;
+  
+  try {
+    const resp = await fetch(`/api/programs/${id}`, {method: 'DELETE'});
+    if (resp.ok) {
+      programs = programs.filter(p => p.id !== id);
+      renderList();
+      showToast('🗑 Программа удалена', 'success');
+    }
+  } catch (err) {
+    console.error('Delete error:', err);
+    showToast('Ошибка удаления');
+  }
+}
+
+function editProgram(id) {
+  showToast('✏️ Редактирование пока не реализовано');
+}
+
+// Wizard
+function openWizard() {
+  wizardStep = 1;
+  wizardData = {
+    name: '',
+    type: 'time-based',
+    color: COLORS[0],
+    schedule_type: 'weekdays',
+    days: [0, 1, 2, 3, 4, 5, 6],
+    time: '06:00',
+    zones: [],
+    enabled: 1
+  };
+  renderWizard();
+  document.getElementById('wizardModal').classList.add('active');
+}
+
+function closeWizard() {
+  document.getElementById('wizardModal').classList.remove('active');
+}
+
+function renderWizard() {
+  renderStepIndicator();
+  renderWizardStep();
+  updateWizardButtons();
+}
+
+function renderStepIndicator() {
+  const steps = 5;
+  let html = '';
+  for (let i = 1; i <= steps; i++) {
+    if (i > 1) html += `<div class="step-line ${i <= wizardStep ? 'done' : ''}"></div>`;
+    const cls = i < wizardStep ? 'done' : (i === wizardStep ? 'active' : '');
+    html += `<div class="step-circle ${cls}">${i < wizardStep ? '✓' : i}</div>`;
+  }
+  document.getElementById('step-indicator').innerHTML = html;
+}
+
+function renderWizardStep() {
+  const container = document.getElementById('wizard-steps');
+  let html = '';
+
+  // Step 1: Basic info
+  html += `<div class="wizard-step ${wizardStep === 1 ? 'active' : ''}">
+    <div class="form-group">
+      <label class="form-label">Название программы</label>
+      <input type="text" class="form-input" placeholder="Например: Утренний полив" 
+        value="${wizardData.name}" onchange="wizardData.name = this.value">
+    </div>
+    
+    <div class="form-group">
+      <label class="form-label">Тип программы</label>
+      <div class="radio-cards">
+        <div class="radio-card ${wizardData.type === 'time-based' ? 'selected' : ''}" 
+          onclick="wizardData.type = 'time-based'; renderWizard()">
+          <div class="radio-card-title">⏱ Time-Based</div>
+          <div class="radio-card-desc">Фиксированное время для каждой зоны</div>
+        </div>
+        <div class="radio-card ${wizardData.type === 'smart' ? 'selected' : ''}" 
+          onclick="wizardData.type = 'smart'; renderWizard()">
+          <div class="radio-card-title">🌤 Smart Weather</div>
+          <div class="radio-card-desc">Автокоррекция по погоде и ET₀</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="form-group">
+      <label class="form-label">Цвет программы</label>
+      <div class="color-picker">
+        ${COLORS.map(c => `
+          <div class="color-option ${wizardData.color === c ? 'selected' : ''}" 
+            style="background: ${c}" onclick="wizardData.color = '${c}'; renderWizard()">
+            ${wizardData.color === c ? '✓' : ''}
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  </div>`;
+
+  // Step 2: Schedule
+  html += `<div class="wizard-step ${wizardStep === 2 ? 'active' : ''}">
+    <div class="schedule-tabs">
+      <button class="schedule-tab ${wizardData.schedule_type === 'weekdays' ? 'active' : ''}" 
+        onclick="wizardData.schedule_type = 'weekdays'; renderWizard()">Дни недели</button>
+      <button class="schedule-tab ${wizardData.schedule_type === 'interval' ? 'active' : ''}" 
+        onclick="wizardData.schedule_type = 'interval'; renderWizard()">Интервал</button>
+    </div>
+    
+    ${wizardData.schedule_type === 'weekdays' ? `
+      <div class="weekdays">
+        ${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map((d, i) => `
+          <button class="weekday-btn ${wizardData.days.includes(i) ? 'active' : ''}" 
+            onclick="toggleDay(${i})">${d}</button>
+        `).join('')}
+      </div>
+    ` : ''}
+    
+    ${wizardData.schedule_type === 'interval' ? `
+      <div class="form-group">
+        <label class="form-label">Интервал полива (дней)</label>
+        <input type="number" class="form-input" min="1" max="30" 
+          value="${wizardData.interval_days || 3}" 
+          onchange="wizardData.interval_days = parseInt(this.value)"
+          placeholder="Дней">
+      </div>
+    ` : ''}
+  </div>`;
+
+  // Step 3: Time
+  html += `<div class="wizard-step ${wizardStep === 3 ? 'active' : ''}">
+    <div class="form-group">
+      <label class="form-label">Время запуска</label>
+      <input type="time" class="form-input" value="${wizardData.time}" 
+        onchange="wizardData.time = this.value">
+    </div>
+  </div>`;
+
+  // Step 4: Zones
+  html += `<div class="wizard-step ${wizardStep === 4 ? 'active' : ''}">
+    <div class="form-group">
+      <label class="form-label">Выбор зон (${wizardData.zones.length} выбрано)</label>
+      ${zones.map(z => `
+        <div class="zone-row ${wizardData.zones.includes(z.id) ? 'enabled' : 'disabled'}">
+          <span class="zone-icon">💧</span>
+          <div class="zone-info">
+            <div>${z.name}</div>
+            <div class="zone-number">Зона ${z.id}</div>
+          </div>
+          <div class="toggle-switch ${wizardData.zones.includes(z.id) ? 'active' : ''}" 
+            onclick="toggleZone(${z.id})"></div>
+        </div>
+      `).join('')}
+    </div>
+  </div>`;
+
+  // Step 5: Summary
+  html += `<div class="wizard-step ${wizardStep === 5 ? 'active' : ''}">
+    <div class="summary-card">
+      <div class="summary-section">
+        <div class="summary-label">Программа</div>
+        <div class="summary-value">
+          <strong>${wizardData.name || 'Без названия'}</strong>
+          <span class="badge ${wizardData.type}">${wizardData.type === 'smart' ? 'Smart' : 'Time-Based'}</span>
+        </div>
+      </div>
+      
+      <div class="summary-section">
+        <div class="summary-label">Расписание</div>
+        <div class="summary-value">
+          ${wizardData.schedule_type === 'weekdays' ? 
+            ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].filter((d, i) => wizardData.days.includes(i)).join(', ') :
+            `Каждые ${wizardData.interval_days || 3} дней`
+          }
+        </div>
+        <div class="summary-value">⏰ ${wizardData.time}</div>
+      </div>
+      
+      <div class="summary-section">
+        <div class="summary-label">Зоны</div>
+        <div class="summary-value">${wizardData.zones.length} зон выбрано</div>
+      </div>
+    </div>
+  </div>`;
+
+  container.innerHTML = html;
+}
+
+function updateWizardButtons() {
+  document.getElementById('prev-btn').style.display = wizardStep === 1 ? 'none' : 'flex';
+  const nextBtn = document.getElementById('next-btn');
+  if (wizardStep === 5) {
+    nextBtn.textContent = '💾 Сохранить';
+    nextBtn.onclick = saveWizard;
+  } else {
+    nextBtn.textContent = 'Далее →';
+    nextBtn.onclick = wizardNext;
+  }
+}
+
+function wizardNext() {
+  if (wizardStep < 5) {
+    wizardStep++;
+    renderWizard();
+  }
+}
+
+function wizardPrev() {
+  if (wizardStep > 1) {
+    wizardStep--;
+    renderWizard();
+  }
+}
+
+function toggleDay(dayIndex) {
+  const idx = wizardData.days.indexOf(dayIndex);
+  if (idx >= 0) {
+    wizardData.days.splice(idx, 1);
+  } else {
+    wizardData.days.push(dayIndex);
+  }
+  renderWizard();
+}
+
+function toggleZone(zoneId) {
+  const idx = wizardData.zones.indexOf(zoneId);
+  if (idx >= 0) {
+    wizardData.zones.splice(idx, 1);
+  } else {
+    wizardData.zones.push(zoneId);
+  }
+  renderWizard();
+}
+
+async function saveWizard() {
+  if (!wizardData.name) {
+    showToast('Введите название программы');
+    return;
+  }
+  
+  if (wizardData.zones.length === 0) {
+    showToast('Выберите хотя бы одну зону');
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/programs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(wizardData)
+    });
+    
+    if (resp.ok) {
+      closeWizard();
+      await loadPrograms();
+      showToast('✅ Программа создана', 'success');
+    } else {
+      const data = await resp.json();
+      showToast(data.message || 'Ошибка создания программы');
+    }
+  } catch (err) {
+    console.error('Save error:', err);
+    showToast('Ошибка сохранения программы');
+  }
+}
+
+// Toast
+function showToast(message, type = '') {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.className = `toast ${type}`;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+// Init
+(async function init() {
+  await loadZones();
+  await loadPrograms();
+})();
+</script>
 {% endblock %}
