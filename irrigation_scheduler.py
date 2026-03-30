@@ -1219,7 +1219,7 @@ class IrrigationScheduler:
             zones = self.db.get_zones()
             for z in zones:
                 st = str(z.get('state') or '').lower()
-                if st in ('starting', 'on', 'stopping'):
+                if st in ('starting', 'on', 'stopping', 'paused'):
                     try:
                         from services.zone_control import stop_zone as _stop
                         _stop(int(z['id']), reason='recovery_boot', force=True)

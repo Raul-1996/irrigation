@@ -155,6 +155,8 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'weather_create_decisions', self._migrate_create_weather_decisions)
                 self._apply_named_migration(conn, 'weather_add_extended_settings', self._migrate_add_extended_weather_settings)
                 self._apply_named_migration(conn, 'weather_wind_kmh_to_ms', self._migrate_wind_kmh_to_ms)
+                # Queue & float support (spec v1.1)
+                self._apply_named_migration(conn, 'queue_and_float_support', self._migrate_queue_and_float_support)
 
                 logger.info("База данных инициализирована успешно")
 
@@ -853,6 +855,101 @@ class MigrationRunner:
         except (sqlite3.Error, ValueError, TypeError) as e:
             logger.error("Ошибка миграции weather_wind_kmh_to_ms: %s", e)
 
+    # --- Queue & float support (spec v1.1) ---
+
+    def _migrate_queue_and_float_support(self, conn):
+        """Add float sensor fields, pause_remaining, queue log, float events tables."""
+        try:
+            # --- groups: float sensor columns ---
+            gcur = conn.execute("PRAGMA table_info(groups)")
+            gcols = [r[1] for r in gcur.fetchall()]
+
+            def _add_group(col, ddl):
+                if col not in gcols:
+                    conn.execute(ddl)
+
+            _add_group('float_enabled',
+                       'ALTER TABLE groups ADD COLUMN float_enabled INTEGER DEFAULT 0')
+            _add_group('float_mqtt_topic',
+                       'ALTER TABLE groups ADD COLUMN float_mqtt_topic TEXT DEFAULT NULL')
+            _add_group('float_mqtt_server_id',
+                       'ALTER TABLE groups ADD COLUMN float_mqtt_server_id INTEGER DEFAULT NULL')
+            _add_group('float_mode',
+                       "ALTER TABLE groups ADD COLUMN float_mode TEXT DEFAULT 'NO'")
+            _add_group('float_timeout_minutes',
+                       'ALTER TABLE groups ADD COLUMN float_timeout_minutes INTEGER DEFAULT 30')
+            _add_group('float_debounce_seconds',
+                       'ALTER TABLE groups ADD COLUMN float_debounce_seconds INTEGER DEFAULT 5')
+
+            # --- zones: pause_remaining_seconds ---
+            zcur = conn.execute("PRAGMA table_info(zones)")
+            zcols = [r[1] for r in zcur.fetchall()]
+            if 'pause_remaining_seconds' not in zcols:
+                conn.execute('ALTER TABLE zones ADD COLUMN pause_remaining_seconds REAL DEFAULT NULL')
+            if 'pause_reason' not in zcols:
+                conn.execute('ALTER TABLE zones ADD COLUMN pause_reason TEXT DEFAULT NULL')
+
+            # --- program_queue_log table ---
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS program_queue_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id TEXT NOT NULL,
+                    program_id INTEGER NOT NULL,
+                    program_run_id TEXT,
+                    group_id INTEGER NOT NULL,
+                    zone_ids TEXT NOT NULL,
+                    scheduled_time TEXT NOT NULL,
+                    enqueued_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    state TEXT NOT NULL,
+                    wait_seconds INTEGER,
+                    run_seconds INTEGER,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_pql_program ON program_queue_log(program_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_pql_state ON program_queue_log(state)')
+
+            # --- float_events table ---
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS float_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    paused_zones TEXT,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_float_events_group ON float_events(group_id)')
+
+            # --- settings ---
+            conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('max_queue_wait_minutes', '120')")
+            conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('max_weather_coefficient', '200')")
+
+            conn.commit()
+            logger.info('Миграция queue_and_float_support выполнена')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции queue_and_float_support: %s", e)
+
+    def _down_queue_and_float_support(self, conn):
+        """Downgrade: remove queue/float tables and columns."""
+        conn.execute('DROP TABLE IF EXISTS program_queue_log')
+        conn.execute('DROP TABLE IF EXISTS float_events')
+        # Remove float columns from groups
+        self._recreate_table_without_columns(conn, 'groups', [
+            'float_enabled', 'float_mqtt_topic', 'float_mqtt_server_id',
+            'float_mode', 'float_timeout_minutes', 'float_debounce_seconds',
+        ])
+        # Remove pause columns from zones
+        self._recreate_table_without_columns(conn, 'zones', [
+            'pause_remaining_seconds', 'pause_reason',
+        ])
+        # Remove settings
+        conn.execute("DELETE FROM settings WHERE key IN ('max_queue_wait_minutes', 'max_weather_coefficient')")
+        conn.commit()
+        logger.info('Downgrade: queue_and_float_support откачена')
+
     # =====================================================================
     # Downgrade methods for the last 10 migrations
     # =====================================================================
@@ -872,6 +969,7 @@ class MigrationRunner:
         'weather_create_decisions': '_down_create_weather_decisions',
         'weather_add_extended_settings': '_down_add_extended_weather_settings',
         'weather_wind_kmh_to_ms': '_down_wind_kmh_to_ms',
+        'queue_and_float_support': '_down_queue_and_float_support',
     }
 
     def _down_create_bot_users(self, conn):
