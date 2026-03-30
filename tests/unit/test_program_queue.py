@@ -128,6 +128,7 @@ def queue_manager(
         float_monitor=mock_float_monitor,
         get_weather_coefficient=mock_weather_coefficient,
         telegram_notify=mock_telegram,
+        max_wait_minutes=120,
     )
     yield qm
     # Cleanup: ensure all workers stop
