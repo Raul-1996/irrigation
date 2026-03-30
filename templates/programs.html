@@ -622,6 +622,34 @@
   background: var(--border-color);
 }
 
+/* Quick select buttons */
+.quick-select-row {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+  flex-wrap: wrap;
+}
+.btn-quick {
+  padding: 6px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-quick:hover {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+/* Even/odd selector */
+.even-odd-selector {
+  margin-top: 8px;
+}
+
 /* Zone row */
 .zone-row {
   display: flex;
@@ -867,6 +895,7 @@
 let currentTab = 'list';
 let currentSort = 'time';
 let wizardStep = 1;
+let editingId = null;
 let wizardData = {};
 let programs = [];
 let zones = [];
@@ -974,9 +1003,14 @@ function renderList() {
           </div>
           <div class="program-time">⏰ ${p.time}</div>
           <div class="program-days">
-            ${dayNames.map((name, i) => 
-              `<div class="day-pill ${days.includes(i) ? 'active' : ''}">${name}</div>`
-            ).join('')}
+            ${p.schedule_type === 'even_odd' ? 
+              `<div class="day-pill active">${p.even_odd === 'even' ? 'Чётные дни' : 'Нечётные дни'}</div>` :
+              p.schedule_type === 'interval' ?
+              `<div class="day-pill active">Каждые ${p.interval_days || 3} дн.</div>` :
+              dayNames.map((name, i) => 
+                `<div class="day-pill ${days.includes(i) ? 'active' : ''}">${name}</div>`
+              ).join('')
+            }
           </div>
           <div class="program-stats">${(p.zones || []).length} зон</div>
         </div>
@@ -1092,11 +1126,30 @@ async function deleteProgram(id) {
 }
 
 function editProgram(id) {
-  showToast('✏️ Редактирование пока не реализовано');
+  const p = programs.find(pr => pr.id === id);
+  if (!p) return;
+  editingId = id;
+  wizardStep = 1;
+  wizardData = {
+    name: p.name || '',
+    type: p.type || 'time-based',
+    color: p.color || COLORS[0],
+    schedule_type: p.schedule_type || 'weekdays',
+    days: Array.isArray(p.days) ? [...p.days] : [],
+    interval_days: p.interval_days || 3,
+    even_odd: p.even_odd || null,
+    time: p.time || '06:00',
+    zones: Array.isArray(p.zones) ? [...p.zones] : [],
+    enabled: p.enabled !== undefined ? p.enabled : 1,
+    extra_times: Array.isArray(p.extra_times) ? [...p.extra_times] : []
+  };
+  renderWizard();
+  document.getElementById('wizardModal').classList.add('active');
 }
 
 // Wizard
 function openWizard() {
+  editingId = null;
   wizardStep = 1;
   wizardData = {
     name: '',
@@ -1104,6 +1157,8 @@ function openWizard() {
     color: COLORS[0],
     schedule_type: 'weekdays',
     days: [0, 1, 2, 3, 4, 5, 6],
+    interval_days: 3,
+    even_odd: null,
     time: '06:00',
     zones: [],
     enabled: 1
@@ -1178,9 +1233,11 @@ function renderWizardStep() {
   html += `<div class="wizard-step ${wizardStep === 2 ? 'active' : ''}">
     <div class="schedule-tabs">
       <button class="schedule-tab ${wizardData.schedule_type === 'weekdays' ? 'active' : ''}" 
-        onclick="wizardData.schedule_type = 'weekdays'; renderWizard()">Дни недели</button>
+        onclick="wizardData.schedule_type = 'weekdays'; wizardData.even_odd = null; renderWizard()">Дни недели</button>
       <button class="schedule-tab ${wizardData.schedule_type === 'interval' ? 'active' : ''}" 
-        onclick="wizardData.schedule_type = 'interval'; renderWizard()">Интервал</button>
+        onclick="wizardData.schedule_type = 'interval'; wizardData.even_odd = null; renderWizard()">Интервал</button>
+      <button class="schedule-tab ${wizardData.schedule_type === 'even_odd' ? 'active' : ''}" 
+        onclick="wizardData.schedule_type = 'even_odd'; renderWizard()">Чёт/Нечет</button>
     </div>
     
     ${wizardData.schedule_type === 'weekdays' ? `
@@ -1189,6 +1246,12 @@ function renderWizardStep() {
           <button class="weekday-btn ${wizardData.days.includes(i) ? 'active' : ''}" 
             onclick="toggleDay(${i})">${d}</button>
         `).join('')}
+      </div>
+      <div class="quick-select-row">
+        <button class="btn-quick" onclick="wizardData.days = [0,1,2,3,4,5,6]; renderWizard()">Все дни</button>
+        <button class="btn-quick" onclick="wizardData.days = [0,1,2,3,4]; renderWizard()">Будни</button>
+        <button class="btn-quick" onclick="wizardData.days = [5,6]; renderWizard()">Выходные</button>
+        <button class="btn-quick" onclick="wizardData.days = []; renderWizard()">Снять все</button>
       </div>
     ` : ''}
     
@@ -1199,6 +1262,23 @@ function renderWizardStep() {
           value="${wizardData.interval_days || 3}" 
           onchange="wizardData.interval_days = parseInt(this.value)"
           placeholder="Дней">
+      </div>
+    ` : ''}
+
+    ${wizardData.schedule_type === 'even_odd' ? `
+      <div class="even-odd-selector">
+        <div class="radio-cards">
+          <div class="radio-card ${wizardData.even_odd === 'even' ? 'selected' : ''}" 
+            onclick="wizardData.even_odd = 'even'; renderWizard()">
+            <div class="radio-card-title">📅 Чётные дни</div>
+            <div class="radio-card-desc">2, 4, 6, 8... числа месяца</div>
+          </div>
+          <div class="radio-card ${wizardData.even_odd === 'odd' ? 'selected' : ''}" 
+            onclick="wizardData.even_odd = 'odd'; renderWizard()">
+            <div class="radio-card-title">📅 Нечётные дни</div>
+            <div class="radio-card-desc">1, 3, 5, 7... числа месяца</div>
+          </div>
+        </div>
       </div>
     ` : ''}
   </div>`;
@@ -1216,6 +1296,12 @@ function renderWizardStep() {
   html += `<div class="wizard-step ${wizardStep === 4 ? 'active' : ''}">
     <div class="form-group">
       <label class="form-label">Выбор зон (${wizardData.zones.length} выбрано)</label>
+      <div class="quick-select-row">
+        <button class="btn-quick" onclick="wizardData.zones = zones.map(z => z.id); renderWizard()">Выбрать все</button>
+        <button class="btn-quick" onclick="wizardData.zones = []; renderWizard()">Снять все</button>
+        <button class="btn-quick" onclick="wizardData.zones = zones.filter(z => z.id % 2 === 0).map(z => z.id); renderWizard()">Чётные</button>
+        <button class="btn-quick" onclick="wizardData.zones = zones.filter(z => z.id % 2 === 1).map(z => z.id); renderWizard()">Нечётные</button>
+      </div>
       ${zones.map(z => `
         <div class="zone-row ${wizardData.zones.includes(z.id) ? 'enabled' : 'disabled'}">
           <span class="zone-icon">💧</span>
@@ -1246,6 +1332,8 @@ function renderWizardStep() {
         <div class="summary-value">
           ${wizardData.schedule_type === 'weekdays' ? 
             ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].filter((d, i) => wizardData.days.includes(i)).join(', ') :
+            wizardData.schedule_type === 'even_odd' ?
+            (wizardData.even_odd === 'even' ? 'Чётные дни месяца' : 'Нечётные дни месяца') :
             `Каждые ${wizardData.interval_days || 3} дней`
           }
         </div>
@@ -1320,8 +1408,10 @@ async function saveWizard() {
   }
   
   try {
-    const resp = await fetch('/api/programs', {
-      method: 'POST',
+    const url = editingId ? `/api/programs/${editingId}` : '/api/programs';
+    const method = editingId ? 'PUT' : 'POST';
+    const resp = await fetch(url, {
+      method: method,
       headers: apiHeaders(),
       body: JSON.stringify(wizardData)
     });
@@ -1329,10 +1419,10 @@ async function saveWizard() {
     if (resp.ok) {
       closeWizard();
       await loadPrograms();
-      showToast('✅ Программа создана', 'success');
+      showToast(editingId ? '✅ Программа обновлена' : '✅ Программа создана', 'success');
     } else {
       const data = await resp.json();
-      showToast(data.message || 'Ошибка создания программы');
+      showToast(data.message || 'Ошибка сохранения программы');
     }
   } catch (err) {
     console.error('Save error:', err);
