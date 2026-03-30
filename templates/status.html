@@ -472,6 +472,12 @@
     /* === Weather Widget === */
     #weather-widget {
         margin-bottom: 1rem;
+        max-width: 600px;
+    }
+    @media (min-width: 1200px) {
+        #weather-widget {
+            max-width: 500px;
+        }
     }
     .weather-card {
         background: var(--card-background, #fff);

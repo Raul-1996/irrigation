@@ -403,6 +403,29 @@
 .modal-header {
   padding: 20px;
   border-bottom: 1px solid var(--border-color);
+  position: relative;
+}
+.modal-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: rgba(239, 83, 80, 0.1);
+  color: #ef5350;
+  font-size: 18px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  z-index: 10;
+}
+.modal-close-btn:hover {
+  background: #ef5350;
+  color: white;
 }
 
 .modal-body {
@@ -870,9 +893,10 @@
 <button class="fab" onclick="openWizard()">+</button>
 
 <!-- Wizard Modal -->
-<div id="wizardModal" class="modal-overlay">
+<div id="wizardModal" class="modal-overlay" onclick="if(event.target===this)closeWizard()">
   <div class="modal">
     <div class="modal-header">
+      <button class="modal-close-btn" onclick="closeWizard()" title="Закрыть">✕</button>
       <div class="step-indicator" id="step-indicator"></div>
     </div>
     <div class="modal-body">
@@ -899,15 +923,6 @@ let editingId = null;
 let wizardData = {};
 let programs = [];
 let zones = [];
-
-const ZONE_NAMES = [
-  "Газон передний", "Газон задний", "Газон боковой", "Цветник парадный",
-  "Цветник задний", "Розарий", "Живая изгородь", "Альпийская горка",
-  "Огород", "Теплица", "Фруктовые деревья", "Ягодные кусты",
-  "Патио горшки", "Балкон", "Дорожки", "Площадка",
-  "Газон спорт", "Детская площадка", "Зона отдыха", "Бассейн зелень",
-  "Въезд", "Парковка зелень", "Компост зона", "Резерв"
-];
 
 const COLORS = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350", "#ab47bc", "#26c6da", "#78909c", "#8d6e63"];
 
