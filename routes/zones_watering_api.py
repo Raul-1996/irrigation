@@ -465,6 +465,17 @@ def api_zone_mqtt_start(zone_id: int):
             db.add_log('zone_start_manual', json.dumps({'zone': int(zone_id), 'group': gid}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("Handled exception in line_1120: %s", e)
+        
+        # FINAL safety: re-write planned_end_time AFTER all background threads
+        # (some background process keeps clearing it)
+        time.sleep(0.1)  # let bg threads complete
+        try:
+            final_end = (datetime.now() + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
+            db.update_zone(zone_id, {'planned_end_time': final_end})
+            logger.warning("DIAG FINAL_SAFETY zone=%s planned_end_time=%s", zone_id, final_end)
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("final planned_end_time safety failed: %s", e)
+        
         return jsonify({'success': True, 'message': f'Зона {int(zone_id)} запущена'})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         logger.exception('api_zone_mqtt_start failed')
