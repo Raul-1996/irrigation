@@ -397,7 +397,7 @@ def api_zone_mqtt_start(zone_id: int):
                 'commanded_state': 'on',
                 'planned_end_time': planned_end
             })
-            logger.info("mqtt_start: zone %s planned_end_time=%s (dur=%s)", zone_id, planned_end, override_dur)
+            logger.warning("DIAG MAIN_THREAD zone=%s planned_end_time=%s (dur=%s) ts=%s", zone_id, planned_end, override_dur, time.time())
         except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_1063: %s", e)
         t4 = time.time()
