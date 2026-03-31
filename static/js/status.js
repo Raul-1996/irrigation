@@ -50,20 +50,24 @@
     let envProbeTimer = null;
     let envProbeAttempts = 0;
     
-    // Функция обновления времени
-    async function updateDateTime() {
+    // Функция обновления времени (локальное, без fetch)
+    var _serverTimeOffset = 0;
+    async function syncServerTime() {
         try {
             const r = await fetch('/api/server-time?ts=' + Date.now(), { cache: 'no-store' });
             const j = await r.json();
             if (j && j.now_iso) {
-                document.getElementById('datetime').textContent = j.now_iso.replace('T',' ');
-                return;
+                var serverMs = new Date(j.now_iso).getTime();
+                _serverTimeOffset = serverMs - Date.now();
             }
         } catch (e) {}
-        const now = new Date();
-        const pad = (n)=> String(n).padStart(2,'0');
-        const dt = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-        document.getElementById('datetime').textContent = dt;
+    }
+    function updateDateTime() {
+        var now = new Date(Date.now() + _serverTimeOffset);
+        var pad = function(n){ return String(n).padStart(2,'0'); };
+        var dt = now.getFullYear()+'-'+pad(now.getMonth()+1)+'-'+pad(now.getDate())+' '+pad(now.getHours())+':'+pad(now.getMinutes())+':'+pad(now.getSeconds());
+        var el = document.getElementById('datetime');
+        if (el) el.textContent = dt;
     }
     
     function anyGroupUsesWaterMeter() {
@@ -171,23 +175,19 @@
     
     async function loadZonesData() {
         try {
-            // Fetch zones
-            var zonesRespJson = [];
-            try {
-                var zr = await fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' });
-                zonesRespJson = await zr.json();
-            } catch (e) { zonesRespJson = []; }
-            zonesData = Array.isArray(zonesRespJson) ? zonesRespJson : [];
-
-            // Fetch groups for tabs (cached)
-            if (!zoneGroupsCache || !zoneGroupsCache.length) {
-                try {
-                    var gResp = await fetch('/api/groups');
-                    zoneGroupsCache = await gResp.json();
-                } catch(e2) { zoneGroupsCache = []; }
+            // Fetch zones + groups in PARALLEL
+            var needGroups = !zoneGroupsCache || !zoneGroupsCache.length;
+            var promises = [
+                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(function(r){return r.json();}).catch(function(){return [];}),
+            ];
+            if (needGroups) {
+                promises.push(fetch('/api/groups').then(function(r){return r.json();}).catch(function(){return [];}));
             }
+            var results = await Promise.all(promises);
+            zonesData = Array.isArray(results[0]) ? results[0] : [];
+            if (needGroups && results[1]) zoneGroupsCache = results[1];
 
-            // Render V2 zones IMMEDIATELY (no waiting for next-watering)
+            // Render V2 zones IMMEDIATELY
             renderGroupTabs();
             renderZoneCards();
 
@@ -796,8 +796,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(`Группа "${gname}": ${data.message || 'запущена'}`, 'success');
-                await loadStatusData();
-                await loadZonesData();
+                await Promise.all([loadStatusData(), loadZonesData()]);
             } else {
                 showNotification(data.message || `Ошибка запуска группы "${gname}"`, 'error');
             }
@@ -820,8 +819,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(data.message, 'success');
-                await loadStatusData();
-                await loadZonesData();
+                await Promise.all([loadStatusData(), loadZonesData()]);
             } else {
                 showNotification(data.message || 'Ошибка остановки группы', 'error');
             }
@@ -939,8 +937,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(data.message, 'warning');
-                await loadStatusData();
-                await loadZonesData();
+                await Promise.all([loadStatusData(), loadZonesData()]);
                 // Показать кнопку возобновления явно
                 document.getElementById('resume-btn').style.display = 'inline-block';
             } else {
@@ -957,8 +954,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(data.message, 'success');
-                await loadStatusData();
-                await loadZonesData();
+                await Promise.all([loadStatusData(), loadZonesData()]);
                 // Скрыть кнопку возобновления
                 document.getElementById('resume-btn').style.display = 'none';
             } else {
@@ -971,8 +967,7 @@
 
     async function refreshAllUI() {
         try {
-            await loadStatusData();
-            await loadZonesData();
+            await Promise.all([loadStatusData(), loadZonesData()]);
         } catch (e) {}
     }
 
@@ -1020,19 +1015,22 @@
             };
             window.addEventListener('zones-rendered', ()=> swMark('zones-rendered'));
         }catch(e){}
-        // Обновляем время сразу
+        // Обновляем время сразу (синхронизируем с сервером один раз)
+        syncServerTime();
         updateDateTime();
         
-        loadStatusData();
-        loadZonesData();
+        // Параллельная загрузка всех данных
+        Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+        
+        // Синхронизация времени раз в 5 минут
+        setInterval(syncServerTime, 5 * 60 * 1000);
         
         // Обновление времени каждую секунду
         setInterval(updateDateTime, 1000);
         
         // Обновление данных каждые 30 секунд
         setInterval(() => {
-            loadStatusData();
-            loadZonesData();
+            Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
         }, 30000);
         setInterval(tickCountdowns, 1000);
         
@@ -1822,13 +1820,15 @@
         fetch(url, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
             if (data && data.success) {
                 showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
+                // Refresh timer for this zone only
+                if (wantOn) setTimeout(function() { initZoneTimer(z); }, 1000);
+                // Light refresh status (groups) after 2 sec
+                setTimeout(function() { loadStatusData(); }, 2000);
             } else {
                 z.state = wantOn ? 'off' : 'on';
                 renderZoneCards();
                 showZoneToast((data && data.message) || 'Ошибка', 'error');
             }
-            loadStatusData();
-            loadZonesData();
         }).catch(function() {
             z.state = wantOn ? 'off' : 'on';
             renderZoneCards();
