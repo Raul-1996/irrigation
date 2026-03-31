@@ -2116,9 +2116,20 @@
         
         api.put('/api/zones/' + id, { duration: dur }).then(function(putResult) {
             // Check if PUT actually succeeded
-            if (putResult && (putResult.success === false || (typeof putResult === 'string' && putResult.indexOf('error') !== -1))) {
-                showZoneToast('Ошибка обновления длительности', 'error');
+            var putFailed = false;
+            if (!putResult) putFailed = true;
+            else if (putResult.success === false) putFailed = true;
+            else if (typeof putResult === 'string') putFailed = true; // HTML error page
+            else if (!putResult.zone && !putResult.id && !putResult.duration) putFailed = true;
+            if (putFailed) {
+                console.error('PUT duration failed:', putResult);
+                showZoneToast('Ошибка обновления длительности. Попробуйте ещё раз.', 'error');
                 return;
+            }
+            // Verify duration was saved
+            var savedDur = (putResult.zone || putResult).duration;
+            if (savedDur && savedDur !== dur) {
+                console.warn('Duration mismatch: wanted', dur, 'got', savedDur);
             }
             if (z) z.duration = dur;
             renderZoneCards();
@@ -2127,7 +2138,7 @@
                 // Zone already running — stop then restart with new duration
                 fetch('/api/zones/' + id + '/mqtt/stop', { method: 'POST' })
                 .then(function() { return new Promise(function(r) { setTimeout(r, 500); }); })
-                .then(function() { return fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST' }); })
+                .then(function() { return fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({duration: dur}) }); })
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     showZoneToast('🔄 Зона #' + id + ' перезапущена на ' + dur + ' мин', 'success');
@@ -2144,7 +2155,7 @@
             if (z) z.state = 'on';
             renderZoneCards();
             renderGroupTabs();
-            fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST' })
+            fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({duration: dur}) })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data && data.success) {

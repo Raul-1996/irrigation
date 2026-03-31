@@ -236,6 +236,18 @@ def api_zone_mqtt_start(zone_id: int):
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         if current_app.config.get('EMERGENCY_STOP'):
             return jsonify({'success': False, 'message': 'Аварийная остановка активна'}), 400
+        # Accept optional duration override from request body
+        try:
+            body = request.get_json(silent=True) or {}
+            req_duration = body.get('duration')
+            if req_duration is not None:
+                req_duration = int(req_duration)
+                if 1 <= req_duration <= 120 and req_duration != int(z.get('duration') or 0):
+                    db.update_zone(zone_id, {'duration': req_duration})
+                    z['duration'] = req_duration
+                    logger.info("mqtt_start: zone %s duration updated to %s via request", zone_id, req_duration)
+        except (ValueError, TypeError) as e:
+            logger.debug("mqtt_start duration parse: %s", e)
         if str(z.get('state') or '') == 'on':
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
         gid = int(z.get('group_id') or 0)
