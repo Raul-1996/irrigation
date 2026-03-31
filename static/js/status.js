@@ -2223,7 +2223,6 @@
     window.confirmRunWithDefaults = confirmRunWithDefaults;
     window.showRunPopup = showRunPopup;
     window.closeRunPopup = closeRunPopup;
-    window.adjustRunDur = adjustRunDur;
     window.setRunDur = setRunDur;
     window.confirmRun = confirmRun;
 
