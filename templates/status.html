@@ -1349,7 +1349,8 @@
     }
     .zq-btn:active { transform:scale(0.97); }
     .zq-filled { flex:1; background:#00838f; color:white; }
-    .zq-danger { border-color:#999; color:#666; }
+    .zq-outline { border-color:#00838f; color:#00838f; min-width:48px; }
+    .zq-search { border-color:#999; color:#666; min-width:48px; }
 
     /* Zone List */
     .zone-list { margin-bottom:16px; }
@@ -1429,7 +1430,7 @@
     /* Zone actions */
     .zc-actions { display:flex; gap:6px; }
     .zc-actions { display:flex; gap:8px; }
-    .zc-actions button { flex:1; padding:12px; border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; min-height:44px; }
+    .zc-actions button { flex:1; padding:14px; border:none; border-radius:10px; font-size:15px; font-weight:600; cursor:pointer; min-height:48px; }
     .zc-actions button:active { transform:scale(0.97); }
     .zc-btn-run { background:#00838f; color:white; }
     .zc-btn-stop { background:#ef5350; color:white; }
@@ -1492,7 +1493,7 @@
     }
     .run-popup-presets button:active { background:#e0f7fa; border-color:#00838f; }
     .run-popup-actions { display:flex; gap:8px; }
-    .run-popup-actions button { flex:1; }
+    .run-popup-actions button { flex:1; min-height:48px; font-size:15px; }
 
     /* Toast */
     .zone-toast {
@@ -1647,8 +1648,9 @@
 
 <!-- Quick Actions -->
 <div class="zone-quick-actions">
-  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runSelectedGroup()">▶ Запустить все</button>
-  <button class="zq-btn zq-danger" id="zoneSearchToggle" onclick="toggleZoneSearch()">🔍</button>
+  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runGroupWithDefaults()">▶ Запустить</button>
+  <button class="zq-btn zq-outline" onclick="runSelectedGroup()">⏱</button>
+  <button class="zq-btn zq-search" onclick="toggleZoneSearch()">🔍</button>
 </div>
 
 <!-- Zone List -->

@@ -1904,22 +1904,49 @@
 
     // Run selected group
     function runSelectedGroup() {
-        if (currentGroupFilter) {
-            fetch('/api/groups/' + currentGroupFilter + '/start-from-first', { method: 'POST' })
+        var gid = currentGroupFilter;
+        var gName = 'все группы';
+        if (gid) {
+            var g = (zoneGroupsCache || []).find(function(g){ return g.id === gid; });
+            gName = g ? g.name : 'Группа';
+        }
+        // Show popup with two options
+        showGroupRunPopup(gid, gName);
+    }
+    
+    function showGroupRunPopup(gid, gName) {
+        runPopupGroupId = gid;
+        runPopupZoneId = null;
+        var title = gid ? '▶ ' + gName : '▶ Все группы';
+        document.getElementById('runPopupTitle').textContent = title;
+        runPopupDur = 15;
+        initDialTicks();
+        updateDial();
+        document.getElementById('runPopupOverlay').classList.add('show');
+        document.getElementById('runPopup').classList.add('show');
+        setTimeout(initDialDrag, 100);
+    }
+    
+    function runGroupWithDefaults() {
+        // Run group with existing zone durations (no dial)
+        var gid = currentGroupFilter;
+        if (gid) {
+            fetch('/api/groups/' + gid + '/start-from-first', { method: 'POST' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 showZoneToast(data && data.success ? '▶ Группа запущена' : ((data && data.message) || 'Ошибка'), data && data.success ? 'success' : 'error');
-                loadStatusData(); loadZonesData();
+                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             }).catch(function() { showZoneToast('Ошибка', 'error'); });
         } else {
-            // Run all groups
-            (zoneGroupsCache || []).forEach(function(g) {
+            (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
                 fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function() {});
             });
             showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { loadStatusData(); loadZonesData(); }, 1000);
+            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
         }
     }
+    window.runGroupWithDefaults = runGroupWithDefaults;
+    window.showGroupRunPopup = showGroupRunPopup;
     window.runSelectedGroup = runSelectedGroup;
 
     // Edit sheet
@@ -1966,6 +1993,7 @@
 
     // Run Duration Popup with Circular Dial
     var runPopupZoneId = null;
+    var runPopupGroupId = null;
     var runPopupDur = 10;
     var MAX_DUR = 120;
     var DIAL_R = 85;
@@ -1999,7 +2027,7 @@
             var x2 = 100 + 78 * Math.cos(rad), y2 = 100 + 78 * Math.sin(rad);
             var tx = 100 + 65 * Math.cos(rad), ty = 100 + 65 * Math.sin(rad);
             html += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="#bbb" stroke-width="1.5"/>';
-            if (i % 30 === 0) html += '<text x="'+tx+'" y="'+ty+'" text-anchor="middle" dominant-baseline="central" font-size="10" fill="#999">'+i+'</text>';
+            if (i > 0 && i % 30 === 0) html += '<text x="'+tx+'" y="'+ty+'" text-anchor="middle" dominant-baseline="central" font-size="10" fill="#999">'+i+'</text>';
         }
         g.innerHTML = html;
     }
@@ -2056,15 +2084,56 @@
         updateDial();
     }
     function confirmRun() {
-        if (!runPopupZoneId) return;
-        var id = runPopupZoneId;
+        if (!runPopupZoneId && !runPopupGroupId) return;
+        var dur = runPopupDur;
         closeRunPopup();
-        // Update zone duration first, then start
-        api.put('/api/zones/' + id, { duration: runPopupDur }).then(function() {
+        
+        if (runPopupGroupId) {
+            // Group run: update all zone durations in group, then start
+            var gid = runPopupGroupId;
+            runPopupGroupId = null;
+            var groupZones = (zonesData || []).filter(function(z) { return z.group_id === gid && z.group_id !== 999; });
+            // Update durations
+            Promise.all(groupZones.map(function(z) {
+                return api.put('/api/zones/' + z.id, { duration: dur }).catch(function(){});
+            })).then(function() {
+                groupZones.forEach(function(z) { z.duration = dur; });
+                fetch('/api/groups/' + gid + '/start-from-first', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    showZoneToast(data && data.success ? '▶ Группа запущена' : 'Ошибка', data && data.success ? 'success' : 'error');
+                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                });
+            });
+            return;
+        }
+        
+        // Single zone run
+        var id = runPopupZoneId;
+        runPopupZoneId = null;
+        api.put('/api/zones/' + id, { duration: dur }).then(function() {
             var z = (zonesData || []).find(function(z){ return z.id === id; });
-            if (z) z.duration = runPopupDur;
-            toggleZoneRun(id);
-        }).catch(function() { toggleZoneRun(id); });
+            if (z) z.duration = dur;
+            // Always START (not toggle)
+            z.state = 'on';
+            renderZoneCards();
+            renderGroupTabs();
+            fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data && data.success) {
+                    showZoneToast('▶ Зона #' + id + ' запущена на ' + dur + ' мин', 'success');
+                    setTimeout(function() { initZoneTimer(z); }, 1000);
+                    setTimeout(function() { loadStatusData(); }, 2000);
+                } else {
+                    z.state = 'off';
+                    renderZoneCards();
+                    showZoneToast((data && data.message) || 'Ошибка', 'error');
+                }
+            });
+        }).catch(function() {
+            showZoneToast('Ошибка обновления длительности', 'error');
+        });
     }
     window.showRunPopup = showRunPopup;
     window.closeRunPopup = closeRunPopup;
