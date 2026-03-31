@@ -2111,11 +2111,37 @@
         
         // Single zone run
         var id = savedZoneId;
-        api.put('/api/zones/' + id, { duration: dur }).then(function() {
-            var z = (zonesData || []).find(function(z){ return z.id === id; });
+        var z = (zonesData || []).find(function(z){ return z.id === id; });
+        var wasRunning = z && z.state === 'on';
+        
+        api.put('/api/zones/' + id, { duration: dur }).then(function(putResult) {
+            // Check if PUT actually succeeded
+            if (putResult && (putResult.success === false || (typeof putResult === 'string' && putResult.indexOf('error') !== -1))) {
+                showZoneToast('Ошибка обновления длительности', 'error');
+                return;
+            }
             if (z) z.duration = dur;
-            // Always START (not toggle)
-            z.state = 'on';
+            renderZoneCards();
+            
+            if (wasRunning) {
+                // Zone already running — stop then restart with new duration
+                fetch('/api/zones/' + id + '/mqtt/stop', { method: 'POST' })
+                .then(function() { return new Promise(function(r) { setTimeout(r, 500); }); })
+                .then(function() { return fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST' }); })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    showZoneToast('🔄 Зона #' + id + ' перезапущена на ' + dur + ' мин', 'success');
+                    if (z) z.state = 'on';
+                    renderZoneCards();
+                    renderGroupTabs();
+                    setTimeout(function() { initZoneTimer(z); }, 1000);
+                    setTimeout(function() { loadStatusData(); }, 2000);
+                });
+                return;
+            }
+            
+            // Zone was off — start normally
+            if (z) z.state = 'on';
             renderZoneCards();
             renderGroupTabs();
             fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST' })
@@ -2126,13 +2152,13 @@
                     setTimeout(function() { initZoneTimer(z); }, 1000);
                     setTimeout(function() { loadStatusData(); }, 2000);
                 } else {
-                    z.state = 'off';
+                    if (z) z.state = 'off';
                     renderZoneCards();
                     showZoneToast((data && data.message) || 'Ошибка', 'error');
                 }
             });
-        }).catch(function() {
-            showZoneToast('Ошибка обновления длительности', 'error');
+        }).catch(function(err) {
+            showZoneToast('Ошибка: ' + (err.message || 'сеть'), 'error');
         });
     }
     window.showRunPopup = showRunPopup;
