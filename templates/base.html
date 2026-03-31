@@ -64,112 +64,123 @@
         
         /* Header */
         header {
-            background: linear-gradient(135deg, var(--primary-color), #1976d2);
+            background: linear-gradient(135deg, var(--primary-color), #1565c0);
             color: white;
-            padding: 1rem 0;
-            box-shadow: var(--shadow);
+            padding: 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
             position: sticky;
             top: 0;
             z-index: 100;
         }
         
         .header-content {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 0 1rem;
+            padding: 0 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            height: 56px;
         }
         
         .logo {
             display: flex;
             flex-direction: column;
-            align-items: center;
-            gap: 2px;
+            align-items: flex-start;
+            gap: 0;
             color: white;
+            flex-shrink: 0;
         }
         
         .logo-link {
             display: flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 8px;
             text-decoration: none;
             color: inherit;
-            transition: var(--transition);
-        }
-        
-        .logo-link:hover {
-            transform: scale(1.05);
-            color: var(--primary-dark);
         }
         
         .logo-icon {
-            font-size: 1.7rem;
+            font-size: 1.5rem;
         }
         
         .logo-text {
-            font-size: 1.3rem;
-            font-weight: bold;
+            font-size: 1.1rem;
+            font-weight: 700;
+            letter-spacing: -0.3px;
         }
-        .logo-subtitle { font-size: 0.9rem; color: #fff; text-align: center; }
+        .logo-subtitle { font-size: 0.7rem; color: rgba(255,255,255,0.8); text-align: left; margin-left: 32px; margin-top: -2px; }
+        
+        /* Hamburger */
+        .hamburger {
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            gap: 5px;
+            width: 36px;
+            height: 36px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 6px;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+        .hamburger:hover { background: rgba(255,255,255,0.15); }
+        .hamburger span {
+            display: block;
+            width: 22px;
+            height: 2px;
+            background: white;
+            border-radius: 2px;
+            transition: all 0.25s;
+        }
+        .hamburger.active span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+        .hamburger.active span:nth-child(2) { opacity: 0; }
+        .hamburger.active span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
         
         /* Navigation */
         nav {
             display: flex;
-            gap: 1rem;
+            gap: 4px;
             flex-wrap: wrap;
+            align-items: center;
         }
         
         nav a {
             color: white;
             text-decoration: none;
-            padding: 0.5rem 1rem;
-            border-radius: 5px;
-            transition: var(--transition);
-            position: relative;
-            overflow: hidden;
+            padding: 6px 12px;
+            border-radius: 6px;
+            transition: background 0.15s;
+            font-size: 0.85rem;
+            font-weight: 500;
+            white-space: nowrap;
         }
         
         nav a:hover {
-            background: rgba(255,255,255,0.2);
-            transform: translateY(-2px);
+            background: rgba(255,255,255,0.15);
         }
         
         nav a.active {
-            background: rgba(255,255,255,0.3);
-            font-weight: bold;
-        }
-        
-        nav a::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-            transition: left 0.5s;
-        }
-        
-        nav a:hover::before {
-            left: 100%;
+            background: rgba(255,255,255,0.25);
+            font-weight: 600;
         }
         
         /* Main content */
         main {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 2rem 1rem;
-            min-height: calc(100vh - 200px);
+            padding: 16px;
+            min-height: calc(100vh - 120px);
             overflow-wrap: anywhere;
         }
         
         main h1 {
-            color: white;
-            margin-bottom: 1.5rem;
-            font-size: 2rem;
-            font-weight: bold;
+            color: var(--text-color);
+            margin: 0 0 16px 0;
+            font-size: 1.4rem;
+            font-weight: 700;
         }
         
         /* Footer */
@@ -177,24 +188,25 @@
             background: var(--card-background);
             color: var(--text-color);
             text-align: center;
-            padding: 1rem;
+            padding: 8px 16px;
             border-top: 1px solid var(--border-color);
             margin-top: auto;
+            font-size: 0.8rem;
         }
         
         .footer-content {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 0 1rem;
         }
         
         .footer-time {
             font-family: 'Courier New', monospace;
-            font-weight: bold;
+            font-weight: 600;
             color: var(--primary-color);
+            font-size: 0.8rem;
         }
         
         /* Enhanced notifications */
@@ -280,43 +292,68 @@
         /* Responsive design */
         @media (max-width: 767px) {
             .header-content {
-                flex-direction: column;
-                gap: 0.5rem;
-                padding: 0 0.5rem;
+                height: 48px;
+                padding: 0 12px;
+            }
+            
+            .hamburger {
+                display: flex;
             }
             
             .logo-text {
-                font-size: 1.1rem;
+                font-size: 1rem;
+            }
+            
+            .logo-icon {
+                font-size: 1.2rem;
             }
             
             .logo-subtitle {
-                font-size: 0.75rem;
+                display: none;
             }
             
             nav {
-                justify-content: center;
-                gap: 0.3rem;
-                width: 100%;
+                display: none;
+                position: absolute;
+                top: 48px;
+                left: 0;
+                right: 0;
+                background: linear-gradient(135deg, #1976d2, #1565c0);
+                flex-direction: column;
+                padding: 8px;
+                gap: 2px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            }
+            
+            nav.nav-open {
+                display: flex;
             }
             
             nav a {
-                padding: 0.4rem 0.6rem;
-                font-size: 0.85rem;
+                padding: 10px 16px;
+                font-size: 0.9rem;
+                border-radius: 8px;
             }
             
             .footer-content {
                 flex-direction: column;
-                gap: 0.5rem;
+                gap: 4px;
             }
             
             .notification-container {
-                left: 10px;
-                right: 10px;
+                left: 8px;
+                right: 8px;
+                top: 56px;
                 max-width: none;
             }
             
             main {
-                padding: 1rem 0.5rem;
+                padding: 12px 8px;
+            }
+            
+            main h1 {
+                font-size: 1.2rem;
+                margin-bottom: 12px;
             }
         }
         
@@ -361,6 +398,7 @@
                 <div class="logo-subtitle">{{ (system_name or '')[:32] }}</div>
                 {% endif %}
             </div>
+            <button class="hamburger" id="hamburger" aria-label="Меню" onclick="this.classList.toggle('active');document.querySelector('header nav').classList.toggle('nav-open')"><span></span><span></span><span></span></button>
             <nav>
                 <a href="/" class="{% if request.endpoint == 'index' or request.endpoint == 'status' %}active{% endif %}">Статус</a>
                 

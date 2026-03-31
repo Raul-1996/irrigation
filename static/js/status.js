@@ -285,19 +285,21 @@
                     </div>`;
                 
                 card.innerHTML = `
-                    <div class="zone-card-header">
+                    <div class="zone-card-header" onclick="this.parentElement.classList.toggle('expanded')">
                         <span class="zone-status-dot ${zone.state}"></span>
                         <span class="zone-number">#${zone.id}</span>
                         <span class="zone-name">${zone.name}</span>
-                        <span class="zone-group" data-group-id="${zone.group_id}">${zone.group_id}</span>
-                        ${photoHTML}
+                        <span class="zone-card-next-inline" style="color:#999;font-size:0.75rem;margin-left:auto;"></span>
+                        <span class="zone-chevron">▼</span>
                     </div>
                     <div class="zone-card-body">
                         <span>${zone.icon} ${zone.duration} мин</span>
                         <span class="zone-card-next">Следующий: —</span>
+                        <span class="zone-group" data-group-id="${zone.group_id}">${zone.group_id}</span>
                     </div>
                     <div class="zone-card-actions">
-                        <button onclick="${action}">${zone.state==='on' ? '⏹ Стоп' : '▶ Старт'}</button>
+                        <button onclick="event.stopPropagation();${action}">${zone.state==='on' ? '⏹ Стоп' : '▶ Старт'}</button>
+                        ${photoHTML}
                     </div>
                 `;
                 cardsFrag.appendChild(card);
@@ -388,6 +390,8 @@
                             }
                             const nextSpan = card.querySelector('.zone-card-next');
                             if (nextSpan) nextSpan.textContent = `Следующий: ${txt}`;
+                            const inlineSpan = card.querySelector('.zone-card-next-inline');
+                            if (inlineSpan) inlineSpan.textContent = txt !== '—' ? txt : '';
                         });
                     }
                 }catch(e){}
@@ -476,23 +480,23 @@
     }
 
     function getStatusText(group) {
+        const mob = window.innerWidth < 768;
         if (group.status === 'watering' && group.current_zone) {
             const src = String(group.current_zone_source || '').toLowerCase();
-            // Оставляем два статуса: по расписанию, либо вручную (включая удаленно)
-            if (src === 'schedule') return 'Полив - активно поливается(по расписанию)';
-            return 'Полив - активно поливается(запущено вручную)';
+            if (src === 'schedule') return mob ? '💧 Полив (расписание)' : 'Полив - активно поливается (по расписанию)';
+            return mob ? '💧 Полив (вручную)' : 'Полив - активно поливается (запущено вручную)';
         }
         switch (group.status) {
-            case 'waiting': return 'Ожидание - готов к поливу';
-            case 'error': return 'Ошибка - проблема с системой';
+            case 'waiting': return mob ? '✅ Ожидание' : 'Ожидание - готов к поливу';
+            case 'error': return mob ? '❌ Ошибка' : 'Ошибка - проблема с системой';
             case 'postponed': {
                 const r = (group.postpone_reason || '').toString();
-                if (r === 'rain') return 'Отложено - полив отложен из за дождя';
-                if (r === 'manual') return 'Отложено - полив отложен пользователем';
-                if (r === 'emergency') return 'Отложено - полив отложен из за аварии';
-                return 'Отложено - полив отложен';
+                if (r === 'rain') return mob ? '⏸ Дождь' : 'Отложено - полив отложен из-за дождя';
+                if (r === 'manual') return mob ? '⏸ Отложено' : 'Отложено - полив отложен пользователем';
+                if (r === 'emergency') return mob ? '⏸ Авария' : 'Отложено - полив отложен из-за аварии';
+                return mob ? '⏸ Отложено' : 'Отложено - полив отложен';
             }
-            default: return 'Ожидание - готов к поливу';
+            default: return mob ? '✅ Ожидание' : 'Ожидание - готов к поливу';
         }
     }
 
@@ -599,15 +603,17 @@
                 extraText = String(group.error_message);
             }
             const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
+            const _m = window.innerWidth < 768;
             const groupActionHtml = anyZoneOnThisGroup
-                ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">Остановить полив группы</button>`
-                : `<button class="group-action-btn group-action-start" onclick="startGroupFromFirst(${group.id})">Запустить полив группы</button>`;
+                ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">${_m ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
+                : `<button class="group-action-btn group-action-start" onclick="startGroupFromFirst(${group.id})">${_m ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
+            const _mob = window.innerWidth < 768;
             const groupButtons = `
                 <div class="btn-group">
-                    <button class="delay" onclick="delayGroup(${group.id}, 1)">Остановить полив на 1 день</button>
-                    <button class="delay" onclick="delayGroup(${group.id}, 2)">Остановить полив на 2 дня</button>
-                    <button class="delay" onclick="delayGroup(${group.id}, 3)">Остановить полив на 3 дня</button>
-                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">Продолжить по расписанию</button>` : ''}
+                    <button class="delay" onclick="delayGroup(${group.id}, 1)">${_mob ? '1 день' : 'Остановить полив на 1 день'}</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 2)">${_mob ? '2 дня' : 'Остановить полив на 2 дня'}</button>
+                    <button class="delay" onclick="delayGroup(${group.id}, 3)">${_mob ? '3 дня' : 'Остановить полив на 3 дня'}</button>
+                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">${_mob ? 'Продолжить' : 'Продолжить по расписанию'}</button>` : ''}
                 </div>
                 <div class="btn-group" style="width:100%">${groupActionHtml}</div>`;
             // Optional feature blocks by group flags
@@ -711,15 +717,17 @@
             const mvState2 = String(group.master_valve_state || 'unknown');
             const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
             const anyZoneOnThisGroup2 = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
+            const _m3 = window.innerWidth < 768;
             const groupActionHtml2 = anyZoneOnThisGroup2
-                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">Остановить полив группы</button>`
-                : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">Запустить полив группы</button>`;
+                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">${_m3 ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
+                : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">${_m3 ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
+            const _mob2 = window.innerWidth < 768;
             const groupButtons = `
                 <div class=\"btn-group\">
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 1)\">Остановить полив на 1 день</button>
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 2)\">Остановить полив на 2 дня</button>
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 3)\">Остановить полив на 3 дня</button>
-                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class=\"cancel-postpone\" onclick=\"cancelPostpone(${group.id})\">Продолжить по расписанию</button>` : ''}
+                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 1)\">${_mob2 ? '1 день' : 'Остановить полив на 1 день'}</button>
+                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 2)\">${_mob2 ? '2 дня' : 'Остановить полив на 2 дня'}</button>
+                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 3)\">${_mob2 ? '3 дня' : 'Остановить полив на 3 дня'}</button>
+                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class=\"cancel-postpone\" onclick=\"cancelPostpone(${group.id})\">${_mob2 ? 'Продолжить' : 'Продолжить по расписанию'}</button>` : ''}
                 </div>
                 <div class=\"btn-group\" style=\"width:100%\">${groupActionHtml2}</div>`;
             card.innerHTML = `
