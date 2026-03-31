@@ -1869,8 +1869,12 @@
             if (data && data.success) {
                 hideLoading();
                 showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
-                // Refresh timer for this zone only
-                if (wantOn) setTimeout(function() { initZoneTimer(z); }, 1000);
+                // Set local planned_end_time for instant timer
+                if (wantOn && z) {
+                    z.planned_end_time = new Date(Date.now() + (z.duration||10) * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                    initZoneTimer(z);
+                    renderZoneCards();
+                }
                 // Light refresh status (groups) after 2 sec
                 setTimeout(function() { loadStatusData(); }, 2000);
             } else {
@@ -2135,9 +2139,13 @@
                 if (data && data.success) {
                     hideLoading();
                     showZoneToast('▶ #' + id + ' запущена на ' + dur + ' мин', 'success');
-                    // Override local duration for timer display
-                    if (z) z._overrideDuration = dur;
-                    setTimeout(function() { initZoneTimer(z); }, 1000);
+                    // Set local planned_end_time for instant timer
+                    if (z) {
+                        z.planned_end_time = new Date(Date.now() + dur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                        z.duration = dur; // local only for timer calc
+                    }
+                    initZoneTimer(z); // instant, no delay
+                    renderZoneCards();
                     setTimeout(function() { loadStatusData(); }, 2000);
                 } else {
                     if (z) z.state = 'off';

@@ -347,14 +347,25 @@ def api_zone_mqtt_start(zone_id: int):
             logger.exception('fast ON publish failed')
             return jsonify({'success': False, 'message': 'MQTT publish failed'}), 500
         t3 = time.time()
-        # DB update
+        # DB update — use override duration for planned_end_time
+        override_dur = int(z.get('duration') or 10)
+        now_dt = datetime.now()
+        planned_end = (now_dt + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
         try:
-            db.update_zone(int(zone_id), {'state': 'on', 'watering_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'watering_start_source': 'manual', 'commanded_state': 'on'})
+            db.update_zone(int(zone_id), {
+                'state': 'on',
+                'watering_start_time': now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                'watering_start_source': 'manual',
+                'commanded_state': 'on',
+                'planned_end_time': planned_end
+            })
+            logger.info("mqtt_start: zone %s planned_end_time=%s (dur=%s)", zone_id, planned_end, override_dur)
         except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_1063: %s", e)
         t4 = time.time()
-        # Schedule auto-stop in background
+        # Schedule auto-stop in background (use override duration)
         t5 = time.time()
+        _override_dur_for_bg = override_dur
         try:
             import threading
             _is_testing = current_app.config.get('TESTING', False)
@@ -362,16 +373,12 @@ def api_zone_mqtt_start(zone_id: int):
                 try:
                     sched = get_scheduler()
                     if sched and not _is_testing:
-                        dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
+                        dur = _override_dur_for_bg
                         if dur > 0:
                             sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
                             sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
                     if (not sched) and not _is_testing:
-                        try:
-                            dur = int((db.get_zone(int(zone_id)) or {}).get('duration') or 0)
-                        except (sqlite3.Error, OSError) as e:
-                            logger.debug("Exception in _bg_schedule: %s", e)
-                            dur = 0
+                        dur = _override_dur_for_bg
                         if dur > 0:
                             def _fallback_stop():
                                 try:
