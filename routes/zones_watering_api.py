@@ -129,7 +129,19 @@ def api_zone_watering_time(zone_id):
             resp.headers['Cache-Control'] = 'no-store'
             return resp, 404
 
-        total_duration = int(zone.get('duration') or 0)
+        # Use planned_end_time if available (for override duration), else base duration
+        planned_end_str = zone.get('planned_end_time')
+        if planned_end_str and zone.get('watering_start_time'):
+            try:
+                planned_end_dt = datetime.strptime(planned_end_str, '%Y-%m-%d %H:%M:%S')
+                start_dt_for_calc = datetime.strptime(zone.get('watering_start_time'), '%Y-%m-%d %H:%M:%S')
+                total_duration = max(1, int((planned_end_dt - start_dt_for_calc).total_seconds() / 60))
+                logger.debug("watering_time: zone %s using planned_end_time dur=%s", zone_id, total_duration)
+            except (ValueError, TypeError) as e:
+                logger.debug("planned_end_time parse failed: %s", e)
+                total_duration = int(zone.get('duration') or 0)
+        else:
+            total_duration = int(zone.get('duration') or 0)
         start_str = zone.get('watering_start_time')
         if zone.get('state') != 'on' or not start_str:
             resp = jsonify({
@@ -397,15 +409,25 @@ def api_zone_mqtt_start(zone_id: int):
             _is_testing = current_app.config.get('TESTING', False)
             def _bg_schedule():
                 try:
+                    logger.warning("DIAG _bg_schedule zone=%s _override_dur_for_bg=%s", zone_id, _override_dur_for_bg)
                     sched = get_scheduler()
                     if sched and not _is_testing:
                         dur = _override_dur_for_bg
+                        logger.warning("DIAG _bg_schedule calling schedule_zone_stop zone=%s dur=%s", zone_id, dur)
                         if dur > 0:
                             sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
                             sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
                     if (not sched) and not _is_testing:
                         dur = _override_dur_for_bg
+                        logger.warning("DIAG fallback path dur=%s zone=%s", dur, zone_id)
+                        # Write planned_end_time for fallback too
                         if dur > 0:
+                            try:
+                                fallback_end = (datetime.now() + timedelta(minutes=dur)).strftime('%Y-%m-%d %H:%M:%S')
+                                db.update_zone(zone_id, {'planned_end_time': fallback_end})
+                                logger.warning("DIAG fallback planned_end_time=%s", fallback_end)
+                            except (sqlite3.Error, OSError) as e:
+                                logger.debug("fallback planned_end_time update failed: %s", e)
                             def _fallback_stop():
                                 try:
                                     time.sleep(max(1, dur * 60))
