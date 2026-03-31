@@ -1019,8 +1019,26 @@
         syncServerTime();
         updateDateTime();
         
-        // Параллельная загрузка всех данных
-        Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+        // SSR: instant render from inline data (zero fetch)
+        if (window._ssrZones && window._ssrZones.length) {
+            zonesData = window._ssrZones;
+            zoneGroupsCache = window._ssrGroups || [];
+            if (window._ssrStatus && window._ssrStatus.groups) {
+                statusData = window._ssrStatus;
+                updateStatusDisplay();
+            }
+            renderGroupTabs();
+            renderZoneCards();
+            try { updateActiveZoneIndicator(zonesData); } catch(e) {}
+            try { updateWaterMeter(zonesData); } catch(e) {}
+            // Then refresh in background for live data
+            setTimeout(function() {
+                Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+            }, 1000);
+        } else {
+            // No SSR data, fetch normally
+            Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+        }
         
         // Синхронизация времени раз в 5 минут
         setInterval(syncServerTime, 5 * 60 * 1000);
@@ -1116,7 +1134,12 @@
                             if (idx>=0){ zonesData[idx].state = data.state; }
                             const gid = typeof data.group_id !== 'undefined' ? Number(data.group_id) : (idx>=0 ? zonesData[idx].group_id : null);
                             if (gid) { refreshSingleGroup(gid); }
-                            if (String(data.state).toLowerCase() === 'off') { requestZonesReload(); }
+                            // V2: instant re-render zone cards + timer
+                            renderZoneCards();
+                            renderGroupTabs();
+                            if (data.state === 'on' && idx >= 0) {
+                                setTimeout(function() { initZoneTimer(zonesData[idx]); }, 500);
+                            }
                         } else if (typeof data.mv_group_id !== 'undefined') {
                             const gid = Number(data.mv_group_id);
                             const card = document.getElementById(`group-card-${gid}`);
@@ -1715,14 +1738,12 @@
             html += '<div class="zc-detail-item"><div class="zc-d-label">Послед. полив</div><div class="zc-d-value">' + (z.last_watering_time ? z.last_watering_time.replace('T',' ').slice(0,16) : '—') + '</div></div>';
             html += '</div>'; // detail-grid
 
-            html += '<div class="zc-dur-control">';
-            html += '<button class="zc-dur-btn" onclick="event.stopPropagation();changeZoneDur(' + z.id + ',-1)">−</button>';
-            html += '<div><span class="zc-dur-display" id="zdur-' + z.id + '">' + z.duration + '</span><span class="zc-dur-unit"> мин</span></div>';
-            html += '<button class="zc-dur-btn" onclick="event.stopPropagation();changeZoneDur(' + z.id + ',1)">+</button>';
-            html += '</div>';
-
             html += '<div class="zc-actions">';
-            html += '<button class="' + (isRunning ? 'zc-btn-stop' : 'zc-btn-run') + '" onclick="event.stopPropagation();' + startAction + '">' + (isRunning ? '⏹ Стоп' : '▶ Запустить') + '</button>';
+            if (isRunning) {
+                html += '<button class="zc-btn-stop" onclick="event.stopPropagation();' + startAction + '">⏹ Стоп</button>';
+            } else {
+                html += '<button class="zc-btn-run" onclick="event.stopPropagation();showRunPopup(' + z.id + ',' + z.duration + ')">▶ Запустить</button>';
+            }
             html += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
             html += '</div>';
 
@@ -1916,6 +1937,49 @@
         }).catch(function() { showZoneToast('Ошибка сохранения', 'error'); });
     }
     window.saveZoneEdit = saveZoneEdit;
+
+    // Run Duration Popup
+    var runPopupZoneId = null;
+    var runPopupDur = 10;
+    function showRunPopup(zoneId, defaultDur) {
+        runPopupZoneId = zoneId;
+        runPopupDur = defaultDur || 10;
+        var z = (zonesData || []).find(function(z){ return z.id === zoneId; });
+        var title = z ? '▶ #' + z.id + ' ' + z.name : '▶ Запустить';
+        document.getElementById('runPopupTitle').textContent = title;
+        document.getElementById('runPopupDur').textContent = runPopupDur;
+        document.getElementById('runPopupOverlay').classList.add('show');
+        document.getElementById('runPopup').classList.add('show');
+    }
+    function closeRunPopup() {
+        document.getElementById('runPopupOverlay').classList.remove('show');
+        document.getElementById('runPopup').classList.remove('show');
+        runPopupZoneId = null;
+    }
+    function adjustRunDur(delta) {
+        runPopupDur = Math.max(1, Math.min(120, runPopupDur + delta));
+        document.getElementById('runPopupDur').textContent = runPopupDur;
+    }
+    function setRunDur(val) {
+        runPopupDur = val;
+        document.getElementById('runPopupDur').textContent = runPopupDur;
+    }
+    function confirmRun() {
+        if (!runPopupZoneId) return;
+        var id = runPopupZoneId;
+        closeRunPopup();
+        // Update zone duration first, then start
+        api.put('/api/zones/' + id, { duration: runPopupDur }).then(function() {
+            var z = (zonesData || []).find(function(z){ return z.id === id; });
+            if (z) z.duration = runPopupDur;
+            toggleZoneRun(id);
+        }).catch(function() { toggleZoneRun(id); });
+    }
+    window.showRunPopup = showRunPopup;
+    window.closeRunPopup = closeRunPopup;
+    window.adjustRunDur = adjustRunDur;
+    window.setRunDur = setRunDur;
+    window.confirmRun = confirmRun;
 
     // Toast
     function showZoneToast(msg, type) {
