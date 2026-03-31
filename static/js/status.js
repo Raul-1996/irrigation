@@ -171,268 +171,53 @@
     
     async function loadZonesData() {
         try {
-            // 1) Быстрый рендер зон по /api/zones (напрямую через fetch, без обёртки)
-            let zonesRespJson = [];
+            // Fetch zones
+            var zonesRespJson = [];
             try {
-                const zr = await fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' });
+                var zr = await fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' });
                 zonesRespJson = await zr.json();
-            } catch (e) {
-                zonesRespJson = [];
-            }
+            } catch (e) { zonesRespJson = []; }
             zonesData = Array.isArray(zonesRespJson) ? zonesRespJson : [];
-            const tbody = document.getElementById('zones-table-body');
-            const cardsContainer = document.getElementById('zones-cards');
-            try { updateAdminHeaderColumns(); } catch(e){}
-            // ВАЖНО: сначала убедимся, что в существующих строках есть админ-ячейки,
-            // чтобы ниже мы могли сразу заполнить их актуальными значениями без задержки
-            try { ensureAdminCellsInRows(); } catch(e){}
-            try { fillAdminCellsFromZonesData(); } catch(e){}
-            const existingRows = {};
-            tbody.querySelectorAll('tr').forEach(row=>{
-                const idCell = row.querySelector('td:nth-child(2)');
-                if (idCell) existingRows[idCell.textContent.trim()] = row;
-            });
-            const filteredZones = (zonesData || []).filter(z=>z.group_id !== 999);
-            const frag = document.createDocumentFragment();
-            const cardsFrag = document.createDocumentFragment();
-            
-            filteredZones.forEach(zone=>{
-                const rowId = String(zone.id);
-                const row = existingRows[rowId];
-                if (row){
-                    // только изменившиеся поля
-                    const ind = row.querySelector('.indicator');
-                    if (ind){ ind.classList.remove('on','off'); ind.classList.add(zone.state); }
-                    const btn = row.querySelector('.zone-start-btn');
-                    if (btn){
-                        btn.textContent = zone.state==='on'?'⏹':'▶';
-                        const emergency = !!(statusData && statusData.emergency_stop);
-                        const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
-                        btn.setAttribute('onclick', action);
-                    }
-                    if (!row.getAttribute('data-zone-id')) {
-                        try { row.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
-                    }
-                    // обновим админ-ячейки, если есть и нужно показывать
-                    const isAdmin = (!!(statusData && statusData.is_admin));
-                    const showWaterCols = isAdmin && anyGroupUsesWaterMeter();
-                    if (isAdmin) {
-                        const adminCells = row.querySelectorAll('td.admin-only');
-                        if (showWaterCols && adminCells && adminCells.length>=2){
-                            let avg = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
-                            const tot = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
-                            if (avg !== 'НД') {
-                                const n = Number(avg);
-                                if (!Number.isNaN(n)) avg = String(Math.round(n));
-                            }
-                            adminCells[0].textContent = avg;
-                            adminCells[1].textContent = tot;
-                        } else if (!showWaterCols && adminCells && adminCells.length){
-                            adminCells.forEach(td=> td.remove());
-                        }
-                    }
-                } else {
-                    // создаём новую строку с placeholders для группы и next
-                    const tr = document.createElement('tr');
-                    const emergency = !!(statusData && statusData.emergency_stop);
-                    const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
-                    const isAdmin = (!!(statusData && statusData.is_admin));
-                    const showWaterCols = isAdmin && anyGroupUsesWaterMeter();
-                    let avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
-                    if (avgFlow !== 'НД') {
-                        const n = Number(avgFlow);
-                        if (!Number.isNaN(n)) avgFlow = String(Math.round(n));
-                    }
-                    const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
-                    tr.innerHTML = `
-                        <td><span class="indicator ${zone.state}"></span></td>
-                        <td>${zone.id}</td>
-                        <td><button class="zone-start-btn" onclick="${action}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
-                        <td>${zone.name}</td>
-                        <td>${zone.icon}</td>
-                        <td>${zone.duration} мин</td>
-                        <td data-group-id="${zone.group_id}">${zone.group_id}</td>
-                        <td class="hide-mobile col-last-watering">—</td>
-                        <td class="col-next" data-label="Следующий полив">—</td>
-                        ${showWaterCols ? `<td class=\"admin-only\">${avgFlow}</td>` : ''}
-                        ${showWaterCols ? `<td class=\"admin-only\">${totalLiters}</td>` : ''}
-                        <td class="col-photo" data-label="Фото">
-                            <div class="zone-photo">
-                                ${zone.photo_path ? 
-                                    `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
-                                    `<div class="no-photo" title="Нет фото">📷</div>`
-                                }
-                            </div>
-                        </td>`;
-                    try { tr.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
-                    frag.appendChild(tr);
-                }
-                
-                // Создаём карточку для мобилки
-                const card = document.createElement('div');
-                card.className = `zone-card status-${zone.state}`;
-                card.setAttribute('data-zone-id', String(zone.id));
-                
-                const emergency = !!(statusData && statusData.emergency_stop);
-                const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
-                
-                const photoHTML = zone.photo_path ? 
-                    `<div class="zone-card-photo" onclick="showPhotoModal('/api/zones/${zone.id}/photo')">
-                        <img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}">
-                    </div>` :
-                    `<div class="zone-card-photo">
-                        <div class="no-photo">📷</div>
-                    </div>`;
-                
-                card.innerHTML = `
-                    <div class="zone-card-header" onclick="this.parentElement.classList.toggle('expanded')">
-                        <span class="zone-status-dot ${zone.state}"></span>
-                        <span class="zone-number">#${zone.id}</span>
-                        <span class="zone-name">${zone.name}</span>
-                        <span class="zone-card-next-inline" style="color:#999;font-size:0.75rem;margin-left:auto;"></span>
-                        <span class="zone-chevron">▼</span>
-                    </div>
-                    <div class="zone-card-body">
-                        <span>${zone.icon} ${zone.duration} мин</span>
-                        <span class="zone-card-next">Следующий: —</span>
-                        <span class="zone-group" data-group-id="${zone.group_id}">${zone.group_id}</span>
-                    </div>
-                    <div class="zone-card-actions">
-                        <button onclick="event.stopPropagation();${action}">${zone.state==='on' ? '⏹ Стоп' : '▶ Старт'}</button>
-                        ${photoHTML}
-                    </div>
-                `;
-                cardsFrag.appendChild(card);
-            });
-            if (frag.childNodes.length && tbody) tbody.appendChild(frag);
-            if (cardsFrag.childNodes.length && cardsContainer) {
-                cardsContainer.innerHTML = '';
-                cardsContainer.appendChild(cardsFrag);
-            }
-            
-            // Повторная страховка на случай вновь созданных строк
-            try { ensureAdminCellsInRows(); } catch(e){}
-            try { fillAdminCellsFromZonesData(); } catch(e){}
-            try { document.getElementById('zones-count').textContent = filteredZones.length; } catch(e) {}
-            hideConnectionError();
-            // После первичного рендера — синхронизация с актуальным статусом групп
-            try { reconcileZoneRowsWithGroupStatus(); } catch(e) {}
-            // 2) Подгружаем имена групп без блокировки
-            (async()=>{
-                try{
-                    const groups = await api.get('/api/groups');
-                    const nameById = {}; (groups||[]).forEach(g=>{ nameById[g.id]=g.name; });
-                    
-                    // Обновляем таблицу
-                    tbody.querySelectorAll('tr').forEach(row=>{
-                        const cell = row.querySelector('td:nth-child(7)');
-                        if (!cell) return;
-                        const gidAttr = cell.getAttribute('data-group-id');
-                        const gid = gidAttr ? Number(gidAttr) : Number(cell.textContent.trim());
-                        if (nameById[gid]) cell.textContent = nameById[gid];
-                    });
-                    
-                    // Обновляем карточки
-                    if (cardsContainer) {
-                        cardsContainer.querySelectorAll('.zone-group').forEach(span=>{
-                            const gidAttr = span.getAttribute('data-group-id');
-                            if (gidAttr && nameById[Number(gidAttr)]) {
-                                span.textContent = nameById[Number(gidAttr)];
-                            }
-                        });
-                    }
-                }catch(e){}
-            })();
-            // 3) Подгружаем next-watering без блокировки
-            (async()=>{
-                try{
-                    const ids = filteredZones.map(z=>z.id);
-                    if (!ids.length) return;
-                    const resp = await fetch('/api/zones/next-watering-bulk',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({zone_ids: ids})});
-                    if (!resp.ok) return;
-                    const bulk = await resp.json();
-                    const nextMap = {}; (bulk.items||[]).forEach(it=>{ nextMap[it.zone_id]= it.next_datetime || (it.next_watering==='Никогда'?'Никогда': null); });
-                    
-                    // Обновляем таблицу
-                    tbody.querySelectorAll('tr').forEach(row=>{
-                        const idCell = row.querySelector('td:nth-child(2)');
-                        const nextCell = row.querySelector('td:nth-child(9)');
-                        if (!idCell || !nextCell) return;
-                        const zid = Number(idCell.textContent.trim());
-                        if (!(zid in nextMap)) return;
-                        const v = nextMap[zid];
-                        let txt = '—';
-                        if (statusData && statusData.emergency_stop) txt = 'До отмены аварии';
-                        else if (v==='Никогда') txt = 'Никогда';
-                        else if (v) txt = String(v).replace('T',' ').slice(0,19);
-                        nextCell.textContent = txt;
-                    });
-                    
-                    // Обновляем карточки
-                    if (cardsContainer) {
-                        cardsContainer.querySelectorAll('.zone-card').forEach(card=>{
-                            const zidAttr = card.getAttribute('data-zone-id');
-                            if (!zidAttr) return;
-                            const zid = Number(zidAttr);
-                            if (!(zid in nextMap)) return;
-                            const v = nextMap[zid];
-                            let txt = '—';
-                            if (statusData && statusData.emergency_stop) txt = 'До отмены аварии';
-                            else if (v==='Никогда') txt = 'Никогда';
-                            else if (v) {
-                                const dt = String(v).replace('T',' ').slice(0,19);
-                                const parts = dt.split(' ');
-                                if (parts.length === 2) {
-                                    txt = parts[1].slice(0,5); // только время HH:MM
-                                } else {
-                                    txt = dt;
-                                }
-                            }
-                            const nextSpan = card.querySelector('.zone-card-next');
-                            if (nextSpan) nextSpan.textContent = `Следующий: ${txt}`;
-                            const inlineSpan = card.querySelector('.zone-card-next-inline');
-                            if (inlineSpan) inlineSpan.textContent = txt !== '—' ? txt : '';
-                        });
-                    }
-                }catch(e){}
-            })();
-            // 4) Обновляем sidebar indicators
-            try {
-                updateActiveZoneIndicator(zonesData);
-                updateWaterMeter(zonesData);
-            } catch(e) {}
-            // 5) Zones V2: Hunter-style cards
-            try {
-                // Load groups for tabs (cached)
-                if (!zoneGroupsCache || !zoneGroupsCache.length) {
-                    try {
-                        var gResp = await fetch('/api/groups');
-                        zoneGroupsCache = await gResp.json();
-                    } catch(e2) { zoneGroupsCache = []; }
-                }
-                // Attach next-watering to zone data for card rendering
+
+            // Fetch groups for tabs (cached)
+            if (!zoneGroupsCache || !zoneGroupsCache.length) {
                 try {
-                    var nwResp = await fetch('/api/zones/next-watering-bulk', {
-                        method: 'POST',
-                        headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
-                    });
-                    var nwData = await nwResp.json();
-                    var nwMap = {};
-                    ((nwData && nwData.items) || []).forEach(function(it) {
-                        nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
-                    });
-                    zonesData.forEach(function(z) {
-                        var v = nwMap[z.id];
-                        if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
-                        else if (v === 'Никогда') z._nextWatering = 'Никогда';
-                        else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
-                        else z._nextWatering = '—';
-                    });
-                } catch(e3) {}
-                renderGroupTabs();
-                renderZoneCards();
-            } catch(e4) { console.error('Zones V2 render error:', e4); }
+                    var gResp = await fetch('/api/groups');
+                    zoneGroupsCache = await gResp.json();
+                } catch(e2) { zoneGroupsCache = []; }
+            }
+
+            // Fetch next-watering bulk
+            var filteredZones = zonesData.filter(function(z) { return z.group_id !== 999; });
+            try {
+                var nwResp = await fetch('/api/zones/next-watering-bulk', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
+                });
+                var nwData = await nwResp.json();
+                var nwMap = {};
+                (nwData.items || []).forEach(function(it) {
+                    nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
+                });
+                zonesData.forEach(function(z) {
+                    var v = nwMap[z.id];
+                    if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
+                    else if (v === 'Никогда') z._nextWatering = 'Никогда';
+                    else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
+                    else z._nextWatering = '—';
+                });
+            } catch(e3) {}
+
+            // Render V2 zones
+            renderGroupTabs();
+            renderZoneCards();
+
+            // Update sidebar indicators
+            try { updateActiveZoneIndicator(zonesData); } catch(e) {}
+            try { updateWaterMeter(zonesData); } catch(e) {}
+
+            hideConnectionError();
         } catch (error) {
             console.error('Ошибка загрузки зон:', error);
             showConnectionError();
@@ -1342,6 +1127,19 @@
             });
         } catch (e) {}
     });
+
+
+    // Export V2 zone functions to global scope for onclick handlers
+    window.selectZoneGroup = selectZoneGroup;
+    window.toggleZoneSearch = toggleZoneSearch;
+    window.filterZonesBySearch = filterZonesBySearch;
+    window.runSelectedGroup = runSelectedGroup;
+    window.closeZoneSheet = closeZoneSheet;
+    window.saveZoneEdit = saveZoneEdit;
+    window.toggleZoneCard = toggleZoneCard;
+    window.showPhotoModal = showPhotoModal;
+    window.closePhotoModal = closePhotoModal;
+    window.startOrStopZone = startOrStopZone;
 
     // Точечное обновление строк зон группы (без полной перерисовки таблицы)
     async function refreshZonesRowsForGroup(groupId) {
