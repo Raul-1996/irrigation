@@ -480,7 +480,7 @@
     }
 
     function getStatusText(group) {
-        const mob = window.innerWidth < 768;
+        const mob = window.innerWidth < 1024;
         if (group.status === 'watering' && group.current_zone) {
             const src = String(group.current_zone_source || '').toLowerCase();
             if (src === 'schedule') return mob ? '💧 Полив (расписание)' : 'Полив - активно поливается (по расписанию)';
@@ -603,11 +603,11 @@
                 extraText = String(group.error_message);
             }
             const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
-            const _m = window.innerWidth < 768;
+            const _m = window.innerWidth < 1024;
             const groupActionHtml = anyZoneOnThisGroup
                 ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">${_m ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
                 : `<button class="group-action-btn group-action-start" onclick="startGroupFromFirst(${group.id})">${_m ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
-            const _mob = window.innerWidth < 768;
+            const _mob = window.innerWidth < 1024;
             const groupButtons = `
                 <div class="btn-group">
                     <button class="delay" onclick="delayGroup(${group.id}, 1)">${_mob ? '1 день' : 'Остановить полив на 1 день'}</button>
@@ -717,11 +717,11 @@
             const mvState2 = String(group.master_valve_state || 'unknown');
             const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
             const anyZoneOnThisGroup2 = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
-            const _m3 = window.innerWidth < 768;
+            const _m3 = window.innerWidth < 1024;
             const groupActionHtml2 = anyZoneOnThisGroup2
                 ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">${_m3 ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
                 : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">${_m3 ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
-            const _mob2 = window.innerWidth < 768;
+            const _mob2 = window.innerWidth < 1024;
             const groupButtons = `
                 <div class=\"btn-group\">
                     <button class=\"delay\" onclick=\"delayGroup(${group.id}, 1)\">${_mob2 ? '1 день' : 'Остановить полив на 1 день'}</button>
