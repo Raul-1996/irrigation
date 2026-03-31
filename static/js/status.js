@@ -1828,11 +1828,7 @@
         // Debounce API call
         clearTimeout(durDebounceTimers[id]);
         durDebounceTimers[id] = setTimeout(function() {
-            fetch('/api/zones/' + id, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ duration: z.duration })
-            }).catch(function() {});
+            api.put('/api/zones/' + id, { duration: z.duration }).catch(function() {});
         }, 500);
     }
     window.changeZoneDur = changeZoneDur;
@@ -1891,11 +1887,7 @@
             icon: document.getElementById('editZoneIcon').value,
             group_id: parseInt(document.getElementById('editZoneGroup').value) || 1,
         };
-        fetch('/api/zones/' + editingZoneId, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        }).then(function(r) { return r.json(); }).then(function(data) {
+        api.put('/api/zones/' + editingZoneId, payload).then(function(data) {
             closeZoneSheet();
             showZoneToast('✅ Зона сохранена', 'success');
             loadZonesData();
