@@ -772,12 +772,12 @@
         padding: 16px;
         min-width: 0;
     }
-    .weather-sidebar {
-        position: relative;
+    .desktop-layout {
+        overflow-x: hidden;
     }
     .sidebar-toggle {
-        position: absolute;
-        right: -24px;
+        position: fixed;
+        left: 300px;
         top: 50%;
         transform: translateY(-50%);
         width: 24px;
@@ -789,6 +789,7 @@
         cursor: pointer;
         font-size: 12px;
         z-index: 100;
+        transition: left 0.3s;
     }
     .sidebar-toggle:hover {
         background: #1976d2;
@@ -800,7 +801,7 @@
         overflow: hidden;
     }
     .sidebar-collapsed .sidebar-toggle {
-        right: -24px;
+        left: 0;
     }
 
     /* === Weather Widget in Sidebar === */
@@ -1613,8 +1614,9 @@
       <div class="water-meter-value" id="water-meter-value">0 <span class="unit">л</span></div>
       <div class="water-meter-detail" id="water-meter-detail"></div>
     </div>
-    <button class="sidebar-toggle" id="sidebar-toggle" title="Свернуть/развернуть">◀</button>
   </aside>
+
+  <button class="sidebar-toggle" id="sidebar-toggle" title="Свернуть/развернуть">◀</button>
 
   <main class="main-content">
     <div class="top-bar">
