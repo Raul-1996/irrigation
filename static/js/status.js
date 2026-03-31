@@ -181,6 +181,7 @@
             }
             zonesData = Array.isArray(zonesRespJson) ? zonesRespJson : [];
             const tbody = document.getElementById('zones-table-body');
+            const cardsContainer = document.getElementById('zones-cards');
             try { updateAdminHeaderColumns(); } catch(e){}
             // ВАЖНО: сначала убедимся, что в существующих строках есть админ-ячейки,
             // чтобы ниже мы могли сразу заполнить их актуальными значениями без задержки
@@ -193,6 +194,8 @@
             });
             const filteredZones = (zonesData || []).filter(z=>z.group_id !== 999);
             const frag = document.createDocumentFragment();
+            const cardsFrag = document.createDocumentFragment();
+            
             filteredZones.forEach(zone=>{
                 const rowId = String(zone.id);
                 const row = existingRows[rowId];
@@ -264,8 +267,47 @@
                     try { tr.setAttribute('data-zone-id', String(zone.id)); } catch(e) {}
                     frag.appendChild(tr);
                 }
+                
+                // Создаём карточку для мобилки
+                const card = document.createElement('div');
+                card.className = `zone-card status-${zone.state}`;
+                card.setAttribute('data-zone-id', String(zone.id));
+                
+                const emergency = !!(statusData && statusData.emergency_stop);
+                const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zone.id + ", '" + zone.state + "')");
+                
+                const photoHTML = zone.photo_path ? 
+                    `<div class="zone-card-photo" onclick="showPhotoModal('/api/zones/${zone.id}/photo')">
+                        <img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}">
+                    </div>` :
+                    `<div class="zone-card-photo">
+                        <div class="no-photo">📷</div>
+                    </div>`;
+                
+                card.innerHTML = `
+                    <div class="zone-card-header">
+                        <span class="zone-status-dot ${zone.state}"></span>
+                        <span class="zone-number">#${zone.id}</span>
+                        <span class="zone-name">${zone.name}</span>
+                        <span class="zone-group" data-group-id="${zone.group_id}">${zone.group_id}</span>
+                        ${photoHTML}
+                    </div>
+                    <div class="zone-card-body">
+                        <span>${zone.icon} ${zone.duration} мин</span>
+                        <span class="zone-card-next">Следующий: —</span>
+                    </div>
+                    <div class="zone-card-actions">
+                        <button onclick="${action}">${zone.state==='on' ? '⏹ Стоп' : '▶ Старт'}</button>
+                    </div>
+                `;
+                cardsFrag.appendChild(card);
             });
             if (frag.childNodes.length) tbody.appendChild(frag);
+            if (cardsFrag.childNodes.length && cardsContainer) {
+                cardsContainer.innerHTML = '';
+                cardsContainer.appendChild(cardsFrag);
+            }
+            
             // Повторная страховка на случай вновь созданных строк
             try { ensureAdminCellsInRows(); } catch(e){}
             try { fillAdminCellsFromZonesData(); } catch(e){}
@@ -278,6 +320,8 @@
                 try{
                     const groups = await api.get('/api/groups');
                     const nameById = {}; (groups||[]).forEach(g=>{ nameById[g.id]=g.name; });
+                    
+                    // Обновляем таблицу
                     tbody.querySelectorAll('tr').forEach(row=>{
                         const cell = row.querySelector('td:nth-child(7)');
                         if (!cell) return;
@@ -285,6 +329,16 @@
                         const gid = gidAttr ? Number(gidAttr) : Number(cell.textContent.trim());
                         if (nameById[gid]) cell.textContent = nameById[gid];
                     });
+                    
+                    // Обновляем карточки
+                    if (cardsContainer) {
+                        cardsContainer.querySelectorAll('.zone-group').forEach(span=>{
+                            const gidAttr = span.getAttribute('data-group-id');
+                            if (gidAttr && nameById[Number(gidAttr)]) {
+                                span.textContent = nameById[Number(gidAttr)];
+                            }
+                        });
+                    }
                 }catch(e){}
             })();
             // 3) Подгружаем next-watering без блокировки
@@ -296,6 +350,8 @@
                     if (!resp.ok) return;
                     const bulk = await resp.json();
                     const nextMap = {}; (bulk.items||[]).forEach(it=>{ nextMap[it.zone_id]= it.next_datetime || (it.next_watering==='Никогда'?'Никогда': null); });
+                    
+                    // Обновляем таблицу
                     tbody.querySelectorAll('tr').forEach(row=>{
                         const idCell = row.querySelector('td:nth-child(2)');
                         const nextCell = row.querySelector('td:nth-child(9)');
@@ -309,6 +365,31 @@
                         else if (v) txt = String(v).replace('T',' ').slice(0,19);
                         nextCell.textContent = txt;
                     });
+                    
+                    // Обновляем карточки
+                    if (cardsContainer) {
+                        cardsContainer.querySelectorAll('.zone-card').forEach(card=>{
+                            const zidAttr = card.getAttribute('data-zone-id');
+                            if (!zidAttr) return;
+                            const zid = Number(zidAttr);
+                            if (!(zid in nextMap)) return;
+                            const v = nextMap[zid];
+                            let txt = '—';
+                            if (statusData && statusData.emergency_stop) txt = 'До отмены аварии';
+                            else if (v==='Никогда') txt = 'Никогда';
+                            else if (v) {
+                                const dt = String(v).replace('T',' ').slice(0,19);
+                                const parts = dt.split(' ');
+                                if (parts.length === 2) {
+                                    txt = parts[1].slice(0,5); // только время HH:MM
+                                } else {
+                                    txt = dt;
+                                }
+                            }
+                            const nextSpan = card.querySelector('.zone-card-next');
+                            if (nextSpan) nextSpan.textContent = `Следующий: ${txt}`;
+                        });
+                    }
                 }catch(e){}
             })();
             // 4) Обновляем sidebar indicators

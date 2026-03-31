@@ -92,3 +92,26 @@ def test_mobile_media_query(client):
     html = response.data.decode('utf-8')
     
     assert '@media (max-width: 1023px)' in html or '@media(max-width:1023px)' in html
+
+
+def test_mobile_zones_cards_class(client):
+    """Verify HTML contains zones-cards container for mobile view."""
+    response = client.get('/status')
+    assert response.status_code == 200
+    html = response.data.decode('utf-8')
+    
+    assert 'class="zones-cards"' in html
+    assert 'id="zones-cards"' in html
+
+
+def test_mobile_buttons_responsive(client):
+    """Verify CSS contains media query for responsive group action buttons."""
+    response = client.get('/status')
+    assert response.status_code == 200
+    html = response.data.decode('utf-8')
+    
+    # Проверяем наличие медиа-запроса для мобилки
+    assert '@media (max-width: 767px)' in html or '@media(max-width:767px)' in html
+    
+    # Проверяем что кнопки группы становятся вертикальными
+    assert 'flex-direction: column' in html or 'flex-direction:column' in html

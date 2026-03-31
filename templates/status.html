@@ -8,6 +8,7 @@
     /* Общие стили для контрастности */
     body {
         color: #333;
+        overflow-x: hidden;
     }
     
     .connection-status {
@@ -345,6 +346,131 @@
     }
     /* Временно скрываем колонку "Последний полив" на всех устройствах */
     .col-last-watering { display: none !important; }
+    
+    /* Карточки зон для мобилки */
+    .zones-cards {
+        display: none;
+    }
+    
+    .zone-card {
+        background: white;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 8px;
+        border-left: 3px solid #ccc;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .zone-card.status-on {
+        border-left-color: #4caf50;
+    }
+    
+    .zone-card.status-off {
+        border-left-color: #ccc;
+    }
+    
+    .zone-card-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+    }
+    
+    .zone-status-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #ccc;
+        flex-shrink: 0;
+    }
+    
+    .zone-status-dot.on {
+        background: #4caf50;
+    }
+    
+    .zone-status-dot.off {
+        background: #ccc;
+    }
+    
+    .zone-number {
+        font-weight: 600;
+        color: #666;
+        font-size: 0.9rem;
+    }
+    
+    .zone-name {
+        font-weight: 700;
+        color: #333;
+        flex: 1;
+        font-size: 0.95rem;
+    }
+    
+    .zone-group {
+        font-size: 0.8rem;
+        color: #999;
+        padding: 2px 8px;
+        background: #f5f5f5;
+        border-radius: 4px;
+    }
+    
+    .zone-card-body {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-bottom: 8px;
+        font-size: 0.85rem;
+        color: #666;
+    }
+    
+    .zone-card-body > span {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+    
+    .zone-card-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+    }
+    
+    .zone-card-actions button {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 4px;
+        background: #4caf50;
+        color: white;
+        cursor: pointer;
+        font-size: 0.9rem;
+    }
+    
+    .zone-card-actions button:hover {
+        background: #45a049;
+    }
+    
+    .zone-card-photo {
+        width: 32px;
+        height: 32px;
+        border-radius: 4px;
+        overflow: hidden;
+        background: #f0f0f0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+    
+    .zone-card-photo img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: cover;
+    }
+    
+    .zone-card-photo .no-photo {
+        font-size: 1.2rem;
+        color: #888;
+    }
     .zones-header {
         display: flex;
         justify-content: space-between;
@@ -438,13 +564,22 @@
     }
     
     /* Мобильная верстка */
-    @media (max-width: 768px) {
+    @media (max-width: 767px) {
         .hide-mobile { display: none; }
+        
+        /* Кнопки управления группой → вертикальный стек */
+        .btn-group {
+            flex-direction: column;
+            gap: 8px;
+        }
+        
         .btn-group button { 
-            min-width: 100px; 
+            width: 100% !important;
+            min-width: unset;
             font-size: 0.8rem; 
             padding: 0.4rem 0.3rem;
         }
+        
         /* На мобильных разрешаем перенос и авто-высоту у длинных кнопок */
         .status-grid .card .btn-group button {
             white-space: normal;
@@ -455,18 +590,23 @@
             word-break: break-word;
             text-align: center;
         }
+        
         .status-grid { grid-template-columns: 1fr; gap: 0.8rem; }
         .card { min-height: 160px; padding: 0.6rem; }
         .top-bar { flex-direction: column; gap: 0.3rem; }
         .info-box { flex: 1 1 auto; width: 100%; }
         .legend-grid { grid-template-columns: 1fr; gap: 0.3rem; }
-        .zones-section { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        .zones-table { font-size: 0.75rem; min-width: 640px; }
-        .zones-table th, .zones-table td { padding: 0.3rem 0.2rem; }
         .emergency { width: 100%; margin: 0.5rem 0; }
-        /* Подписи в ячейках на узких экранах для ясности (убираем подпись у "Следующий полив") */
-        .zones-table td.col-photo::before { content: attr(data-label) ": "; font-weight: 600; color: #666; margin-right: 4px; }
         .group-info-grid { grid-template-columns: 1fr; }
+        
+        /* Таблица зон → скрыть, показать карточки */
+        .zones-table {
+            display: none !important;
+        }
+        
+        .zones-cards {
+            display: block;
+        }
     }
 
     /* === Desktop Sidebar Layout === */
@@ -1145,6 +1285,8 @@
     <div class="zones-header">
         <h3>Все зоны (<span id="zones-count">0</span>)</h3>
     </div>
+    
+    <!-- Десктоп: таблица -->
     <table class="zones-table">
         <thead id="zones-table-head">
             <tr>
@@ -1164,6 +1306,11 @@
             <!-- Зоны будут загружены динамически -->
         </tbody>
     </table>
+    
+    <!-- Мобилка: карточки -->
+    <div class="zones-cards" id="zones-cards">
+        <!-- Карточки будут загружены динамически -->
+    </div>
 </div>
 
 <!-- Модальное окно для просмотра фотографий -->
