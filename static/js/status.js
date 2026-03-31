@@ -187,31 +187,35 @@
                 } catch(e2) { zoneGroupsCache = []; }
             }
 
-            // Fetch next-watering bulk
-            var filteredZones = zonesData.filter(function(z) { return z.group_id !== 999; });
-            try {
-                var nwResp = await fetch('/api/zones/next-watering-bulk', {
-                    method: 'POST',
-                    headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
-                });
-                var nwData = await nwResp.json();
-                var nwMap = {};
-                (nwData.items || []).forEach(function(it) {
-                    nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
-                });
-                zonesData.forEach(function(z) {
-                    var v = nwMap[z.id];
-                    if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
-                    else if (v === 'Никогда') z._nextWatering = 'Никогда';
-                    else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
-                    else z._nextWatering = '—';
-                });
-            } catch(e3) {}
-
-            // Render V2 zones
+            // Render V2 zones IMMEDIATELY (no waiting for next-watering)
             renderGroupTabs();
             renderZoneCards();
+
+            // Fetch next-watering bulk ASYNC (non-blocking)
+            var filteredZones = zonesData.filter(function(z) { return z.group_id !== 999; });
+            (async function() {
+                try {
+                    var nwResp = await fetch('/api/zones/next-watering-bulk', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
+                    });
+                    var nwData = await nwResp.json();
+                    var nwMap = {};
+                    (nwData.items || []).forEach(function(it) {
+                        nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
+                    });
+                    zonesData.forEach(function(z) {
+                        var v = nwMap[z.id];
+                        if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
+                        else if (v === 'Никогда') z._nextWatering = 'Никогда';
+                        else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
+                        else z._nextWatering = '—';
+                    });
+                    // Re-render with next-watering data
+                    renderZoneCards();
+                } catch(e3) {}
+            })();
 
             // Update sidebar indicators
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
@@ -1585,7 +1589,7 @@
 
         var html = '<button class="group-tab ' + (currentGroupFilter === null ? 'active' : '') + '" onclick="selectZoneGroup(null)">Все<span class="tab-count">' + allZones.length + '</span></button>';
 
-        groups.forEach(function(g) {
+        groups.filter(function(g) { return g.id !== 999; }).forEach(function(g) {
             var gZones = allZones.filter(function(z) { return z.group_id === g.id; });
             var gRunning = gZones.filter(function(z) { return z.state === 'on'; }).length;
             var gStatus = 'waiting';
@@ -1672,7 +1676,7 @@
             html += '<div class="zone-card-main" onclick="toggleZoneCard(' + z.id + ')">';
             html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
             html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + (z.name || '') + '</div>';
-            html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge">' + z.duration + ' мин</span>';
+            html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
             if (!showSections) html += '<span style="color:#ddd">·</span><span>' + gName2 + '</span>';
             html += '</div></div>';
             html += nextHtml;
@@ -1819,6 +1823,8 @@
         z.duration = Math.max(1, Math.min(120, (z.duration || 10) + delta));
         var el = document.getElementById('zdur-' + id);
         if (el) el.textContent = z.duration;
+        var badge = document.getElementById('zbadge-' + id);
+        if (badge) badge.textContent = z.duration + ' мин';
         // Debounce API call
         clearTimeout(durDebounceTimers[id]);
         durDebounceTimers[id] = setTimeout(function() {
