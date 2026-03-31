@@ -1964,6 +1964,7 @@
     function showGroupRunPopup(gid, gName) {
         runPopupGroupId = gid;
         runPopupZoneId = null;
+        _runPopupAllGroups = !gid;
         var title = gid ? '▶ ' + gName : '▶ Все группы';
         document.getElementById('runPopupTitle').textContent = title;
         runPopupDur = 15;
@@ -2044,6 +2045,7 @@
     // Run Duration Popup with Circular Dial
     var runPopupZoneId = null;
     var runPopupGroupId = null;
+    var _runPopupAllGroups = false;
     var runPopupDur = 10;
     var MAX_DUR = 120;
     var DIAL_R = 85;
@@ -2114,6 +2116,7 @@
     function showRunPopup(zoneId, defaultDur) {
         runPopupZoneId = zoneId;
         runPopupGroupId = null;
+        _runPopupAllGroups = false;
         runPopupDur = defaultDur || 10;
         var z = (zonesData || []).find(function(z){ return z.id === zoneId; });
         var title = z ? '▶ #' + z.id + ' ' + z.name : '▶ Запустить';
@@ -2131,20 +2134,40 @@
         document.getElementById('runPopupOverlay').classList.remove('show');
         document.getElementById('runPopup').classList.remove('show');
         runPopupZoneId = null;
+        _runPopupAllGroups = false;
     }
     function setRunDur(val) {
         runPopupDur = val;
         updateDial();
     }
     function confirmRun() {
-        if (!runPopupZoneId && !runPopupGroupId) return;
+        // _runPopupAllGroups flag: true when "all groups" was selected (gid=null)
+        if (!runPopupZoneId && !runPopupGroupId && !_runPopupAllGroups) return;
         var dur = runPopupDur;
         var savedZoneId = runPopupZoneId;
         var savedGroupId = runPopupGroupId;
+        var savedAllGroups = _runPopupAllGroups;
         closeRunPopup();
         
-        if (savedGroupId) {
+        if (savedGroupId || savedAllGroups) {
             // Group run: pass override_duration to API (does NOT change base durations in DB)
+            if (savedAllGroups && !savedGroupId) {
+                // All groups: start each group with override
+                showLoading('Запуск всех групп...');
+                var allGroups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
+                Promise.all(allGroups.map(function(g) {
+                    return fetch('/api/groups/' + g.id + '/start-from-first', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({override_duration: dur})
+                    }).catch(function() {});
+                })).then(function() {
+                    hideLoading();
+                    showZoneToast('▶ Все группы запущены на ' + dur + ' мин', 'success');
+                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                });
+                return;
+            }
             var gid = savedGroupId;
             var groupZones = (zonesData || []).filter(function(z) { return z.group_id === gid && z.group_id !== 999; });
             // Optimistic: set local times for instant timer display
