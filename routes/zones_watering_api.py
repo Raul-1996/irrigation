@@ -248,6 +248,31 @@ def api_zone_mqtt_start(zone_id: int):
         except (ValueError, TypeError) as e:
             logger.debug("mqtt_start duration parse: %s", e)
         if str(z.get('state') or '') == 'on':
+            # If duration override provided — reschedule stop with new duration
+            try:
+                body2 = request.get_json(silent=True) or {}
+                if body2.get('duration') is not None:
+                    override_dur = int(z.get('duration') or 10)  # already overridden above
+                    now_dt = datetime.now()
+                    new_end = (now_dt + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
+                    db.update_zone(zone_id, {
+                        'planned_end_time': new_end,
+                        'watering_start_time': now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                        'watering_start_source': 'manual'
+                    })
+                    # Reschedule stop
+                    try:
+                        sched = get_scheduler()
+                        if sched:
+                            sched.cancel_group_jobs(int(z.get('group_id') or 0))
+                            sched.schedule_zone_stop(zone_id, override_dur, command_id=str(int(time.time())))
+                            sched.schedule_zone_hard_stop(zone_id, now_dt + timedelta(minutes=override_dur))
+                    except (ValueError, TypeError, ImportError) as e:
+                        logger.debug("reschedule on override: %s", e)
+                    logger.info("mqtt_start: zone %s already ON, rescheduled to %s min (end=%s)", zone_id, override_dur, new_end)
+                    return jsonify({'success': True, 'message': f'Зона {zone_id} перезапущена на {override_dur} мин'})
+            except (ValueError, TypeError) as e:
+                logger.debug("mqtt_start already-on duration: %s", e)
             return jsonify({'success': True, 'message': 'Зона уже запущена'})
         gid = int(z.get('group_id') or 0)
         try:
