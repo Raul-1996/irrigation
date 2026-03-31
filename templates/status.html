@@ -474,6 +474,10 @@
         display: flex;
         min-height: 100vh;
     }
+    /* На десктопе кнопка "Подробнее" скрыта */
+    .mobile-weather-toggle {
+        display: none;
+    }
     .weather-sidebar {
         width: 300px;
         position: sticky;
@@ -935,15 +939,50 @@
             height: auto;
             position: static;
             border-right: none;
-            border-bottom: 1px solid #e0e0e0;
+            border-bottom: 1px solid var(--border-color, #e0e0e0);
+            padding: 12px 16px;
+            max-height: none;
+            overflow: visible;
         }
+        /* На мобилке скрываем прогнозы/детали, оставляем только summary + active zone */
+        .weather-sidebar .weather-extra-block,
+        .weather-sidebar #sidebar-water-meter {
+            display: none;
+        }
+        /* Показываем скрытые блоки при раскрытии */
+        .weather-sidebar.mobile-expanded .weather-extra-block,
+        .weather-sidebar.mobile-expanded #sidebar-water-meter {
+            display: block;
+        }
+        /* Кнопка "Подробнее" для мобилки */
+        .mobile-weather-toggle {
+            display: block;
+            width: 100%;
+            padding: 8px;
+            margin-top: 8px;
+            background: transparent;
+            border: 1px solid var(--border-color, #e0e0e0);
+            border-radius: 6px;
+            color: var(--primary, #2196f3);
+            font-size: 13px;
+            cursor: pointer;
+            text-align: center;
+        }
+        .weather-sidebar.mobile-expanded .mobile-weather-toggle {
+            margin-bottom: 8px;
+        }
+        /* Sidebar desktop toggle скрыт */
         .sidebar-toggle {
             display: none;
         }
         .sidebar-collapsed .weather-sidebar {
             width: 100%;
-            padding: 16px;
-            border-bottom: 1px solid #e0e0e0;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color, #e0e0e0);
+        }
+        /* Active zone на мобилке всегда видно */
+        .weather-sidebar #sidebar-active-zone {
+            display: block;
         }
     }
 
@@ -1001,20 +1040,20 @@
       </div>
 
       <!-- ПРОГНОЗ 24Ч -->
-      <div class="weather-card">
+      <div class="weather-card weather-extra-block" id="weather-forecast-24h">
         <div class="weather-section-title">Прогноз 24ч</div>
         <div class="weather-24h-grid" id="w-hours"></div>
         <div class="weather-hours-legend">осадки мм · ветер м/с</div>
       </div>
 
       <!-- ПРОГНОЗ 3 ДНЯ -->
-      <div class="weather-card">
+      <div class="weather-card weather-extra-block" id="weather-forecast-3d">
         <div class="weather-section-title">Прогноз на 3 дня</div>
         <div class="weather-days" id="w-days"></div>
       </div>
 
       <!-- ДЕТАЛИ -->
-      <div class="weather-card">
+      <div class="weather-card weather-extra-block" id="weather-details-card">
         <details>
           <summary>📊 Подробнее</summary>
           <div class="weather-details-content" id="w-details"></div>
@@ -1030,6 +1069,9 @@
           <div class="weather-details-content" id="w-history"></div>
         </details>
       </div>
+
+      <!-- Кнопка "Подробнее" для мобилки -->
+      <button class="mobile-weather-toggle" id="mobile-weather-toggle" onclick="this.closest('.weather-sidebar').classList.toggle('mobile-expanded'); this.textContent = this.closest('.weather-sidebar').classList.contains('mobile-expanded') ? 'Скрыть ▲' : 'Подробнее ▼';">Подробнее ▼</button>
     </div>
 
     <!-- Active Zone Indicator -->
