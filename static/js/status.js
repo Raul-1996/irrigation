@@ -1067,10 +1067,10 @@
         // Обновление времени каждую секунду
         setInterval(updateDateTime, 1000);
         
-        // Обновление данных каждые 30 секунд
+        // Обновление данных каждые 5 секунд
         setInterval(() => {
             Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
-        }, 30000);
+        }, 5000);
         setInterval(tickCountdowns, 1000);
         
         // Обработчик аварийной остановки
@@ -1136,7 +1136,7 @@
                 }catch(e){}
             }
             if (ENABLE_WS) connectWS();
-            var sseMaxAge = 25 * 60 * 1000; // 25 min — reconnect before server 30min timeout
+            var sseMaxAge = 4 * 60 * 1000; // 4 min — reconnect before server 5min timeout
             var sseStartTime = 0;
             function connectSSE(){
                 try { if (es) { try{ es.close(); }catch(e){} } } catch(e){}

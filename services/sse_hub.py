@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Global hub state
 # ---------------------------------------------------------------------------
-MAX_SSE_CLIENTS: int = 20
+MAX_SSE_CLIENTS: int = 5
 
 _SSE_HUB_STARTED: bool = False
 _SSE_HUB_LOCK: threading.Lock = threading.Lock()
@@ -348,7 +348,7 @@ def register_client() -> 'queue.Queue':
             except queue.Full:
                 pass
             logger.info("SSE client evicted (limit %d reached)", MAX_SSE_CLIENTS)
-        msg_queue = queue.Queue(maxsize=100)
+        msg_queue = queue.Queue(maxsize=20)
         _SSE_HUB_CLIENTS.append(msg_queue)
     return msg_queue
 

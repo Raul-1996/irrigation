@@ -219,7 +219,7 @@ def api_mqtt_zones_sse():
         @stream_with_context
         def _gen():
             start_time = time.time()
-            max_duration = 1800  # 30 min
+            max_duration = 300  # 5 min — aggressive timeout for ARM stability
             try:
                 yield 'event: open\n' + 'data: {}\n\n'
                 while True:

@@ -171,10 +171,18 @@
             }
         }
         
-        // Global error handler
+        // Global error handler — show concrete error text
         window.addEventListener('error', (event) => {
+            var msg = '';
+            try {
+                if (event.error && event.error.message) msg = event.error.message;
+                else if (event.message) msg = event.message;
+                else msg = String(event.error || event);
+            } catch(e) { msg = 'unknown'; }
+            // Truncate long messages
+            if (msg.length > 120) msg = msg.slice(0, 120) + '…';
             console.error('Global error:', event.error);
-            showNotification('Произошла ошибка в приложении', 'error');
+            showNotification('JS: ' + msg, 'error');
         });
         
         // Service Worker registration for offline support
