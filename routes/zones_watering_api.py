@@ -374,6 +374,7 @@ def api_zone_mqtt_start(zone_id: int):
         t3 = time.time()
         # DB update — use override duration for planned_end_time
         override_dur = int(z.get('duration') or 10)
+        logger.warning("DIAG mqtt_start zone=%s override_dur=%s z_duration=%s", zone_id, override_dur, z.get('duration'))
         now_dt = datetime.now()
         planned_end = (now_dt + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
         try:
