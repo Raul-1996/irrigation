@@ -469,15 +469,59 @@
         .group-info-grid { grid-template-columns: 1fr; }
     }
 
-    /* === Weather Widget === */
+    /* === Desktop Sidebar Layout === */
+    .desktop-layout {
+        display: flex;
+        min-height: 100vh;
+    }
+    .weather-sidebar {
+        width: 300px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+        border-right: 1px solid #e0e0e0;
+        padding: 16px;
+        background: white;
+        flex-shrink: 0;
+    }
+    .main-content {
+        flex: 1;
+        padding: 16px;
+        min-width: 0;
+    }
+    .sidebar-toggle {
+        position: fixed;
+        left: 300px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 24px;
+        height: 60px;
+        background: #2196f3;
+        color: white;
+        border: none;
+        border-radius: 0 4px 4px 0;
+        cursor: pointer;
+        font-size: 12px;
+        z-index: 100;
+        transition: left 0.3s;
+    }
+    .sidebar-toggle:hover {
+        background: #1976d2;
+    }
+    .sidebar-collapsed .weather-sidebar {
+        width: 0;
+        padding: 0;
+        border: none;
+        overflow: hidden;
+    }
+    .sidebar-collapsed .sidebar-toggle {
+        left: 0;
+    }
+
+    /* === Weather Widget in Sidebar === */
     #weather-widget {
         margin-bottom: 1rem;
-        max-width: 600px;
-    }
-    @media (min-width: 1200px) {
-        #weather-widget {
-            max-width: 500px;
-        }
     }
     .weather-card {
         background: var(--card-background, #fff);
@@ -546,6 +590,36 @@
         margin: 0.6rem 0 0.3rem;
         font-weight: 600;
     }
+    /* 24h forecast grid */
+    .weather-24h-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+    }
+    .hour-cell {
+        text-align: center;
+        background: rgba(33,150,243,0.08);
+        border-radius: 8px;
+        padding: 0.35rem 0.25rem;
+        font-size: 0.72rem;
+    }
+    .hour-time {
+        color: #999;
+        font-size: 0.65rem;
+    }
+    .hour-icon {
+        font-size: 1.1rem;
+        margin: 0.1rem 0;
+    }
+    .hour-temp {
+        font-weight: 600;
+        color: var(--text-color, #333);
+    }
+    .hour-detail {
+        font-size: 0.6rem;
+        color: #999;
+    }
+    /* Legacy styles for compatibility */
     .weather-hours {
         display: flex;
         gap: 0.4rem;
@@ -777,6 +851,119 @@
     .photo-modal-actions .btn:focus {
         outline: none;
     }
+
+    /* === Active Zone Indicator === */
+    #sidebar-active-zone {
+        background: linear-gradient(135deg, #2196f3, #1976d2);
+        color: white;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+    }
+    .active-zone-header {
+        font-weight: 600;
+        font-size: 0.85rem;
+        margin-bottom: 8px;
+    }
+    .active-zone-name {
+        font-size: 1rem;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+    .active-zone-timer {
+        font-size: 0.85rem;
+        margin-bottom: 8px;
+    }
+    .active-zone-progress {
+        height: 4px;
+        background: rgba(255,255,255,0.3);
+        border-radius: 2px;
+        margin-bottom: 8px;
+    }
+    .progress-bar {
+        height: 100%;
+        background: white;
+        border-radius: 2px;
+        transition: width 0.3s;
+    }
+    .active-zone-next {
+        font-size: 0.75rem;
+        opacity: 0.9;
+    }
+
+    /* === Water Meter === */
+    #sidebar-water-meter {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+    }
+    .water-meter-header {
+        font-weight: 600;
+        font-size: 0.85rem;
+        color: #333;
+        margin-bottom: 8px;
+    }
+    .water-meter-value {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #2196f3;
+        margin-bottom: 4px;
+    }
+    .water-meter-value .unit {
+        font-size: 0.9rem;
+        font-weight: 400;
+        color: #999;
+    }
+    .water-meter-detail {
+        font-size: 0.75rem;
+        color: #666;
+    }
+    .water-meter-detail span {
+        display: block;
+        margin-top: 2px;
+    }
+
+    /* === Mobile Layout === */
+    @media (max-width: 1023px) {
+        .desktop-layout {
+            flex-direction: column;
+        }
+        .weather-sidebar {
+            width: 100%;
+            height: auto;
+            position: static;
+            border-right: none;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .sidebar-toggle {
+            display: none;
+        }
+        .sidebar-collapsed .weather-sidebar {
+            width: 100%;
+            padding: 16px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+    }
+
+    /* === Dark Theme === */
+    @media (prefers-color-scheme: dark) {
+        .weather-sidebar {
+            background: #1e1e1e;
+            border-color: #333;
+        }
+        #sidebar-water-meter {
+            background: #2d2d2d;
+            border-color: #333;
+        }
+        .water-meter-header {
+            color: #e0e0e0;
+        }
+        .water-meter-detail {
+            color: #999;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -786,7 +973,86 @@
 <div id="mqtt-no-servers" class="connection-status warn">⚠️ Нет ни одного MQTT сервера. Проверьте настройки.</div>
 <div id="mqtt-no-connection" class="connection-status warn">⚠️ Нет связи с MQTT сервером. Проверьте подключение.</div>
 
-<div class="top-bar">
+<div class="desktop-layout">
+  <aside class="weather-sidebar" id="weather-sidebar">
+    <!-- Weather Widget -->
+    <div id="weather-widget" style="display:none;">
+      <!-- СВОДКА -->
+      <div class="weather-card">
+        <div class="weather-summary">
+          <div class="weather-summary-left">
+            <span class="weather-icon" id="w-icon">🌡️</span>
+            <div>
+              <div class="weather-temp"><span id="w-temp">—</span><span class="weather-unit">°C</span></div>
+              <div class="weather-desc" id="w-desc"></div>
+            </div>
+          </div>
+          <div class="weather-coeff">
+            <div class="weather-coeff-val" id="w-coeff">—</div>
+            <div class="weather-coeff-label">полив</div>
+          </div>
+        </div>
+        <div class="weather-metrics" id="w-metrics">
+          <span>💧 —%</span>
+          <span>💨 — м/с</span>
+          <span>🌧 — мм</span>
+        </div>
+        <div class="weather-source" id="w-source"></div>
+      </div>
+
+      <!-- ПРОГНОЗ 24Ч -->
+      <div class="weather-card">
+        <div class="weather-section-title">Прогноз 24ч</div>
+        <div class="weather-24h-grid" id="w-hours"></div>
+        <div class="weather-hours-legend">осадки мм · ветер м/с</div>
+      </div>
+
+      <!-- ПРОГНОЗ 3 ДНЯ -->
+      <div class="weather-card">
+        <div class="weather-section-title">Прогноз на 3 дня</div>
+        <div class="weather-days" id="w-days"></div>
+      </div>
+
+      <!-- ДЕТАЛИ -->
+      <div class="weather-card">
+        <details>
+          <summary>📊 Подробнее</summary>
+          <div class="weather-details-content" id="w-details"></div>
+        </details>
+
+        <details>
+          <summary>⚙️ Погодокоррекция</summary>
+          <div class="weather-details-content" id="w-factors"></div>
+        </details>
+
+        <details>
+          <summary>📋 История решений</summary>
+          <div class="weather-details-content" id="w-history"></div>
+        </details>
+      </div>
+    </div>
+
+    <!-- Active Zone Indicator -->
+    <div id="sidebar-active-zone" style="display:none">
+      <div class="active-zone-header">💧 Сейчас поливается</div>
+      <div class="active-zone-name" id="active-zone-name"></div>
+      <div class="active-zone-timer" id="active-zone-timer"></div>
+      <div class="active-zone-progress"><div class="progress-bar" id="active-zone-progress"></div></div>
+      <div class="active-zone-next" id="active-zone-next"></div>
+    </div>
+
+    <!-- Water Meter -->
+    <div id="sidebar-water-meter" style="display:none">
+      <div class="water-meter-header">🚰 Расход воды сегодня</div>
+      <div class="water-meter-value" id="water-meter-value">0 <span class="unit">л</span></div>
+      <div class="water-meter-detail" id="water-meter-detail"></div>
+    </div>
+  </aside>
+
+  <button class="sidebar-toggle" id="sidebar-toggle" title="Свернуть/развернуть">◀</button>
+
+  <main class="main-content">
+    <div class="top-bar">
     <div class="info-box">
         <strong>Время:</strong> <span id="datetime">—</span>
     </div>
@@ -799,63 +1065,6 @@
     <div class="info-box" id="rain-box" style="display:none;">
         <strong>Датчик дождя:</strong> <span id="rain-value">—</span>
     </div>
-</div>
-
-<!-- Weather Widget -->
-<div id="weather-widget" style="display:none;">
-  <!-- СВОДКА -->
-  <div class="weather-card">
-    <div class="weather-summary">
-      <div class="weather-summary-left">
-        <span class="weather-icon" id="w-icon">🌡️</span>
-        <div>
-          <div class="weather-temp"><span id="w-temp">—</span><span class="weather-unit">°C</span></div>
-          <div class="weather-desc" id="w-desc"></div>
-        </div>
-      </div>
-      <div class="weather-coeff">
-        <div class="weather-coeff-val" id="w-coeff">—</div>
-        <div class="weather-coeff-label">полив</div>
-      </div>
-    </div>
-    <div class="weather-metrics" id="w-metrics">
-      <span>💧 —%</span>
-      <span>💨 — м/с</span>
-      <span>🌧 — мм</span>
-    </div>
-    <div class="weather-source" id="w-source"></div>
-  </div>
-
-  <!-- ПРОГНОЗ 24Ч -->
-  <div class="weather-card">
-    <div class="weather-section-title">Прогноз на 24 часа</div>
-    <div class="weather-hours" id="w-hours"></div>
-    <div class="weather-hours-legend">осадки мм · ветер м/с</div>
-  </div>
-
-  <!-- ПРОГНОЗ 3 ДНЯ -->
-  <div class="weather-card">
-    <div class="weather-section-title">Прогноз на 3 дня</div>
-    <div class="weather-days" id="w-days"></div>
-  </div>
-
-  <!-- ДЕТАЛИ -->
-  <div class="weather-card">
-    <details>
-      <summary>📊 Подробнее</summary>
-      <div class="weather-details-content" id="w-details"></div>
-    </details>
-
-    <details>
-      <summary>⚙️ Погодокоррекция</summary>
-      <div class="weather-details-content" id="w-factors"></div>
-    </details>
-
-    <details>
-      <summary>📋 История решений</summary>
-      <div class="weather-details-content" id="w-history"></div>
-    </details>
-  </div>
 </div>
 
 <div class="status-grid" id="groups-container">
@@ -923,6 +1132,8 @@
             <button class="btn btn-primary" onclick="closePhotoModal()">Закрыть</button>
         </div>
     </div>
+</div>
+  </main>
 </div>
 {% endblock %}
 

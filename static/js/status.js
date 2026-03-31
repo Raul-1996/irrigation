@@ -311,6 +311,11 @@
                     });
                 }catch(e){}
             })();
+            // 4) Обновляем sidebar indicators
+            try {
+                updateActiveZoneIndicator(zonesData);
+                updateWaterMeter(zonesData);
+            } catch(e) {}
         } catch (error) {
             console.error('Ошибка загрузки зон:', error);
             showConnectionError();
@@ -1379,16 +1384,28 @@
         var el = document.getElementById('w-hours');
         if (!el) return;
         if (!items || !items.length) { el.innerHTML = '<div style="color:#999;font-size:0.75rem;">Нет данных</div>'; return; }
+        // Фильтруем до 6 интервалов (каждый 4-й час)
+        var filtered = [];
+        if (items.length >= 18) {
+            for (var i = 0; i < items.length; i += 4) {
+                filtered.push(items[i]);
+                if (filtered.length >= 6) break;
+            }
+        } else {
+            filtered = items.slice(0, 6);
+        }
         var html = '';
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i];
+        for (var i = 0; i < filtered.length; i++) {
+            var it = filtered[i];
             var icon = it.icon || getWeatherIcon(it.weather_code);
-            html += '<div class="weather-hour">'
-                + '<div class="weather-hour-time">' + (it.time || '') + '</div>'
-                + '<div class="weather-hour-icon">' + icon + '</div>'
-                + '<div class="weather-hour-temp">' + formatTemp(it.temp) + '°</div>'
-                + '<div class="weather-hour-detail">' + (it.precip !== null && it.precip !== undefined ? (typeof it.precip === 'number' ? it.precip.toFixed(1) : it.precip) : '0') + 'мм · ' + (it.wind !== null && it.wind !== undefined ? (typeof it.wind === 'number' ? it.wind.toFixed(1) : it.wind) : '—') + '</div>'
-                + '</div>';
+            html += '<div class="hour-cell">'
+                + '<div class="hour-time">' + (it.time || '') + '</div>'
+                + '<div class="hour-icon">' + icon + '</div>'
+                + '<div class="hour-temp">' + formatTemp(it.temp) + '°</div>'
+                + '<div class="hour-detail">'
+                + (it.precip != null ? (typeof it.precip === 'number' ? it.precip.toFixed(1) : it.precip) : '0') + 'мм · '
+                + (it.wind != null ? (typeof it.wind === 'number' ? it.wind.toFixed(1) : it.wind) : '—') + 'м/с'
+                + '</div></div>';
         }
         el.innerHTML = html;
     }
@@ -1526,3 +1543,99 @@
     // Initial load + periodic refresh (every 5 min)
     refreshWeatherWidget();
     setInterval(refreshWeatherWidget, 5 * 60 * 1000);
+
+    // --- Active Zone Indicator ---
+    function updateActiveZoneIndicator(zones) {
+        var el = document.getElementById('sidebar-active-zone');
+        if (!el) return;
+        var active = null;
+        for (var i = 0; i < zones.length; i++) {
+            if (zones[i].state === 'on') {
+                active = zones[i];
+                break;
+            }
+        }
+        if (!active) {
+            el.style.display = 'none';
+            return;
+        }
+        el.style.display = '';
+        var nameEl = document.getElementById('active-zone-name');
+        var timerEl = document.getElementById('active-zone-timer');
+        var progressEl = document.getElementById('active-zone-progress');
+        var nextEl = document.getElementById('active-zone-next');
+        if (nameEl) nameEl.textContent = active.name;
+        // Timer
+        if (active.planned_end_time && timerEl) {
+            var end = new Date(active.planned_end_time);
+            var now = new Date();
+            var remain = Math.max(0, Math.floor((end - now) / 1000));
+            var mins = Math.floor(remain / 60);
+            var secs = remain % 60;
+            timerEl.innerHTML = 'осталось <strong>' + mins + ':' + (secs < 10 ? '0' : '') + secs + '</strong>';
+            // Progress
+            if (active.watering_start_time && progressEl) {
+                var start = new Date(active.watering_start_time);
+                var total = (end - start) / 1000;
+                var elapsed = (now - start) / 1000;
+                var pct = Math.min(100, Math.max(0, (elapsed / total) * 100));
+                progressEl.style.width = pct + '%';
+            }
+        }
+        // Next zone
+        if (nextEl) {
+            var next = null;
+            for (var j = 0; j < zones.length; j++) {
+                if (zones[j].scheduled_start_time && zones[j].state !== 'on') {
+                    if (!next || zones[j].scheduled_start_time < next.scheduled_start_time) {
+                        next = zones[j];
+                    }
+                }
+            }
+            nextEl.textContent = next ? ('Следующая: ' + next.name + ' → ' + next.scheduled_start_time.split(' ')[1].slice(0,5)) : '';
+        }
+    }
+
+    // --- Water Meter ---
+    function updateWaterMeter(zones) {
+        var el = document.getElementById('sidebar-water-meter');
+        if (!el) return;
+        var total = 0;
+        var perZone = [];
+        zones.forEach(function(z) {
+            if (z.last_total_liters > 0) {
+                total += z.last_total_liters;
+                perZone.push({name: z.name, liters: z.last_total_liters});
+            }
+        });
+        if (total === 0) {
+            el.style.display = 'none';
+            return;
+        }
+        el.style.display = '';
+        var valEl = document.getElementById('water-meter-value');
+        var detEl = document.getElementById('water-meter-detail');
+        if (valEl) valEl.innerHTML = Math.round(total).toLocaleString() + ' <span class="unit">л</span>';
+        if (detEl) {
+            perZone.sort(function(a,b) { return b.liters - a.liters; });
+            detEl.innerHTML = perZone.slice(0, 3).map(function(z) {
+                return '<span>' + z.name + ': ' + Math.round(z.liters) + 'л</span>';
+            }).join('');
+        }
+    }
+
+    // --- Sidebar Toggle ---
+    (function() {
+        var btn = document.getElementById('sidebar-toggle');
+        if (!btn) return;
+        var layout = document.querySelector('.desktop-layout');
+        if (!layout) return;
+        // Restore state
+        if (localStorage.getItem('sidebar-collapsed') === 'true') {
+            layout.classList.add('sidebar-collapsed');
+        }
+        btn.addEventListener('click', function() {
+            layout.classList.toggle('sidebar-collapsed');
+            localStorage.setItem('sidebar-collapsed', layout.classList.contains('sidebar-collapsed'));
+        });
+    })();
