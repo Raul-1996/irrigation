@@ -1136,9 +1136,12 @@
                 }catch(e){}
             }
             if (ENABLE_WS) connectWS();
+            var sseMaxAge = 25 * 60 * 1000; // 25 min — reconnect before server 30min timeout
+            var sseStartTime = 0;
             function connectSSE(){
                 try { if (es) { try{ es.close(); }catch(e){} } } catch(e){}
                 es = new EventSource('/api/mqtt/zones-sse');
+                sseStartTime = Date.now();
                 es.onopen = ()=>{ retry = 0; console.log('SSE open'); };
                 es.onerror = ()=>{
                     try{ es.close(); }catch(e){}
@@ -1184,8 +1187,22 @@
                         }
                     }catch(e){}
                 };
+                // Server-initiated reconnect (session timeout)
+                es.addEventListener('reconnect', function(){
+                    console.log('SSE server requested reconnect');
+                    try { es.close(); } catch(e){}
+                    setTimeout(connectSSE, 1000);
+                });
             }
             connectSSE();
+            // Periodic SSE age check — reconnect before server 30min timeout
+            setInterval(function(){
+                if (es && sseStartTime && (Date.now() - sseStartTime > sseMaxAge)) {
+                    console.log('SSE max age reached, reconnecting');
+                    try { es.close(); } catch(e){}
+                    connectSSE();
+                }
+            }, 30000);
             document.addEventListener('visibilitychange', ()=>{
                 if (document.visibilityState === 'visible'){
                     // re-arm SSE if needed

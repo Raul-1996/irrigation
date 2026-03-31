@@ -20,11 +20,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Global hub state
 # ---------------------------------------------------------------------------
+MAX_SSE_CLIENTS: int = 20
+
 _SSE_HUB_STARTED: bool = False
 _SSE_HUB_LOCK: threading.Lock = threading.Lock()
 _SSE_HUB_CLIENTS: list = []          # list[queue.Queue]
 _SSE_HUB_MQTT: dict = {}             # sid → paho client
 _SSE_META_BUFFER: deque = deque(maxlen=100)
+_SSE_CLEANER_STARTED: bool = False
 
 # Anti-restart: remember manual stops so we can ignore instant ON bounces
 _LAST_MANUAL_STOP: dict[int, float] = {}
@@ -65,16 +68,27 @@ def get_meta_buffer() -> list:
 
 
 def broadcast(data_json: str) -> None:
-    """Push a JSON string to every connected SSE client."""
+    """Push a JSON string to every connected SSE client.
+
+    Clients whose queues are full are considered dead and removed.
+    """
+    dead: list = []
     try:
         with _SSE_HUB_LOCK:
             for q in list(_SSE_HUB_CLIENTS):
                 try:
                     q.put_nowait(data_json)
-                except queue.Full as e:
-                    logger.debug("Handled exception in broadcast: %s", e)
+                except queue.Full:
+                    dead.append(q)
+            for q in dead:
+                try:
+                    _SSE_HUB_CLIENTS.remove(q)
+                except ValueError:
+                    pass
     except (RuntimeError, OSError) as e:
         logger.warning("Broadcast failed: %s", e)
+    if dead:
+        logger.info("Removed %d dead SSE clients (queue full)", len(dead))
 
 
 def mark_zone_stopped(zone_id: int) -> None:
@@ -301,10 +315,40 @@ def ensure_hub_started() -> None:
         _SSE_HUB_STARTED = True
 
 
+def _ensure_cleaner_started() -> None:
+    """Start the background cleaner thread (once)."""
+    global _SSE_CLEANER_STARTED
+    if _SSE_CLEANER_STARTED:
+        return
+    _SSE_CLEANER_STARTED = True
+
+    def _clean_loop():
+        while True:
+            time.sleep(60)
+            with _SSE_HUB_LOCK:
+                count = len(_SSE_HUB_CLIENTS)
+            if count > 0:
+                logger.debug("SSE clients connected: %d", count)
+
+    t = threading.Thread(target=_clean_loop, daemon=True, name="sse-cleaner")
+    t.start()
+
+
 def register_client() -> 'queue.Queue':
-    """Create and register a new SSE client queue.  Returns the queue."""
-    msg_queue = queue.Queue(maxsize=10000)
+    """Create and register a new SSE client queue.  Returns the queue.
+
+    Enforces MAX_SSE_CLIENTS — evicts oldest client when limit is reached.
+    """
+    _ensure_cleaner_started()
     with _SSE_HUB_LOCK:
+        while len(_SSE_HUB_CLIENTS) >= MAX_SSE_CLIENTS:
+            oldest = _SSE_HUB_CLIENTS.pop(0)
+            try:
+                oldest.put_nowait(None)  # sentinel: tell generator to stop
+            except queue.Full:
+                pass
+            logger.info("SSE client evicted (limit %d reached)", MAX_SSE_CLIENTS)
+        msg_queue = queue.Queue(maxsize=100)
         _SSE_HUB_CLIENTS.append(msg_queue)
     return msg_queue
 

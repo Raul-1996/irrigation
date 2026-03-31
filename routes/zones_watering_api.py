@@ -218,11 +218,19 @@ def api_mqtt_zones_sse():
 
         @stream_with_context
         def _gen():
+            start_time = time.time()
+            max_duration = 1800  # 30 min
             try:
                 yield 'event: open\n' + 'data: {}\n\n'
                 while True:
+                    # Enforce max session duration
+                    if time.time() - start_time > max_duration:
+                        yield 'event: reconnect\ndata: {"reason":"timeout"}\n\n'
+                        break
                     try:
-                        data = msg_queue.get(timeout=0.5)
+                        data = msg_queue.get(timeout=1.0)
+                        if data is None:  # sentinel from register_client eviction
+                            break
                         yield f'data: {data}\n\n'
                     except queue.Empty:  # Expected: send keepalive ping on poll timeout
                         yield 'event: ping\n' + 'data: {}\n\n'
