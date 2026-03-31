@@ -1700,6 +1700,12 @@
     function renderZoneCards() {
         var c = document.getElementById('zoneList');
         if (!c) return;
+        // Preserve open accordion state across re-renders
+        var openIds = {};
+        c.querySelectorAll('.zone-card.open').forEach(function(el) {
+            var zid = el.getAttribute('data-zone-id');
+            if (zid) openIds[zid] = true;
+        });
         var zones = getFilteredZonesV2();
         var groups = zoneGroupsCache || [];
         var groupNameById = {};
@@ -1790,6 +1796,11 @@
         });
 
         c.innerHTML = html;
+        // Restore open accordion state
+        Object.keys(openIds).forEach(function(zid) {
+            var el = document.getElementById('zcard-' + zid);
+            if (el) el.classList.add('open');
+        });
         updateZoneStats(zones);
 
         // Init running timers
