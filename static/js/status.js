@@ -2086,12 +2086,13 @@
     function confirmRun() {
         if (!runPopupZoneId && !runPopupGroupId) return;
         var dur = runPopupDur;
+        var savedZoneId = runPopupZoneId;
+        var savedGroupId = runPopupGroupId;
         closeRunPopup();
         
-        if (runPopupGroupId) {
+        if (savedGroupId) {
             // Group run: update all zone durations in group, then start
-            var gid = runPopupGroupId;
-            runPopupGroupId = null;
+            var gid = savedGroupId;
             var groupZones = (zonesData || []).filter(function(z) { return z.group_id === gid && z.group_id !== 999; });
             // Update durations
             Promise.all(groupZones.map(function(z) {
@@ -2109,8 +2110,7 @@
         }
         
         // Single zone run
-        var id = runPopupZoneId;
-        runPopupZoneId = null;
+        var id = savedZoneId;
         api.put('/api/zones/' + id, { duration: dur }).then(function() {
             var z = (zonesData || []).find(function(z){ return z.id === id; });
             if (z) z.duration = dur;
