@@ -272,11 +272,17 @@ def api_zone_mqtt_start(zone_id: int):
                         'watering_start_time': now_dt.strftime('%Y-%m-%d %H:%M:%S'),
                         'watering_start_source': 'manual'
                     })
-                    # Reschedule stop
+                    # Reschedule stop (don't cancel_group_jobs — it stops all zones!)
                     try:
                         sched = get_scheduler()
                         if sched:
-                            sched.cancel_group_jobs(int(z.get('group_id') or 0))
+                            # Remove existing stop jobs for this zone only
+                            try:
+                                for job in sched.scheduler.get_jobs():
+                                    if f"zone_stop:{zone_id}:" in str(job.id) or f"zone_hard_stop:{zone_id}" in str(job.id):
+                                        job.remove()
+                            except Exception as e:
+                                logger.debug("remove old stop jobs: %s", e)
                             sched.schedule_zone_stop(zone_id, override_dur, command_id=str(int(time.time())))
                             sched.schedule_zone_hard_stop(zone_id, now_dt + timedelta(minutes=override_dur))
                     except (ValueError, TypeError, ImportError) as e:
