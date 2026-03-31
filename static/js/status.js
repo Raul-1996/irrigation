@@ -1856,6 +1856,7 @@
 
     // Run/stop zone
     function toggleZoneRun(id) {
+        showLoading(((zonesData||[]).find(function(z){return z.id===id;})||{}).state==='on' ? 'Остановка...' : 'Запуск...');
         var z = (zonesData || []).find(function(z) { return z.id === id; });
         if (!z) return;
         var wantOn = z.state !== 'on';
@@ -1866,6 +1867,7 @@
         renderGroupTabs();
         fetch(url, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
             if (data && data.success) {
+                hideLoading();
                 showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
                 // Refresh timer for this zone only
                 if (wantOn) setTimeout(function() { initZoneTimer(z); }, 1000);
@@ -1877,6 +1879,7 @@
                 showZoneToast((data && data.message) || 'Ошибка', 'error');
             }
         }).catch(function() {
+            hideLoading();
             z.state = wantOn ? 'off' : 'on';
             renderZoneCards();
             showZoneToast('Ошибка сети', 'error');
@@ -2121,6 +2124,7 @@
         var wasRunning = z && z.state === 'on';
         
         // If already running — stop first, then restart
+        showLoading('Запуск зоны #' + id + '...');
         var startFn = function() {
             if (z) z.state = 'on';
             renderZoneCards();
@@ -2129,6 +2133,7 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data && data.success) {
+                    hideLoading();
                     showZoneToast('▶ #' + id + ' запущена на ' + dur + ' мин', 'success');
                     // Override local duration for timer display
                     if (z) z._overrideDuration = dur;
@@ -2137,9 +2142,10 @@
                 } else {
                     if (z) z.state = 'off';
                     renderZoneCards();
+                    hideLoading();
                     showZoneToast((data && data.message) || 'Ошибка', 'error');
                 }
-            }).catch(function() { showZoneToast('Ошибка сети', 'error'); });
+            }).catch(function() { hideLoading(); showZoneToast('Ошибка сети', 'error'); });
         };
         
         if (wasRunning) {
@@ -2151,12 +2157,14 @@
         }
     }
     function confirmRunWithDefaults() {
+        showLoading('Запуск группы...');
         var gid = runPopupGroupId;
         closeRunPopup();
         if (gid) {
             fetch('/api/groups/' + gid + '/start-from-first', { method: 'POST' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                hideLoading();
                 showZoneToast(data && data.success ? '▶ Группа запущена с настройками зон' : 'Ошибка', data && data.success ? 'success' : 'error');
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             });
@@ -2164,6 +2172,7 @@
             (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
                 fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function(){});
             });
+            hideLoading();
             showZoneToast('▶ Все группы запущены', 'success');
             setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
         }
@@ -2174,6 +2183,23 @@
     window.adjustRunDur = adjustRunDur;
     window.setRunDur = setRunDur;
     window.confirmRun = confirmRun;
+
+    // Loading overlay
+    function showLoading(text) {
+        var el = document.getElementById('loadingOverlay');
+        var txt = document.getElementById('loadingText');
+        if (txt) txt.textContent = text || 'Загрузка...';
+        if (el) el.classList.add('show');
+        clearTimeout(_loadingTimer);
+        _loadingTimer = setTimeout(hideLoading, 15000); // safety: auto-hide after 15s
+    }
+    function hideLoading() {
+        var el = document.getElementById('loadingOverlay');
+        if (el) el.classList.remove('show');
+    }
+    var _loadingTimer = null;
+    window.showLoading = showLoading;
+    window.hideLoading = hideLoading;
 
     // Toast
     function showZoneToast(msg, type) {
