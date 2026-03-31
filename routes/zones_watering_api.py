@@ -198,50 +198,14 @@ def api_zone_watering_time(zone_id):
 
 @zones_watering_api_bp.route('/api/mqtt/zones-sse')
 def api_mqtt_zones_sse():
-    """Unified SSE hub for MQTT zone updates."""
-    if mqtt is None:
-        if current_app.config.get('TESTING'):
-            return jsonify({'success': False, 'message': 'paho-mqtt not installed'}), 200
-        return api_error('MQTT_LIB_MISSING', 'paho-mqtt not installed', 500)
-    
-    # Return mock SSE in tests
-    if current_app.config.get('TESTING'):
-        @stream_with_context
-        def mock_gen():
-            yield 'event: open\n' + 'data: {}\n\n'
-            yield 'event: ping\n' + 'data: {}\n\n'
-        return Response(mock_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-    
+    """SSE endpoint — DISABLED to prevent event loop death on ARM/Hypercorn.
+    Frontend uses 5s polling instead. Returns 204 No Content."""
+    # Still start the hub for MQTT→DB state sync (zone state tracking)
     try:
         _sse_hub.ensure_hub_started()
-        msg_queue = _sse_hub.register_client()
-
-        @stream_with_context
-        def _gen():
-            start_time = time.time()
-            max_duration = 300  # 5 min — aggressive timeout for ARM stability
-            try:
-                yield 'event: open\n' + 'data: {}\n\n'
-                while True:
-                    # Enforce max session duration
-                    if time.time() - start_time > max_duration:
-                        yield 'event: reconnect\ndata: {"reason":"timeout"}\n\n'
-                        break
-                    try:
-                        data = msg_queue.get(timeout=1.0)
-                        if data is None:  # sentinel from register_client eviction
-                            break
-                        yield f'data: {data}\n\n'
-                    except queue.Empty:  # Expected: send keepalive ping on poll timeout
-                        yield 'event: ping\n' + 'data: {}\n\n'
-            finally:
-                _sse_hub.unregister_client(msg_queue)
-        return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-    except queue.Full as e:
-        logger.error(f"zones SSE failed: {e}")
-        if current_app.config.get('TESTING'):
-            return jsonify({'success': False}), 200
-        return api_error('SSE_FAILED', 'sse failed', 500)
+    except (OSError, RuntimeError) as e:
+        logger.debug("SSE hub start (background): %s", e)
+    return ('', 204)
 
 
 # ---- Zone MQTT start/stop ----

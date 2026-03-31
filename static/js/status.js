@@ -1076,13 +1076,12 @@
         // Обработчик аварийной остановки
         document.getElementById('emergency-btn').addEventListener('click', emergencyStop);
         document.getElementById('resume-btn').addEventListener('click', resumeSchedule);
-        // Подписка на статусы зон через SSE
-        try {
+        // SSE disabled — polling every 5s provides updates; SSE caused event loop death on ARM
+        // To re-enable: replace this block with EventSource connection to /api/mqtt/zones-sse
+        if (false) {
             let es; let retry = 0; let reconnectTimer = null;
-            // WebSocket client (disabled by default; use SSE)
             const ENABLE_WS = false;
             let ws; let wsRetry = 0; let wsTimer = null;
-            // Debounce для мгновенного обновления зон после смены состояния зоны
             let zonesReloadTimer = null;
             function requestZonesReload(){
                 try{ clearTimeout(zonesReloadTimer); }catch(e){}
