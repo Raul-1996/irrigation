@@ -401,6 +401,38 @@
                 updateActiveZoneIndicator(zonesData);
                 updateWaterMeter(zonesData);
             } catch(e) {}
+            // 5) Zones V2: Hunter-style cards
+            try {
+                // Load groups for tabs (cached)
+                if (!zoneGroupsCache || !zoneGroupsCache.length) {
+                    try {
+                        var gResp = await fetch('/api/groups');
+                        zoneGroupsCache = await gResp.json();
+                    } catch(e2) { zoneGroupsCache = []; }
+                }
+                // Attach next-watering to zone data for card rendering
+                try {
+                    var nwResp = await fetch('/api/zones/next-watering-bulk', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
+                    });
+                    var nwData = await nwResp.json();
+                    var nwMap = {};
+                    ((nwData && nwData.items) || []).forEach(function(it) {
+                        nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
+                    });
+                    zonesData.forEach(function(z) {
+                        var v = nwMap[z.id];
+                        if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
+                        else if (v === 'Никогда') z._nextWatering = 'Никогда';
+                        else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
+                        else z._nextWatering = '—';
+                    });
+                } catch(e3) {}
+                renderGroupTabs();
+                renderZoneCards();
+            } catch(e4) { console.error('Zones V2 render error:', e4); }
         } catch (error) {
             console.error('Ошибка загрузки зон:', error);
             showConnectionError();
@@ -1711,6 +1743,369 @@
                 return '<span>' + z.name + ': ' + Math.round(z.liters) + 'л</span>';
             }).join('');
         }
+    }
+
+    // ===== ZONES V2: Hunter-style rendering =====
+    var zoneGroupsCache = [];
+    var currentGroupFilter = null; // null = all
+    var zoneSearchQuery = '';
+    var editingZoneId = null;
+
+    function getZoneTypeInfo(icon) {
+        var map = {
+            '🌿': { label: 'Роторные', bg: '#e8f5e9' },
+            '💧': { label: 'Капельный', bg: '#e3f2fd' },
+            '🌊': { label: 'Спрей', bg: '#fff3e0' },
+            '🌳': { label: 'Деревья', bg: '#f1f8e9' },
+            '🌹': { label: 'Цветы', bg: '#fce4ec' },
+            '🥕': { label: 'Огород', bg: '#fff8e1' },
+        };
+        return map[icon] || { label: icon || '—', bg: '#f5f5f5' };
+    }
+
+    function getFilteredZonesV2() {
+        var zones = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
+        if (currentGroupFilter !== null) {
+            zones = zones.filter(function(z) { return z.group_id === currentGroupFilter; });
+        }
+        if (zoneSearchQuery) {
+            var q = zoneSearchQuery.toLowerCase();
+            zones = zones.filter(function(z) {
+                return (z.name || '').toLowerCase().indexOf(q) !== -1 || String(z.id).indexOf(q) !== -1;
+            });
+        }
+        return zones;
+    }
+
+    function renderGroupTabs() {
+        var c = document.getElementById('groupTabs');
+        if (!c) return;
+        var allZones = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
+        var groups = zoneGroupsCache || [];
+        var runningCount = allZones.filter(function(z) { return z.state === 'on'; }).length;
+
+        var html = '<button class="group-tab ' + (currentGroupFilter === null ? 'active' : '') + '" onclick="selectZoneGroup(null)">Все<span class="tab-count">' + allZones.length + '</span></button>';
+
+        groups.forEach(function(g) {
+            var gZones = allZones.filter(function(z) { return z.group_id === g.id; });
+            var gRunning = gZones.filter(function(z) { return z.state === 'on'; }).length;
+            var gStatus = 'waiting';
+            if (statusData && statusData.groups) {
+                var sg = statusData.groups.find(function(sg) { return sg.id === g.id; });
+                if (sg) gStatus = sg.status || 'waiting';
+            }
+            html += '<button class="group-tab ' + (currentGroupFilter === g.id ? 'active' : '') + '" onclick="selectZoneGroup(' + g.id + ')">';
+            html += '<span class="tab-status ' + gStatus + '"></span>' + g.name;
+            html += '<span class="tab-count">' + (gRunning ? '▶' + gRunning : gZones.length) + '</span></button>';
+        });
+        c.innerHTML = html;
+
+        // Update run button text
+        var btn = document.getElementById('zoneRunGroupBtn');
+        if (btn) {
+            if (currentGroupFilter !== null) {
+                var gName = '';
+                groups.forEach(function(g) { if (g.id === currentGroupFilter) gName = g.name; });
+                btn.textContent = '▶ ' + (gName || 'Группу');
+            } else {
+                btn.textContent = '▶ Запустить все';
+            }
+        }
+    }
+
+    function renderZoneCards() {
+        var c = document.getElementById('zoneList');
+        if (!c) return;
+        var zones = getFilteredZonesV2();
+        var groups = zoneGroupsCache || [];
+        var groupNameById = {};
+        groups.forEach(function(g) { groupNameById[g.id] = g.name; });
+
+        if (!zones.length) {
+            c.innerHTML = '<div style="text-align:center;padding:30px;color:#999;font-size:14px">🔍 Зоны не найдены</div>';
+            updateZoneStats(zones);
+            return;
+        }
+
+        var html = '';
+        var lastGroupId = null;
+        var showSections = currentGroupFilter === null && !zoneSearchQuery;
+
+        zones.forEach(function(z) {
+            if (showSections && z.group_id !== lastGroupId) {
+                var gName = groupNameById[z.group_id] || ('Группа ' + z.group_id);
+                var gCount = (zonesData || []).filter(function(zz) { return zz.group_id === z.group_id && zz.group_id !== 999; }).length;
+                html += '<div class="group-section"><span class="group-section-name">' + gName + '</span><span class="group-section-line"></span><span class="group-section-count">' + gCount + ' зон</span></div>';
+                lastGroupId = z.group_id;
+            }
+
+            var t = getZoneTypeInfo(z.icon);
+            var isRunning = z.state === 'on';
+            var statusCls = isRunning ? 'zs-running' : 'zs-enabled';
+            var gName2 = groupNameById[z.group_id] || '';
+
+            // Next watering
+            var nextHtml = '';
+            if (isRunning) {
+                nextHtml = '<div class="zc-next"><div class="zc-next-val" style="color:#2196f3">⏱</div><div class="zc-next-lbl">полив</div></div>';
+            } else {
+                var nextText = z._nextWatering || '';
+                if (nextText && nextText !== 'Никогда' && nextText !== '—') {
+                    var parts = nextText.split(' ');
+                    var timeOnly = parts.length >= 2 ? parts[1].slice(0, 5) : nextText.slice(0, 5);
+                    nextHtml = '<div class="zc-next"><div class="zc-next-val">' + timeOnly + '</div><div class="zc-next-lbl">след.</div></div>';
+                } else if (nextText === 'Никогда') {
+                    nextHtml = '<div class="zc-next"><div class="zc-next-val" style="color:#ccc;font-size:11px">—</div><div class="zc-next-lbl">нет</div></div>';
+                }
+            }
+
+            // Running info
+            var runningHtml = '';
+            if (isRunning) {
+                runningHtml = '<div class="zc-running"><span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '">--:--</span><span class="zc-running-pct" id="zpct-' + z.id + '"></span></div>';
+                runningHtml += '<div class="zc-progress"><div class="zc-progress-bar" id="zprog-' + z.id + '" style="width:0%"></div></div>';
+            }
+
+            var emergency = !!(statusData && statusData.emergency_stop);
+            var startAction = emergency ? "showNotification('Аварийная остановка активна','warning')" : "toggleZoneRun(" + z.id + ")";
+
+            html += '<div class="zone-card ' + statusCls + '" id="zcard-' + z.id + '" data-zone-id="' + z.id + '">';
+            html += '<div class="zone-card-main" onclick="toggleZoneCard(' + z.id + ')">';
+            html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
+            html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + (z.name || '') + '</div>';
+            html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge">' + z.duration + ' мин</span>';
+            if (!showSections) html += '<span style="color:#ddd">·</span><span>' + gName2 + '</span>';
+            html += '</div></div>';
+            html += nextHtml;
+            html += '<span class="zc-chevron">▼</span>';
+            html += '</div>'; // end zone-card-main
+
+            html += runningHtml;
+
+            // Expanded
+            html += '<div class="zc-expanded">';
+            html += '<div class="zc-detail-grid">';
+            html += '<div class="zc-detail-item"><div class="zc-d-label">Длительность</div><div class="zc-d-value">' + z.duration + ' мин</div></div>';
+            html += '<div class="zc-detail-item"><div class="zc-d-label">Группа</div><div class="zc-d-value">' + gName2 + '</div></div>';
+            var nextFull = z._nextWatering || '—';
+            html += '<div class="zc-detail-item"><div class="zc-d-label">След. полив</div><div class="zc-d-value ' + (nextFull !== '—' && nextFull !== 'Никогда' ? 'highlight' : '') + '">' + nextFull + '</div></div>';
+            html += '<div class="zc-detail-item"><div class="zc-d-label">Послед. полив</div><div class="zc-d-value">' + (z.last_watering_time ? z.last_watering_time.replace('T',' ').slice(0,16) : '—') + '</div></div>';
+            html += '</div>'; // detail-grid
+
+            html += '<div class="zc-dur-control">';
+            html += '<button class="zc-dur-btn" onclick="event.stopPropagation();changeZoneDur(' + z.id + ',-1)">−</button>';
+            html += '<div><span class="zc-dur-display" id="zdur-' + z.id + '">' + z.duration + '</span><span class="zc-dur-unit"> мин</span></div>';
+            html += '<button class="zc-dur-btn" onclick="event.stopPropagation();changeZoneDur(' + z.id + ',1)">+</button>';
+            html += '</div>';
+
+            html += '<div class="zc-actions">';
+            html += '<button class="' + (isRunning ? 'zc-btn-stop' : 'zc-btn-run') + '" onclick="event.stopPropagation();' + startAction + '">' + (isRunning ? '⏹ Стоп' : '▶ Запустить') + '</button>';
+            html += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
+            html += '</div>';
+
+            html += '</div>'; // zc-expanded
+            html += '</div>'; // zone-card
+        });
+
+        c.innerHTML = html;
+        updateZoneStats(zones);
+
+        // Init running timers
+        zones.forEach(function(z) {
+            if (z.state === 'on') initZoneTimer(z);
+        });
+    }
+
+    function updateZoneStats(zones) {
+        var all = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
+        var running = all.filter(function(z) { return z.state === 'on'; }).length;
+        var groups = zoneGroupsCache || [];
+        var totalWater = 0;
+        all.forEach(function(z) { if (z.last_total_liters > 0) totalWater += z.last_total_liters; });
+
+        var el;
+        el = document.getElementById('statZonesTotal'); if (el) el.textContent = all.length;
+        el = document.getElementById('statZonesActive'); if (el) el.textContent = running;
+        el = document.getElementById('statZonesGroups'); if (el) el.textContent = groups.length;
+        el = document.getElementById('statZonesWater'); if (el) el.textContent = totalWater > 0 ? Math.round(totalWater) : '—';
+        // Also update old zones-count for backward compat
+        el = document.getElementById('zones-count'); if (el) el.textContent = all.length;
+    }
+
+    function initZoneTimer(zone) {
+        try {
+            fetch('/api/zones/' + zone.id + '/watering-time?ts=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data || !data.success || !data.is_watering) return;
+                var remain = data.remaining_seconds || (data.remaining_time * 60);
+                var total = (zone.duration || 10) * 60;
+                var pct = Math.min(100, Math.max(0, ((total - remain) / total) * 100));
+                var timerEl = document.getElementById('ztimer-' + zone.id);
+                var pctEl = document.getElementById('zpct-' + zone.id);
+                var progEl = document.getElementById('zprog-' + zone.id);
+                if (timerEl) { timerEl.textContent = formatSeconds(remain); timerEl.dataset.remainingSeconds = String(remain); }
+                if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+                if (progEl) progEl.style.width = pct + '%';
+            }).catch(function() {});
+        } catch(e) {}
+    }
+
+    // Accordion toggle
+    function toggleZoneCard(id) {
+        var card = document.getElementById('zcard-' + id);
+        if (card) card.classList.toggle('open');
+    }
+    // Make accessible globally
+    window.toggleZoneCard = toggleZoneCard;
+
+    // Group selection
+    function selectZoneGroup(groupId) {
+        currentGroupFilter = groupId;
+        renderGroupTabs();
+        renderZoneCards();
+    }
+    window.selectZoneGroup = selectZoneGroup;
+
+    // Search
+    function toggleZoneSearch() {
+        var wrap = document.getElementById('zoneSearchWrap');
+        if (!wrap) return;
+        var visible = wrap.style.display !== 'none';
+        wrap.style.display = visible ? 'none' : 'block';
+        if (!visible) document.getElementById('searchInput').focus();
+        else { zoneSearchQuery = ''; document.getElementById('searchInput').value = ''; renderZoneCards(); }
+    }
+    window.toggleZoneSearch = toggleZoneSearch;
+
+    function filterZonesBySearch() {
+        zoneSearchQuery = (document.getElementById('searchInput') || {}).value || '';
+        renderZoneCards();
+    }
+    window.filterZonesBySearch = filterZonesBySearch;
+
+    // Run/stop zone
+    function toggleZoneRun(id) {
+        var z = (zonesData || []).find(function(z) { return z.id === id; });
+        if (!z) return;
+        var wantOn = z.state !== 'on';
+        var url = wantOn ? '/api/zones/' + id + '/mqtt/start' : '/api/zones/' + id + '/mqtt/stop';
+        // Optimistic
+        z.state = wantOn ? 'on' : 'off';
+        renderZoneCards();
+        renderGroupTabs();
+        fetch(url, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data && data.success) {
+                showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
+            } else {
+                z.state = wantOn ? 'off' : 'on';
+                renderZoneCards();
+                showZoneToast((data && data.message) || 'Ошибка', 'error');
+            }
+            loadStatusData();
+            loadZonesData();
+        }).catch(function() {
+            z.state = wantOn ? 'off' : 'on';
+            renderZoneCards();
+            showZoneToast('Ошибка сети', 'error');
+        });
+    }
+    window.toggleZoneRun = toggleZoneRun;
+
+    // Duration +/-
+    var durDebounceTimers = {};
+    function changeZoneDur(id, delta) {
+        var z = (zonesData || []).find(function(z) { return z.id === id; });
+        if (!z) return;
+        z.duration = Math.max(1, Math.min(120, (z.duration || 10) + delta));
+        var el = document.getElementById('zdur-' + id);
+        if (el) el.textContent = z.duration;
+        // Debounce API call
+        clearTimeout(durDebounceTimers[id]);
+        durDebounceTimers[id] = setTimeout(function() {
+            fetch('/api/zones/' + id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ duration: z.duration })
+            }).catch(function() {});
+        }, 500);
+    }
+    window.changeZoneDur = changeZoneDur;
+
+    // Run selected group
+    function runSelectedGroup() {
+        if (currentGroupFilter) {
+            fetch('/api/groups/' + currentGroupFilter + '/start-from-first', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                showZoneToast(data && data.success ? '▶ Группа запущена' : ((data && data.message) || 'Ошибка'), data && data.success ? 'success' : 'error');
+                loadStatusData(); loadZonesData();
+            }).catch(function() { showZoneToast('Ошибка', 'error'); });
+        } else {
+            // Run all groups
+            (zoneGroupsCache || []).forEach(function(g) {
+                fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function() {});
+            });
+            showZoneToast('▶ Все группы запущены', 'success');
+            setTimeout(function() { loadStatusData(); loadZonesData(); }, 1000);
+        }
+    }
+    window.runSelectedGroup = runSelectedGroup;
+
+    // Edit sheet
+    function openZoneSheet(id) {
+        editingZoneId = id;
+        var z = (zonesData || []).find(function(z) { return z.id === id; });
+        if (!z) return;
+        document.getElementById('sheetTitle').textContent = '✏️ #' + z.id + ' ' + z.name;
+        document.getElementById('editZoneName').value = z.name || '';
+        document.getElementById('editZoneDuration').value = z.duration || 10;
+        document.getElementById('editZoneIcon').value = z.icon || '🌿';
+        // Populate groups
+        var gs = document.getElementById('editZoneGroup');
+        gs.innerHTML = (zoneGroupsCache || []).map(function(g) {
+            return '<option value="' + g.id + '"' + (g.id === z.group_id ? ' selected' : '') + '>' + g.name + '</option>';
+        }).join('');
+        document.getElementById('sheetOverlay').classList.add('show');
+        document.getElementById('bottomSheet').classList.add('show');
+    }
+    window.openZoneSheet = openZoneSheet;
+
+    function closeZoneSheet() {
+        document.getElementById('sheetOverlay').classList.remove('show');
+        document.getElementById('bottomSheet').classList.remove('show');
+        editingZoneId = null;
+    }
+    window.closeZoneSheet = closeZoneSheet;
+
+    function saveZoneEdit() {
+        if (!editingZoneId) return;
+        var payload = {
+            name: document.getElementById('editZoneName').value,
+            duration: parseInt(document.getElementById('editZoneDuration').value) || 10,
+            icon: document.getElementById('editZoneIcon').value,
+            group_id: parseInt(document.getElementById('editZoneGroup').value) || 1,
+        };
+        fetch('/api/zones/' + editingZoneId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            closeZoneSheet();
+            showZoneToast('✅ Зона сохранена', 'success');
+            loadZonesData();
+        }).catch(function() { showZoneToast('Ошибка сохранения', 'error'); });
+    }
+    window.saveZoneEdit = saveZoneEdit;
+
+    // Toast
+    function showZoneToast(msg, type) {
+        var t = document.getElementById('zoneToast');
+        if (!t) return;
+        t.textContent = msg;
+        t.className = 'zone-toast show' + (type ? ' ' + type : '');
+        clearTimeout(t._timer);
+        t._timer = setTimeout(function() { t.className = 'zone-toast'; }, 2500);
     }
 
     // --- Sidebar Toggle ---

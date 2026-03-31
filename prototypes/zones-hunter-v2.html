@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Зоны полива — WB-Irrigation</title>
+<style>
+:root {
+  --primary: #00838f;
+  --primary-dark: #006064;
+  --primary-light: #e0f7fa;
+  --accent: #26c6da;
+  --success: #4caf50;
+  --danger: #ef5350;
+  --warning: #ff9800;
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #333;
+  --text-secondary: #999;
+  --border: #e8eaed;
+  --radius: 12px;
+  --shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* === Header === */
+.app-header {
+  background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+  color: white;
+  padding: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.header-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+.header-subtitle {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 2px;
+}
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+.header-btn {
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: white;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+.header-btn:hover { background: rgba(255,255,255,0.25); }
+
+/* === Stats Bar === */
+.stats-bar {
+  display: flex;
+  gap: 1px;
+  background: var(--border);
+  margin: 8px 12px;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.stat-item {
+  flex: 1;
+  background: var(--card);
+  padding: 10px 6px;
+  text-align: center;
+}
+.stat-val { font-size: 17px; font-weight: 700; color: var(--primary); }
+.stat-lbl { font-size: 10px; color: var(--text-secondary); margin-top: 1px; }
+
+/* === Weather Widget === */
+.weather-strip {
+  margin: 0 12px 8px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.weather-main {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  gap: 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.weather-main:active { background: #fafafa; }
+.w-icon-big { font-size: 32px; flex-shrink: 0; }
+.w-temp-block { flex-shrink: 0; }
+.w-temp { font-size: 26px; font-weight: 700; color: var(--text); line-height: 1; }
+.w-temp .w-unit { font-size: 14px; font-weight: 400; color: var(--text-secondary); }
+.w-desc { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
+.w-metrics-row {
+  display: flex;
+  gap: 10px;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.w-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.w-metric .w-m-val { font-size: 14px; font-weight: 600; color: var(--text); }
+.w-coeff-block {
+  text-align: center;
+  flex-shrink: 0;
+  min-width: 48px;
+}
+.w-coeff-val {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+}
+.w-coeff-val.ok { color: var(--success); }
+.w-coeff-val.warn { color: var(--warning); }
+.w-coeff-val.skip { color: var(--danger); }
+.w-coeff-lbl { font-size: 9px; color: var(--text-secondary); }
+.w-chevron {
+  font-size: 11px;
+  color: #ccc;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.weather-strip.open .w-chevron { transform: rotate(180deg); }
+
+/* Weather expanded */
+.weather-detail {
+  display: none;
+  border-top: 1px solid #f0f0f0;
+  padding: 10px 14px;
+}
+.weather-strip.open .weather-detail { display: block; }
+
+.w-forecast-row {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin-bottom: 8px;
+}
+.w-forecast-row::-webkit-scrollbar { display: none; }
+.w-hour {
+  flex: 0 0 auto;
+  text-align: center;
+  min-width: 52px;
+  padding: 6px 4px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.w-hour-time { color: var(--text-secondary); font-size: 10px; }
+.w-hour-icon { font-size: 16px; margin: 2px 0; }
+.w-hour-temp { font-weight: 600; color: var(--text); }
+.w-hour-rain { font-size: 10px; color: #90caf9; }
+
+.w-factors {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.w-factor {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.w-factor.ok { background: #e8f5e9; color: #2e7d32; }
+.w-factor.warn { background: #fff3e0; color: #e65100; }
+.w-factor.danger { background: #fce4ec; color: #c62828; }
+
+/* === Group Tabs === */
+.group-tabs {
+  display: flex;
+  padding: 0 12px;
+  gap: 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 8px;
+}
+.group-tabs::-webkit-scrollbar { display: none; }
+.group-tab {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border: 2px solid var(--border);
+  background: var(--card);
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+  color: var(--text-secondary);
+}
+.group-tab.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+.group-tab .tab-count {
+  display: inline-block;
+  background: rgba(0,0,0,0.1);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.group-tab.active .tab-count {
+  background: rgba(255,255,255,0.25);
+}
+
+/* Status pill in group tab */
+.group-tab .tab-status {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.tab-status.idle { background: #bdbdbd; }
+.tab-status.running { background: #2196f3; }
+.tab-status.postponed { background: var(--warning); }
+.tab-status.error { background: var(--danger); }
+
+/* === Quick Actions === */
+.quick-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 8px;
+}
+.quick-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  border: 2px solid var(--primary);
+  background: white;
+  color: var(--primary);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.quick-btn:active { transform: scale(0.97); }
+.quick-btn.danger { border-color: var(--danger); color: var(--danger); }
+.quick-btn.filled { background: var(--primary); color: white; }
+.quick-btn.filled:active { background: var(--primary-dark); }
+
+/* === Zone List === */
+.zone-list {
+  padding: 0 12px 12px;
+}
+
+/* Group section header */
+.group-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0 6px;
+}
+.group-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.group-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.group-zone-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: #f0f0f0;
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+
+/* === Zone Card === */
+.zone-card {
+  background: var(--card);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  border-left: 4px solid #bdbdbd;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.zone-card.status-idle { border-left-color: #bdbdbd; }
+.zone-card.status-enabled { border-left-color: var(--success); }
+.zone-card.status-running { border-left-color: #2196f3; }
+.zone-card.status-error { border-left-color: var(--danger); }
+.zone-card.status-disabled { border-left-color: #e0e0e0; opacity: 0.6; }
+
+/* Main row */
+.zone-main {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  gap: 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.1s;
+}
+.zone-main:active { background: #fafafa; }
+
+/* Zone icon */
+.zone-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.zone-icon.type-rotor { background: #e8f5e9; }
+.zone-icon.type-drip { background: #e3f2fd; }
+.zone-icon.type-spray { background: #fff3e0; }
+.zone-icon.type-tree { background: #f1f8e9; }
+.zone-icon.type-default { background: #f5f5f5; }
+
+/* Zone info */
+.zone-info {
+  flex: 1;
+  min-width: 0;
+}
+.zone-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.zone-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+.zone-meta .sep { color: #ddd; }
+
+/* Duration badge */
+.dur-badge {
+  background: var(--primary-light);
+  color: var(--primary-dark);
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Next watering time */
+.next-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+  min-width: 50px;
+}
+.next-time .time-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--primary);
+}
+.next-time .time-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+/* Chevron */
+.zone-chevron {
+  font-size: 11px;
+  color: #ccc;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.zone-card.open .zone-chevron { transform: rotate(180deg); }
+
+/* === Running info bar === */
+.zone-running {
+  display: none;
+  background: #e3f2fd;
+  padding: 8px 12px;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1565c0;
+}
+.zone-card.status-running .zone-running { display: flex; }
+.running-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2196f3;
+  animation: waterPulse 1.5s infinite;
+  flex-shrink: 0;
+}
+@keyframes waterPulse {
+  0% { box-shadow: 0 0 0 0 rgba(33,150,243,0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(33,150,243,0); }
+  100% { box-shadow: 0 0 0 0 rgba(33,150,243,0); }
+}
+.running-timer { font-weight: 700; font-size: 16px; }
+.running-pct { margin-left: auto; font-size: 12px; color: #90caf9; }
+.zone-progress {
+  height: 3px;
+  background: #bbdefb;
+}
+.zone-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--primary));
+  transition: width 0.5s;
+}
+
+/* === Expanded details === */
+.zone-expanded {
+  display: none;
+  padding: 12px;
+  background: #fafbfc;
+  border-top: 1px solid #f0f0f0;
+}
+.zone-card.open .zone-expanded { display: block; }
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.detail-item {
+  background: white;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #f0f0f0;
+}
+.detail-item .d-label { font-size: 11px; color: var(--text-secondary); }
+.detail-item .d-value { font-size: 14px; font-weight: 600; color: var(--text); margin-top: 1px; }
+.detail-item .d-value.highlight { color: var(--primary); }
+
+/* Duration control in expanded */
+.dur-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px;
+  background: white;
+  border-radius: 10px;
+  border: 1px solid #f0f0f0;
+  margin-bottom: 10px;
+}
+.dur-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px solid var(--primary);
+  background: white;
+  color: var(--primary);
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.dur-btn:active { background: var(--primary); color: white; }
+.dur-display {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--primary);
+  min-width: 60px;
+  text-align: center;
+}
+.dur-unit { font-size: 14px; color: var(--text-secondary); }
+
+/* Action buttons */
+.zone-actions {
+  display: flex;
+  gap: 8px;
+}
+.zone-actions button {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.zone-actions button:active { transform: scale(0.97); }
+.btn-run { background: var(--primary); color: white; }
+.btn-stop { background: var(--danger); color: white; }
+.btn-edit { background: #f5f5f5; color: var(--text); border: 1px solid var(--border) !important; }
+
+/* === Empty state === */
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+}
+.empty-state .empty-icon { font-size: 48px; margin-bottom: 12px; }
+.empty-state .empty-text { font-size: 15px; font-weight: 500; }
+
+/* === Search === */
+.search-wrap {
+  padding: 0 12px 8px;
+}
+.search-input {
+  width: 100%;
+  padding: 10px 12px 10px 36px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  background: white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23999' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.868-3.834zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E") 12px center no-repeat;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input:focus { border-color: var(--primary); }
+.search-input::placeholder { color: #ccc; }
+
+/* === Toast notification === */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: #333;
+  color: white;
+  padding: 12px 24px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 200;
+  opacity: 0;
+  transition: all 0.3s;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+.toast.success { background: var(--success); }
+.toast.error { background: var(--danger); }
+
+/* === Bottom Sheet (edit zone) === */
+.sheet-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 100;
+}
+.sheet-overlay.show { display: block; }
+.bottom-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-radius: 16px 16px 0 0;
+  padding: 16px;
+  z-index: 101;
+  transform: translateY(100%);
+  transition: transform 0.3s;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.bottom-sheet.show { transform: translateY(0); }
+.sheet-handle {
+  width: 36px;
+  height: 4px;
+  background: #ddd;
+  border-radius: 2px;
+  margin: 0 auto 12px;
+}
+.sheet-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+.form-group {
+  margin-bottom: 12px;
+}
+.form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  display: block;
+}
+.form-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+}
+.form-input:focus { border-color: var(--primary); }
+.form-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  background: white;
+  outline: none;
+}
+.sheet-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.sheet-actions button {
+  flex: 1;
+  padding: 12px;
+  border: none;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-save { background: var(--primary); color: white; }
+.btn-cancel { background: #f5f5f5; color: var(--text); }
+
+/* === Responsive === */
+@media (min-width: 768px) {
+  body { display: flex; justify-content: center; }
+  body > * { max-width: 480px; width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div style="width:100%;max-width:480px;margin:0 auto;">
+
+<!-- Header -->
+<div class="app-header">
+  <div class="header-top">
+    <div>
+      <div class="header-title">💧 Зоны полива</div>
+      <div class="header-subtitle" id="headerSubtitle">24 зоны · 4 группы</div>
+    </div>
+    <div class="header-actions">
+      <button class="header-btn" onclick="toggleSearch()" title="Поиск">🔍</button>
+      <button class="header-btn" onclick="location.reload()" title="Обновить">🔄</button>
+    </div>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats-bar" id="statsBar">
+  <div class="stat-item"><div class="stat-val" id="statTotal">24</div><div class="stat-lbl">Всего</div></div>
+  <div class="stat-item"><div class="stat-val" id="statActive">1</div><div class="stat-lbl">Активна</div></div>
+  <div class="stat-item"><div class="stat-val" id="statGroups">4</div><div class="stat-lbl">Группы</div></div>
+  <div class="stat-item"><div class="stat-val" id="statWater">—</div><div class="stat-lbl">Расход (л)</div></div>
+</div>
+
+<!-- Weather Widget -->
+<div class="weather-strip" id="weatherStrip">
+  <div class="weather-main" onclick="document.getElementById('weatherStrip').classList.toggle('open')">
+    <span class="w-icon-big" id="wIcon">☀️</span>
+    <div class="w-temp-block">
+      <div class="w-temp"><span id="wTemp">28</span><span class="w-unit">°C</span></div>
+      <div class="w-desc" id="wDesc">Ясно</div>
+    </div>
+    <div class="w-metrics-row">
+      <div class="w-metric"><span class="w-m-val" id="wHum">45%</span><span>💧 влаж.</span></div>
+      <div class="w-metric"><span class="w-m-val" id="wWind">3.2</span><span>💨 м/с</span></div>
+      <div class="w-metric"><span class="w-m-val" id="wRain">0.0</span><span>🌧 мм</span></div>
+    </div>
+    <div class="w-coeff-block">
+      <div class="w-coeff-val ok" id="wCoeff">95%</div>
+      <div class="w-coeff-lbl">полив</div>
+    </div>
+    <span class="w-chevron">▼</span>
+  </div>
+  <div class="weather-detail">
+    <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px;font-weight:600">Прогноз на сегодня</div>
+    <div class="w-forecast-row" id="wForecast"></div>
+    <div style="font-size:11px;color:var(--text-secondary);margin:8px 0 6px;font-weight:600">Погодокоррекция</div>
+    <div class="w-factors" id="wFactors"></div>
+    <div style="font-size:10px;color:#ccc;margin-top:8px;text-align:center" id="wSource">🌐 Open-Meteo · 📡 WB-MSW · обновлено 5 мин назад</div>
+  </div>
+</div>
+
+<!-- Group Tabs -->
+<div class="group-tabs" id="groupTabs"></div>
+
+<!-- Search -->
+<div class="search-wrap" id="searchWrap" style="display:none">
+  <input type="text" class="search-input" id="searchInput" placeholder="Поиск зоны..." oninput="filterZones()">
+</div>
+
+<!-- Quick Actions -->
+<div class="quick-actions" id="quickActions">
+  <button class="quick-btn filled" onclick="runGroup()">▶ Запустить группу</button>
+  <button class="quick-btn danger" onclick="stopAll()">⏹ Стоп всё</button>
+</div>
+
+<!-- Zone List -->
+<div class="zone-list" id="zoneList"></div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Edit Sheet -->
+<div class="sheet-overlay" id="sheetOverlay" onclick="closeSheet()"></div>
+<div class="bottom-sheet" id="bottomSheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-title" id="sheetTitle">Редактирование зоны</div>
+  <div class="form-group">
+    <label class="form-label">Название</label>
+    <input type="text" class="form-input" id="editName">
+  </div>
+  <div class="form-group">
+    <label class="form-label">Тип</label>
+    <select class="form-select" id="editType">
+      <option value="rotor">🌿 Роторные</option>
+      <option value="drip">💧 Капельный</option>
+      <option value="spray">🌊 Спрей</option>
+      <option value="tree">🌳 Деревья</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Длительность (мин)</label>
+    <input type="number" class="form-input" id="editDuration" min="1" max="120">
+  </div>
+  <div class="form-group">
+    <label class="form-label">Группа</label>
+    <select class="form-select" id="editGroup"></select>
+  </div>
+  <div class="sheet-actions">
+    <button class="btn-cancel" onclick="closeSheet()">Отмена</button>
+    <button class="btn-save" onclick="saveZone()">Сохранить</button>
+  </div>
+</div>
+
+</div>
+
+<script>
+// === Data ===
+const GROUPS = [
+  { id: 1, name: 'Насос-1', status: 'running', zones_count: 8 },
+  { id: 2, name: 'Насос-2', status: 'idle', zones_count: 6 },
+  { id: 3, name: 'Насос-3', status: 'idle', zones_count: 6 },
+  { id: 4, name: 'Насос-4', status: 'postponed', zones_count: 4 },
+];
+
+const ZONE_TYPES = {
+  'rotor': { icon: '🌿', label: 'Роторные', css: 'type-rotor' },
+  'drip': { icon: '💧', label: 'Капельный', css: 'type-drip' },
+  'spray': { icon: '🌊', label: 'Спрей', css: 'type-spray' },
+  'tree': { icon: '🌳', label: 'Деревья', css: 'type-tree' },
+};
+
+const ZONES = [
+  { id:1,  name:'Газон фасад',       type:'rotor', group_id:1, dur:15, state:'idle',    next:'08:15' },
+  { id:2,  name:'Газон бок левый',    type:'rotor', group_id:1, dur:12, state:'idle',    next:'08:30' },
+  { id:3,  name:'Клумба вход',        type:'drip',  group_id:1, dur:20, state:'running', next:null, remaining:'08:32', progress:43 },
+  { id:4,  name:'Живая изгородь',     type:'spray', group_id:1, dur:10, state:'idle',    next:'09:10' },
+  { id:5,  name:'Цветник южный',      type:'drip',  group_id:1, dur:18, state:'idle',    next:'09:28' },
+  { id:6,  name:'Альпийская горка',   type:'spray', group_id:1, dur:8,  state:'idle',    next:'09:46' },
+  { id:7,  name:'Бордюр дорожка',     type:'spray', group_id:1, dur:6,  state:'idle',    next:'09:54' },
+  { id:8,  name:'Газон парадный',     type:'rotor', group_id:1, dur:15, state:'idle',    next:'10:00' },
+  { id:9,  name:'Огород грядки',      type:'drip',  group_id:2, dur:25, state:'idle',    next:'11:00' },
+  { id:10, name:'Огород теплица',     type:'drip',  group_id:2, dur:20, state:'idle',    next:'11:25' },
+  { id:11, name:'Малина',             type:'drip',  group_id:2, dur:15, state:'idle',    next:'11:45' },
+  { id:12, name:'Виноград',           type:'drip',  group_id:2, dur:22, state:'idle',    next:'12:00' },
+  { id:13, name:'Розарий',            type:'drip',  group_id:2, dur:18, state:'idle',    next:'12:22' },
+  { id:14, name:'Газон задний',       type:'rotor', group_id:2, dur:15, state:'idle',    next:'12:40' },
+  { id:15, name:'Фруктовые деревья',  type:'tree',  group_id:3, dur:30, state:'idle',    next:'13:00' },
+  { id:16, name:'Хвойные',            type:'tree',  group_id:3, dur:25, state:'idle',    next:'13:30' },
+  { id:17, name:'Кустарники забор',   type:'spray', group_id:3, dur:12, state:'idle',    next:'13:55' },
+  { id:18, name:'Декоративные',       type:'drip',  group_id:3, dur:15, state:'idle',    next:'14:07' },
+  { id:19, name:'Клумба задняя',      type:'drip',  group_id:3, dur:18, state:'idle',    next:'14:22' },
+  { id:20, name:'Газон боковой прав.', type:'rotor', group_id:3, dur:12, state:'idle',   next:'14:40' },
+  { id:21, name:'Зона отдыха',        type:'spray', group_id:4, dur:10, state:'idle',    next:'Никогда' },
+  { id:22, name:'Площадка мангал',    type:'spray', group_id:4, dur:8,  state:'idle',    next:'Никогда' },
+  { id:23, name:'Газон спортивный',   type:'rotor', group_id:4, dur:20, state:'idle',    next:'15:00' },
+  { id:24, name:'Дорожки периметр',   type:'spray', group_id:4, dur:5,  state:'idle',    next:'15:20' },
+];
+
+let currentGroupId = null; // null = все
+let searchQuery = '';
+let editingZoneId = null;
+
+// === Render ===
+
+function renderGroupTabs() {
+  const c = document.getElementById('groupTabs');
+  const allCount = ZONES.length;
+  const activeCount = ZONES.filter(z => z.state === 'running').length;
+  
+  let html = `<button class="group-tab ${currentGroupId === null ? 'active' : ''}" onclick="selectGroup(null)">Все<span class="tab-count">${allCount}</span></button>`;
+  
+  GROUPS.forEach(g => {
+    const statusClass = g.status;
+    const count = ZONES.filter(z => z.group_id === g.id).length;
+    const runningInGroup = ZONES.filter(z => z.group_id === g.id && z.state === 'running').length;
+    html += `<button class="group-tab ${currentGroupId === g.id ? 'active' : ''}" onclick="selectGroup(${g.id})">
+      <span class="tab-status ${statusClass}"></span>${g.name}<span class="tab-count">${runningInGroup ? '▶' + runningInGroup : count}</span>
+    </button>`;
+  });
+  
+  c.innerHTML = html;
+}
+
+function getFilteredZones() {
+  let zones = ZONES;
+  if (currentGroupId !== null) {
+    zones = zones.filter(z => z.group_id === currentGroupId);
+  }
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    zones = zones.filter(z => z.name.toLowerCase().includes(q) || String(z.id).includes(q));
+  }
+  return zones;
+}
+
+function renderZones() {
+  const c = document.getElementById('zoneList');
+  const zones = getFilteredZones();
+  
+  if (!zones.length) {
+    c.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><div class="empty-text">Зоны не найдены</div></div>`;
+    return;
+  }
+  
+  let html = '';
+  let lastGroupId = null;
+  
+  // Если показываем все — группируем секциями
+  const showSections = currentGroupId === null && !searchQuery;
+  
+  zones.forEach(z => {
+    if (showSections && z.group_id !== lastGroupId) {
+      const g = GROUPS.find(g => g.id === z.group_id);
+      const groupZones = ZONES.filter(zz => zz.group_id === z.group_id);
+      html += `<div class="group-section">
+        <span class="group-name">${g ? g.name : 'Группа ' + z.group_id}</span>
+        <span class="group-line"></span>
+        <span class="group-zone-count">${groupZones.length} зон</span>
+      </div>`;
+      lastGroupId = z.group_id;
+    }
+    
+    const t = ZONE_TYPES[z.type] || ZONE_TYPES['rotor'];
+    const isRunning = z.state === 'running';
+    const statusClass = isRunning ? 'status-running' : 'status-enabled';
+    const g = GROUPS.find(g => g.id === z.group_id);
+    const groupName = g ? g.name : '';
+    
+    // Next watering display
+    let nextHtml = '';
+    if (isRunning) {
+      nextHtml = `<div class="next-time"><div class="time-val" style="color:#2196f3">⏱</div><div class="time-label">полив</div></div>`;
+    } else if (z.next && z.next !== 'Никогда') {
+      nextHtml = `<div class="next-time"><div class="time-val">${z.next}</div><div class="time-label">след.</div></div>`;
+    } else if (z.next === 'Никогда') {
+      nextHtml = `<div class="next-time"><div class="time-val" style="color:#ccc;font-size:12px">—</div><div class="time-label">нет</div></div>`;
+    }
+    
+    html += `
+    <div class="zone-card ${statusClass}" id="zone-${z.id}" data-zone-id="${z.id}">
+      <div class="zone-main" onclick="toggleZone(${z.id})">
+        <div class="zone-icon ${t.css}">${t.icon}</div>
+        <div class="zone-info">
+          <div class="zone-name">#${z.id} ${z.name}</div>
+          <div class="zone-meta">
+            <span>${t.label}</span>
+            <span class="sep">·</span>
+            <span class="dur-badge">${z.dur} мин</span>
+            ${!showSections ? `<span class="sep">·</span><span>${groupName}</span>` : ''}
+          </div>
+        </div>
+        ${nextHtml}
+        <span class="zone-chevron">▼</span>
+      </div>
+      
+      ${isRunning ? `
+      <div class="zone-running">
+        <span class="running-dot"></span>
+        <span>Осталось</span>
+        <span class="running-timer">${z.remaining || '--:--'}</span>
+        <span class="running-pct">${z.progress || 0}%</span>
+      </div>
+      <div class="zone-progress"><div class="zone-progress-bar" style="width:${z.progress || 0}%"></div></div>
+      ` : ''}
+      
+      <div class="zone-expanded">
+        <div class="detail-grid">
+          <div class="detail-item">
+            <div class="d-label">Длительность</div>
+            <div class="d-value">${z.dur} мин</div>
+          </div>
+          <div class="detail-item">
+            <div class="d-label">Группа</div>
+            <div class="d-value">${groupName}</div>
+          </div>
+          <div class="detail-item">
+            <div class="d-label">След. полив</div>
+            <div class="d-value ${z.next && z.next !== 'Никогда' ? 'highlight' : ''}">${z.next || '—'}</div>
+          </div>
+          <div class="detail-item">
+            <div class="d-label">Послед. полив</div>
+            <div class="d-value">Вчера, 08:15</div>
+          </div>
+        </div>
+        
+        <div class="dur-control">
+          <button class="dur-btn" onclick="event.stopPropagation();changeDur(${z.id},-1)">−</button>
+          <div><span class="dur-display" id="dur-${z.id}">${z.dur}</span><span class="dur-unit"> мин</span></div>
+          <button class="dur-btn" onclick="event.stopPropagation();changeDur(${z.id},1)">+</button>
+        </div>
+        
+        <div class="zone-actions">
+          <button class="${isRunning ? 'btn-stop' : 'btn-run'}" onclick="event.stopPropagation();toggleRun(${z.id})">
+            ${isRunning ? '⏹ Стоп' : '▶ Запустить'}
+          </button>
+          <button class="btn-edit" onclick="event.stopPropagation();openEdit(${z.id})">✏️</button>
+        </div>
+      </div>
+    </div>`;
+  });
+  
+  c.innerHTML = html;
+  updateStats();
+}
+
+function updateStats() {
+  const filtered = getFilteredZones();
+  const running = filtered.filter(z => z.state === 'running').length;
+  document.getElementById('statTotal').textContent = filtered.length;
+  document.getElementById('statActive').textContent = running;
+  document.getElementById('statGroups').textContent = GROUPS.length;
+}
+
+// === Interactions ===
+
+function selectGroup(groupId) {
+  currentGroupId = groupId;
+  renderGroupTabs();
+  renderZones();
+  
+  // Update quick action button text
+  const btn = document.querySelector('.quick-btn.filled');
+  if (groupId !== null) {
+    const g = GROUPS.find(g => g.id === groupId);
+    btn.textContent = '▶ Запустить ' + (g ? g.name : 'группу');
+  } else {
+    btn.textContent = '▶ Запустить все';
+  }
+}
+
+function toggleZone(id) {
+  const card = document.getElementById('zone-' + id);
+  if (card) card.classList.toggle('open');
+}
+
+function toggleRun(id) {
+  const z = ZONES.find(z => z.id === id);
+  if (!z) return;
+  if (z.state === 'running') {
+    z.state = 'idle';
+    z.remaining = null;
+    z.progress = null;
+    showToast('⏹ Зона #' + id + ' остановлена', '');
+  } else {
+    z.state = 'running';
+    z.remaining = z.dur + ':00';
+    z.progress = 0;
+    showToast('▶ Зона #' + id + ' запущена', 'success');
+  }
+  renderGroupTabs();
+  renderZones();
+}
+
+function changeDur(id, delta) {
+  const z = ZONES.find(z => z.id === id);
+  if (!z) return;
+  z.dur = Math.max(1, Math.min(120, z.dur + delta));
+  const el = document.getElementById('dur-' + id);
+  if (el) el.textContent = z.dur;
+}
+
+function toggleSearch() {
+  const wrap = document.getElementById('searchWrap');
+  const visible = wrap.style.display !== 'none';
+  wrap.style.display = visible ? 'none' : 'block';
+  if (!visible) {
+    document.getElementById('searchInput').focus();
+  } else {
+    searchQuery = '';
+    document.getElementById('searchInput').value = '';
+    renderZones();
+  }
+}
+
+function filterZones() {
+  searchQuery = document.getElementById('searchInput').value;
+  renderZones();
+}
+
+function runGroup() {
+  if (currentGroupId) {
+    const g = GROUPS.find(g => g.id === currentGroupId);
+    showToast('▶ ' + (g ? g.name : 'Группа') + ' запущена', 'success');
+  } else {
+    showToast('▶ Все группы запущены', 'success');
+  }
+}
+
+function stopAll() {
+  ZONES.forEach(z => { z.state = 'idle'; z.remaining = null; z.progress = null; });
+  renderGroupTabs();
+  renderZones();
+  showToast('⏹ Все зоны остановлены', 'error');
+}
+
+// === Edit Sheet ===
+function openEdit(id) {
+  editingZoneId = id;
+  const z = ZONES.find(z => z.id === id);
+  if (!z) return;
+  
+  document.getElementById('sheetTitle').textContent = '✏️ #' + z.id + ' ' + z.name;
+  document.getElementById('editName').value = z.name;
+  document.getElementById('editDuration').value = z.dur;
+  
+  // Populate type
+  const typeSelect = document.getElementById('editType');
+  typeSelect.value = z.type;
+  
+  // Populate groups
+  const groupSelect = document.getElementById('editGroup');
+  groupSelect.innerHTML = GROUPS.map(g => `<option value="${g.id}" ${g.id === z.group_id ? 'selected' : ''}>${g.name}</option>`).join('');
+  
+  document.getElementById('sheetOverlay').classList.add('show');
+  document.getElementById('bottomSheet').classList.add('show');
+}
+
+function closeSheet() {
+  document.getElementById('sheetOverlay').classList.remove('show');
+  document.getElementById('bottomSheet').classList.remove('show');
+  editingZoneId = null;
+}
+
+function saveZone() {
+  if (!editingZoneId) return;
+  const z = ZONES.find(z => z.id === editingZoneId);
+  if (!z) return;
+  
+  z.name = document.getElementById('editName').value;
+  z.dur = parseInt(document.getElementById('editDuration').value) || z.dur;
+  z.type = document.getElementById('editType').value;
+  z.group_id = parseInt(document.getElementById('editGroup').value);
+  
+  closeSheet();
+  renderZones();
+  showToast('✅ Зона #' + z.id + ' сохранена', 'success');
+}
+
+// === Toast ===
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (type ? ' ' + type : '');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.className = 'toast'; }, 2500);
+}
+
+// === Weather ===
+function renderWeather() {
+  // Forecast hours
+  const hours = [
+    { time: '09:00', icon: '☀️', temp: 28, rain: 0 },
+    { time: '12:00', icon: '🌤️', temp: 32, rain: 0 },
+    { time: '15:00', icon: '⛅', temp: 34, rain: 0 },
+    { time: '18:00', icon: '🌤️', temp: 30, rain: 0 },
+    { time: '21:00', icon: '🌙', temp: 24, rain: 0 },
+    { time: '00:00', icon: '🌙', temp: 20, rain: 0.2 },
+    { time: '03:00', icon: '🌙', temp: 18, rain: 0 },
+    { time: '06:00', icon: '🌅', temp: 19, rain: 0 },
+  ];
+  
+  const fc = document.getElementById('wForecast');
+  fc.innerHTML = hours.map(h => `
+    <div class="w-hour">
+      <div class="w-hour-time">${h.time}</div>
+      <div class="w-hour-icon">${h.icon}</div>
+      <div class="w-hour-temp">${h.temp}°</div>
+      ${h.rain > 0 ? `<div class="w-hour-rain">${h.rain}мм</div>` : ''}
+    </div>
+  `).join('');
+  
+  // Factors
+  const factors = [
+    { name: '🌡️ Жара', status: 'warn', detail: '+34°C' },
+    { name: '🌧️ Дождь', status: 'ok', detail: 'нет' },
+    { name: '💨 Ветер', status: 'ok', detail: '3.2 м/с' },
+    { name: '❄️ Заморозок', status: 'ok', detail: 'нет' },
+    { name: '💧 Влажность', status: 'ok', detail: '45%' },
+  ];
+  
+  const ff = document.getElementById('wFactors');
+  ff.innerHTML = factors.map(f => `<span class="w-factor ${f.status}">${f.name} ${f.detail}</span>`).join('');
+}
+
+// === Init ===
+renderGroupTabs();
+renderZones();
+renderWeather();
+</script>
+</body>
+</html>

@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Управление зонами — Сравнение UI производителей</title>
+<style>
+:root {
+  --hunter-primary: #00838f;
+  --hunter-accent: #26c6da;
+  --rain-primary: #1565c0;
+  --rain-accent: #42a5f5;
+  --rachio-primary: #2e7d32;
+  --rachio-accent: #66bb6a;
+  --orbit-primary: #e65100;
+  --orbit-accent: #ff9800;
+  --os-primary: #37474f;
+  --os-accent: #78909c;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #333; }
+
+/* === Tab Navigation === */
+.tab-bar {
+  display: flex;
+  background: #fff;
+  border-bottom: 2px solid #e0e0e0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.tab-bar button {
+  flex: 0 0 auto;
+  padding: 12px 20px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: #666;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.tab-bar button.active { color: #1976d2; border-bottom-color: #1976d2; }
+.tab-bar button:hover { background: #f5f5f5; }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* === Shared === */
+.page-wrap { max-width: 480px; margin: 0 auto; min-height: 100vh; }
+.proto-header { padding: 16px; color: white; }
+.proto-header h1 { font-size: 20px; font-weight: 700; }
+.proto-header p { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+
+.zone-toggle {
+  position: relative;
+  width: 48px; height: 26px;
+  background: #ccc;
+  border-radius: 13px;
+  cursor: pointer;
+  transition: background 0.25s;
+  flex-shrink: 0;
+}
+.zone-toggle.on { background: #4caf50; }
+.zone-toggle::after {
+  content: '';
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 20px; height: 20px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.25s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.zone-toggle.on::after { transform: translateX(22px); }
+
+/* Running animation */
+@keyframes waterPulse {
+  0% { box-shadow: 0 0 0 0 rgba(33,150,243,0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(33,150,243,0); }
+  100% { box-shadow: 0 0 0 0 rgba(33,150,243,0); }
+}
+.running { animation: waterPulse 1.5s infinite; }
+
+/* Status dot */
+.status-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.idle { background: #bdbdbd; }
+.status-dot.active { background: #4caf50; }
+.status-dot.running { background: #2196f3; animation: waterPulse 1.5s infinite; }
+.status-dot.error { background: #f44336; }
+
+/* Inline SVG icons */
+.icon-zone { width: 24px; height: 24px; flex-shrink: 0; }
+
+/* === HUNTER HYDRAWISE === */
+.hunter .proto-header { background: linear-gradient(135deg, #00695c, #00838f); }
+.hunter .zone-list { padding: 8px; }
+.hunter .zone-card {
+  background: white;
+  border-radius: 12px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  border-left: 4px solid #bdbdbd;
+  transition: all 0.2s;
+}
+.hunter .zone-card.is-running { border-left-color: #2196f3; }
+.hunter .zone-card.is-active { border-left-color: #4caf50; }
+.hunter .zone-card-main {
+  display: flex;
+  align-items: center;
+  padding: 12px;
+  gap: 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.hunter .zone-icon {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  flex-shrink: 0;
+}
+.hunter .zone-icon.grass { background: #e8f5e9; }
+.hunter .zone-icon.drip { background: #e3f2fd; }
+.hunter .zone-icon.spray { background: #fff3e0; }
+.hunter .zone-icon.tree { background: #f1f8e9; }
+.hunter .zone-info { flex: 1; min-width: 0; }
+.hunter .zone-name { font-weight: 600; font-size: 15px; color: #333; }
+.hunter .zone-meta { font-size: 12px; color: #999; margin-top: 2px; display: flex; gap: 8px; align-items: center; }
+.hunter .zone-duration-badge {
+  background: #e0f2f1;
+  color: #00695c;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.hunter .zone-running-info {
+  background: #e3f2fd;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #1565c0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hunter .zone-running-info .timer { font-weight: 700; font-size: 15px; }
+.hunter .zone-progress {
+  height: 3px;
+  background: #e0e0e0;
+}
+.hunter .zone-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #26c6da, #00838f);
+  transition: width 0.3s;
+}
+.hunter .zone-expanded {
+  display: none;
+  padding: 12px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+}
+.hunter .zone-card.open .zone-expanded { display: block; }
+.hunter .zone-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.hunter .zone-actions button {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hunter .btn-run { background: #00838f; color: white; }
+.hunter .btn-stop { background: #ef5350; color: white; }
+.hunter .btn-edit { background: #f5f5f5; color: #333; border: 1px solid #e0e0e0; }
+.hunter .zone-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+.hunter .zone-detail-item {
+  background: white;
+  padding: 8px;
+  border-radius: 8px;
+  text-align: center;
+}
+.hunter .zone-detail-item .label { font-size: 11px; color: #999; }
+.hunter .zone-detail-item .value { font-size: 15px; font-weight: 600; color: #333; margin-top: 2px; }
+.hunter .zone-chevron {
+  font-size: 12px;
+  color: #ccc;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.hunter .zone-card.open .zone-chevron { transform: rotate(180deg); }
+
+/* Quick actions bar */
+.hunter .quick-bar {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+}
+.hunter .quick-bar button {
+  flex: 1;
+  padding: 10px;
+  border: 2px solid #00838f;
+  background: white;
+  color: #00838f;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hunter .quick-bar button.danger { border-color: #ef5350; color: #ef5350; }
+
+/* Stats summary */
+.hunter .stats-bar {
+  display: flex;
+  gap: 1px;
+  background: #e0e0e0;
+  margin: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.hunter .stat-item {
+  flex: 1;
+  background: white;
+  padding: 10px 8px;
+  text-align: center;
+}
+.hunter .stat-item .stat-val { font-size: 18px; font-weight: 700; color: #00838f; }
+.hunter .stat-item .stat-lbl { font-size: 11px; color: #999; margin-top: 2px; }
+
+/* === RAIN BIRD === */
+.rainbird .proto-header { background: linear-gradient(135deg, #0d47a1, #1565c0); }
+.rainbird .zone-list { padding: 0; }
+.rainbird .zone-row {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  gap: 12px;
+  background: white;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.rainbird .zone-row:active { background: #f5f5f5; }
+.rainbird .zone-num {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: #e3f2fd;
+  color: #1565c0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+.rainbird .zone-num.active { background: #1565c0; color: white; }
+.rainbird .zone-num.running { background: #2196f3; color: white; animation: waterPulse 1.5s infinite; }
+.rainbird .zone-info { flex: 1; }
+.rainbird .zone-name { font-weight: 600; font-size: 15px; }
+.rainbird .zone-subtitle { font-size: 12px; color: #999; margin-top: 1px; }
+.rainbird .zone-time-right { text-align: right; flex-shrink: 0; }
+.rainbird .zone-time-val { font-size: 16px; font-weight: 700; color: #1565c0; }
+.rainbird .zone-time-unit { font-size: 11px; color: #999; }
+
+/* Rain Bird detail sheet */
+.rainbird .zone-sheet {
+  display: none;
+  background: white;
+  padding: 16px;
+  border-top: 3px solid #1565c0;
+}
+.rainbird .zone-row.open + .zone-sheet { display: block; }
+.rainbird .sheet-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.rainbird .sheet-title { font-size: 18px; font-weight: 700; }
+.rainbird .sheet-close { background: none; border: none; font-size: 24px; color: #999; cursor: pointer; padding: 4px; }
+.rainbird .duration-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px;
+  background: #f5f7fa;
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+.rainbird .dur-btn {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  border: 2px solid #1565c0;
+  background: white;
+  color: #1565c0;
+  font-size: 22px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rainbird .dur-value { font-size: 32px; font-weight: 700; color: #1565c0; }
+.rainbird .dur-unit { font-size: 14px; color: #999; margin-left: 4px; }
+.rainbird .sheet-actions {
+  display: flex;
+  gap: 8px;
+}
+.rainbird .sheet-actions button {
+  flex: 1;
+  padding: 12px;
+  border: none;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.rainbird .btn-primary { background: #1565c0; color: white; }
+.rainbird .btn-secondary { background: #f5f5f5; color: #333; }
+
+/* Rain Bird top bar */
+.rainbird .top-summary {
+  display: flex;
+  justify-content: space-around;
+  padding: 12px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #e0e0e0;
+}
+.rainbird .top-stat { text-align: center; }
+.rainbird .top-stat .val { font-size: 20px; font-weight: 700; color: #1565c0; }
+.rainbird .top-stat .lbl { font-size: 11px; color: #999; }
+
+/* === RACHIO === */
+.rachio .proto-header { background: linear-gradient(135deg, #1b5e20, #2e7d32); }
+.rachio .zone-list { padding: 16px; }
+.rachio .zone-tile {
+  background: white;
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  transition: all 0.2s;
+}
+.rachio .zone-tile:active { transform: scale(0.98); }
+.rachio .tile-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rachio .tile-avatar {
+  width: 52px; height: 52px;
+  border-radius: 14px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #e8f5e9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rachio .tile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.rachio .tile-avatar .emoji { font-size: 26px; }
+.rachio .tile-info { flex: 1; }
+.rachio .tile-name { font-size: 16px; font-weight: 700; }
+.rachio .tile-type { font-size: 12px; color: #999; margin-top: 1px; }
+.rachio .tile-toggle { }
+
+/* Rachio big run button */
+.rachio .tile-run {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  background: #2e7d32;
+  color: white;
+  border: none;
+  border-radius: 12px;
+  width: 100%;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.rachio .tile-run.stop { background: #d32f2f; }
+.rachio .tile-run:active { opacity: 0.9; }
+
+/* Rachio moisture bar */
+.rachio .moisture-bar {
+  margin-top: 12px;
+  height: 6px;
+  background: #e0e0e0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.rachio .moisture-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.rachio .moisture-fill.good { background: #66bb6a; }
+.rachio .moisture-fill.medium { background: #ffa726; }
+.rachio .moisture-fill.low { background: #ef5350; }
+.rachio .moisture-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #999;
+  margin-top: 4px;
+}
+
+/* Rachio running state */
+.rachio .tile-running {
+  margin-top: 10px;
+  padding: 10px;
+  background: #e8f5e9;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.rachio .tile-running .timer {
+  font-size: 20px;
+  font-weight: 700;
+  color: #2e7d32;
+}
+.rachio .tile-running .timer-label {
+  font-size: 12px;
+  color: #666;
+}
+.rachio .running-progress {
+  flex: 1;
+  height: 4px;
+  background: #c8e6c9;
+  border-radius: 2px;
+}
+.rachio .running-progress-bar {
+  height: 100%;
+  background: #2e7d32;
+  border-radius: 2px;
+}
+
+/* === ORBIT B-HYVE === */
+.orbit .proto-header { background: linear-gradient(135deg, #bf360c, #e65100); }
+.orbit .zone-list { padding: 12px; }
+.orbit .zone-circle-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.orbit .zone-circle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.orbit .circle-ring {
+  width: 72px; height: 72px;
+  border-radius: 50%;
+  border: 3px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  background: white;
+  transition: all 0.2s;
+  position: relative;
+}
+.orbit .circle-ring.active { border-color: #ff9800; }
+.orbit .circle-ring.running { border-color: #2196f3; animation: waterPulse 1.5s infinite; }
+.orbit .circle-num {
+  position: absolute;
+  top: -4px; right: -4px;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: #e65100;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.orbit .circle-name { font-size: 12px; color: #666; text-align: center; font-weight: 500; }
+.orbit .circle-dur { font-size: 11px; color: #999; }
+
+/* Orbit selected zone detail */
+.orbit .zone-detail-panel {
+  background: white;
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+.orbit .detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.orbit .detail-icon { font-size: 32px; }
+.orbit .detail-name { font-size: 18px; font-weight: 700; }
+.orbit .detail-type { font-size: 13px; color: #999; }
+
+.orbit .dur-slider {
+  width: 100%;
+  margin: 12px 0;
+  -webkit-appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, #ff9800 0%, #ff9800 50%, #e0e0e0 50%);
+  outline: none;
+}
+.orbit .dur-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: #e65100;
+  border: 3px solid white;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+  cursor: pointer;
+}
+.orbit .dur-display {
+  text-align: center;
+  font-size: 28px;
+  font-weight: 700;
+  color: #e65100;
+  margin-bottom: 12px;
+}
+.orbit .detail-actions {
+  display: flex;
+  gap: 8px;
+}
+.orbit .detail-actions button {
+  flex: 1;
+  padding: 12px;
+  border: none;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.orbit .btn-orange { background: #e65100; color: white; }
+.orbit .btn-outline { background: white; color: #e65100; border: 2px solid #e65100; }
+
+/* === OPENSPRINKLER === */
+.opensprinkler .proto-header { background: linear-gradient(135deg, #263238, #37474f); }
+.opensprinkler .toolbar {
+  display: flex;
+  padding: 8px;
+  gap: 4px;
+  background: #eceff1;
+  border-bottom: 1px solid #cfd8dc;
+}
+.opensprinkler .toolbar button {
+  padding: 6px 12px;
+  border: 1px solid #90a4ae;
+  background: white;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #37474f;
+  font-weight: 500;
+}
+.opensprinkler .toolbar button.active { background: #37474f; color: white; border-color: #37474f; }
+.opensprinkler .zone-list { padding: 0; }
+.opensprinkler .zone-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.opensprinkler .zone-table th {
+  background: #eceff1;
+  padding: 8px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: #37474f;
+  border-bottom: 2px solid #b0bec5;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.opensprinkler .zone-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #eceff1;
+  vertical-align: middle;
+}
+.opensprinkler .zone-table tr:hover { background: #f5f7f8; }
+.opensprinkler .os-toggle {
+  width: 36px; height: 20px;
+  background: #b0bec5;
+  border-radius: 10px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.opensprinkler .os-toggle.on { background: #4caf50; }
+.opensprinkler .os-toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.opensprinkler .os-toggle.on::after { transform: translateX(16px); }
+.opensprinkler .os-btn {
+  padding: 4px 10px;
+  border: 1px solid #78909c;
+  background: white;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #37474f;
+}
+.opensprinkler .os-btn.run { border-color: #4caf50; color: #2e7d32; }
+.opensprinkler .os-btn.run:hover { background: #e8f5e9; }
+.opensprinkler .os-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.opensprinkler .os-status.idle { background: #eceff1; color: #607d8b; }
+.opensprinkler .os-status.running { background: #e3f2fd; color: #1565c0; }
+.opensprinkler .os-status.disabled { background: #fce4ec; color: #c62828; }
+
+/* OS log panel */
+.opensprinkler .log-panel {
+  margin: 8px;
+  padding: 8px;
+  background: #263238;
+  border-radius: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #b2ff59;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.opensprinkler .log-panel .log-line { padding: 1px 0; }
+.opensprinkler .log-panel .log-time { color: #78909c; }
+
+/* Footer note */
+.proto-footer {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: #999;
+  background: #f5f5f5;
+  border-top: 1px solid #e0e0e0;
+}
+</style>
+</head>
+<body>
+
+<!-- Tab Navigation -->
+<div class="tab-bar" id="tabBar">
+  <button class="active" onclick="showTab('hunter')">🎯 Hunter</button>
+  <button onclick="showTab('rainbird')">💧 Rain Bird</button>
+  <button onclick="showTab('rachio')">🌿 Rachio</button>
+  <button onclick="showTab('orbit')">🔶 B-Hyve</button>
+  <button onclick="showTab('opensprinkler')">⚙️ OpenSprinkler</button>
+</div>
+
+<!-- ==================== HUNTER HYDRAWISE ==================== -->
+<div class="tab-content active hunter" id="tab-hunter">
+<div class="page-wrap">
+  <div class="proto-header">
+    <h1>💧 Зоны полива</h1>
+    <p>Hunter Hydrawise — 24 зоны · 4 группы</p>
+  </div>
+  
+  <div class="stats-bar">
+    <div class="stat-item"><div class="stat-val">24</div><div class="stat-lbl">Зон</div></div>
+    <div class="stat-item"><div class="stat-val">4</div><div class="stat-lbl">Группы</div></div>
+    <div class="stat-item"><div class="stat-val">1</div><div class="stat-lbl">Активна</div></div>
+    <div class="stat-item"><div class="stat-val">12.4л</div><div class="stat-lbl">Сегодня</div></div>
+  </div>
+
+  <div class="quick-bar">
+    <button onclick="alert('Запустить все')">▶ Запустить все</button>
+    <button class="danger" onclick="alert('Стоп все')">⏹ Стоп все</button>
+  </div>
+
+  <div class="zone-list" id="hunterZones"></div>
+</div>
+</div>
+
+<!-- ==================== RAIN BIRD ==================== -->
+<div class="tab-content rainbird" id="tab-rainbird">
+<div class="page-wrap">
+  <div class="proto-header">
+    <h1>Мои зоны</h1>
+    <p>Rain Bird — Управление зонами</p>
+  </div>
+  
+  <div class="top-summary">
+    <div class="top-stat"><div class="val">24</div><div class="lbl">Всего</div></div>
+    <div class="top-stat"><div class="val">1</div><div class="lbl">Активна</div></div>
+    <div class="top-stat"><div class="val">08:15</div><div class="lbl">След. полив</div></div>
+  </div>
+
+  <div class="zone-list" id="rainbirdZones"></div>
+</div>
+</div>
+
+<!-- ==================== RACHIO ==================== -->
+<div class="tab-content rachio" id="tab-rachio">
+<div class="page-wrap">
+  <div class="proto-header">
+    <h1>🌱 Мой двор</h1>
+    <p>Rachio — Умный полив</p>
+  </div>
+  
+  <div class="zone-list" id="rachioZones"></div>
+</div>
+</div>
+
+<!-- ==================== ORBIT B-HYVE ==================== -->
+<div class="tab-content orbit" id="tab-orbit">
+<div class="page-wrap">
+  <div class="proto-header">
+    <h1>Зоны</h1>
+    <p>Orbit B-Hyve — Выберите зону</p>
+  </div>
+  
+  <div class="zone-list">
+    <div class="zone-circle-grid" id="orbitGrid"></div>
+    <div class="zone-detail-panel" id="orbitDetail">
+      <div class="detail-header">
+        <span class="detail-icon">🌿</span>
+        <div>
+          <div class="detail-name" id="orbitDetailName">Газон фасад</div>
+          <div class="detail-type" id="orbitDetailType">Роторные · Группа 1</div>
+        </div>
+      </div>
+      <div class="dur-display"><span id="orbitDurVal">15</span> мин</div>
+      <input type="range" class="dur-slider" min="1" max="60" value="15" id="orbitSlider" oninput="document.getElementById('orbitDurVal').textContent=this.value">
+      <div class="detail-actions">
+        <button class="btn-orange" onclick="alert('Запуск зоны 1')">▶ Запустить</button>
+        <button class="btn-outline" onclick="alert('Настройки')">⚙️ Настройки</button>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ==================== OPENSPRINKLER ==================== -->
+<div class="tab-content opensprinkler" id="tab-opensprinkler">
+<div class="page-wrap">
+  <div class="proto-header">
+    <h1>Stations</h1>
+    <p>OpenSprinkler — v2.2.1(1)</p>
+  </div>
+  
+  <div class="toolbar">
+    <button class="active">Все (24)</button>
+    <button>Группа 1 (8)</button>
+    <button>Группа 2 (6)</button>
+    <button>Активные</button>
+  </div>
+  
+  <div class="zone-list">
+    <table class="zone-table" id="osTable">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Название</th>
+          <th>Статус</th>
+          <th>Вкл</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="osBody"></tbody>
+    </table>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-line"><span class="log-time">[09:30:12]</span> Zone 3 started (manual, 15min)</div>
+    <div class="log-line"><span class="log-time">[09:15:00]</span> Zone 2 completed (schedule, 12min, 8.4L)</div>
+    <div class="log-line"><span class="log-time">[09:03:00]</span> Zone 1 completed (schedule, 12min, 9.1L)</div>
+    <div class="log-line"><span class="log-time">[08:51:00]</span> Program A started (6 zones)</div>
+    <div class="log-line"><span class="log-time">[08:50:55]</span> Weather check: coeff=95%, OK</div>
+  </div>
+</div>
+</div>
+
+<div class="proto-footer">
+  WB-Irrigation · Прототипы управления зонами · Март 2026
+</div>
+
+<script>
+// Sample zone data
+const ZONES = [
+  {id:1, name:'Газон фасад', type:'Роторные', icon:'🌿', group:'Насос-1', dur:15, state:'idle', moisture:72},
+  {id:2, name:'Газон бок лев.', type:'Роторные', icon:'🌿', group:'Насос-1', dur:12, state:'idle', moisture:65},
+  {id:3, name:'Клумба вход', type:'Капельный', icon:'🌺', group:'Насос-1', dur:20, state:'running', moisture:45, remaining:'08:32', progress:43},
+  {id:4, name:'Живая изгородь', type:'Спрей', icon:'🌳', group:'Насос-1', dur:10, state:'idle', moisture:80},
+  {id:5, name:'Огород', type:'Капельный', icon:'🥕', group:'Насос-2', dur:25, state:'idle', moisture:55},
+  {id:6, name:'Газон задний', type:'Роторные', icon:'🌿', group:'Насос-2', dur:15, state:'idle', moisture:68},
+  {id:7, name:'Розы', type:'Капельный', icon:'🌹', group:'Насос-2', dur:18, state:'idle', moisture:40},
+  {id:8, name:'Деревья', type:'Капельный', icon:'🌳', group:'Насос-2', dur:30, state:'idle', moisture:75},
+  {id:9, name:'Альпийская горка', type:'Спрей', icon:'⛰️', group:'Насос-1', dur:8, state:'idle', moisture:62},
+  {id:10, name:'Дорожки', type:'Спрей', icon:'🛤️', group:'Насос-1', dur:5, state:'idle', moisture:90},
+  {id:11, name:'Теплица', type:'Капельный', icon:'🏠', group:'Насос-3', dur:20, state:'idle', moisture:50},
+  {id:12, name:'Виноград', type:'Капельный', icon:'🍇', group:'Насос-3', dur:22, state:'idle', moisture:58},
+];
+
+// Tab switching
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  // Find the button
+  const btns = document.querySelectorAll('.tab-bar button');
+  const map = {hunter:0, rainbird:1, rachio:2, orbit:3, opensprinkler:4};
+  if (map[name] !== undefined) btns[map[name]].classList.add('active');
+}
+
+// === HUNTER ===
+function renderHunter() {
+  const c = document.getElementById('hunterZones');
+  c.innerHTML = ZONES.map(z => {
+    const isRunning = z.state === 'running';
+    const iconClass = z.type === 'Роторные' ? 'grass' : z.type === 'Капельный' ? 'drip' : 'spray';
+    return `
+    <div class="zone-card ${isRunning ? 'is-running' : 'is-active'}" onclick="this.classList.toggle('open')">
+      <div class="zone-card-main">
+        <div class="zone-icon ${iconClass}">${z.icon}</div>
+        <div class="zone-info">
+          <div class="zone-name">${z.name}</div>
+          <div class="zone-meta">
+            <span>${z.type}</span>
+            <span class="zone-duration-badge">${z.dur} мин</span>
+            <span style="color:#bbb">${z.group}</span>
+          </div>
+        </div>
+        <div class="zone-toggle ${isRunning ? 'on' : ''}" onclick="event.stopPropagation();this.classList.toggle('on')"></div>
+        <span class="zone-chevron">▼</span>
+      </div>
+      ${isRunning ? `
+      <div class="zone-running-info">
+        <span class="status-dot running"></span>
+        <span>Осталось</span>
+        <span class="timer">${z.remaining}</span>
+        <span style="flex:1"></span>
+        <span style="font-size:12px;color:#90caf9">${z.progress}%</span>
+      </div>
+      <div class="zone-progress"><div class="zone-progress-bar" style="width:${z.progress}%"></div></div>
+      ` : ''}
+      <div class="zone-expanded">
+        <div class="zone-detail-grid">
+          <div class="zone-detail-item"><div class="label">Длительность</div><div class="value">${z.dur} мин</div></div>
+          <div class="zone-detail-item"><div class="label">Группа</div><div class="value">${z.group}</div></div>
+          <div class="zone-detail-item"><div class="label">Влажность</div><div class="value">${z.moisture}%</div></div>
+          <div class="zone-detail-item"><div class="label">Послед. полив</div><div class="value">Вчера</div></div>
+        </div>
+        <div class="zone-actions">
+          <button class="${isRunning ? 'btn-stop' : 'btn-run'}" onclick="event.stopPropagation();alert('${isRunning ? 'Стоп' : 'Запуск'} зоны ${z.id}')">${isRunning ? '⏹ Стоп' : '▶ Запустить'}</button>
+          <button class="btn-edit" onclick="event.stopPropagation();alert('Редактирование зоны ${z.id}')">✏️ Изменить</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// === RAIN BIRD ===
+function renderRainBird() {
+  const c = document.getElementById('rainbirdZones');
+  c.innerHTML = ZONES.map(z => {
+    const isRunning = z.state === 'running';
+    const numClass = isRunning ? 'running' : 'active';
+    return `
+    <div class="zone-row" onclick="this.classList.toggle('open')">
+      <div class="zone-num ${numClass}">${z.id}</div>
+      <div class="zone-info">
+        <div class="zone-name">${z.name}</div>
+        <div class="zone-subtitle">${z.type} · ${z.group}</div>
+      </div>
+      <div class="zone-time-right">
+        ${isRunning ? `<div class="zone-time-val" style="color:#2196f3">${z.remaining}</div><div class="zone-time-unit">осталось</div>` 
+                    : `<div class="zone-time-val">${z.dur}</div><div class="zone-time-unit">мин</div>`}
+      </div>
+    </div>
+    <div class="zone-sheet">
+      <div class="sheet-header">
+        <div class="sheet-title">${z.icon} ${z.name}</div>
+        <button class="sheet-close" onclick="event.stopPropagation();this.closest('.zone-sheet').previousElementSibling.classList.remove('open')">✕</button>
+      </div>
+      <div class="duration-control">
+        <button class="dur-btn" onclick="event.stopPropagation()">−</button>
+        <div><span class="dur-value">${z.dur}</span><span class="dur-unit">мин</span></div>
+        <button class="dur-btn" onclick="event.stopPropagation()">+</button>
+      </div>
+      <div class="sheet-actions">
+        <button class="btn-primary" onclick="event.stopPropagation();alert('Запуск ${z.name}')">▶ Запустить</button>
+        <button class="btn-secondary" onclick="event.stopPropagation();alert('Настройки ${z.name}')">Настройки</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// === RACHIO ===
+function renderRachio() {
+  const c = document.getElementById('rachioZones');
+  c.innerHTML = ZONES.map(z => {
+    const isRunning = z.state === 'running';
+    const moistureClass = z.moisture > 65 ? 'good' : z.moisture > 40 ? 'medium' : 'low';
+    return `
+    <div class="zone-tile">
+      <div class="tile-top">
+        <div class="tile-avatar"><span class="emoji">${z.icon}</span></div>
+        <div class="tile-info">
+          <div class="tile-name">${z.name}</div>
+          <div class="tile-type">${z.type} · ${z.dur} мин · ${z.group}</div>
+        </div>
+        <div class="zone-toggle ${isRunning ? 'on' : ''}" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="moisture-bar"><div class="moisture-fill ${moistureClass}" style="width:${z.moisture}%"></div></div>
+      <div class="moisture-label"><span>Влажность ${z.moisture}%</span><span>${z.moisture > 65 ? 'Хорошо' : z.moisture > 40 ? 'Средне' : 'Сухо'}</span></div>
+      ${isRunning ? `
+      <div class="tile-running">
+        <div>
+          <div class="timer">${z.remaining}</div>
+          <div class="timer-label">осталось</div>
+        </div>
+        <div class="running-progress"><div class="running-progress-bar" style="width:${z.progress}%"></div></div>
+      </div>
+      <button class="tile-run stop" onclick="alert('Стоп ${z.name}')">⏹ Остановить</button>
+      ` : `
+      <button class="tile-run" onclick="alert('Запуск ${z.name}')">▶ Запустить полив</button>
+      `}
+    </div>`;
+  }).join('');
+}
+
+// === ORBIT ===
+function renderOrbit() {
+  const grid = document.getElementById('orbitGrid');
+  grid.innerHTML = ZONES.map(z => {
+    const ringClass = z.state === 'running' ? 'running' : 'active';
+    return `
+    <div class="zone-circle" onclick="selectOrbitZone(${z.id})">
+      <div class="circle-ring ${ringClass}">
+        ${z.icon}
+        <span class="circle-num">${z.id}</span>
+      </div>
+      <div class="circle-name">${z.name}</div>
+      <div class="circle-dur">${z.dur} мин</div>
+    </div>`;
+  }).join('');
+}
+function selectOrbitZone(id) {
+  const z = ZONES.find(x => x.id === id);
+  if (!z) return;
+  document.getElementById('orbitDetailName').textContent = z.name;
+  document.getElementById('orbitDetailType').textContent = z.type + ' · ' + z.group;
+  document.getElementById('orbitDurVal').textContent = z.dur;
+  document.getElementById('orbitSlider').value = z.dur;
+}
+
+// === OPENSPRINKLER ===
+function renderOS() {
+  const body = document.getElementById('osBody');
+  body.innerHTML = ZONES.map(z => {
+    const isRunning = z.state === 'running';
+    const statusClass = isRunning ? 'running' : 'idle';
+    const statusText = isRunning ? `▶ ${z.remaining}` : 'Idle';
+    return `
+    <tr>
+      <td style="font-weight:600;color:#37474f">${z.id}</td>
+      <td>
+        <div style="font-weight:500">${z.name}</div>
+        <div style="font-size:11px;color:#90a4ae">${z.type} · ${z.group}</div>
+      </td>
+      <td><span class="os-status ${statusClass}">${statusText}</span></td>
+      <td><div class="os-toggle on" onclick="this.classList.toggle('on')"></div></td>
+      <td><button class="os-btn run" onclick="alert('Run ${z.name}')">${isRunning ? '⏹' : '▶'}</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// Init
+renderHunter();
+renderRainBird();
+renderRachio();
+renderOrbit();
+renderOS();
+</script>
+</body>
+</html>

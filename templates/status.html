@@ -1283,6 +1283,192 @@
             color: #999;
         }
     }
+
+    /* ======== ZONES V2: Hunter-style ======== */
+    .zones-stats-bar {
+        display: flex;
+        gap: 1px;
+        background: #e8eaed;
+        margin: 8px 0;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    .zstat-item { flex:1; background:white; padding:8px 4px; text-align:center; }
+    .zstat-val { font-size:16px; font-weight:700; color:#00838f; }
+    .zstat-lbl { font-size:10px; color:#999; }
+
+    /* Group Tabs */
+    .group-tabs {
+        display:flex; padding:0; gap:6px; overflow-x:auto;
+        -webkit-overflow-scrolling:touch; scrollbar-width:none;
+        padding-bottom:8px; margin-bottom:4px;
+    }
+    .group-tabs::-webkit-scrollbar { display:none; }
+    .group-tab {
+        flex:0 0 auto; padding:7px 14px; border:2px solid #e8eaed;
+        background:white; border-radius:20px; font-size:13px;
+        font-weight:600; cursor:pointer; white-space:nowrap;
+        color:#999; transition:all 0.15s;
+    }
+    .group-tab.active { background:#00838f; color:white; border-color:#00838f; }
+    .group-tab .tab-count {
+        display:inline-block; background:rgba(0,0,0,0.08); padding:1px 6px;
+        border-radius:8px; font-size:11px; margin-left:3px;
+    }
+    .group-tab.active .tab-count { background:rgba(255,255,255,0.25); }
+    .tab-status {
+        display:inline-block; width:8px; height:8px; border-radius:50%;
+        margin-right:3px; vertical-align:middle;
+    }
+    .tab-status.idle { background:#bdbdbd; }
+    .tab-status.running, .tab-status.watering { background:#2196f3; }
+    .tab-status.postponed { background:#ff9800; }
+    .tab-status.error { background:#f44336; }
+    .tab-status.waiting { background:#4caf50; }
+
+    /* Search */
+    .zone-search-wrap { margin-bottom:8px; }
+    .search-input {
+        width:100%; padding:9px 12px 9px 36px; border:2px solid #e8eaed;
+        border-radius:10px; font-size:14px; outline:none;
+        background:white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23999' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.868-3.834zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E") 12px center no-repeat;
+    }
+    .search-input:focus { border-color:#00838f; }
+
+    /* Quick Actions */
+    .zone-quick-actions { display:flex; gap:8px; margin-bottom:8px; }
+    .zq-btn {
+        padding:9px 16px; border:2px solid #00838f; background:white;
+        color:#00838f; border-radius:10px; font-size:13px; font-weight:600;
+        cursor:pointer; transition:all 0.15s;
+    }
+    .zq-btn:active { transform:scale(0.97); }
+    .zq-filled { flex:1; background:#00838f; color:white; }
+    .zq-danger { border-color:#999; color:#666; }
+
+    /* Zone List */
+    .zone-list { margin-bottom:16px; }
+
+    /* Group section header */
+    .group-section { display:flex; align-items:center; gap:8px; padding:10px 0 4px; }
+    .group-section-name { font-size:12px; font-weight:700; color:#999; text-transform:uppercase; letter-spacing:0.5px; }
+    .group-section-line { flex:1; height:1px; background:#e8eaed; }
+    .group-section-count { font-size:11px; color:#999; background:#f0f0f0; padding:2px 7px; border-radius:8px; }
+
+    /* Zone Card */
+    .zone-card {
+        background:white; border-radius:10px; margin-bottom:5px;
+        overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.06);
+        border-left:4px solid #bdbdbd; transition:border-color 0.2s;
+    }
+    .zone-card.zs-idle { border-left-color:#bdbdbd; }
+    .zone-card.zs-enabled { border-left-color:#4caf50; }
+    .zone-card.zs-running { border-left-color:#2196f3; }
+    .zone-card.zs-error { border-left-color:#f44336; }
+
+    .zone-card-main {
+        display:flex; align-items:center; padding:10px 12px;
+        gap:10px; cursor:pointer; -webkit-tap-highlight-color:transparent;
+    }
+    .zone-card-main:active { background:#fafafa; }
+
+    .zc-icon {
+        width:40px; height:40px; border-radius:9px;
+        display:flex; align-items:center; justify-content:center;
+        font-size:18px; flex-shrink:0; background:#f5f5f5;
+    }
+    .zc-info { flex:1; min-width:0; }
+    .zc-name { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .zc-meta { display:flex; gap:6px; margin-top:1px; font-size:11px; color:#999; flex-wrap:wrap; align-items:center; }
+    .zc-dur-badge { background:#e0f7fa; color:#006064; padding:1px 6px; border-radius:7px; font-size:10px; font-weight:600; }
+    .zc-next { font-size:12px; text-align:right; flex-shrink:0; min-width:44px; }
+    .zc-next-val { font-size:13px; font-weight:600; color:#00838f; }
+    .zc-next-lbl { font-size:9px; color:#999; }
+    .zc-chevron { font-size:10px; color:#ccc; transition:transform 0.2s; flex-shrink:0; }
+    .zone-card.open .zc-chevron { transform:rotate(180deg); }
+
+    /* Running info */
+    .zc-running { display:none; background:#e3f2fd; padding:7px 12px; align-items:center; gap:8px; font-size:13px; color:#1565c0; }
+    .zone-card.zs-running .zc-running { display:flex; }
+    .zc-running-dot { width:10px; height:10px; border-radius:50%; background:#2196f3; animation:waterPulse 1.5s infinite; flex-shrink:0; }
+    @keyframes waterPulse {
+        0% { box-shadow:0 0 0 0 rgba(33,150,243,0.4); }
+        70% { box-shadow:0 0 0 8px rgba(33,150,243,0); }
+        100% { box-shadow:0 0 0 0 rgba(33,150,243,0); }
+    }
+    .zc-running-timer { font-weight:700; font-size:15px; }
+    .zc-running-pct { margin-left:auto; font-size:12px; color:#90caf9; }
+    .zc-progress { height:3px; background:#bbdefb; }
+    .zc-progress-bar { height:100%; background:linear-gradient(90deg,#26c6da,#00838f); transition:width 0.5s; }
+
+    /* Expanded details */
+    .zc-expanded { display:none; padding:10px 12px; background:#fafbfc; border-top:1px solid #f0f0f0; }
+    .zone-card.open .zc-expanded { display:block; }
+    .zc-detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:8px; }
+    .zc-detail-item { background:white; padding:6px 8px; border-radius:7px; border:1px solid #f0f0f0; }
+    .zc-d-label { font-size:10px; color:#999; }
+    .zc-d-value { font-size:13px; font-weight:600; margin-top:1px; }
+    .zc-d-value.highlight { color:#00838f; }
+
+    /* Duration control */
+    .zc-dur-control { display:flex; align-items:center; justify-content:center; gap:14px; padding:10px; background:white; border-radius:8px; border:1px solid #f0f0f0; margin-bottom:8px; }
+    .zc-dur-btn {
+        width:36px; height:36px; border-radius:50%; border:2px solid #00838f;
+        background:white; color:#00838f; font-size:18px; cursor:pointer;
+        display:flex; align-items:center; justify-content:center;
+    }
+    .zc-dur-btn:active { background:#00838f; color:white; }
+    .zc-dur-display { font-size:24px; font-weight:700; color:#00838f; min-width:50px; text-align:center; }
+    .zc-dur-unit { font-size:13px; color:#999; }
+
+    /* Zone actions */
+    .zc-actions { display:flex; gap:6px; }
+    .zc-actions button { flex:1; padding:9px; border:none; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; }
+    .zc-actions button:active { transform:scale(0.97); }
+    .zc-btn-run { background:#00838f; color:white; }
+    .zc-btn-stop { background:#ef5350; color:white; }
+    .zc-btn-edit { background:#f5f5f5; color:#333; border:1px solid #e8eaed !important; }
+
+    /* Bottom Sheet */
+    .sheet-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:200; }
+    .sheet-overlay.show { display:block; }
+    .bottom-sheet {
+        position:fixed; bottom:0; left:0; right:0; background:white;
+        border-radius:14px 14px 0 0; padding:16px; z-index:201;
+        transform:translateY(100%); transition:transform 0.3s;
+        max-height:80vh; overflow-y:auto;
+    }
+    .bottom-sheet.show { transform:translateY(0); }
+    .sheet-handle { width:36px; height:4px; background:#ddd; border-radius:2px; margin:0 auto 12px; }
+    .sheet-title { font-size:17px; font-weight:700; margin-bottom:14px; }
+    .sheet-form-group { margin-bottom:10px; }
+    .sheet-label { font-size:12px; font-weight:600; color:#999; margin-bottom:3px; display:block; }
+    .sheet-input, .sheet-select {
+        width:100%; padding:9px 12px; border:2px solid #e8eaed;
+        border-radius:8px; font-size:14px; outline:none; background:white;
+    }
+    .sheet-input:focus, .sheet-select:focus { border-color:#00838f; }
+    .sheet-actions { display:flex; gap:8px; margin-top:14px; }
+    .sheet-actions button { flex:1; padding:11px; border:none; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer; }
+    .sheet-btn-cancel { background:#f5f5f5; color:#333; }
+    .sheet-btn-save { background:#00838f; color:white; }
+
+    /* Toast */
+    .zone-toast {
+        position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(80px);
+        background:#333; color:white; padding:10px 22px; border-radius:10px;
+        font-size:14px; font-weight:500; z-index:300; opacity:0; transition:all 0.3s;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3); pointer-events:none;
+    }
+    .zone-toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
+    .zone-toast.success { background:#4caf50; }
+    .zone-toast.error { background:#ef5350; }
+
+    /* Desktop: 2 columns for zone cards */
+    @media (min-width:1024px) {
+        .zone-list { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+        .group-section { grid-column:1/-1; }
+    }
 </style>
 {% endblock %}
 
@@ -1400,47 +1586,81 @@
     <button id="resume-btn" class="emergency" style="background:#4caf50; display:none;">Продолжить полив</button>
  </div>
 
-<div class="zones-section">
-    <div class="zones-header">
-        <h3>Все зоны (<span id="zones-count">0</span>)</h3>
-    </div>
-    
-    <!-- Десктоп: таблица -->
-    <table class="zones-table">
-        <thead id="zones-table-head">
-            <tr>
-                <th>Статус</th>
-                <th>№</th>
-                <th>Действие</th>
-                <th>Название</th>
-                <th>Тип</th>
-                <th>Время</th>
-                <th>Группа</th>
-                <th class="hide-mobile col-last-watering">Последний полив</th>
-                <th>Следующий полив</th>
-                <th>Фото</th>
-            </tr>
-        </thead>
-        <tbody id="zones-table-body">
-            <!-- Зоны будут загружены динамически -->
-        </tbody>
-    </table>
-    
-    <!-- Мобилка: карточки -->
-    <div class="zones-cards" id="zones-cards">
-        <!-- Карточки будут загружены динамически -->
-    </div>
+<!-- ========== ZONES v2: Hunter-style ========== -->
+
+<!-- Stats Bar (zones) -->
+<div class="zones-stats-bar" id="zonesStatsBar">
+  <div class="zstat-item"><div class="zstat-val" id="statZonesTotal">0</div><div class="zstat-lbl">Всего</div></div>
+  <div class="zstat-item"><div class="zstat-val" id="statZonesActive">0</div><div class="zstat-lbl">Активна</div></div>
+  <div class="zstat-item"><div class="zstat-val" id="statZonesGroups">0</div><div class="zstat-lbl">Группы</div></div>
+  <div class="zstat-item"><div class="zstat-val" id="statZonesWater">—</div><div class="zstat-lbl">Расход (л)</div></div>
 </div>
 
-<!-- Модальное окно для просмотра фотографий -->
-<div id="photoModal" class="photo-modal">
-    <div class="photo-modal-content">
-        <img id="photoModalImg" src="" alt="Фото зоны">
-        <div class="photo-modal-actions">
-            <button class="btn btn-primary" onclick="closePhotoModal()">Закрыть</button>
-        </div>
-    </div>
+<!-- Group Tabs -->
+<div class="group-tabs" id="groupTabs"></div>
+
+<!-- Search -->
+<div class="zone-search-wrap" id="zoneSearchWrap" style="display:none">
+  <input type="text" class="search-input" id="searchInput" placeholder="Поиск зоны..." oninput="filterZonesBySearch()">
 </div>
+
+<!-- Quick Actions -->
+<div class="zone-quick-actions">
+  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runSelectedGroup()">▶ Запустить все</button>
+  <button class="zq-btn zq-danger" id="zoneSearchToggle" onclick="toggleZoneSearch()">🔍</button>
+</div>
+
+<!-- Zone List -->
+<div class="zone-list" id="zoneList">
+  <!-- Карточки рендерятся JS -->
+</div>
+
+<!-- Bottom Sheet: Edit Zone -->
+<div class="sheet-overlay" id="sheetOverlay" onclick="closeZoneSheet()"></div>
+<div class="bottom-sheet" id="bottomSheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-title" id="sheetTitle">Редактирование зоны</div>
+  <div class="sheet-form-group">
+    <label class="sheet-label">Название</label>
+    <input type="text" class="sheet-input" id="editZoneName">
+  </div>
+  <div class="sheet-form-group">
+    <label class="sheet-label">Тип (иконка)</label>
+    <select class="sheet-select" id="editZoneIcon">
+      <option value="🌿">🌿 Роторные</option>
+      <option value="💧">💧 Капельный</option>
+      <option value="🌊">🌊 Спрей</option>
+      <option value="🌳">🌳 Деревья</option>
+      <option value="🌹">🌹 Цветы</option>
+      <option value="🥕">🥕 Огород</option>
+    </select>
+  </div>
+  <div class="sheet-form-group">
+    <label class="sheet-label">Длительность (мин)</label>
+    <input type="number" class="sheet-input" id="editZoneDuration" min="1" max="120">
+  </div>
+  <div class="sheet-form-group">
+    <label class="sheet-label">Группа</label>
+    <select class="sheet-select" id="editZoneGroup"></select>
+  </div>
+  <div class="sheet-actions">
+    <button class="sheet-btn-cancel" onclick="closeZoneSheet()">Отмена</button>
+    <button class="sheet-btn-save" onclick="saveZoneEdit()">Сохранить</button>
+  </div>
+</div>
+
+<!-- Photo Modal -->
+<div id="photoModal" class="photo-modal">
+  <div class="photo-modal-content">
+    <img id="photoModalImg" src="" alt="Фото зоны">
+    <div class="photo-modal-actions">
+      <button class="btn btn-primary" onclick="closePhotoModal()">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="zone-toast" id="zoneToast"></div>
   </main>
 </div>
 {% endblock %}

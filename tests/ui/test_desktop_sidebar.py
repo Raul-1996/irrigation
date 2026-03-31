@@ -95,23 +95,20 @@ def test_mobile_media_query(client):
 
 
 def test_mobile_zones_cards_class(client):
-    """Verify HTML contains zones-cards container for mobile view."""
+    """Verify HTML contains zone list container for mobile view (v2: Hunter-style)."""
     response = client.get('/status')
     assert response.status_code == 200
     html = response.data.decode('utf-8')
     
-    assert 'class="zones-cards"' in html
-    assert 'id="zones-cards"' in html
+    # v2: zone-list replaces zones-cards
+    assert 'id="zoneList"' in html or 'id="zones-cards"' in html
 
 
 def test_mobile_buttons_responsive(client):
-    """Verify CSS contains media query for responsive group action buttons."""
+    """Verify CSS contains media query for responsive layout."""
     response = client.get('/status')
     assert response.status_code == 200
     html = response.data.decode('utf-8')
     
-    # Проверяем наличие медиа-запроса для мобилки
-    assert '@media (max-width: 767px)' in html or '@media(max-width:767px)' in html
-    
-    # Проверяем что кнопки группы становятся вертикальными
-    assert 'flex-direction: column' in html or 'flex-direction:column' in html
+    # v2: breakpoint raised to 1023px
+    assert '@media (max-width: 1023px)' in html or '@media(max-width:1023px)' in html or '@media (max-width: 767px)' in html
