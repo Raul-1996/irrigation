@@ -1920,6 +1920,9 @@
         var title = gid ? '▶ ' + gName : '▶ Все группы';
         document.getElementById('runPopupTitle').textContent = title;
         runPopupDur = 15;
+        // Show "with defaults" button for group
+        var defBtn = document.getElementById('runPopupDefaults');
+        if (defBtn) defBtn.style.display = 'block';
         initDialTicks();
         updateDial();
         document.getElementById('runPopupOverlay').classList.add('show');
@@ -2063,15 +2066,18 @@
 
     function showRunPopup(zoneId, defaultDur) {
         runPopupZoneId = zoneId;
+        runPopupGroupId = null;
         runPopupDur = defaultDur || 10;
         var z = (zonesData || []).find(function(z){ return z.id === zoneId; });
         var title = z ? '▶ #' + z.id + ' ' + z.name : '▶ Запустить';
         document.getElementById('runPopupTitle').textContent = title;
+        // Hide "with defaults" button for single zone
+        var defBtn = document.getElementById('runPopupDefaults');
+        if (defBtn) defBtn.style.display = 'none';
         initDialTicks();
         updateDial();
         document.getElementById('runPopupOverlay').classList.add('show');
         document.getElementById('runPopup').classList.add('show');
-        // Init drag after visible
         setTimeout(initDialDrag, 100);
     }
     function closeRunPopup() {
@@ -2109,49 +2115,13 @@
             return;
         }
         
-        // Single zone run
+        // Single zone run — duration override (one-time, doesn't change base)
         var id = savedZoneId;
         var z = (zonesData || []).find(function(z){ return z.id === id; });
         var wasRunning = z && z.state === 'on';
         
-        api.put('/api/zones/' + id, { duration: dur }).then(function(putResult) {
-            // Check if PUT actually succeeded
-            var putFailed = false;
-            if (!putResult) putFailed = true;
-            else if (putResult.success === false) putFailed = true;
-            else if (typeof putResult === 'string') putFailed = true; // HTML error page
-            else if (!putResult.zone && !putResult.id && !putResult.duration) putFailed = true;
-            if (putFailed) {
-                console.error('PUT duration failed:', putResult);
-                showZoneToast('Ошибка обновления длительности. Попробуйте ещё раз.', 'error');
-                return;
-            }
-            // Verify duration was saved
-            var savedDur = (putResult.zone || putResult).duration;
-            if (savedDur && savedDur !== dur) {
-                console.warn('Duration mismatch: wanted', dur, 'got', savedDur);
-            }
-            if (z) z.duration = dur;
-            renderZoneCards();
-            
-            if (wasRunning) {
-                // Zone already running — stop then restart with new duration
-                fetch('/api/zones/' + id + '/mqtt/stop', { method: 'POST' })
-                .then(function() { return new Promise(function(r) { setTimeout(r, 500); }); })
-                .then(function() { return fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({duration: dur}) }); })
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    showZoneToast('🔄 Зона #' + id + ' перезапущена на ' + dur + ' мин', 'success');
-                    if (z) z.state = 'on';
-                    renderZoneCards();
-                    renderGroupTabs();
-                    setTimeout(function() { initZoneTimer(z); }, 1000);
-                    setTimeout(function() { loadStatusData(); }, 2000);
-                });
-                return;
-            }
-            
-            // Zone was off — start normally
+        // If already running — stop first, then restart
+        var startFn = function() {
             if (z) z.state = 'on';
             renderZoneCards();
             renderGroupTabs();
@@ -2159,7 +2129,9 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data && data.success) {
-                    showZoneToast('▶ Зона #' + id + ' запущена на ' + dur + ' мин', 'success');
+                    showZoneToast('▶ #' + id + ' запущена на ' + dur + ' мин', 'success');
+                    // Override local duration for timer display
+                    if (z) z._overrideDuration = dur;
                     setTimeout(function() { initZoneTimer(z); }, 1000);
                     setTimeout(function() { loadStatusData(); }, 2000);
                 } else {
@@ -2167,11 +2139,36 @@
                     renderZoneCards();
                     showZoneToast((data && data.message) || 'Ошибка', 'error');
                 }
-            });
-        }).catch(function(err) {
-            showZoneToast('Ошибка: ' + (err.message || 'сеть'), 'error');
-        });
+            }).catch(function() { showZoneToast('Ошибка сети', 'error'); });
+        };
+        
+        if (wasRunning) {
+            fetch('/api/zones/' + id + '/mqtt/stop', { method: 'POST' })
+            .then(function() { return new Promise(function(r) { setTimeout(r, 500); }); })
+            .then(startFn);
+        } else {
+            startFn();
+        }
     }
+    function confirmRunWithDefaults() {
+        var gid = runPopupGroupId;
+        closeRunPopup();
+        if (gid) {
+            fetch('/api/groups/' + gid + '/start-from-first', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                showZoneToast(data && data.success ? '▶ Группа запущена с настройками зон' : 'Ошибка', data && data.success ? 'success' : 'error');
+                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            });
+        } else {
+            (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
+                fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function(){});
+            });
+            showZoneToast('▶ Все группы запущены', 'success');
+            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+        }
+    }
+    window.confirmRunWithDefaults = confirmRunWithDefaults;
     window.showRunPopup = showRunPopup;
     window.closeRunPopup = closeRunPopup;
     window.adjustRunDur = adjustRunDur;

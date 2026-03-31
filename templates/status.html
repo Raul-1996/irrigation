@@ -1648,8 +1648,7 @@
 
 <!-- Quick Actions -->
 <div class="zone-quick-actions">
-  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runGroupWithDefaults()">▶ Запустить</button>
-  <button class="zq-btn zq-outline" onclick="runSelectedGroup()">⏱</button>
+  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runSelectedGroup()">▶ Запустить</button>
   <button class="zq-btn zq-search" onclick="toggleZoneSearch()">🔍</button>
 </div>
 
@@ -1742,9 +1741,15 @@
     <button onclick="setRunDur(30)">30м</button>
     <button onclick="setRunDur(60)">60м</button>
   </div>
-  <div class="run-popup-actions">
+  <div class="run-popup-actions" id="runPopupActions">
     <button class="sheet-btn-cancel" onclick="closeRunPopup()">Отмена</button>
     <button class="sheet-btn-save" onclick="confirmRun()" style="background:#4caf50">▶ Запустить</button>
+  </div>
+  <!-- Extra button for group: run with zone defaults -->
+  <div class="run-popup-defaults" id="runPopupDefaults" style="display:none;margin-top:8px">
+    <button class="sheet-btn-save" onclick="confirmRunWithDefaults()" style="background:#00838f;width:100%;border-radius:10px;padding:14px;font-size:15px;border:none;color:white;font-weight:600;cursor:pointer">
+      📋 Запустить с настройками зон
+    </button>
   </div>
 </div>
 
