@@ -199,7 +199,16 @@ def api_start_group_from_first(group_id):
                 scheduler = None
         if not scheduler:
             return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
-        ok = scheduler.start_group_sequence(group_id)
+        body = request.get_json(silent=True) or {}
+        override_dur = body.get('override_duration')
+        if override_dur is not None:
+            try:
+                override_dur = int(override_dur)
+                if not (1 <= override_dur <= 120):
+                    override_dur = None
+            except (ValueError, TypeError):
+                override_dur = None
+        ok = scheduler.start_group_sequence(group_id, override_duration=override_dur)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
         try:

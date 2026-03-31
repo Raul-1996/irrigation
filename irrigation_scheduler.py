@@ -75,12 +75,12 @@ def job_run_program(program_id: int, zones: list, program_name: str):
         logger.debug("Handled exception in job_run_program: %s", e)
 
 
-def job_run_group_sequence(group_id: int, zone_ids: list):
+def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None):
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
-            s._run_group_sequence(int(group_id), [int(z) for z in zone_ids])
+            s._run_group_sequence(int(group_id), [int(z) for z in zone_ids], override_duration=override_duration)
     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
         logger.debug("Handled exception in job_run_group_sequence: %s", e)
 
@@ -872,7 +872,7 @@ class IrrigationScheduler:
             logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
 
     # ===== Ручной последовательный запуск всех зон в группе =====
-    def start_group_sequence(self, group_id: int):
+    def start_group_sequence(self, group_id: int, override_duration: int = None):
         """Остановить все зоны группы и запустить последовательный полив всех зон по порядку."""
         try:
             zones = self.db.get_zones()
@@ -893,7 +893,7 @@ class IrrigationScheduler:
                 for z in group_zones:
                     start_dt = start_base + timedelta(minutes=cumulative)
                     schedule_map[z['id']] = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                    cumulative += int(z.get('duration') or 0)
+                    cumulative += override_duration if override_duration else int(z.get('duration') or 0)
                 # Очистим предыдущие плановые старты и запишем новые
                 self.db.clear_group_scheduled_starts(group_id)
                 self.db.set_group_scheduled_starts(group_id, schedule_map)
@@ -930,11 +930,11 @@ class IrrigationScheduler:
             zone_ids = [z['id'] for z in group_zones]
             # In TESTING mode, run synchronously to avoid APScheduler thread timing issues
             if os.environ.get('TESTING') == '1':
-                self._run_group_sequence(group_id, zone_ids)
+                self._run_group_sequence(group_id, zone_ids, override_duration=override_duration)
             else:
                 # Запускаем последовательность в отдельном джобе прямо сейчас
                 _kwargs = dict(
-                    args=[group_id, zone_ids],
+                    args=[group_id, zone_ids, override_duration],
                     id=f"group_seq:{group_id}:{int(datetime.now().timestamp())}",
                     replace_existing=False,
                     misfire_grace_time=120,
@@ -959,7 +959,7 @@ class IrrigationScheduler:
             logger.error(f"Ошибка старта последовательного полива для группы {group_id}: {e}")
             return False
 
-    def _run_group_sequence(self, group_id: int, zone_ids: List[int]):
+    def _run_group_sequence(self, group_id: int, zone_ids: List[int], override_duration: int = None):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
         if os.environ.get('TESTING') == '1':
             logger.debug("TESTING mode: simplified _run_group_sequence for group %s", group_id)
@@ -968,7 +968,7 @@ class IrrigationScheduler:
                 zone = self.db.get_zone(zone_id)
                 if not zone:
                     continue
-                duration = int(zone.get('duration') or 0)
+                duration = override_duration if override_duration else int(zone.get('duration') or 0)
                 if duration <= 0:
                     continue
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -999,7 +999,8 @@ class IrrigationScheduler:
                     logger.warning(f"Группа {group_id}: зона {zone_id} не найдена, пропуск")
                     continue
 
-                duration = self._get_weather_adjusted_duration(zone_id, int(zone.get('duration') or 0))
+                base_dur = override_duration if override_duration else int(zone.get('duration') or 0)
+                duration = self._get_weather_adjusted_duration(zone_id, base_dur)
                 if duration <= 0:
                     logger.info(f"Группа {group_id}: зона {zone_id} имеет нулевую длительность, пропуск")
                     continue

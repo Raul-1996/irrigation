@@ -514,7 +514,14 @@
             var progEl = document.getElementById('zprog-' + zid);
             var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
             if (progEl && zone) {
-                var total = (zone.duration || 10) * 60;
+                var total;
+                if (zone.planned_end_time && zone.watering_start_time) {
+                    var endMs = new Date(zone.planned_end_time).getTime();
+                    var startMs = new Date(zone.watering_start_time).getTime();
+                    total = Math.max(60, Math.floor((endMs - startMs) / 1000));
+                } else {
+                    total = (zone.duration || 10) * 60;
+                }
                 var pct = Math.min(100, Math.max(0, ((total - sec) / total) * 100));
                 progEl.style.width = pct + '%';
                 var pctEl = document.getElementById('zpct-' + zid);
@@ -1792,7 +1799,14 @@
 
     function initZoneTimer(zone) {
         function applyTimer(remain) {
-            var total = (zone.duration || 10) * 60;
+            var total;
+            if (zone.planned_end_time && zone.watering_start_time) {
+                var endMs = new Date(zone.planned_end_time).getTime();
+                var startMs = new Date(zone.watering_start_time).getTime();
+                total = Math.max(60, Math.floor((endMs - startMs) / 1000));
+            } else {
+                total = (zone.duration || 10) * 60;
+            }
             var pct = Math.min(100, Math.max(0, ((total - remain) / total) * 100));
             var timerEl = document.getElementById('ztimer-' + zone.id);
             var pctEl = document.getElementById('zpct-' + zone.id);
@@ -1861,20 +1875,18 @@
         if (!z) return;
         var wantOn = z.state !== 'on';
         var url = wantOn ? '/api/zones/' + id + '/mqtt/start' : '/api/zones/' + id + '/mqtt/stop';
-        // Optimistic
+        // Optimistic: set state + times BEFORE fetch for instant timer
         z.state = wantOn ? 'on' : 'off';
+        if (wantOn) {
+            z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
+            z.planned_end_time = new Date(Date.now() + (z.duration||10) * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+        }
         renderZoneCards();
         renderGroupTabs();
         fetch(url, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
             if (data && data.success) {
                 hideLoading();
                 showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
-                // Set local planned_end_time for instant timer
-                if (wantOn && z) {
-                    z.planned_end_time = new Date(Date.now() + (z.duration||10) * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
-                    initZoneTimer(z);
-                    renderZoneCards();
-                }
                 // Light refresh status (groups) after 2 sec
                 setTimeout(function() { loadStatusData(); }, 2000);
             } else {
@@ -2104,20 +2116,26 @@
         closeRunPopup();
         
         if (savedGroupId) {
-            // Group run: update all zone durations in group, then start
+            // Group run: pass override_duration to API (does NOT change base durations in DB)
             var gid = savedGroupId;
             var groupZones = (zonesData || []).filter(function(z) { return z.group_id === gid && z.group_id !== 999; });
-            // Update durations
-            Promise.all(groupZones.map(function(z) {
-                return api.put('/api/zones/' + z.id, { duration: dur }).catch(function(){});
-            })).then(function() {
-                groupZones.forEach(function(z) { z.duration = dur; });
-                fetch('/api/groups/' + gid + '/start-from-first', { method: 'POST' })
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    showZoneToast(data && data.success ? '▶ Группа запущена' : 'Ошибка', data && data.success ? 'success' : 'error');
-                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
-                });
+            // Optimistic: set local times for instant timer display
+            groupZones.forEach(function(z) {
+                z.state = 'on';
+                z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
+                z.planned_end_time = new Date(Date.now() + dur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+            });
+            renderZoneCards();
+            renderGroupTabs();
+            fetch('/api/groups/' + gid + '/start-from-first', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({override_duration: dur})
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                showZoneToast(data && data.success ? '▶ Группа запущена' : 'Ошибка', data && data.success ? 'success' : 'error');
+                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             });
             return;
         }
@@ -2130,7 +2148,12 @@
         // If already running — stop first, then restart
         showLoading('Запуск зоны #' + id + '...');
         var startFn = function() {
-            if (z) z.state = 'on';
+            // Optimistic: set state + times BEFORE fetch for instant timer
+            if (z) {
+                z.state = 'on';
+                z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
+                z.planned_end_time = new Date(Date.now() + dur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+            }
             renderZoneCards();
             renderGroupTabs();
             fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({duration: dur}) })
@@ -2139,13 +2162,8 @@
                 if (data && data.success) {
                     hideLoading();
                     showZoneToast('▶ #' + id + ' запущена на ' + dur + ' мин', 'success');
-                    // Set local planned_end_time for instant timer
-                    if (z) {
-                        z.planned_end_time = new Date(Date.now() + dur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
-                        z.duration = dur; // local only for timer calc
-                    }
-                    initZoneTimer(z); // instant, no delay
-                    renderZoneCards();
+                    // Refresh timer (server times may differ slightly)
+                    initZoneTimer(z);
                     setTimeout(function() { loadStatusData(); }, 2000);
                 } else {
                     if (z) z.state = 'off';
