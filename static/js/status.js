@@ -330,11 +330,9 @@
             if (zone && zone.planned_end_time) {
                 var endMs = new Date(zone.planned_end_time).getTime();
                 var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
-                if (remain > 0) {
-                    span.dataset.remainingSeconds = String(remain);
-                    span.textContent = formatSeconds(remain);
-                    return;
-                }
+                span.dataset.remainingSeconds = String(remain);
+                span.textContent = formatSeconds(remain);
+                return;
             }
         } catch(e) {}
         // Fallback: fetch from API
@@ -425,7 +423,18 @@
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
             let extraText = '—';
             if (group.status === 'watering' && group.current_zone) {
-                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                // Compute timer inline to avoid --:-- flash
+                var _gt = '--:--', _gr = '';
+                try {
+                    var _gz = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
+                    if (_gz && _gz.planned_end_time) {
+                        var _ge = new Date(_gz.planned_end_time).getTime();
+                        var _grem = Math.max(0, Math.floor((_ge - Date.now()) / 1000));
+                        _gt = formatSeconds(_grem);
+                        _gr = String(_grem);
+                    }
+                } catch(e) {}
+                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gr}">${_gt}</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu = String(group.postpone_until);
                 const reason = String(group.postpone_reason || '').toLowerCase();
@@ -565,7 +574,17 @@
             const statusText = getStatusText(group);
             let extraText2 = '—';
             if (group.status === 'watering' && group.current_zone) {
-                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                var _gt2 = '--:--', _gr2 = '';
+                try {
+                    var _gz2 = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
+                    if (_gz2 && _gz2.planned_end_time) {
+                        var _ge2 = new Date(_gz2.planned_end_time).getTime();
+                        var _grem2 = Math.max(0, Math.floor((_ge2 - Date.now()) / 1000));
+                        _gt2 = formatSeconds(_grem2);
+                        _gr2 = String(_grem2);
+                    }
+                } catch(e) {}
+                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gr2}">${_gt2}</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu2 = String(group.postpone_until);
                 const reason2 = String(group.postpone_reason || '').toLowerCase();
