@@ -486,6 +486,28 @@
     }
 
     function tickCountdowns() {
+        // Tick zone card timers
+        document.querySelectorAll('.zc-running-timer').forEach(function(el) {
+            var val = el.dataset.remainingSeconds;
+            if (!val) return;
+            var sec = Number(val);
+            if (isNaN(sec) || sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
+            sec--;
+            el.dataset.remainingSeconds = String(sec);
+            el.textContent = formatSeconds(sec);
+            // Update progress bar
+            var zid = el.id.replace('ztimer-', '');
+            var progEl = document.getElementById('zprog-' + zid);
+            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
+            if (progEl && zone) {
+                var total = (zone.duration || 10) * 60;
+                var pct = Math.min(100, Math.max(0, ((total - sec) / total) * 100));
+                progEl.style.width = pct + '%';
+                var pctEl = document.getElementById('zpct-' + zid);
+                if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+            }
+        });
+        // Tick group timers
         const spans = document.querySelectorAll('.group-timer');
         spans.forEach(span => {
             const val = span.dataset.remainingSeconds;
@@ -1722,7 +1744,7 @@
     function updateZoneStats(zones) {
         var all = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
         var running = all.filter(function(z) { return z.state === 'on'; }).length;
-        var groups = zoneGroupsCache || [];
+        var groups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
         var totalWater = 0;
         all.forEach(function(z) { if (z.last_total_liters > 0) totalWater += z.last_total_liters; });
 
