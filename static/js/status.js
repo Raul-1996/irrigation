@@ -304,7 +304,7 @@
                 `;
                 cardsFrag.appendChild(card);
             });
-            if (frag.childNodes.length) tbody.appendChild(frag);
+            if (frag.childNodes.length && tbody) tbody.appendChild(frag);
             if (cardsFrag.childNodes.length && cardsContainer) {
                 cardsContainer.innerHTML = '';
                 cardsContainer.appendChild(cardsFrag);
@@ -313,7 +313,7 @@
             // Повторная страховка на случай вновь созданных строк
             try { ensureAdminCellsInRows(); } catch(e){}
             try { fillAdminCellsFromZonesData(); } catch(e){}
-            document.getElementById('zones-count').textContent = filteredZones.length;
+            try { document.getElementById('zones-count').textContent = filteredZones.length; } catch(e) {}
             hideConnectionError();
             // После первичного рендера — синхронизация с актуальным статусом групп
             try { reconcileZoneRowsWithGroupStatus(); } catch(e) {}
@@ -834,6 +834,7 @@
         const tbody = document.getElementById('zones-table-body');
         const countSpan = document.getElementById('zones-count');
         
+        if (!tbody) return; // V2: table removed, cards used instead
         tbody.innerHTML = '';
         
         // Фильтруем зоны, исключая группу 999 (БЕЗ ПОЛИВА)
