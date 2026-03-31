@@ -1749,11 +1749,24 @@
                 }
             }
 
-            // Running info
+            // Running info — compute timer inline to avoid --:-- flash on re-render
             var runningHtml = '';
             if (isRunning) {
-                runningHtml = '<div class="zc-running"><span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '">--:--</span><span class="zc-running-pct" id="zpct-' + z.id + '"></span></div>';
-                runningHtml += '<div class="zc-progress"><div class="zc-progress-bar" id="zprog-' + z.id + '" style="width:0%"></div></div>';
+                var _timerText = '--:--';
+                var _pctText = '';
+                var _progWidth = '0%';
+                if (z.planned_end_time && z.watering_start_time) {
+                    var _endMs = new Date(z.planned_end_time).getTime();
+                    var _startMs = new Date(z.watering_start_time).getTime();
+                    var _remain = Math.max(0, Math.floor((_endMs - Date.now()) / 1000));
+                    var _total = Math.max(60, Math.floor((_endMs - _startMs) / 1000));
+                    _timerText = formatSeconds(_remain);
+                    var _pct = Math.min(100, Math.max(0, ((_total - _remain) / _total) * 100));
+                    _pctText = Math.round(_pct) + '%';
+                    _progWidth = _pct + '%';
+                }
+                runningHtml = '<div class="zc-running"><span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + (_remain || '') + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span></div>';
+                runningHtml += '<div class="zc-progress"><div class="zc-progress-bar" id="zprog-' + z.id + '" style="width:' + _progWidth + '"></div></div>';
             }
 
             var emergency = !!(statusData && statusData.emergency_stop);
