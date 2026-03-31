@@ -324,6 +324,20 @@
     async function initGroupTimer(group) {
         const span = document.getElementById(`group-timer-${group.id}`);
         if (!span) return;
+        // Try local calc first (instant, no fetch)
+        try {
+            var zone = group.current_zone ? (zonesData || []).find(function(z){ return z.id === group.current_zone; }) : null;
+            if (zone && zone.planned_end_time) {
+                var endMs = new Date(zone.planned_end_time).getTime();
+                var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                if (remain > 0) {
+                    span.dataset.remainingSeconds = String(remain);
+                    span.textContent = formatSeconds(remain);
+                    return;
+                }
+            }
+        } catch(e) {}
+        // Fallback: fetch from API
         try {
             const res = await fetch(`/api/zones/${group.current_zone}/watering-time?ts=${Date.now()}`, { cache: 'no-store' });
             const data = await res.json();
@@ -1777,20 +1791,32 @@
     }
 
     function initZoneTimer(zone) {
+        function applyTimer(remain) {
+            var total = (zone.duration || 10) * 60;
+            var pct = Math.min(100, Math.max(0, ((total - remain) / total) * 100));
+            var timerEl = document.getElementById('ztimer-' + zone.id);
+            var pctEl = document.getElementById('zpct-' + zone.id);
+            var progEl = document.getElementById('zprog-' + zone.id);
+            if (timerEl) { timerEl.textContent = formatSeconds(remain); timerEl.dataset.remainingSeconds = String(remain); }
+            if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+            if (progEl) progEl.style.width = pct + '%';
+        }
+        // Try local calc first (instant)
+        try {
+            if (zone.planned_end_time) {
+                var endMs = new Date(zone.planned_end_time).getTime();
+                var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                if (remain > 0) { applyTimer(remain); return; }
+            }
+        } catch(e) {}
+        // Fallback: fetch
         try {
             fetch('/api/zones/' + zone.id + '/watering-time?ts=' + Date.now(), { cache: 'no-store' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (!data || !data.success || !data.is_watering) return;
                 var remain = data.remaining_seconds || (data.remaining_time * 60);
-                var total = (zone.duration || 10) * 60;
-                var pct = Math.min(100, Math.max(0, ((total - remain) / total) * 100));
-                var timerEl = document.getElementById('ztimer-' + zone.id);
-                var pctEl = document.getElementById('zpct-' + zone.id);
-                var progEl = document.getElementById('zprog-' + zone.id);
-                if (timerEl) { timerEl.textContent = formatSeconds(remain); timerEl.dataset.remainingSeconds = String(remain); }
-                if (pctEl) pctEl.textContent = Math.round(pct) + '%';
-                if (progEl) progEl.style.width = pct + '%';
+                applyTimer(remain);
             }).catch(function() {});
         } catch(e) {}
     }
@@ -1938,31 +1964,96 @@
     }
     window.saveZoneEdit = saveZoneEdit;
 
-    // Run Duration Popup
+    // Run Duration Popup with Circular Dial
     var runPopupZoneId = null;
     var runPopupDur = 10;
+    var MAX_DUR = 120;
+    var DIAL_R = 85;
+    var DIAL_CIRC = 2 * Math.PI * DIAL_R;
+
+    function updateDial() {
+        var frac = runPopupDur / MAX_DUR;
+        var arc = document.getElementById('dialArc');
+        var handle = document.getElementById('dialHandle');
+        var valEl = document.getElementById('dialValue');
+        if (arc) arc.setAttribute('stroke-dashoffset', String(DIAL_CIRC * (1 - frac)));
+        if (valEl) valEl.textContent = runPopupDur;
+        if (handle) {
+            var angle = frac * 360 - 90;
+            var rad = angle * Math.PI / 180;
+            var hx = 100 + DIAL_R * Math.cos(rad);
+            var hy = 100 + DIAL_R * Math.sin(rad);
+            handle.setAttribute('cx', String(hx));
+            handle.setAttribute('cy', String(hy));
+        }
+    }
+
+    function initDialTicks() {
+        var g = document.getElementById('dialTicks');
+        if (!g) return;
+        var html = '';
+        for (var i = 0; i <= 120; i += 10) {
+            var angle = (i / MAX_DUR) * 360 - 90;
+            var rad = angle * Math.PI / 180;
+            var x1 = 100 + 72 * Math.cos(rad), y1 = 100 + 72 * Math.sin(rad);
+            var x2 = 100 + 78 * Math.cos(rad), y2 = 100 + 78 * Math.sin(rad);
+            var tx = 100 + 65 * Math.cos(rad), ty = 100 + 65 * Math.sin(rad);
+            html += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="#bbb" stroke-width="1.5"/>';
+            if (i % 30 === 0) html += '<text x="'+tx+'" y="'+ty+'" text-anchor="middle" dominant-baseline="central" font-size="10" fill="#999">'+i+'</text>';
+        }
+        g.innerHTML = html;
+    }
+
+    function initDialDrag() {
+        var svg = document.getElementById('dialSvg');
+        if (!svg) return;
+        var dragging = false;
+        function angleFromEvent(e) {
+            var rect = svg.getBoundingClientRect();
+            var cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+            var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            var angle = Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI + 90;
+            if (angle < 0) angle += 360;
+            return angle;
+        }
+        function onMove(e) {
+            if (!dragging) return;
+            e.preventDefault();
+            var angle = angleFromEvent(e);
+            var dur = Math.round((angle / 360) * MAX_DUR);
+            runPopupDur = Math.max(1, Math.min(MAX_DUR, dur));
+            updateDial();
+        }
+        svg.addEventListener('mousedown', function(e) { dragging = true; onMove(e); });
+        svg.addEventListener('touchstart', function(e) { dragging = true; onMove(e); }, {passive:false});
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('touchmove', onMove, {passive:false});
+        document.addEventListener('mouseup', function() { dragging = false; });
+        document.addEventListener('touchend', function() { dragging = false; });
+    }
+
     function showRunPopup(zoneId, defaultDur) {
         runPopupZoneId = zoneId;
         runPopupDur = defaultDur || 10;
         var z = (zonesData || []).find(function(z){ return z.id === zoneId; });
         var title = z ? '▶ #' + z.id + ' ' + z.name : '▶ Запустить';
         document.getElementById('runPopupTitle').textContent = title;
-        document.getElementById('runPopupDur').textContent = runPopupDur;
+        initDialTicks();
+        updateDial();
         document.getElementById('runPopupOverlay').classList.add('show');
         document.getElementById('runPopup').classList.add('show');
+        // Init drag after visible
+        setTimeout(initDialDrag, 100);
     }
     function closeRunPopup() {
         document.getElementById('runPopupOverlay').classList.remove('show');
         document.getElementById('runPopup').classList.remove('show');
         runPopupZoneId = null;
     }
-    function adjustRunDur(delta) {
-        runPopupDur = Math.max(1, Math.min(120, runPopupDur + delta));
-        document.getElementById('runPopupDur').textContent = runPopupDur;
-    }
     function setRunDur(val) {
         runPopupDur = val;
-        document.getElementById('runPopupDur').textContent = runPopupDur;
+        updateDial();
     }
     function confirmRun() {
         if (!runPopupZoneId) return;
