@@ -171,6 +171,15 @@ class ZoneRepository(BaseRepository):
                 if 'mqtt_server_id' in updated_data:
                     sql_fields.append('mqtt_server_id = ?')
                     params.append(updated_data.get('mqtt_server_id'))
+                if 'planned_end_time' in zone_data:
+                    sql_fields.append('planned_end_time = ?')
+                    params.append(zone_data['planned_end_time'])
+                if 'watering_start_source' in zone_data:
+                    sql_fields.append('watering_start_source = ?')
+                    params.append(zone_data['watering_start_source'])
+                if 'commanded_state' in zone_data:
+                    sql_fields.append('commanded_state = ?')
+                    params.append(zone_data['commanded_state'])
 
                 sql_fields.append('updated_at = CURRENT_TIMESTAMP')
                 params.append(zone_id)
