@@ -392,7 +392,6 @@ def api_zone_mqtt_start(zone_id: int):
         t3 = time.time()
         # DB update — use override duration for planned_end_time
         override_dur = int(z.get('duration') or 10)
-        logger.warning("DIAG mqtt_start zone=%s override_dur=%s z_duration=%s", zone_id, override_dur, z.get('duration'))
         now_dt = datetime.now()
         planned_end = (now_dt + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
         try:
@@ -403,7 +402,6 @@ def api_zone_mqtt_start(zone_id: int):
                 'commanded_state': 'on',
                 'planned_end_time': planned_end
             })
-            logger.warning("DIAG MAIN_THREAD zone=%s planned_end_time=%s (dur=%s) ts=%s", zone_id, planned_end, override_dur, time.time())
         except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_1063: %s", e)
         t4 = time.time()
@@ -415,23 +413,19 @@ def api_zone_mqtt_start(zone_id: int):
             _is_testing = current_app.config.get('TESTING', False)
             def _bg_schedule():
                 try:
-                    logger.warning("DIAG _bg_schedule zone=%s _override_dur_for_bg=%s", zone_id, _override_dur_for_bg)
                     sched = get_scheduler()
                     if sched and not _is_testing:
                         dur = _override_dur_for_bg
-                        logger.warning("DIAG _bg_schedule calling schedule_zone_stop zone=%s dur=%s", zone_id, dur)
                         if dur > 0:
                             sched.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
                             sched.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
                     if (not sched) and not _is_testing:
                         dur = _override_dur_for_bg
-                        logger.warning("DIAG fallback path dur=%s zone=%s", dur, zone_id)
                         # Write planned_end_time for fallback too
                         if dur > 0:
                             try:
                                 fallback_end = (datetime.now() + timedelta(minutes=dur)).strftime('%Y-%m-%d %H:%M:%S')
                                 db.update_zone(zone_id, {'planned_end_time': fallback_end})
-                                logger.warning("DIAG fallback planned_end_time=%s", fallback_end)
                             except (sqlite3.Error, OSError) as e:
                                 logger.debug("fallback planned_end_time update failed: %s", e)
                             def _fallback_stop():
@@ -471,17 +465,6 @@ def api_zone_mqtt_start(zone_id: int):
             db.add_log('zone_start_manual', json.dumps({'zone': int(zone_id), 'group': gid}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("Handled exception in line_1120: %s", e)
-        
-        # FINAL safety: re-write planned_end_time AFTER all background threads
-        # (some background process keeps clearing it)
-        time.sleep(0.1)  # let bg threads complete
-        try:
-            final_end = (datetime.now() + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
-            db.update_zone(zone_id, {'planned_end_time': final_end})
-            logger.warning("DIAG FINAL_SAFETY zone=%s planned_end_time=%s", zone_id, final_end)
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("final planned_end_time safety failed: %s", e)
-        
         return jsonify({'success': True, 'message': f'Зона {int(zone_id)} запущена'})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         logger.exception('api_zone_mqtt_start failed')

@@ -492,8 +492,6 @@ class IrrigationScheduler:
                     try:
                         planned_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
                         self.db.update_zone(zone_id, {'planned_end_time': planned_str})
-                        import time as time_mod
-                        logger.warning("DIAG SCHEDULER zone=%s planned_end_time=%s ts=%s", zone_id, planned_str, time_mod.time())
                     except (sqlite3.Error, OSError) as e:
                         logger.debug("Handled exception in line_413: %s", e)
                     # Watchdog job
