@@ -485,7 +485,7 @@
             // pad to keep even number of cells for 2x2 symmetry on desktop
             const mvBlock = gridCells.length ? `<div class="group-info-grid">${gridCells.join('')}${gridCells.length % 2 ? '<div class="grid-item"></div>' : ''}</div>` : '';
             card.innerHTML = `
-                <div class="group-header">${group.name}</div>
+                <div class="group-header">${escapeHtml(group.name)}</div>
                 <div id="group-status-${group.id}">${statusText}</div>
                 <div class="postpone-until">${extraText}</div>
                 ${groupButtons}
@@ -595,7 +595,7 @@
                 </div>
                 <div class=\"btn-group\" style=\"width:100%\">${groupActionHtml2}</div>`;
             card.innerHTML = `
-                <div class="group-header">${group.name}</div>
+                <div class="group-header">${escapeHtml(group.name)}</div>
                 <div id="group-status-${group.id}">${statusText}</div>
                 <div class="postpone-until">${extraText2}</div>
                 ${groupButtons}
@@ -716,10 +716,10 @@
                  <td><span class="indicator ${zone.state}"></span></td>
                  <td>${zone.id}</td>
                  <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
-                 <td>${zone.name}</td>
-                 <td>${zone.icon}</td>
+                 <td>${escapeHtml(zone.name)}</td>
+                 <td>${escapeHtml(zone.icon)}</td>
                  <td>${zone.duration} мин</td>
-                 <td>${groupNameById[zone.group_id] || zone.group_id}</td>
+                 <td>${escapeHtml(groupNameById[zone.group_id] || zone.group_id)}</td>
                  <td class="hide-mobile col-last-watering">—</td>
                  <td class="col-next" data-label="Следующий полив">${nextWatering}</td>
                  ${showWaterCols ? `<td class=\"admin-only\">${avgFlow}</td>` : ''}
@@ -1491,7 +1491,7 @@
         if (detEl) {
             perZone.sort(function(a,b) { return b.liters - a.liters; });
             detEl.innerHTML = perZone.slice(0, 3).map(function(z) {
-                return '<span>' + z.name + ': ' + Math.round(z.liters) + 'л</span>';
+                return '<span>' + escapeHtml(z.name) + ': ' + Math.round(z.liters) + 'л</span>';
             }).join('');
         }
     }
@@ -1546,7 +1546,7 @@
                 if (sg) gStatus = sg.status || 'waiting';
             }
             html += '<button class="group-tab ' + (currentGroupFilter === g.id ? 'active' : '') + '" onclick="selectZoneGroup(' + g.id + ')">';
-            html += '<span class="tab-status ' + gStatus + '"></span>' + g.name;
+            html += '<span class="tab-status ' + gStatus + '"></span>' + escapeHtml(g.name);
             html += '<span class="tab-count">' + (gRunning ? '▶' + gRunning : gZones.length) + '</span></button>';
         });
         c.innerHTML = html;
@@ -1592,7 +1592,7 @@
             if (showSections && z.group_id !== lastGroupId) {
                 var gName = groupNameById[z.group_id] || ('Группа ' + z.group_id);
                 var gCount = (zonesData || []).filter(function(zz) { return zz.group_id === z.group_id && zz.group_id !== 999; }).length;
-                html += '<div class="group-section"><span class="group-section-name">' + gName + '</span><span class="group-section-line"></span><span class="group-section-count">' + gCount + ' зон</span></div>';
+                html += '<div class="group-section"><span class="group-section-name">' + escapeHtml(gName) + '</span><span class="group-section-line"></span><span class="group-section-count">' + gCount + ' зон</span></div>';
                 lastGroupId = z.group_id;
             }
 
@@ -1642,9 +1642,9 @@
             html += '<div class="zone-card ' + statusCls + '" id="zcard-' + z.id + '" data-zone-id="' + z.id + '">';
             html += '<div class="zone-card-main" onclick="toggleZoneCard(' + z.id + ')">';
             html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
-            html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + (z.name || '') + '</div>';
+            html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + escapeHtml(z.name || '') + '</div>';
             html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
-            if (!showSections) html += '<span style="color:#ddd">·</span><span>' + gName2 + '</span>';
+            if (!showSections) html += '<span style="color:#ddd">·</span><span>' + escapeHtml(gName2) + '</span>';
             html += '</div></div>';
             html += nextHtml;
             html += '<span class="zc-chevron">▼</span>';
@@ -1656,7 +1656,7 @@
             html += '<div class="zc-expanded">';
             html += '<div class="zc-detail-grid">';
             html += '<div class="zc-detail-item"><div class="zc-d-label">Длительность</div><div class="zc-d-value">' + z.duration + ' мин</div></div>';
-            html += '<div class="zc-detail-item"><div class="zc-d-label">Группа</div><div class="zc-d-value">' + gName2 + '</div></div>';
+            html += '<div class="zc-detail-item"><div class="zc-d-label">Группа</div><div class="zc-d-value">' + escapeHtml(gName2) + '</div></div>';
             var nextFull = z._nextWatering || '—';
             html += '<div class="zc-detail-item"><div class="zc-d-label">След. полив</div><div class="zc-d-value ' + (nextFull !== '—' && nextFull !== 'Никогда' ? 'highlight' : '') + '">' + nextFull + '</div></div>';
             html += '<div class="zc-detail-item"><div class="zc-d-label">Послед. полив</div><div class="zc-d-value">' + (z.last_watering_time ? z.last_watering_time.replace('T',' ').slice(0,16) : '—') + '</div></div>';
@@ -1892,7 +1892,7 @@
         // Populate groups
         var gs = document.getElementById('editZoneGroup');
         gs.innerHTML = (zoneGroupsCache || []).map(function(g) {
-            return '<option value="' + g.id + '"' + (g.id === z.group_id ? ' selected' : '') + '>' + g.name + '</option>';
+            return '<option value="' + g.id + '"' + (g.id === z.group_id ? ' selected' : '') + '>' + escapeHtml(g.name) + '</option>';
         }).join('');
         document.getElementById('sheetOverlay').classList.add('show');
         document.getElementById('bottomSheet').classList.add('show');

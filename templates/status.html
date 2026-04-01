@@ -1789,11 +1789,14 @@
 {% endblock %}
 
 {% block extra_js %}
+<script type="application/json" id="ssr-zones">{{ inline_zones|default('[]') }}</script>
+<script type="application/json" id="ssr-groups">{{ inline_groups|default('[]') }}</script>
+<script type="application/json" id="ssr-status">{{ inline_status|default('{}') }}</script>
 <script>
 // SSR: inline data for instant render (no fetch needed on first load)
-window._ssrZones = {{ inline_zones|default('[]')|safe }};
-window._ssrGroups = {{ inline_groups|default('[]')|safe }};
-window._ssrStatus = {{ inline_status|default('{}')|safe }};
+window._ssrZones = JSON.parse(document.getElementById('ssr-zones').textContent);
+window._ssrGroups = JSON.parse(document.getElementById('ssr-groups').textContent);
+window._ssrStatus = JSON.parse(document.getElementById('ssr-status').textContent);
 </script>
 <script src="{{ asset('static/js/status.js') }}"></script>
 {% endblock %}

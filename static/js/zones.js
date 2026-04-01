@@ -79,7 +79,7 @@
                     </div>
                 </td>
                 <td>
-                    <input type="text" class="zone-name" value="${zone.name}" 
+                    <input type="text" class="zone-name" value="${escapeHtml(zone.name)}" 
                            onchange="updateZone(${zone.id}, 'name', this.value)">
                 </td>
                 <td>
@@ -90,17 +90,17 @@
                     <select class="zone-group" onchange="updateZone(${zone.id}, 'group_id', this.value)">
                         ${groupsData.map(group => 
                             (group.id === 999 ? `<option value="999" ${zone.group_id == 999 ? 'selected' : ''}>БЕЗ ПОЛИВА</option>` :
-                            `<option value="${group.id}" ${zone.group_id == group.id ? 'selected' : ''}>${group.name}</option>`)
+                            `<option value="${group.id}" ${zone.group_id == group.id ? 'selected' : ''}>${escapeHtml(group.name)}</option>`)
                         ).join('')}
                     </select>
                 </td>
                 <td>
-                    <input type="text" class="zone-topic" value="${zone.topic || ''}" 
+                    <input type="text" class="zone-topic" value="${escapeHtml(zone.topic || '')}" 
                            placeholder="zone/1" onchange="updateZone(${zone.id}, 'topic', this.value)">
                 </td>
                 <td>
                     <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
-                        ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${s.name}</option>`).join('')}
+                        ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                     </select>
                 </td>
                 <td>
@@ -150,7 +150,7 @@
                 <div class="group-head-grid">
                     <div>
                         <label style="display:block; color:#555; font-weight:500; margin-bottom:4px;">Имя группы</label>
-                    <input type="text" class="group-name" value="${group.name}" 
+                    <input type="text" class="group-name" value="${escapeHtml(group.name)}" 
                            oninput="autoSaveGroupName(${group.id}, this.value)"
                            placeholder="Название группы"
                                style="width:100%; height:34px;">
@@ -309,25 +309,25 @@
             if (selector) {
                 selector.innerHTML = groupsData.map(group => {
                     // В массовых действиях тоже показываем группу 999 (БЕЗ ПОЛИВА)
-                    return `<option value="${group.id}">${group.id===999?'БЕЗ ПОЛИВА':group.name}</option>`;
+                    return `<option value="${group.id}">${group.id===999?'БЕЗ ПОЛИВА':escapeHtml(group.name)}</option>`;
                 }).join('');
             }
         });
         // MQTT servers for bulk
         const bulkMqtt = document.getElementById('bulkMqtt');
         if (bulkMqtt) {
-            bulkMqtt.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+            bulkMqtt.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         }
         // Rain server selector
         const rs = document.getElementById('rain-server');
         if (rs) {
-            rs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+            rs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         }
         // Env servers
         const ets = document.getElementById('env-temp-server');
-        if (ets) ets.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+        if (ets) ets.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         const ehs = document.getElementById('env-hum-server');
-        if (ehs) ehs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+        if (ehs) ehs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
     }
     
     // Обновление счетчика зон
@@ -1053,7 +1053,7 @@
                 const groups = (c.common_groups || []).join(', ');
                 const zones = (c.common_zones || []).join(', ');
                 return `<li style="margin-bottom: .5rem;">
-                    <div><strong>${c.checked_program_name}</strong> (${c.checked_program_time}) ↔ <strong>${c.other_program_name}</strong> (${c.other_program_time})</div>
+                    <div><strong>${escapeHtml(c.checked_program_name)}</strong> (${c.checked_program_time}) ↔ <strong>${escapeHtml(c.other_program_name)}</strong> (${c.other_program_time})</div>
                     <div>Пересечение: ${start} - ${end}</div>
                     ${zones ? `<div>Зоны: ${zones}</div>` : ''}
                     ${groups ? `<div>Группы: ${groups}</div>` : ''}

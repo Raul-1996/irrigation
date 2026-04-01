@@ -77,7 +77,7 @@
             const finishText = computeProgramFinishText(program);
             tr.innerHTML = `
                 <td>${program.id}</td>
-                <td>${program.name}</td>
+                <td>${escapeHtml(program.name)}</td>
                 <td>${startText}</td>
                 <td>${finishText}</td>
                 <td>${formatDays(program.days)}</td>
@@ -288,7 +288,7 @@
                 groupDiv.className = 'group-block';
                 
                 const groupLabel = document.createElement('label');
-                groupLabel.innerHTML = `<input type='checkbox' class='group-check' data-group='${gid}' onclick='toggleGroup(${gid}, this)'> ${meta.name}`;
+                groupLabel.innerHTML = `<input type='checkbox' class='group-check' data-group='${gid}' onclick='toggleGroup(${gid}, this)'> ${escapeHtml(meta.name)}`;
                 groupDiv.appendChild(groupLabel);
                 
                 const zonesDiv = document.createElement('div');
@@ -297,7 +297,7 @@
                 groupZones.forEach(zone => {
                     const zoneLabel = document.createElement('label');
                     const icon = zone.icon || '';
-                    zoneLabel.innerHTML = `<input type='checkbox' class='zone-check' data-group='${gid}' value='${zone.id}'> ${icon} Зона ${zone.id} (${zone.name})`;
+                    zoneLabel.innerHTML = `<input type='checkbox' class='zone-check' data-group='${gid}' value='${zone.id}'> ${escapeHtml(icon)} Зона ${zone.id} (${escapeHtml(zone.name)})`;
                     zonesDiv.appendChild(zoneLabel);
                 });
                 

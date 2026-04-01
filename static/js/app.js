@@ -1,3 +1,18 @@
+/**
+ * Escape HTML special characters to prevent XSS in innerHTML.
+ * @param {*} str - Value to escape
+ * @returns {string} Escaped HTML string
+ */
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
         // CSRF token interceptor: attach token to all non-GET fetch requests
         (function() {
             var csrfMeta = document.querySelector('meta[name="csrf-token"]');
@@ -135,7 +150,7 @@
             
             notification.innerHTML = `
                 <span class="notification-icon">${icons[type] || icons.info}</span>
-                <span>${message}</span>
+                <span>${escapeHtml(message)}</span>
                 <button class="notification-close" onclick="this.parentElement.remove()">×</button>
             `;
             
