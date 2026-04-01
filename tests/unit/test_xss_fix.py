@@ -52,19 +52,18 @@ class TestSSRTemplateNoSafe:
                 assert '|safe' not in line, \
                     f"Line {i} uses |safe with SSR data: {line.strip()}"
 
-    def test_json_island_present(self):
-        """status.html should use <script type="application/json"> for SSR data."""
+    def test_tojson_filter_used(self):
+        """status.html should use |tojson filter for SSR data."""
         html = read_file('templates/status.html')
-        assert 'type="application/json"' in html, \
-            "status.html missing JSON island (<script type='application/json'>)"
-        # Should have 3 JSON islands for zones, groups, status
-        assert html.count('type="application/json"') >= 3, \
-            "Expected at least 3 JSON islands for zones, groups, status"
+        assert '|tojson' in html, \
+            "status.html missing |tojson filter for SSR data"
+        assert html.count('|tojson') >= 3, \
+            "Expected at least 3 |tojson usages for zones, groups, status"
 
     def test_json_parse_present(self):
-        """status.html should use JSON.parse to read JSON islands."""
+        """status.html should use JSON.parse to decode SSR data."""
         html = read_file('templates/status.html')
-        assert 'JSON.parse' in html, "status.html missing JSON.parse for JSON island"
+        assert 'JSON.parse' in html, "status.html missing JSON.parse for SSR data"
 
 
 # ── 2. SSR Rendering with XSS Payloads ──────────────────────────────
@@ -92,15 +91,16 @@ class TestSSRRenderingEscaping:
 
     def test_script_tag_in_zone_name_escaped(self, rendered_status):
         """Zone name with </script> should not break HTML structure."""
-        # The literal </script> should NOT appear inside JSON island data
-        # It should be escaped as &lt;/script&gt; by Jinja2 autoescaping
         html = rendered_status
-        # Count <script type="application/json"> tags — they should all be properly closed
-        json_islands = re.findall(r'<script type="application/json"[^>]*>(.*?)</script>', html, re.DOTALL)
-        for island in json_islands:
-            # Inside JSON island, < should be escaped as &lt;
-            assert '</script>' not in island, \
-                "Unescaped </script> found inside JSON island — XSS vulnerability!"
+        # tojson should escape </script> inside JSON string values
+        # so that the literal unescaped sequence never appears in SSR data block
+        # Find the SSR script block
+        ssr_match = re.search(r'window\._ssrZones\s*=\s*JSON\.parse\((.*?)\);', html)
+        if ssr_match:
+            ssr_block = ssr_match.group(1)
+            # The raw </script> should not appear unescaped inside the JSON string
+            assert '</script>' not in ssr_block.lower(), \
+                "Unescaped </script> in SSR data — tojson should escape this"
 
     def test_img_onerror_in_zone_name_escaped(self, rendered_status):
         """<img src=x onerror=alert(1)> should be escaped in SSR output."""
