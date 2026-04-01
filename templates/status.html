@@ -1456,6 +1456,26 @@
         max-height:80vh; overflow-y:auto;
     }
     .bottom-sheet.show { transform:translateY(0); }
+
+    /* Desktop: centered modal instead of bottom sheet */
+    @media (min-width: 768px) {
+        .bottom-sheet {
+            position:fixed;
+            bottom:auto;
+            top:50%;
+            left:50%;
+            transform:translate(-50%, 100%);
+            max-width:540px;
+            max-height:75vh;
+            width:90%;
+            border-radius:16px;
+            overflow-y:auto;
+        }
+        .bottom-sheet.show {
+            transform:translate(-50%, -50%);
+        }
+    }
+
     .sheet-handle { width:36px; height:4px; background:#ddd; border-radius:2px; margin:0 auto 12px; }
     .sheet-title { font-size:17px; font-weight:700; margin-bottom:14px; }
     .sheet-form-group { margin-bottom:10px; }
