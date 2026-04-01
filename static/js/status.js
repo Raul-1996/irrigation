@@ -1567,6 +1567,7 @@
     function renderZoneCards() {
         var c = document.getElementById('zoneList');
         if (!c) return;
+        var isAdmin = !!(statusData && statusData.is_admin);
         // Preserve open accordion state across re-renders
         var openIds = {};
         c.querySelectorAll('.zone-card.open').forEach(function(el) {
@@ -1668,7 +1669,9 @@
             } else {
                 html += '<button class="zc-btn-run" onclick="event.stopPropagation();showRunPopup(' + z.id + ',' + z.duration + ')">▶ Запустить</button>';
             }
-            html += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
+            if (isAdmin) {
+                html += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
+            }
             html += '</div>';
 
             html += '</div>'; // zc-expanded
