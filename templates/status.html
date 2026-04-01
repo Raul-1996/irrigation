@@ -1811,7 +1811,6 @@
 {% block extra_js %}
 <script>
 // SSR: inline data for instant render (no fetch needed on first load)
-// tojson safely escapes </script> and all special chars
 window._ssrZones = JSON.parse({{ inline_zones|default('[]')|tojson }});
 window._ssrGroups = JSON.parse({{ inline_groups|default('[]')|tojson }});
 window._ssrStatus = JSON.parse({{ inline_status|default('{}')|tojson }});
