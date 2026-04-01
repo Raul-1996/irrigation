@@ -367,7 +367,7 @@ def _general_api_rate_limit():
         return None
     # Skip paths that have their own decorators (mqtt_control, emergency, programs)
     # or non-mutable paths
-    skip_paths = {'/api/login', '/api/password', '/api/status', '/health', '/api/env'}
+    skip_paths = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/zones/next-watering-bulk'}
     if p in skip_paths:
         return None
     # Specific groups already have their own limits applied via decorators

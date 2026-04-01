@@ -44,6 +44,7 @@
     // Загрузка и обновление данных статуса
     let statusData = null;
     let zonesData = [];
+    var nextWateringCache = {}; // {zoneId: {next_watering, source, ...}} — survives polling cycles
     let connectionError = false;
     let mqttNoServers = false;
     let mqttNoConnection = false;
@@ -187,11 +188,15 @@
             zonesData = Array.isArray(results[0]) ? results[0] : [];
             if (needGroups && results[1]) zoneGroupsCache = results[1];
 
-            // Render V2 zones IMMEDIATELY
-            renderGroupTabs();
-            renderZoneCards();
+            // Restore cached next-watering data before render
+            (zonesData || []).forEach(function(z) {
+                if (nextWateringCache[z.id]) {
+                    z._nextWatering = nextWateringCache[z.id];
+                }
+            });
 
-            // Fetch next-watering bulk ASYNC (non-blocking)
+            // Fetch next-watering bulk, then render ONCE
+            renderGroupTabs();
             var filteredZones = zonesData.filter(function(z) { return z.group_id !== 999; });
             (async function() {
                 try {
@@ -200,21 +205,34 @@
                         headers: {'Content-Type':'application/json'},
                         body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
                     });
-                    var nwData = await nwResp.json();
-                    var nwMap = {};
-                    (nwData.items || []).forEach(function(it) {
-                        nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
-                    });
-                    zonesData.forEach(function(z) {
-                        var v = nwMap[z.id];
-                        if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
-                        else if (v === 'Никогда') z._nextWatering = 'Никогда';
-                        else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
-                        else z._nextWatering = '—';
-                    });
-                    // Re-render with next-watering data
-                    renderZoneCards();
-                } catch(e3) {}
+                    if (nwResp.ok) {
+                        var nwData = await nwResp.json();
+                        var nwMap = {};
+                        (nwData.items || []).forEach(function(it) {
+                            nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
+                        });
+                        zonesData.forEach(function(z) {
+                            var v = nwMap[z.id];
+                            if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
+                            else if (v === 'Никогда') z._nextWatering = 'Никогда';
+                            else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
+                            else z._nextWatering = '—';
+                            // Update cache with fresh data
+                            nextWateringCache[z.id] = z._nextWatering;
+                        });
+                    } else if (nwResp.status === 429) {
+                        var retryAfter = nwResp.headers.get('Retry-After');
+                        if (retryAfter) {
+                            console.log('next-watering-bulk: 429, retry after', retryAfter, 's');
+                        }
+                        // Do NOT update cache — keep old data from nextWateringCache
+                    }
+                    // else: other errors — keep cached data, do not clear
+                } catch(e3) {
+                    // Network error — keep cached data
+                }
+                // Single render with best available next-watering data
+                renderZoneCards();
             })();
 
             // Update sidebar indicators
@@ -425,7 +443,18 @@
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
             let extraText = '—';
             if (group.status === 'watering' && group.current_zone) {
-                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                // Compute timer inline to avoid --:-- flash on re-render
+                var _gtText = '--:--';
+                var _gtRemain = '';
+                try {
+                    var _gz = (zonesData || []).find(function(zz){ return zz.id === group.current_zone; });
+                    if (_gz && _gz.planned_end_time) {
+                        var _gEndMs = new Date(_gz.planned_end_time).getTime();
+                        var _gRem = Math.max(0, Math.floor((_gEndMs - Date.now()) / 1000));
+                        if (_gRem > 0) { _gtText = formatSeconds(_gRem); _gtRemain = String(_gRem); }
+                    }
+                } catch(_ge) {}
+                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gtRemain}">${_gtText}</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu = String(group.postpone_until);
                 const reason = String(group.postpone_reason || '').toLowerCase();
@@ -565,7 +594,18 @@
             const statusText = getStatusText(group);
             let extraText2 = '—';
             if (group.status === 'watering' && group.current_zone) {
-                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                // Compute timer inline to avoid --:-- flash
+                var _gt2Text = '--:--';
+                var _gt2Remain = '';
+                try {
+                    var _gz2 = (zonesData || []).find(function(zz){ return zz.id === group.current_zone; });
+                    if (_gz2 && _gz2.planned_end_time) {
+                        var _g2EndMs = new Date(_gz2.planned_end_time).getTime();
+                        var _g2Rem = Math.max(0, Math.floor((_g2EndMs - Date.now()) / 1000));
+                        if (_g2Rem > 0) { _gt2Text = formatSeconds(_g2Rem); _gt2Remain = String(_g2Rem); }
+                    }
+                } catch(_ge2) {}
+                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gt2Remain}">${_gt2Text}</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu2 = String(group.postpone_until);
                 const reason2 = String(group.postpone_reason || '').toLowerCase();
@@ -1067,10 +1107,9 @@
         // Обновление времени каждую секунду
         setInterval(updateDateTime, 1000);
         
-        // Обновление данных каждые 5 секунд
-        setInterval(() => {
-            Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
-        }, 5000);
+        // Split polling: status every 10s (lightweight GET), zones+next-watering every 30s (heavy POST)
+        setInterval(loadStatusData, 10000);
+        setInterval(loadZonesData, 30000);
         setInterval(tickCountdowns, 1000);
         
         // Обработчик аварийной остановки
