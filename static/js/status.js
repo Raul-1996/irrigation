@@ -231,8 +231,8 @@
                 } catch(e3) {
                     // Network error — keep cached data
                 }
-                // Single render with best available next-watering data
-                renderZoneCards();
+                // Incremental update (full render only on first load or structural changes)
+                updateZoneCards();
             })();
 
             // Update sidebar indicators
@@ -432,10 +432,55 @@
             }, 1000);
         }
         const container = document.getElementById('groups-container');
-        container.innerHTML = '';
         const resumeBtn = document.getElementById('resume-btn');
         if (statusData.emergency_stop) { resumeBtn.style.display = 'inline-block'; } else { resumeBtn.style.display = 'none'; }
+
+        // Build set of current group ids to detect removals
+        var currentGroupIds = {};
         for (const group of statusData.groups) {
+            currentGroupIds['gcard-' + group.id] = true;
+        }
+        // Remove cards for groups no longer present
+        var existingCards = container.querySelectorAll('[id^="gcard-"]');
+        for (var ei = 0; ei < existingCards.length; ei++) {
+            if (!currentGroupIds[existingCards[ei].id]) {
+                container.removeChild(existingCards[ei]);
+            }
+        }
+
+        for (const group of statusData.groups) {
+            var existingCard = document.getElementById('gcard-' + group.id);
+
+            // Build a fingerprint to detect if card needs full rebuild
+            var groupFingerprint = [
+                group.status, group.current_zone || '', group.postpone_until || '',
+                group.postpone_reason || '', group.error_message || '',
+                group.use_master_valve, group.master_valve_state || '',
+                group.current_zone_source || ''
+            ].join('|');
+
+            if (existingCard && existingCard.getAttribute('data-group-fp') === groupFingerprint) {
+                // Status unchanged — only update sensor values (pressure/flow/meter) without rebuilding
+                var pressureEl = document.getElementById('pressure-' + group.id);
+                if (pressureEl) {
+                    var pv = (group.pressure_value != null && group.pressure_value !== '') ? String(group.pressure_value) : '—';
+                    if (pressureEl.textContent !== pv) pressureEl.textContent = pv;
+                }
+                var meterEl = document.getElementById('meter-' + group.id);
+                if (meterEl) {
+                    var mv = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
+                    if (meterEl.textContent !== mv) meterEl.textContent = mv;
+                }
+                var flowEl = document.getElementById('flow-' + group.id);
+                if (flowEl) {
+                    var fv = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
+                    if (flowEl.textContent !== fv) flowEl.textContent = fv;
+                }
+                // DO NOT touch .group-timer — tickCountdowns handles it
+                continue;
+            }
+
+            // Status changed or card doesn't exist — build new card
             const card = document.createElement('div');
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
@@ -520,8 +565,13 @@
                 ${groupButtons}
                 ${mvBlock}
             `;
-            card.id = `group-card-${group.id}`;
-            container.appendChild(card);
+            card.id = `gcard-${group.id}`;
+            card.setAttribute('data-group-fp', groupFingerprint);
+            if (existingCard) {
+                container.replaceChild(card, existingCard);
+            } else {
+                container.appendChild(card);
+            }
             if (group.status === 'watering' && group.current_zone) {
                 initGroupTimer(group);
             }
@@ -586,7 +636,7 @@
             statusData = data;
             const group = (data.groups || []).find(g => String(g.id) === String(groupId));
             if (!group) return;
-            const card = document.getElementById(`group-card-${group.id}`);
+            const card = document.getElementById(`gcard-${group.id}`) || document.getElementById(`group-card-${group.id}`);
             if (!card) return;
             // Полностью пересоберем содержимое карточки по актуальным данным
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
@@ -785,7 +835,7 @@
     async function delayGroup(groupId, days) {
         try {
             // Блокируем кнопки в карточке группы на время запроса
-            const card = document.getElementById(`group-card-${groupId}`);
+            const card = document.getElementById(`gcard-${groupId}`) || document.getElementById(`group-card-${groupId}`);
             if (card) {
                 const buttons = card.querySelectorAll('button');
                 buttons.forEach(b=>b.disabled=true);
@@ -808,7 +858,7 @@
             console.error('Ошибка при отложке полива:', error);
             showNotification('Ошибка при отложке полива', 'error');
         } finally {
-            const card = document.getElementById(`group-card-${groupId}`);
+            const card = document.getElementById(`gcard-${groupId}`) || document.getElementById(`group-card-${groupId}`);
             if (card) {
                 const buttons = card.querySelectorAll('button');
                 buttons.forEach(b=>b.disabled=false);
@@ -819,7 +869,7 @@
     async function cancelPostpone(groupId) {
         try {
             // Блокируем кнопки в карточке группы на время запроса
-            const card = document.getElementById(`group-card-${groupId}`);
+            const card = document.getElementById(`gcard-${groupId}`) || document.getElementById(`group-card-${groupId}`);
             if (card) {
                 const buttons = card.querySelectorAll('button');
                 buttons.forEach(b=>b.disabled=true);
@@ -841,7 +891,7 @@
             console.error('Ошибка при отмене отложенного полива:', error);
             showNotification('Ошибка при отмене отложенного полива', 'error');
         } finally {
-            const card = document.getElementById(`group-card-${groupId}`);
+            const card = document.getElementById(`gcard-${groupId}`) || document.getElementById(`group-card-${groupId}`);
             if (card) {
                 const buttons = card.querySelectorAll('button');
                 buttons.forEach(b=>b.disabled=false);
@@ -955,7 +1005,7 @@
     async function toggleMasterValve(groupId) {
         try {
             // UI busy
-            const card = document.getElementById(`group-card-${groupId}`);
+            const card = document.getElementById(`gcard-${groupId}`) || document.getElementById(`group-card-${groupId}`);
             const btn = card ? card.querySelector(`#mv-btn-${groupId}`) : null;
             if (btn) { btn.disabled = true; btn.setAttribute('aria-busy','true'); }
             // Determine current state from button data attribute if present, fallback to text
@@ -984,7 +1034,7 @@
         } catch (e) {
             showNotification('Ошибка управления мастер-клапаном', 'error');
         } finally {
-            const card = document.getElementById(`group-card-${groupId}`);
+            const card = document.getElementById(`gcard-${groupId}`) || document.getElementById(`group-card-${groupId}`);
             const btn = card ? card.querySelector(`#mv-btn-${groupId}`) : null;
             if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
         }
@@ -1718,6 +1768,8 @@
         });
 
         c.innerHTML = html;
+        // Store rendered zone ids for incremental update detection
+        c.setAttribute('data-zone-ids', zones.map(function(z){ return z.id; }).join(','));
         // Restore open accordion state
         Object.keys(openIds).forEach(function(zid) {
             var el = document.getElementById('zcard-' + zid);
@@ -1729,6 +1781,179 @@
         zones.forEach(function(z) {
             if (z.state === 'on') initZoneTimer(z);
         });
+    }
+
+    // Incremental zone card update — only patches changed data, avoids full DOM rebuild
+    // Falls back to full renderZoneCards() when zone list structure changes
+    function updateZoneCards() {
+        var c = document.getElementById('zoneList');
+        if (!c) return;
+        var zones = getFilteredZonesV2();
+        var groups = zoneGroupsCache || [];
+        var groupNameById = {};
+        groups.forEach(function(g) { groupNameById[g.id] = g.name; });
+
+        // If layout changed (zone count, filter, search) — full re-render
+        var currentIds = zones.map(function(z){ return z.id; }).join(',');
+        var renderedIds = c.getAttribute('data-zone-ids') || '';
+        if (currentIds !== renderedIds) {
+            renderZoneCards();
+            return;
+        }
+
+        // No zones — nothing to patch
+        if (!zones.length) return;
+
+        var showSections = currentGroupFilter === null && !zoneSearchQuery;
+
+        // Patch each zone card in-place
+        zones.forEach(function(z) {
+            var card = document.getElementById('zcard-' + z.id);
+            if (!card) return;
+
+            var isRunning = z.state === 'on';
+            var wasRunning = card.classList.contains('zs-running');
+
+            // Update status class
+            if (isRunning && !wasRunning) {
+                card.classList.remove('zs-enabled');
+                card.classList.add('zs-running');
+            } else if (!isRunning && wasRunning) {
+                card.classList.remove('zs-running');
+                card.classList.add('zs-enabled');
+            }
+
+            // Update duration badge
+            var badge = document.getElementById('zbadge-' + z.id);
+            if (badge) {
+                var newBadge = z.duration + ' мин';
+                if (badge.textContent !== newBadge) badge.textContent = newBadge;
+            }
+
+            // Update next-watering display (in collapsed header)
+            var nextEl = card.querySelector('.zc-next');
+            if (nextEl) {
+                if (isRunning) {
+                    // Show watering indicator
+                    var wantNext = '<div class="zc-next-val" style="color:#2196f3">⏱</div><div class="zc-next-lbl">полив</div>';
+                    if (nextEl.innerHTML.indexOf('⏱') === -1) nextEl.innerHTML = wantNext;
+                } else {
+                    var nextText = z._nextWatering || '';
+                    if (nextText && nextText !== 'Никогда' && nextText !== '—') {
+                        var parts = nextText.split(' ');
+                        var timeOnly = parts.length >= 2 ? parts[1].slice(0, 5) : nextText.slice(0, 5);
+                        var valEl = nextEl.querySelector('.zc-next-val');
+                        if (valEl && valEl.textContent !== timeOnly) {
+                            valEl.textContent = timeOnly;
+                            valEl.removeAttribute('style');
+                        }
+                        var lblEl = nextEl.querySelector('.zc-next-lbl');
+                        if (lblEl && lblEl.textContent !== 'след.') lblEl.textContent = 'след.';
+                    } else if (nextText === 'Никогда') {
+                        var valEl2 = nextEl.querySelector('.zc-next-val');
+                        if (valEl2 && valEl2.textContent !== '—') {
+                            valEl2.textContent = '—';
+                            valEl2.style.color = '#ccc';
+                            valEl2.style.fontSize = '11px';
+                        }
+                        var lblEl2 = nextEl.querySelector('.zc-next-lbl');
+                        if (lblEl2 && lblEl2.textContent !== 'нет') lblEl2.textContent = 'нет';
+                    }
+                }
+            }
+
+            // Update expanded detail values (if card is open)
+            var expanded = card.querySelector('.zc-expanded');
+            if (expanded) {
+                var detailValues = expanded.querySelectorAll('.zc-d-value');
+                // Detail grid: [duration, group, next watering, last watering]
+                if (detailValues.length >= 1) {
+                    var durText = z.duration + ' мин';
+                    if (detailValues[0].textContent !== durText) detailValues[0].textContent = durText;
+                }
+                if (detailValues.length >= 2) {
+                    var gName = escapeHtml(groupNameById[z.group_id] || '');
+                    if (detailValues[1].textContent !== gName) detailValues[1].textContent = gName;
+                }
+                if (detailValues.length >= 3) {
+                    var nextFull = z._nextWatering || '—';
+                    if (detailValues[2].textContent !== nextFull) detailValues[2].textContent = nextFull;
+                }
+                if (detailValues.length >= 4) {
+                    var lastW = z.last_watering_time ? z.last_watering_time.replace('T',' ').slice(0,16) : '—';
+                    if (detailValues[3].textContent !== lastW) detailValues[3].textContent = lastW;
+                }
+            }
+
+            // Handle running state transitions
+            if (isRunning && !wasRunning) {
+                // Zone just started — insert running HTML block
+                var _timerText = '--:--';
+                var _pctText = '';
+                var _progWidth = '0%';
+                var _remain = 0;
+                if (z.planned_end_time && z.watering_start_time) {
+                    var _endMs = new Date(z.planned_end_time).getTime();
+                    var _startMs = new Date(z.watering_start_time).getTime();
+                    _remain = Math.max(0, Math.floor((_endMs - Date.now()) / 1000));
+                    var _total = Math.max(60, Math.floor((_endMs - _startMs) / 1000));
+                    _timerText = formatSeconds(_remain);
+                    var _pct = Math.min(100, Math.max(0, ((_total - _remain) / _total) * 100));
+                    _pctText = Math.round(_pct) + '%';
+                    _progWidth = _pct + '%';
+                }
+                var runDiv = document.createElement('div');
+                runDiv.className = 'zc-running';
+                runDiv.innerHTML = '<span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + _remain + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span>';
+                var progDiv = document.createElement('div');
+                progDiv.className = 'zc-progress';
+                progDiv.innerHTML = '<div class="zc-progress-bar" id="zprog-' + z.id + '" style="width:' + _progWidth + '"></div>';
+                // Insert after .zone-card-main
+                var mainEl = card.querySelector('.zone-card-main');
+                if (mainEl && mainEl.nextSibling) {
+                    card.insertBefore(runDiv, mainEl.nextSibling);
+                    card.insertBefore(progDiv, runDiv.nextSibling);
+                } else {
+                    var expandedEl = card.querySelector('.zc-expanded');
+                    if (expandedEl) {
+                        card.insertBefore(runDiv, expandedEl);
+                        card.insertBefore(progDiv, expandedEl);
+                    }
+                }
+                // Update action button to stop
+                var emergency = !!(statusData && statusData.emergency_stop);
+                var actionsEl = card.querySelector('.zc-actions');
+                if (actionsEl) {
+                    var startAction = emergency ? "showNotification('Аварийная остановка активна','warning')" : "toggleZoneRun(" + z.id + ")";
+                    actionsEl.innerHTML = '<button class="zc-btn-stop" onclick="event.stopPropagation();' + startAction + '">⏹ Стоп</button>';
+                    var isAdmin = !!(statusData && statusData.is_admin);
+                    if (isAdmin) {
+                        actionsEl.innerHTML += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
+                    }
+                }
+                initZoneTimer(z);
+            } else if (!isRunning && wasRunning) {
+                // Zone just stopped — remove running HTML blocks
+                var runEl = card.querySelector('.zc-running');
+                if (runEl) runEl.parentNode.removeChild(runEl);
+                var progEl2 = card.querySelector('.zc-progress');
+                if (progEl2) progEl2.parentNode.removeChild(progEl2);
+                // Update action button to start
+                var emergency2 = !!(statusData && statusData.emergency_stop);
+                var actionsEl2 = card.querySelector('.zc-actions');
+                if (actionsEl2) {
+                    actionsEl2.innerHTML = '<button class="zc-btn-run" onclick="event.stopPropagation();showRunPopup(' + z.id + ',' + z.duration + ')">▶ Запустить</button>';
+                    var isAdmin2 = !!(statusData && statusData.is_admin);
+                    if (isAdmin2) {
+                        actionsEl2.innerHTML += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
+                    }
+                }
+            }
+            // If zone is already running — DO NOT touch timer/progress elements
+            // tickCountdowns() handles them every second
+        });
+
+        updateZoneStats(zones);
     }
 
     function updateZoneStats(zones) {
