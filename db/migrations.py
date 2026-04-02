@@ -1,7 +1,6 @@
 import sqlite3
 import json
 import logging
-from typing import Optional
 
 from werkzeug.security import generate_password_hash
 from utils import encrypt_secret

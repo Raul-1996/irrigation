@@ -1,5 +1,5 @@
 """Groups API blueprint — all /api/groups* endpoints + master valve."""
-from flask import Blueprint, request, jsonify, current_app, session
+from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime, timedelta
 import json
 import time
@@ -10,7 +10,6 @@ from database import db
 from utils import normalize_topic
 from irrigation_scheduler import init_scheduler, get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
-from services.helpers import api_error
 from services import sse_hub as _sse_hub
 from constants import GROUP_DEBOUNCE_SEC, ZONE_CAP_DEFAULT_MIN
 import sqlite3

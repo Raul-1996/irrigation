@@ -60,9 +60,7 @@ def api_get_weather_decisions():
         days = min(90, max(1, int(request.args.get('days', 7))))
         limit = min(200, max(1, int(request.args.get('limit', 50))))
 
-        with sqlite3.connect(db.db_path, timeout=5) as conn:
-            conn.row_factory = sqlite3.Row
-
+        with db.logs._connect() as conn:
             # Get decisions
             cur = conn.execute(
                 'SELECT * FROM weather_decisions '
@@ -272,8 +270,7 @@ def api_get_weather_log():
     """Get weather adjustment log (last 50 entries)."""
     try:
         limit = min(100, max(1, int(request.args.get('limit', 50))))
-        with sqlite3.connect(db.db_path, timeout=5) as conn:
-            conn.row_factory = sqlite3.Row
+        with db.logs._connect() as conn:
             cur = conn.execute(
                 'SELECT * FROM weather_log ORDER BY created_at DESC LIMIT ?',
                 (limit,),

@@ -5,7 +5,6 @@ import logging
 
 from database import db
 from irrigation_scheduler import get_scheduler
-from services.helpers import api_error
 from services.api_rate_limiter import rate_limit
 import sqlite3
 

@@ -1,3 +1,4 @@
+import sqlite3
 from flask import Blueprint, render_template, current_app
 from services.security import admin_required
 from database import db
@@ -92,9 +93,7 @@ def api_test_telegram():
             chat_id = db.get_setting_value('telegram_admin_chat_id')
             if not chat_id:
                 # fallback: последний активный чат
-                import sqlite3
-                with sqlite3.connect(db.db_path, timeout=5) as conn:
-                    conn.row_factory = sqlite3.Row
+                with db.telegram._connect() as conn:
                     cur = conn.execute('SELECT chat_id FROM bot_users ORDER BY last_seen_at DESC LIMIT 1')
                     row = cur.fetchone()
                     chat_id = str(row['chat_id']) if row else None

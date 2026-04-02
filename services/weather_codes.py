@@ -3,7 +3,7 @@
 Used by both backend (API responses) and can be referenced by frontend.
 Python 3.9 compatible.
 """
-from typing import Tuple, Optional
+from typing import Optional
 
 # WMO Weather Interpretation Codes (WW)
 # https://open-meteo.com/en/docs — "WMO Weather interpretation codes"

@@ -7,7 +7,6 @@ IrrigationDB class with the same public API so that every existing call like
 
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime
 
 from db.zones import ZoneRepository
 from db.programs import ProgramRepository

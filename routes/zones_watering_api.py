@@ -1,16 +1,14 @@
 """Zones Watering API — start/stop, watering time, SSE, MQTT control."""
-from flask import Blueprint, request, jsonify, current_app, Response, stream_with_context
+from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime, timedelta
 import json
 import time
-import queue
 import logging
 
 from database import db
 from utils import normalize_topic
 from irrigation_scheduler import get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
-from services.helpers import api_error
 from services import sse_hub as _sse_hub
 from services.api_rate_limiter import rate_limit
 import sqlite3

@@ -8,7 +8,6 @@ import sqlite3
 
 import logging
 import time
-import threading
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +272,7 @@ import atexit
 import signal
 import os
 
-from services.shutdown import shutdown_all_zones_off, reset_shutdown
+from services.shutdown import shutdown_all_zones_off
 
 
 def shutdown_all_zones(db=None) -> None:

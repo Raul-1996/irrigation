@@ -12,7 +12,7 @@ from utils import normalize_topic
 import os
 import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
-from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value, get_or_create_mqtt_client as _get_or_create_mqtt_client
+from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from flask_wtf.csrf import CSRFProtect
 try:
     import paho.mqtt.client as mqtt
@@ -28,7 +28,7 @@ import time as _perf_time
 import threading
 import time
 from config import Config
-from services.logging_setup import setup_logging, ensure_console_handler, apply_runtime_log_level
+from services.logging_setup import setup_logging
 
 # Page-rendering blueprints
 from routes.status import status_bp
@@ -61,8 +61,7 @@ from routes.system_config_api import system_config_api_bp
 from routes.system_emergency_api import system_emergency_api_bp
 from routes.weather_api import weather_api_bp
 
-from werkzeug.security import check_password_hash
-from services.monitors import rain_monitor, env_monitor, start_rain_monitor, start_env_monitor, water_monitor, start_water_monitor, probe_env_values
+
 try:
     from services.telegram_bot import subscribe_to_events as _tg_subscribe
     _tg_subscribe()
@@ -70,7 +69,6 @@ try:
     _tg_poll_start()
 except ImportError as e:
     logging.getLogger(__name__).debug("Telegram bot init skipped: %s", e)
-from services.locks import snapshot_all_locks as _locks_snapshot
 from services.api_rate_limiter import _is_allowed as _rate_check
 from services import sse_hub as _sse_hub
 from services.app_init import initialize_app as _initialize_app
@@ -124,7 +122,7 @@ def _inject_app_version():
         logger.debug("context processor fallback: %s", e)
         return {'app_version': '1.0', 'system_name': '', 'asset': (lambda p: p)}
 
-from services.security import admin_required
+
 
 # ── Middleware ──────────────────────────────────────────────────────────────
 @app.before_request
@@ -181,6 +179,20 @@ def dlog(msg: str, *args) -> None:
         except (TypeError, ValueError) as e:
             logger.debug("dlog format error: %s", e)
 
+# ── Shared helper: check if a path is a "status action" allowed without admin ──
+_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
+
+def _is_status_action(path):
+    if path in _ALLOWED_PUBLIC_POSTS:
+        return True
+    if path.startswith('/api/mqtt/'):
+        return True
+    if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop') or '/master-valve/' in path):
+        return True
+    if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
+        return True
+    return False
+
 # ── Auth before-request ────────────────────────────────────────────────────
 @app.before_request
 def _auth_before_request():
@@ -199,17 +211,6 @@ def _auth_before_request():
                 if session.get('role') == 'viewer' and request.method in ['POST', 'PUT', 'DELETE']:
                     if pth != '/api/login':
                         return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
-                allowed_public_posts = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
-                def _is_status_action(path):
-                    if path in allowed_public_posts or path == '/api/zones/next-watering-bulk':
-                        return True
-                    if path.startswith('/api/mqtt/'):
-                        return True
-                    if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop') or '/master-valve/' in path):
-                        return True
-                    if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
-                        return True
-                    return False
                 if session.get('role') != 'admin' and not _is_status_action(pth):
                     return jsonify({'success': False, 'message': 'auth required', 'error_code': 'UNAUTHENTICATED'}), 401
                 if session.get('role') == 'admin' and request.method in ['POST', 'PUT', 'DELETE']:
@@ -253,14 +254,6 @@ def _require_admin_for_mutations():
         if request.method in ['POST', 'PUT', 'DELETE']:
             if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/') or p == '/api/password':
                 return None
-            def _is_status_action(path):
-                if path in ('/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'):
-                    return True
-                if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop') or '/master-valve/' in path):
-                    return True
-                if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
-                    return True
-                return False
             if role != 'admin' and not _is_status_action(p):
                 return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
     except (ConnectionError, TimeoutError, OSError) as e:

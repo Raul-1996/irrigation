@@ -10,7 +10,6 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Optional
 
 from constants import OBSERVED_STATE_TIMEOUT_SEC, OBSERVED_STATE_MAX_RETRIES
 

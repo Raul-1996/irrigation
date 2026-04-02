@@ -1,9 +1,6 @@
-from typing import Optional
-import os
 import logging
 from database import db
-from werkzeug.security import check_password_hash, generate_password_hash
-import threading
+from werkzeug.security import check_password_hash
 import sqlite3
 
 logger = logging.getLogger(__name__)

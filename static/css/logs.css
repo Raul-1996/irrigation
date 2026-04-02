@@ -1,0 +1,230 @@
+.filter-bar {
+        background: #fff;
+        padding: 1rem;
+        border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .filter-bar label {
+        font-size: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .filter-bar input[type=date], 
+    .filter-bar select {
+        padding: 0.4rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+    .filter-bar input:focus,
+    .filter-bar select:focus {
+        outline: none;
+        border-color: #2196f3;
+        box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
+    }
+    .filter-bar button {
+        padding: 0.5rem 1rem;
+        background: #2196f3;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background-color 0.2s;
+    }
+    .filter-bar button:hover {
+        background: #1976d2;
+    }
+    .export-btn {
+        background: #4caf50;
+        color: #fff;
+        margin-left: auto;
+    }
+    .export-btn:hover {
+        background: #45a049;
+    }
+    
+    .logs-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: #fff;
+        font-size: 0.9rem;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .logs-table th, 
+    .logs-table td {
+        border: 1px solid #ccc;
+        padding: 0.5rem;
+        text-align: left;
+        color: #333;
+    }
+    .logs-table th {
+        background: #e0e0e0;
+        font-weight: bold;
+        color: #333;
+    }
+    .logs-table tr:hover {
+        background-color: #f5f5f5;
+    }
+    .nowrap {
+        white-space: nowrap;
+    }
+    
+    .log-details {
+        font-family: 'Courier New', monospace;
+        font-size: 0.85rem;
+        background: #f8f9fa;
+        padding: 0.5rem;
+        border-radius: 3px;
+        border: 1px solid #e9ecef;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-width: 400px;
+    }
+    
+    .log-type {
+        padding: 0.2rem 0.5rem;
+        border-radius: 3px;
+        font-size: 0.8rem;
+        font-weight: bold;
+        text-transform: uppercase;
+    }
+    .log-type.zone_on {
+        background: #d4edda;
+        color: #155724;
+    }
+    .log-type.zone_off {
+        background: #f8d7da;
+        color: #721c24;
+    }
+    .log-type.prog_edit {
+        background: #d1ecf1;
+        color: #0c5460;
+    }
+    .log-type.mqtt_error {
+        background: #fff3cd;
+        color: #856404;
+    }
+    
+    .loading {
+        text-align: center;
+        padding: 2rem;
+        color: #666;
+    }
+    
+    .no-data {
+        text-align: center;
+        padding: 2rem;
+        color: #666;
+        font-style: italic;
+    }
+    
+    /* Мобильная верстка */
+    @media(max-width:768px) {
+        .filter-bar {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0.8rem;
+            padding: 0.8rem;
+        }
+        
+        .filter-row {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .filter-row label {
+            flex: 1 1 calc(50% - 0.25rem);
+            min-width: 120px;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0.3rem;
+        }
+        
+        .filter-row label span {
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .filter-bar input[type=date], 
+        .filter-bar select {
+            width: 100%;
+            padding: 0.5rem;
+            font-size: 0.85rem;
+        }
+        
+        .filter-buttons {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .filter-buttons button {
+            flex: 1 1 auto;
+            min-width: 80px;
+            padding: 0.6rem 0.8rem;
+            font-size: 0.85rem;
+        }
+        
+        .export-btn {
+            margin-left: 0;
+        }
+        
+        .logs-table {
+            font-size: 0.75rem;
+        }
+        
+        .logs-table th, 
+        .logs-table td {
+            padding: 0.4rem 0.3rem;
+        }
+        
+        .log-details {
+            max-width: 150px;
+            font-size: 0.7rem;
+            padding: 0.3rem;
+        }
+        
+        .log-type {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.4rem;
+        }
+        
+        .nowrap {
+            white-space: normal;
+            word-break: break-word;
+        }
+    }
+    
+    @media(max-width:480px) {
+        .filter-row label {
+            flex: 1 1 100%;
+        }
+        
+        .filter-buttons {
+            flex-direction: column;
+        }
+        
+        .filter-buttons button {
+            width: 100%;
+        }
+        
+        .logs-table {
+            font-size: 0.7rem;
+        }
+        
+        .log-details {
+            max-width: 120px;
+            font-size: 0.65rem;
+        }
+    }

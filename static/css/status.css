@@ -1,0 +1,1550 @@
+/* Общие стили для контрастности */
+    body {
+        color: #333;
+        overflow-x: hidden;
+    }
+    
+    .connection-status {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        background: #f44336;
+        color: white;
+        text-align: center;
+        padding: 0.5rem;
+        font-weight: bold;
+        z-index: 1000;
+        display: none;
+    }
+    
+    .connection-status.show {
+        display: block;
+    }
+    .connection-status.warn { background: #ff9800; }
+    
+    .legend {
+        background: white;
+        border-radius: 8px;
+        padding: 0.8rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        font-size: 0.85rem;
+    }
+    
+    .legend h4 {
+        margin: 0 0 0.5rem 0;
+        color: #333;
+        font-weight: bold;
+        font-size: 0.9rem;
+    }
+    
+    .legend-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.4rem;
+    }
+    
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.8rem;
+        color: #333;
+    }
+    
+    .legend-color {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        border: 1px solid #ccc;
+        flex-shrink: 0;
+    }
+    
+    .top-bar { 
+        display: flex; 
+        justify-content: space-between; 
+        align-items: center; 
+        flex-wrap: wrap; 
+        gap: 0.5rem; 
+        margin-bottom: 1rem; 
+    }
+    .info-box { 
+        background: white; 
+        padding: 0.4rem 0.8rem; 
+        border-radius: 5px; 
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1); 
+        font-size: 0.9rem; 
+        text-align: center; 
+        flex: 1 1 160px; 
+        color: #333;
+    }
+    .info-box strong {
+        color: #333;
+    }
+    .status-grid { 
+        display: grid; 
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); 
+        gap: 1rem; 
+        margin-bottom: 1rem; 
+    }
+    .card { 
+        border-radius: 8px; 
+        padding: 0.8rem; 
+        color: white; 
+        display: flex; 
+        flex-direction: column; 
+        align-items: center; 
+        text-align: center; 
+        font-size: 0.9rem; 
+        min-height: 180px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .card.waiting { 
+        background: linear-gradient(135deg, #4caf50, #45a049); 
+        color: white;
+    }
+    .card.watering { 
+        background: linear-gradient(135deg, #2196f3, #1976d2); 
+        color: white;
+    }
+    /* Имитация активности расхода воды: пульсация */
+    .card.watering.flow-active { 
+        animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(33,150,243,0.6); }
+        70% { box-shadow: 0 0 0 12px rgba(33,150,243,0); }
+        100% { box-shadow: 0 0 0 0 rgba(33,150,243,0); }
+    }
+    .card.error { 
+        background: linear-gradient(135deg, #f44336, #d32f2f); 
+        color: white;
+    }
+    .card.postponed { 
+        background: linear-gradient(135deg, #9e9e9e, #757575); 
+        color: white;
+    }
+    .group-header { 
+        font-size: 1rem; 
+        margin-bottom: 0.2rem; 
+        font-weight: bold;
+        color: white;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+    }
+    .postpone-until { 
+        margin: 0.5rem 0; 
+        font-style: italic; 
+        font-size: 0.85rem; 
+        background: rgba(255,255,255,0.2);
+        padding: 0.3rem 0.6rem;
+        border-radius: 4px;
+        color: white;
+        backdrop-filter: blur(5px);
+    }
+    .btn-group { 
+        display: flex; 
+        flex-wrap: wrap; 
+        gap: 0.5rem; 
+        justify-content: center; 
+        margin: 0.2rem 0; 
+        width: 100%; 
+    }
+    .btn-group button { 
+        flex: 1 1 120px; 
+        padding: 0.3rem 0.4rem; 
+        border-radius: 5px; 
+        cursor: pointer; 
+        font-size: 0.85rem; 
+        text-align: center; 
+        min-width: 120px; 
+        border: 2px solid #fff; 
+        transition: all 0.2s;
+    }
+    /* Перенос текста для кнопок отложки: до 3 строк */
+    .btn-group button.delay {
+        white-space: normal; /* разрешаем переносы */
+        text-align: center;
+        line-height: 1.2;
+        height: auto; /* авто-высота при переносе */
+        min-height: 40px;
+        overflow: hidden; /* обрезаем сверх 3 строк */
+        display: -webkit-box; /* для line-clamp */
+        -webkit-line-clamp: 3; /* максимум 3 строки */
+        -webkit-box-orient: vertical;
+        word-break: break-word; /* перенос длинных слов при необходимости */
+        overflow-wrap: anywhere;
+    }
+    /* То же поведение для кнопки «Продолжить по расписанию» */
+    .btn-group button.cancel-postpone {
+        white-space: normal;
+        text-align: center;
+        line-height: 1.2;
+        height: auto;
+        min-height: 40px;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    .btn-group button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .delay { background: #ffc107; color: #000; border-color: transparent; }
+    .cancel-postpone { background: #ff9800; color: #fff; border-color: transparent; }
+    .start { background: #4caf50; color: #fff; }
+    .stop-group { background: #b71c1c; color: #fff; }
+    .continue-group { background: #4caf50; color: #fff; }
+    /* Широкая кнопка управления мастер-клапаном */
+    .mv-button {
+        background: #ffc107;
+        color: #000;
+        border: none;
+        width: 100%;
+        padding: 0.6rem 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.6rem;
+        white-space: normal;
+        line-height: 1.25;
+    }
+    .mv-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 2px solid #fff;
+        box-shadow: 0 0 0 1px rgba(0,0,0,0.1) inset;
+    }
+    .mv-dot.open { background: #4caf50; }
+    .mv-dot.closed { background: #d32f2f; }
+    .mv-label { opacity: 0.9; font-weight: 600; }
+    .mv-action { font-weight: 700; }
+    .grid-item-span2 { grid-column: 1 / -1; }
+    /* Большая одиночная кнопка действия группы */
+    .group-action-btn {
+        width: 100%;
+        padding: 0.6rem 1rem;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-weight: 700;
+    }
+    .group-action-start { background: #4caf50; color: #fff; }
+    .group-action-stop { background: #b71c1c; color: #fff; }
+    .emergency { 
+        background: #d32f2f; 
+        color: #fff; 
+        padding: 0.6rem 1.2rem; 
+        border: none; 
+        border-radius: 5px; 
+        cursor: pointer; 
+        font-size: 0.95rem; 
+        margin: 1rem auto; 
+        display: block; 
+        transition: all 0.2s;
+    }
+    .emergency:hover {
+        background: #b71c1c;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    /* Грид информации группы: кнопка МК + значения давления/расхода в 2x2 на десктопе */
+    .group-info-grid {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
+        margin-top: 0.4rem;
+    }
+    @media (max-width: 900px) {
+        .group-info-grid { grid-template-columns: 1fr; }
+    }
+    .group-info-grid .grid-item { 
+        display: flex; 
+        justify-content: center; 
+        align-items: stretch; 
+    }
+    /* Чипы значений — бледный фон, чтобы отличались от кнопок */
+    .info-chip { 
+        background: rgba(255,255,255,0.15);
+        border: 1px solid rgba(255,255,255,0.25);
+        color: #fff;
+        padding: 0.35rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        line-height: 1.2;
+        display: inline-flex;
+        gap: 0.35rem;
+        align-items: center;
+        width: 100%;
+        justify-content: center;
+        box-sizing: border-box;
+    }
+    .info-chip.chip-green { background: #4caf50; color: #fff; border-color: transparent; }
+    .info-chip.chip-red { background: #b71c1c; color: #fff; border-color: transparent; }
+    .info-chip .label { opacity: 0.9; font-weight: 600; }
+    /* Единая высота контролов внутри карточки группы */
+    .status-grid .card .btn-group button { 
+        height: 40px; 
+        padding: 0 0.8rem; 
+        display: inline-flex; 
+        align-items: center; 
+        justify-content: center; 
+        white-space: nowrap; 
+    }
+    /* Исключение для кнопок отложки: перенос текста даже на широких экранах */
+    .status-grid .card .btn-group button.delay {
+        white-space: normal;
+        height: auto;
+        min-height: 40px;
+        line-height: 1.2;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    /* И для «Продолжить по расписанию» на десктопе */
+    .status-grid .card .btn-group button.cancel-postpone {
+        white-space: normal;
+        height: auto;
+        min-height: 40px;
+        line-height: 1.2;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    .group-info-grid .btn-group { width: 100%; margin: 0; }
+    .info-chip { min-height: 40px; }
+    
+    .zones-section {
+        background: white;
+        border-radius: 8px;
+        padding: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-top: 1rem;
+    }
+    /* Временно скрываем колонку "Последний полив" на всех устройствах */
+    .col-last-watering { display: none !important; }
+    
+    /* Статус группы — компактнее */
+    .card > div:nth-child(2) {
+        font-size: 0.85rem;
+        opacity: 0.95;
+    }
+    
+    /* Карточки зон для мобилки */
+    .zones-cards {
+        display: none;
+    }
+    
+    .zone-card {
+        background: white;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 8px;
+        border-left: 3px solid #ccc;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .zone-card.status-on {
+        border-left-color: #4caf50;
+    }
+    
+    .zone-card.status-off {
+        border-left-color: #ccc;
+    }
+    
+    .zone-card-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+    }
+    
+    .zone-status-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #ccc;
+        flex-shrink: 0;
+    }
+    
+    .zone-status-dot.on {
+        background: #4caf50;
+    }
+    
+    .zone-status-dot.off {
+        background: #ccc;
+    }
+    
+    .zone-number {
+        font-weight: 600;
+        color: #666;
+        font-size: 0.9rem;
+    }
+    
+    .zone-name {
+        font-weight: 700;
+        color: #333;
+        flex: 1;
+        font-size: 0.95rem;
+    }
+    
+    .zone-group {
+        font-size: 0.8rem;
+        color: #999;
+        padding: 2px 8px;
+        background: #f5f5f5;
+        border-radius: 4px;
+    }
+    
+    .zone-card-body {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-bottom: 8px;
+        font-size: 0.85rem;
+        color: #666;
+    }
+    
+    .zone-card-body > span {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+    
+    .zone-card-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+    }
+    
+    .zone-card-actions button {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 4px;
+        background: #4caf50;
+        color: white;
+        cursor: pointer;
+        font-size: 0.9rem;
+    }
+    
+    .zone-card-actions button:hover {
+        background: #45a049;
+    }
+    
+    .zone-card-photo {
+        width: 32px;
+        height: 32px;
+        border-radius: 4px;
+        overflow: hidden;
+        background: #f0f0f0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+    
+    .zone-card-photo img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: cover;
+    }
+    
+    .zone-card-photo .no-photo {
+        font-size: 1.2rem;
+        color: #888;
+    }
+    .zones-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .zones-header h3 {
+        color: #333;
+        margin: 0;
+    }
+    .zones-count {
+        background: #2196f3;
+        color: white;
+        padding: 0.3rem 0.8rem;
+        border-radius: 15px;
+        font-size: 0.9rem;
+    }
+    .zones-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+        color: #333;
+    }
+    .zones-table th,
+    .zones-table td {
+        padding: 0.4rem;
+        text-align: left;
+        border-bottom: 1px solid #eee;
+    }
+    /* Центровка админских колонок расхода */
+    .zones-table th.admin-only,
+    .zones-table td.admin-only {
+        text-align: center;
+        white-space: nowrap;
+    }
+    .zones-table th {
+        background: #f5f5f5;
+        font-weight: 600;
+        color: #333;
+        border-bottom: 2px solid #ddd;
+    }
+    .zones-table td {
+        color: #333;
+        background: white;
+    }
+    .zones-table tr:hover td {
+        background: #f9f9f9;
+    }
+    .indicator {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        display: inline-block;
+    }
+    .indicator.on { background: #4caf50; }
+    .indicator.off { background: #ccc; }
+    .zone-start-btn {
+        background: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        padding: 0.2rem 0.4rem;
+        cursor: pointer;
+        font-size: 0.8rem;
+    }
+    .zone-start-btn:hover {
+        background: #45a049;
+    }
+    .zone-photo {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 5px;
+        overflow: hidden;
+        background-color: #f0f0f0;
+        cursor: pointer;
+    }
+    .zone-photo img {
+        display: block;
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+    }
+    .zone-photo .no-photo {
+        font-size: 1.5rem;
+        color: #888;
+    }
+    
+    /* Мобильная верстка */
+    @media (max-width: 1023px) {
+        .hide-mobile { display: none; }
+        
+        /* Группы — компактные карточки */
+        .status-grid { grid-template-columns: 1fr; gap: 8px; }
+        .card { 
+            min-height: auto; 
+            padding: 12px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+        }
+        .group-header {
+            font-size: 0.95rem;
+            margin-bottom: 2px;
+        }
+        .postpone-until {
+            margin: 4px 0;
+            padding: 2px 8px;
+            font-size: 0.8rem;
+        }
+        
+        /* Кнопки отложки → горизонтальный ряд компактных */
+        .btn-group {
+            flex-direction: row;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        
+        .btn-group button { 
+            min-width: unset;
+            font-size: 0.75rem; 
+            padding: 6px 8px;
+            border-radius: 6px;
+            flex: 1 1 0;
+        }
+        
+        .btn-group button.delay {
+            white-space: nowrap;
+            height: 32px;
+            min-height: 32px;
+            line-height: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .btn-group button.cancel-postpone {
+            white-space: nowrap;
+            height: 32px;
+            min-height: 32px;
+            flex-basis: 100%;
+        }
+        
+        .group-action-btn {
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            border-radius: 8px;
+        }
+        
+        /* Верхняя панель */
+        .top-bar { 
+            flex-direction: row; 
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .info-box { 
+            flex: 1 1 auto;
+            padding: 4px 8px;
+            font-size: 0.8rem;
+        }
+        
+        .legend { padding: 8px; font-size: 0.75rem; margin-bottom: 8px; }
+        .legend h4 { font-size: 0.8rem; margin-bottom: 4px; }
+        .legend-grid { grid-template-columns: 1fr 1fr; gap: 4px; }
+        .legend-item { font-size: 0.7rem; }
+        .legend-color { width: 12px; height: 12px; }
+        
+        .emergency { 
+            width: auto;
+            flex: 1; 
+            margin: 0; 
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            border-radius: 8px;
+        }
+        
+        .group-info-grid { grid-template-columns: 1fr; gap: 6px; }
+        .info-chip { font-size: 0.8rem; min-height: 32px; padding: 4px 8px; }
+        .mv-button { padding: 8px; font-size: 0.85rem; border-radius: 8px; }
+        
+        /* Секция зон */
+        .zones-section {
+            padding: 8px;
+            border-radius: 10px;
+            margin-top: 8px;
+        }
+        .zones-header { margin-bottom: 8px; }
+        .zones-header h3 { font-size: 1rem; }
+        
+        /* Таблица зон → скрыть, показать карточки */
+        .zones-table {
+            display: none !important;
+        }
+        
+        .zones-cards {
+            display: block;
+        }
+        
+        /* Аккордеон-карточки зон */
+        .zone-card {
+            padding: 0;
+            margin-bottom: 4px;
+            border-radius: 8px;
+            border-left-width: 3px;
+            overflow: hidden;
+        }
+        
+        .zone-card-header {
+            padding: 10px 12px;
+            margin-bottom: 0;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
+        .zone-card-body {
+            display: none;
+            padding: 0 12px 8px;
+            margin: 0;
+            font-size: 0.8rem;
+            border-top: 1px solid #f0f0f0;
+        }
+        
+        .zone-card.expanded .zone-card-body {
+            display: flex;
+        }
+        
+        .zone-card-actions {
+            display: none;
+            padding: 0 12px 10px;
+        }
+        
+        .zone-card.expanded .zone-card-actions {
+            display: flex;
+        }
+        
+        .zone-card-actions button {
+            padding: 6px 16px;
+            font-size: 0.8rem;
+            border-radius: 6px;
+        }
+        
+        .zone-number { font-size: 0.8rem; }
+        .zone-name { font-size: 0.85rem; }
+        .zone-group { font-size: 0.7rem; padding: 1px 6px; }
+        .zone-status-dot { width: 10px; height: 10px; }
+        
+        .zone-card-photo {
+            width: 28px;
+            height: 28px;
+            margin-left: auto;
+        }
+        
+        /* Chevron для аккордеона */
+        .zone-chevron {
+            margin-left: 8px;
+            font-size: 0.7rem;
+            color: #999;
+            transition: transform 0.2s;
+            flex-shrink: 0;
+        }
+        .zone-card.expanded .zone-chevron {
+            transform: rotate(180deg);
+        }
+    }
+
+    /* === Desktop Sidebar Layout === */
+    .desktop-layout {
+        display: flex;
+        min-height: 100vh;
+    }
+    /* На десктопе кнопка "Подробнее" скрыта */
+    .mobile-weather-toggle {
+        display: none;
+    }
+    .weather-sidebar {
+        width: 300px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+        border-right: 1px solid #e0e0e0;
+        padding: 16px;
+        background: white;
+        flex-shrink: 0;
+    }
+    .main-content {
+        flex: 1;
+        padding: 16px;
+        padding-left: 40px;
+        min-width: 0;
+    }
+    .desktop-layout {
+        overflow-x: hidden;
+    }
+    .weather-sidebar {
+        position: relative;
+        overflow: visible;
+    }
+    .sidebar-toggle {
+        position: absolute;
+        top: 50%;
+        right: -24px;
+        transform: translateY(-50%);
+        width: 24px;
+        height: 60px;
+        background: #2196f3;
+        color: white;
+        border: none;
+        border-radius: 0 4px 4px 0;
+        cursor: pointer;
+        font-size: 12px;
+        z-index: 100;
+    }
+    .sidebar-toggle:hover {
+        background: #1976d2;
+    }
+    .sidebar-collapsed .weather-sidebar {
+        width: 0;
+        padding: 0;
+        border: none;
+        overflow: hidden;
+    }
+    .sidebar-collapsed .sidebar-toggle {
+        position: fixed;
+        left: 0;
+        top: 50%;
+        right: auto;
+    }
+
+    /* === Weather Widget in Sidebar === */
+    #weather-widget {
+        margin-bottom: 1rem;
+    }
+    .weather-card {
+        background: var(--card-background, #fff);
+        border-radius: 8px;
+        padding: 0.8rem;
+        margin-bottom: 0.5rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .weather-summary {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .weather-summary-left {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .weather-icon {
+        font-size: 2rem;
+    }
+    .weather-temp {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: var(--text-color, #333);
+    }
+    .weather-unit {
+        font-size: 0.9rem;
+        font-weight: 400;
+        color: #999;
+    }
+    .weather-desc {
+        font-size: 0.8rem;
+        color: #999;
+    }
+    .weather-coeff {
+        text-align: right;
+    }
+    .weather-coeff-val {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: var(--success-color, #4caf50);
+    }
+    .weather-coeff-val.skip {
+        color: var(--danger-color, #f44336);
+    }
+    .weather-coeff-label {
+        font-size: 0.65rem;
+        color: #999;
+    }
+    .weather-metrics {
+        display: flex;
+        gap: 0.8rem;
+        margin-top: 0.4rem;
+        font-size: 0.8rem;
+        color: #999;
+    }
+    .weather-source {
+        font-size: 0.6rem;
+        color: #999;
+        margin-top: 0.3rem;
+    }
+    .weather-section-title {
+        font-size: 0.75rem;
+        color: #999;
+        margin: 0.6rem 0 0.3rem;
+        font-weight: 600;
+    }
+    /* 24h forecast grid */
+    .weather-24h-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+    }
+    .hour-cell {
+        text-align: center;
+        background: rgba(33,150,243,0.08);
+        border-radius: 8px;
+        padding: 0.35rem 0.25rem;
+        font-size: 0.72rem;
+    }
+    .hour-time {
+        color: #999;
+        font-size: 0.65rem;
+    }
+    .hour-icon {
+        font-size: 1.1rem;
+        margin: 0.1rem 0;
+    }
+    .hour-temp {
+        font-weight: 600;
+        color: var(--text-color, #333);
+    }
+    .hour-detail {
+        font-size: 0.6rem;
+        color: #999;
+    }
+    /* Legacy styles for compatibility */
+    .weather-hours {
+        display: flex;
+        gap: 0.4rem;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.3rem;
+    }
+    .weather-hour {
+        flex-shrink: 0;
+        text-align: center;
+        min-width: 54px;
+        background: rgba(33,150,243,0.08);
+        border-radius: 8px;
+        padding: 0.35rem 0.25rem;
+        font-size: 0.72rem;
+    }
+    .weather-hour-time {
+        color: #999;
+        font-size: 0.65rem;
+    }
+    .weather-hour-icon {
+        font-size: 1.1rem;
+        margin: 0.1rem 0;
+    }
+    .weather-hour-temp {
+        font-weight: 600;
+        color: var(--text-color, #333);
+    }
+    .weather-hour-detail {
+        font-size: 0.6rem;
+        color: #999;
+    }
+    .weather-hours-legend {
+        font-size: 0.6rem;
+        color: #999;
+        text-align: center;
+        margin-top: 0.15rem;
+    }
+    .weather-days {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .weather-day {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.35rem 0.5rem;
+        background: rgba(33,150,243,0.08);
+        border-radius: 8px;
+        font-size: 0.8rem;
+        color: var(--text-color, #333);
+    }
+    .weather-day-dow {
+        font-weight: 600;
+        min-width: 24px;
+    }
+    .weather-day-icon {
+        font-size: 1.1rem;
+    }
+    .weather-day-temps {
+        flex: 1;
+    }
+    .weather-day-rain {
+        color: #999;
+        font-size: 0.75rem;
+    }
+    /* Weather details/summary */
+    .weather-card details {
+        border-top: 1px solid var(--border-color, #e0e0e0);
+        margin-top: 0.5rem;
+    }
+    .weather-card details + details {
+        margin-top: 0;
+    }
+    .weather-card summary {
+        padding: 0.6rem 0;
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: var(--text-color, #333);
+    }
+    .weather-card summary::-webkit-details-marker { display: none; }
+    .weather-card summary::after {
+        content: '▼';
+        font-size: 0.6rem;
+        color: #999;
+        margin-left: auto;
+        transition: transform 0.2s;
+    }
+    .weather-card details[open] summary::after {
+        transform: rotate(180deg);
+    }
+    .weather-details-content {
+        padding: 0 0 0.5rem;
+    }
+    .weather-params {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.2rem 0.5rem;
+        font-size: 0.78rem;
+    }
+    .weather-params-label {
+        color: #999;
+    }
+    .weather-params-val {
+        font-weight: 500;
+        text-align: right;
+        color: var(--text-color, #333);
+    }
+    .weather-factor {
+        padding: 0.4rem 0;
+        border-bottom: 1px solid var(--border-color, #e0e0e0);
+    }
+    .weather-factor:last-child {
+        border-bottom: none;
+    }
+    .weather-factor-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.8rem;
+    }
+    .weather-factor-name {
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+        color: var(--text-color, #333);
+    }
+    .weather-factor-status {
+        font-size: 0.75rem;
+    }
+    .weather-factor-status.wf-ok { color: var(--success-color, #4caf50); }
+    .weather-factor-status.wf-warn { color: var(--warning-color, #ff9800); }
+    .weather-factor-status.wf-danger { color: var(--danger-color, #f44336); }
+    .weather-factor-desc {
+        font-size: 0.68rem;
+        color: #999;
+        margin-top: 0.15rem;
+    }
+    .weather-hist-item {
+        display: flex;
+        gap: 0.4rem;
+        align-items: baseline;
+        padding: 0.25rem 0;
+        font-size: 0.75rem;
+        border-bottom: 1px solid var(--border-color, #e0e0e0);
+        color: var(--text-color, #333);
+    }
+    .weather-hist-item:last-child { border-bottom: none; }
+    .weather-hist-date {
+        color: #999;
+        min-width: 40px;
+        font-size: 0.7rem;
+    }
+    .weather-badge {
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+        font-size: 0.65rem;
+        font-weight: 600;
+    }
+    .weather-badge-skip { background: rgba(244,67,54,0.15); color: var(--danger-color, #f44336); }
+    .weather-badge-adj { background: rgba(255,152,0,0.15); color: var(--warning-color, #ff9800); }
+    .weather-badge-ok { background: rgba(76,175,80,0.15); color: var(--success-color, #4caf50); }
+    @media (prefers-color-scheme: dark) {
+        .weather-card { background: #2d2d2d; }
+        .weather-hour { background: rgba(33,150,243,0.12); }
+        .weather-day { background: rgba(33,150,243,0.12); }
+    }
+
+    /* Модальное окно для просмотра фотографий */
+    .photo-modal {
+        display: none; /* показ включаем через JS как flex */
+        position: fixed;
+        z-index: 1001;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.9);
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+    }
+
+    .photo-modal-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        max-width: min(92vw, 720px);
+        max-height: 85vh;
+        overflow:auto;
+        box-sizing: border-box;
+        margin: 0;
+    }
+    /* Гарантия вписывания фото в экран смартфона */
+    .photo-modal img {
+        display: block;
+        max-width: 95vw;
+        max-height: 85vh;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+    }
+
+    .photo-modal-actions {
+        display: flex;
+        justify-content: center;
+        margin-top: 0;
+    }
+
+    .photo-modal-actions .btn {
+        padding: 8px 16px;
+        font-size: 1rem;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+
+    .photo-modal-actions .btn:hover {
+        background-color: #f0f0f0;
+    }
+
+    .photo-modal-actions .btn:focus {
+        outline: none;
+    }
+
+    /* === Active Zone Indicator === */
+    #sidebar-active-zone {
+        background: linear-gradient(135deg, #2196f3, #1976d2);
+        color: white;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+    }
+    .active-zone-header {
+        font-weight: 600;
+        font-size: 0.85rem;
+        margin-bottom: 8px;
+    }
+    .active-zone-name {
+        font-size: 1rem;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+    .active-zone-timer {
+        font-size: 0.85rem;
+        margin-bottom: 8px;
+    }
+    .active-zone-progress {
+        height: 4px;
+        background: rgba(255,255,255,0.3);
+        border-radius: 2px;
+        margin-bottom: 8px;
+    }
+    .progress-bar {
+        height: 100%;
+        background: white;
+        border-radius: 2px;
+        transition: width 0.3s;
+    }
+    .active-zone-next {
+        font-size: 0.75rem;
+        opacity: 0.9;
+    }
+
+    /* === Water Meter === */
+    #sidebar-water-meter {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+    }
+    .water-meter-header {
+        font-weight: 600;
+        font-size: 0.85rem;
+        color: #333;
+        margin-bottom: 8px;
+    }
+    .water-meter-value {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #2196f3;
+        margin-bottom: 4px;
+    }
+    .water-meter-value .unit {
+        font-size: 0.9rem;
+        font-weight: 400;
+        color: #999;
+    }
+    .water-meter-detail {
+        font-size: 0.75rem;
+        color: #666;
+    }
+    .water-meter-detail span {
+        display: block;
+        margin-top: 2px;
+    }
+
+    /* === Mobile Layout === */
+    @media (max-width: 1023px) {
+        .desktop-layout {
+            flex-direction: column;
+        }
+        .main-content {
+            padding: 8px;
+            width: 100%;
+            max-width: 100%;
+        }
+        .weather-sidebar {
+            width: 100%;
+            height: auto;
+            position: static;
+            border-right: none;
+            border-bottom: 1px solid var(--border-color, #e0e0e0);
+            padding: 8px 12px;
+            max-height: none;
+            overflow: visible;
+        }
+        .weather-sidebar .weather-extra-block,
+        .weather-sidebar #sidebar-water-meter {
+            display: none;
+        }
+        .weather-sidebar.mobile-expanded .weather-extra-block,
+        .weather-sidebar.mobile-expanded #sidebar-water-meter {
+            display: block;
+        }
+        .mobile-weather-toggle {
+            display: block;
+            width: 100%;
+            padding: 6px;
+            margin-top: 6px;
+            background: transparent;
+            border: 1px solid var(--border-color, #e0e0e0);
+            border-radius: 6px;
+            color: var(--primary, #2196f3);
+            font-size: 12px;
+            cursor: pointer;
+            text-align: center;
+        }
+        .weather-sidebar.mobile-expanded .mobile-weather-toggle {
+            margin-bottom: 6px;
+        }
+        .sidebar-toggle {
+            display: none;
+        }
+        .sidebar-collapsed .weather-sidebar {
+            width: 100%;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-color, #e0e0e0);
+        }
+        .weather-sidebar #sidebar-active-zone {
+            display: none;  /* V2: running info shown in zone card */
+        }
+        /* Compact weather summary on mobile */
+        .weather-card { padding: 8px; margin-bottom: 6px; }
+        .weather-icon { font-size: 1.6rem; }
+        .weather-temp { font-size: 1.3rem; }
+        .weather-coeff-val { font-size: 1.1rem; }
+        .weather-metrics { font-size: 0.75rem; gap: 0.5rem; margin-top: 4px; }
+        #sidebar-active-zone { padding: 8px; margin-top: 6px; border-radius: 8px; }
+    }
+
+    /* === Dark Theme === */
+    @media (prefers-color-scheme: dark) {
+        .weather-sidebar {
+            background: #1e1e1e;
+            border-color: #333;
+        }
+        #sidebar-water-meter {
+            background: #2d2d2d;
+            border-color: #333;
+        }
+        .water-meter-header {
+            color: #e0e0e0;
+        }
+        .water-meter-detail {
+            color: #999;
+        }
+    }
+
+    /* ======== ZONES V2: Hunter-style ======== */
+    .zones-stats-bar {
+        display: flex;
+        gap: 1px;
+        background: #e8eaed;
+        margin: 8px 0;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    .zstat-item { flex:1; background:white; padding:8px 4px; text-align:center; }
+    .zstat-val { font-size:16px; font-weight:700; color:#00838f; }
+    .zstat-lbl { font-size:10px; color:#999; }
+
+    /* Group Tabs */
+    .group-tabs {
+        display:flex; padding:0; gap:6px; overflow-x:auto;
+        -webkit-overflow-scrolling:touch; scrollbar-width:none;
+        padding-bottom:8px; margin-bottom:4px;
+    }
+    .group-tabs::-webkit-scrollbar { display:none; }
+    .group-tab {
+        flex:0 0 auto; padding:7px 14px; border:2px solid #e8eaed;
+        background:white; border-radius:20px; font-size:13px;
+        font-weight:600; cursor:pointer; white-space:nowrap;
+        color:#999; transition:all 0.15s;
+    }
+    .group-tab.active { background:#00838f; color:white; border-color:#00838f; }
+    .group-tab .tab-count {
+        display:inline-block; background:rgba(0,0,0,0.08); padding:1px 6px;
+        border-radius:8px; font-size:11px; margin-left:3px;
+    }
+    .group-tab.active .tab-count { background:rgba(255,255,255,0.25); }
+    .tab-status {
+        display:inline-block; width:8px; height:8px; border-radius:50%;
+        margin-right:3px; vertical-align:middle;
+    }
+    .tab-status.idle { background:#bdbdbd; }
+    .tab-status.running, .tab-status.watering { background:#2196f3; }
+    .tab-status.postponed { background:#ff9800; }
+    .tab-status.error { background:#f44336; }
+    .tab-status.waiting { background:#4caf50; }
+
+    /* Search */
+    .zone-search-wrap { margin-bottom:8px; }
+    .search-input {
+        width:100%; padding:9px 12px 9px 36px; border:2px solid #e8eaed;
+        border-radius:10px; font-size:14px; outline:none;
+        background:white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23999' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.868-3.834zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E") 12px center no-repeat;
+    }
+    .search-input:focus { border-color:#00838f; }
+
+    /* Quick Actions */
+    .zone-quick-actions { display:flex; gap:8px; margin-bottom:8px; }
+    .zq-btn {
+        padding:9px 16px; border:2px solid #00838f; background:white;
+        color:#00838f; border-radius:10px; font-size:13px; font-weight:600;
+        cursor:pointer; transition:all 0.15s;
+    }
+    .zq-btn:active { transform:scale(0.97); }
+    .zq-filled { flex:1; background:#00838f; color:white; }
+    .zq-outline { border-color:#00838f; color:#00838f; min-width:48px; }
+    .zq-search { border-color:#999; color:#666; min-width:48px; }
+
+    /* Zone List */
+    .zone-list { margin-bottom:16px; }
+
+    /* Group section header */
+    .group-section { display:flex; align-items:center; gap:8px; padding:10px 0 4px; }
+    .group-section-name { font-size:12px; font-weight:700; color:#999; text-transform:uppercase; letter-spacing:0.5px; }
+    .group-section-line { flex:1; height:1px; background:#e8eaed; }
+    .group-section-count { font-size:11px; color:#999; background:#f0f0f0; padding:2px 7px; border-radius:8px; }
+
+    /* Zone Card */
+    .zone-card {
+        background:white; border-radius:10px; margin-bottom:5px;
+        overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.06);
+        border-left:4px solid #bdbdbd; transition:border-color 0.2s;
+    }
+    .zone-card.zs-idle { border-left-color:#bdbdbd; }
+    .zone-card.zs-enabled { border-left-color:#4caf50; }
+    .zone-card.zs-running { border-left-color:#2196f3; }
+    .zone-card.zs-error { border-left-color:#f44336; }
+
+    .zone-card-main {
+        display:flex; align-items:center; padding:10px 12px;
+        gap:10px; cursor:pointer; -webkit-tap-highlight-color:transparent;
+    }
+    .zone-card-main:active { background:#fafafa; }
+
+    .zc-icon {
+        width:40px; height:40px; border-radius:9px;
+        display:flex; align-items:center; justify-content:center;
+        font-size:18px; flex-shrink:0; background:#f5f5f5;
+    }
+    .zc-info { flex:1; min-width:0; }
+    .zc-name { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .zc-meta { display:flex; gap:6px; margin-top:1px; font-size:11px; color:#999; flex-wrap:wrap; align-items:center; }
+    .zc-dur-badge { background:#e0f7fa; color:#006064; padding:1px 6px; border-radius:7px; font-size:10px; font-weight:600; }
+    .zc-next { font-size:12px; text-align:right; flex-shrink:0; min-width:44px; }
+    .zc-next-val { font-size:13px; font-weight:600; color:#00838f; }
+    .zc-next-lbl { font-size:9px; color:#999; }
+    .zc-chevron { font-size:10px; color:#ccc; transition:transform 0.2s; flex-shrink:0; }
+    .zone-card.open .zc-chevron { transform:rotate(180deg); }
+
+    /* Running info */
+    .zc-running { display:none; background:#e3f2fd; padding:7px 12px; align-items:center; gap:8px; font-size:13px; color:#1565c0; }
+    .zone-card.zs-running .zc-running { display:flex; }
+    .zc-running-dot { width:10px; height:10px; border-radius:50%; background:#2196f3; animation:waterPulse 1.5s infinite; flex-shrink:0; }
+    @keyframes waterPulse {
+        0% { box-shadow:0 0 0 0 rgba(33,150,243,0.4); }
+        70% { box-shadow:0 0 0 8px rgba(33,150,243,0); }
+        100% { box-shadow:0 0 0 0 rgba(33,150,243,0); }
+    }
+    .zc-running-timer { font-weight:700; font-size:15px; }
+    .zc-running-pct { margin-left:auto; font-size:12px; color:#90caf9; }
+    .zc-progress { height:3px; background:#bbdefb; }
+    .zc-progress-bar { height:100%; background:linear-gradient(90deg,#26c6da,#00838f); transition:width 0.5s; }
+
+    /* Expanded details */
+    .zc-expanded { display:none; padding:10px 12px; background:#fafbfc; border-top:1px solid #f0f0f0; }
+    .zone-card.open .zc-expanded { display:block; }
+    .zc-detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:8px; }
+    .zc-detail-item { background:white; padding:6px 8px; border-radius:7px; border:1px solid #f0f0f0; }
+    .zc-d-label { font-size:10px; color:#999; }
+    .zc-d-value { font-size:13px; font-weight:600; margin-top:1px; }
+    .zc-d-value.highlight { color:#00838f; }
+
+    /* Duration control */
+    .zc-dur-control { display:flex; align-items:center; justify-content:center; gap:14px; padding:10px; background:white; border-radius:8px; border:1px solid #f0f0f0; margin-bottom:8px; }
+    .zc-dur-btn {
+        width:36px; height:36px; border-radius:50%; border:2px solid #00838f;
+        background:white; color:#00838f; font-size:18px; cursor:pointer;
+        display:flex; align-items:center; justify-content:center;
+    }
+    .zc-dur-btn:active { background:#00838f; color:white; }
+    .zc-dur-display { font-size:24px; font-weight:700; color:#00838f; min-width:50px; text-align:center; }
+    .zc-dur-unit { font-size:13px; color:#999; }
+
+    /* Zone actions */
+    .zc-actions { display:flex; gap:6px; }
+    .zc-actions { display:flex; gap:8px; }
+    .zc-actions button { flex:1; padding:14px; border:none; border-radius:10px; font-size:15px; font-weight:600; cursor:pointer; min-height:48px; }
+    .zc-actions button:active { transform:scale(0.97); }
+    .zc-btn-run { background:#00838f; color:white; }
+    .zc-btn-stop { background:#ef5350; color:white; }
+    .zc-btn-edit { background:#f5f5f5; color:#333; border:1px solid #e8eaed !important; min-width:52px; flex:0 0 auto; }
+
+    /* Bottom Sheet */
+    .sheet-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:200; }
+    .sheet-overlay.show { display:block; }
+    .bottom-sheet {
+        position:fixed; bottom:0; left:0; right:0; background:white;
+        border-radius:14px 14px 0 0; padding:16px; z-index:201;
+        transform:translateY(100%); transition:transform 0.3s;
+        max-height:80vh; overflow-y:auto;
+    }
+    .bottom-sheet.show { transform:translateY(0); }
+
+    /* Desktop: centered modal instead of bottom sheet */
+    @media (min-width: 768px) {
+        .bottom-sheet {
+            position:fixed;
+            bottom:auto;
+            top:50%;
+            left:50%;
+            transform:translate(-50%, 100%);
+            max-width:540px;
+            max-height:75vh;
+            width:90%;
+            border-radius:16px;
+            overflow-y:auto;
+        }
+        .bottom-sheet.show {
+            transform:translate(-50%, -50%);
+        }
+    }
+
+    .sheet-handle { width:36px; height:4px; background:#ddd; border-radius:2px; margin:0 auto 12px; }
+    .sheet-title { font-size:17px; font-weight:700; margin-bottom:14px; }
+    .sheet-form-group { margin-bottom:10px; }
+    .sheet-label { font-size:12px; font-weight:600; color:#999; margin-bottom:3px; display:block; }
+    .sheet-input, .sheet-select {
+        width:100%; padding:9px 12px; border:2px solid #e8eaed;
+        border-radius:8px; font-size:14px; outline:none; background:white;
+    }
+    .sheet-input:focus, .sheet-select:focus { border-color:#00838f; }
+    .sheet-actions { display:flex; gap:8px; margin-top:14px; }
+    .sheet-actions button { flex:1; padding:11px; border:none; border-radius:9px; font-size:14px; font-weight:600; cursor:pointer; }
+    .sheet-btn-cancel { background:#f5f5f5; color:#333; }
+    .sheet-btn-save { background:#00838f; color:white; }
+
+    /* Run Duration Popup */
+    .run-popup {
+        position:fixed; bottom:0; left:0; right:0; background:white;
+        border-radius:14px 14px 0 0; padding:16px; z-index:201;
+        transform:translateY(100%); transition:transform 0.3s;
+        max-width:420px; margin:0 auto;
+    }
+    .run-popup.show { transform:translateY(0); }
+    .run-popup-title { font-size:17px; font-weight:700; margin-bottom:12px; text-align:center; }
+    
+    /* Circular Dial */
+    .dial-container {
+        position:relative; width:200px; height:200px; margin:0 auto 12px;
+        touch-action:none;
+    }
+    .dial-svg { width:100%; height:100%; }
+    .dial-center {
+        position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+        text-align:center; pointer-events:none;
+    }
+    .dial-value { font-size:36px; font-weight:700; color:#00838f; line-height:1; }
+    .dial-unit { font-size:14px; color:#999; }
+    
+    .run-popup-presets {
+        display:flex; gap:6px; justify-content:center; margin-bottom:14px;
+    }
+    .run-popup-presets button {
+        padding:7px 12px; border:2px solid #e8eaed; background:white;
+        border-radius:8px; font-size:13px; font-weight:600; color:#333; cursor:pointer;
+        min-width:40px;
+    }
+    .run-popup-presets button:active { background:#e0f7fa; border-color:#00838f; }
+    .run-popup-actions { display:flex; gap:8px; }
+    .run-popup-actions button { flex:1; min-height:48px; font-size:15px; }
+
+    /* Loading Overlay */
+    .loading-overlay {
+        display:none; position:fixed; inset:0; background:rgba(255,255,255,0.85);
+        z-index:300; justify-content:center; align-items:center; flex-direction:column; gap:12px;
+    }
+    .loading-overlay.show { display:flex; }
+    .loading-spinner {
+        width:40px; height:40px; border:4px solid #e0e0e0;
+        border-top-color:#00838f; border-radius:50%;
+        animation:spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .loading-text { font-size:15px; font-weight:600; color:#00838f; }
+
+    /* Toast */
+    .zone-toast {
+        position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(80px);
+        background:#333; color:white; padding:10px 22px; border-radius:10px;
+        font-size:14px; font-weight:500; z-index:300; opacity:0; transition:all 0.3s;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3); pointer-events:none;
+    }
+    .zone-toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
+    .zone-toast.success { background:#4caf50; }
+    .zone-toast.error { background:#ef5350; }
+
+    /* Desktop: 2 columns for zone cards */
+    @media (min-width:1024px) {
+        .zone-list { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+        .group-section { grid-column:1/-1; }
+    }
