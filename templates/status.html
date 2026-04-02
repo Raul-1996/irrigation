@@ -1815,5 +1815,14 @@ window._ssrZones = JSON.parse({{ inline_zones|default('[]')|tojson }});
 window._ssrGroups = JSON.parse({{ inline_groups|default('[]')|tojson }});
 window._ssrStatus = JSON.parse({{ inline_status|default('{}')|tojson }});
 </script>
-<script src="{{ asset('static/js/status.js') }}"></script>
+<!-- Status page modules (split from monolithic status.js) -->
+<script src="{{ asset('static/js/status/timers.js') }}"></script>
+<script src="{{ asset('static/js/status/ui-helpers.js') }}"></script>
+<script src="{{ asset('static/js/status/data-loader.js') }}"></script>
+<script src="{{ asset('static/js/status/group-cards.js') }}"></script>
+<script src="{{ asset('static/js/status/zone-cards.js') }}"></script>
+<script src="{{ asset('static/js/status/zone-actions.js') }}"></script>
+<script src="{{ asset('static/js/status/weather.js') }}"></script>
+<script src="{{ asset('static/js/status/sidebar.js') }}"></script>
+<script src="{{ asset('static/js/status/init.js') }}"></script>
 {% endblock %}
