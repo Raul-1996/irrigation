@@ -579,13 +579,22 @@
     }
 
     function tickCountdowns() {
-        // Tick zone card timers
+        // Tick zone card timers — compute from planned_end_time (absolute) to survive tab sleep
         document.querySelectorAll('.zc-running-timer').forEach(function(el) {
-            var val = el.dataset.remainingSeconds;
-            if (!val) return;
-            var sec = Number(val);
+            var zid = el.id.replace('ztimer-', '');
+            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
+            var sec;
+            // Prefer absolute time calculation (handles tab freeze/background)
+            if (zone && zone.planned_end_time) {
+                var endMs = new Date(zone.planned_end_time).getTime();
+                sec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+            } else {
+                // Fallback to decrement
+                var val = el.dataset.remainingSeconds;
+                if (!val) return;
+                sec = Math.max(0, Number(val) - 1);
+            }
             if (isNaN(sec) || sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
-            sec--;
             el.dataset.remainingSeconds = String(sec);
             el.textContent = formatSeconds(sec);
             // Update progress bar
@@ -607,21 +616,32 @@
                 if (pctEl) pctEl.textContent = Math.round(pct) + '%';
             }
         });
-        // Tick group timers
+        // Tick group timers — compute from zone planned_end_time (absolute)
         const spans = document.querySelectorAll('.group-timer');
         spans.forEach(span => {
-            const val = span.dataset.remainingSeconds;
-            if (!val) return;
-            let sec = Number(val);
+            const zoneId = span.dataset.zoneId;
+            let sec;
+            // Prefer absolute time from zone data
+            if (zoneId) {
+                const gz = (zonesData || []).find(z => String(z.id) === String(zoneId));
+                if (gz && gz.planned_end_time) {
+                    const endMs = new Date(gz.planned_end_time).getTime();
+                    sec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                }
+            }
+            if (sec === undefined) {
+                // Fallback to decrement
+                const val = span.dataset.remainingSeconds;
+                if (!val) return;
+                sec = Math.max(0, Number(val) - 1);
+            }
             if (Number.isNaN(sec) || sec <= 0) {
                 span.textContent = '00:00';
                 span.dataset.remainingSeconds = '';
-                // Попросим актуальный статус группы и перерисуем её карточку без полной перезагрузки страницы
                 const gid = span.dataset.groupId;
                 if (gid) refreshSingleGroup(parseInt(gid, 10));
                 return;
             }
-            sec = sec - 1;
             span.dataset.remainingSeconds = String(sec);
             span.textContent = formatSeconds(sec);
         });
@@ -1162,6 +1182,15 @@
         setInterval(loadZonesData, 30000);
         setInterval(tickCountdowns, 1000);
         
+        // Resync on tab return (browser freezes setInterval when tab is hidden)
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) {
+                tickCountdowns(); // instant timer recalc from planned_end_time
+                loadStatusData();
+                loadZonesData();
+            }
+        });
+
         // Обработчик аварийной остановки
         document.getElementById('emergency-btn').addEventListener('click', emergencyStop);
         document.getElementById('resume-btn').addEventListener('click', resumeSchedule);
