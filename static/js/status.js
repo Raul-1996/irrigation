@@ -1,3 +1,6 @@
+    // Parse datetime string safely (iOS Safari needs 'T' separator, not space)
+    function parseDate(s) { return s ? new Date(String(s).replace(' ', 'T')) : new Date(NaN); }
+
     // UI timing helpers
     (function(){
       function nowMs(){ return performance && performance.now ? performance.now() : Date.now(); }
@@ -346,7 +349,7 @@
         try {
             var zone = group.current_zone ? (zonesData || []).find(function(z){ return z.id === group.current_zone; }) : null;
             if (zone && zone.planned_end_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
+                var endMs = parseDate(zone.planned_end_time).getTime();
                 var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
                 if (remain > 0) {
                     span.dataset.remainingSeconds = String(remain);
@@ -482,7 +485,7 @@
 
             // Status changed or card doesn't exist — build new card
             const card = document.createElement('div');
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
+            const flowActive = group.status === 'watering' && true;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
@@ -494,7 +497,7 @@
                 try {
                     var _gz = (zonesData || []).find(function(zz){ return zz.id === group.current_zone; });
                     if (_gz && _gz.planned_end_time) {
-                        var _gEndMs = new Date(_gz.planned_end_time).getTime();
+                        var _gEndMs = parseDate(_gz.planned_end_time).getTime();
                         var _gRem = Math.max(0, Math.floor((_gEndMs - Date.now()) / 1000));
                         if (_gRem > 0) { _gtText = formatSeconds(_gRem); _gtRemain = String(_gRem); }
                     }
@@ -588,7 +591,7 @@
             var zid = el.id.replace('ztimer-', '');
             var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
             if (zone && zone.planned_end_time) {
-                var endMs = new Date(zone.planned_end_time.replace(' ', 'T')).getTime();
+                var endMs = parseDate(zone.planned_end_time).getTime();
                 if (!isNaN(endMs)) {
                     var absSec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
                     if (Math.abs(absSec - sec) > 2) sec = absSec;
@@ -604,8 +607,8 @@
             if (progEl && zone) {
                 var total;
                 if (zone.planned_end_time && zone.watering_start_time) {
-                    var endMs = new Date(zone.planned_end_time).getTime();
-                    var startMs = new Date(zone.watering_start_time).getTime();
+                    var endMs = parseDate(zone.planned_end_time).getTime();
+                    var startMs = parseDate(zone.watering_start_time).getTime();
                     total = Math.max(60, Math.floor((endMs - startMs) / 1000));
                 } else {
                     total = (zone.duration || 10) * 60;
@@ -627,7 +630,7 @@
             if (zoneId) {
                 const gz = (zonesData || []).find(z => String(z.id) === String(zoneId));
                 if (gz && gz.planned_end_time) {
-                    const endMs = new Date(gz.planned_end_time.replace(' ', 'T')).getTime();
+                    const endMs = parseDate(gz.planned_end_time).getTime();
                     if (!isNaN(endMs)) {
                         const absSec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
                         if (Math.abs(absSec - sec) > 2) sec = absSec;
@@ -658,7 +661,7 @@
             const card = document.getElementById(`gcard-${group.id}`) || document.getElementById(`group-card-${group.id}`);
             if (!card) return;
             // Полностью пересоберем содержимое карточки по актуальным данным
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
+            const flowActive = group.status === 'watering' && true;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             let extraText2 = '—';
@@ -669,7 +672,7 @@
                 try {
                     var _gz2 = (zonesData || []).find(function(zz){ return zz.id === group.current_zone; });
                     if (_gz2 && _gz2.planned_end_time) {
-                        var _g2EndMs = new Date(_gz2.planned_end_time).getTime();
+                        var _g2EndMs = parseDate(_gz2.planned_end_time).getTime();
                         var _g2Rem = Math.max(0, Math.floor((_g2EndMs - Date.now()) / 1000));
                         if (_g2Rem > 0) { _gt2Text = formatSeconds(_g2Rem); _gt2Remain = String(_g2Rem); }
                     }
@@ -1556,7 +1559,7 @@
         if (nameEl) nameEl.textContent = active.name;
         // Timer
         if (active.planned_end_time && timerEl) {
-            var end = new Date(active.planned_end_time);
+            var end = parseDate(active.planned_end_time);
             var now = new Date();
             var remain = Math.max(0, Math.floor((end - now) / 1000));
             var mins = Math.floor(remain / 60);
@@ -1564,7 +1567,7 @@
             timerEl.innerHTML = 'осталось <strong>' + mins + ':' + (secs < 10 ? '0' : '') + secs + '</strong>';
             // Progress
             if (active.watering_start_time && progressEl) {
-                var start = new Date(active.watering_start_time);
+                var start = parseDate(active.watering_start_time);
                 var total = (end - start) / 1000;
                 var elapsed = (now - start) / 1000;
                 var pct = Math.min(100, Math.max(0, (elapsed / total) * 100));
@@ -1741,8 +1744,8 @@
                 var _pctText = '';
                 var _progWidth = '0%';
                 if (z.planned_end_time && z.watering_start_time) {
-                    var _endMs = new Date(z.planned_end_time).getTime();
-                    var _startMs = new Date(z.watering_start_time).getTime();
+                    var _endMs = parseDate(z.planned_end_time).getTime();
+                    var _startMs = parseDate(z.watering_start_time).getTime();
                     var _remain = Math.max(0, Math.floor((_endMs - Date.now()) / 1000));
                     var _total = Math.max(60, Math.floor((_endMs - _startMs) / 1000));
                     _timerText = formatSeconds(_remain);
@@ -1921,8 +1924,8 @@
                 var _progWidth = '0%';
                 var _remain = 0;
                 if (z.planned_end_time && z.watering_start_time) {
-                    var _endMs = new Date(z.planned_end_time).getTime();
-                    var _startMs = new Date(z.watering_start_time).getTime();
+                    var _endMs = parseDate(z.planned_end_time).getTime();
+                    var _startMs = parseDate(z.watering_start_time).getTime();
                     _remain = Math.max(0, Math.floor((_endMs - Date.now()) / 1000));
                     var _total = Math.max(60, Math.floor((_endMs - _startMs) / 1000));
                     _timerText = formatSeconds(_remain);
@@ -2004,8 +2007,8 @@
         function applyTimer(remain) {
             var total;
             if (zone.planned_end_time && zone.watering_start_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
-                var startMs = new Date(zone.watering_start_time).getTime();
+                var endMs = parseDate(zone.planned_end_time).getTime();
+                var startMs = parseDate(zone.watering_start_time).getTime();
                 total = Math.max(60, Math.floor((endMs - startMs) / 1000));
             } else {
                 total = (zone.duration || 10) * 60;
@@ -2021,7 +2024,7 @@
         // Try local calc first (instant)
         try {
             if (zone.planned_end_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
+                var endMs = parseDate(zone.planned_end_time).getTime();
                 var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
                 if (remain > 0) { applyTimer(remain); return; }
             }
