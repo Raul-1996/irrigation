@@ -579,20 +579,20 @@
     }
 
     function tickCountdowns() {
-        // Tick zone card timers — compute from planned_end_time (absolute) to survive tab sleep
+        // Tick zone card timers — decrement normally, correct from planned_end_time if drift > 2s
         document.querySelectorAll('.zc-running-timer').forEach(function(el) {
+            var val = el.dataset.remainingSeconds;
+            if (!val) return;
+            var sec = Math.max(0, Number(val) - 1);
+            // Correct from absolute time if drift > 2 seconds (handles tab freeze)
             var zid = el.id.replace('ztimer-', '');
             var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
-            var sec;
-            // Prefer absolute time calculation (handles tab freeze/background)
             if (zone && zone.planned_end_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
-                sec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
-            } else {
-                // Fallback to decrement
-                var val = el.dataset.remainingSeconds;
-                if (!val) return;
-                sec = Math.max(0, Number(val) - 1);
+                var endMs = new Date(zone.planned_end_time.replace(' ', 'T')).getTime();
+                if (!isNaN(endMs)) {
+                    var absSec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                    if (Math.abs(absSec - sec) > 2) sec = absSec;
+                }
             }
             if (isNaN(sec) || sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
             el.dataset.remainingSeconds = String(sec);
@@ -616,24 +616,23 @@
                 if (pctEl) pctEl.textContent = Math.round(pct) + '%';
             }
         });
-        // Tick group timers — compute from zone planned_end_time (absolute)
+        // Tick group timers — decrement normally, correct from planned_end_time if drift > 2s
         const spans = document.querySelectorAll('.group-timer');
         spans.forEach(span => {
+            const val = span.dataset.remainingSeconds;
+            if (!val) return;
+            let sec = Math.max(0, Number(val) - 1);
+            // Correct from absolute time if drift > 2s
             const zoneId = span.dataset.zoneId;
-            let sec;
-            // Prefer absolute time from zone data
             if (zoneId) {
                 const gz = (zonesData || []).find(z => String(z.id) === String(zoneId));
                 if (gz && gz.planned_end_time) {
-                    const endMs = new Date(gz.planned_end_time).getTime();
-                    sec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                    const endMs = new Date(gz.planned_end_time.replace(' ', 'T')).getTime();
+                    if (!isNaN(endMs)) {
+                        const absSec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                        if (Math.abs(absSec - sec) > 2) sec = absSec;
+                    }
                 }
-            }
-            if (sec === undefined) {
-                // Fallback to decrement
-                const val = span.dataset.remainingSeconds;
-                if (!val) return;
-                sec = Math.max(0, Number(val) - 1);
             }
             if (Number.isNaN(sec) || sec <= 0) {
                 span.textContent = '00:00';
