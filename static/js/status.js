@@ -1,3 +1,10 @@
+    // Cross-browser date parsing (Safari doesn't support "YYYY-MM-DD HH:MM:SS" format)
+    function parseDate(s) {
+        if (!s) return null;
+        var d = new Date(String(s).replace(' ', 'T'));
+        return isNaN(d.getTime()) ? null : d;
+    }
+
     // UI timing helpers
     (function(){
       function nowMs(){ return performance && performance.now ? performance.now() : Date.now(); }
@@ -175,47 +182,66 @@
     
     async function loadZonesData() {
         try {
-            // Fetch zones + groups in PARALLEL
+            // Fetch zones + groups + next-watering in PARALLEL (single render)
             var needGroups = !zoneGroupsCache || !zoneGroupsCache.length;
             var promises = [
-                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(function(r){return r.json();}).catch(function(){return [];}),
+                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(function(r){return r.json();}).catch(function(){return null;}),
             ];
             if (needGroups) {
                 promises.push(fetch('/api/groups').then(function(r){return r.json();}).catch(function(){return [];}));
+            } else {
+                promises.push(null); // placeholder
             }
             var results = await Promise.all(promises);
-            zonesData = Array.isArray(results[0]) ? results[0] : [];
+            var fetchedZones = results[0];
+
+            // On fetch error, preserve previous data
+            if (!Array.isArray(fetchedZones)) {
+                // Network error — keep existing zonesData, don't re-render with empty
+                if (zonesData && zonesData.length) {
+                    // Keep showing cached data
+                    hideConnectionError();
+                    return;
+                }
+                fetchedZones = [];
+            }
+            zonesData = fetchedZones;
             if (needGroups && results[1]) zoneGroupsCache = results[1];
 
-            // Render V2 zones IMMEDIATELY
+            // Fetch next-watering bulk (parallel with zones already done, now fetch NW)
+            var filteredZones = zonesData.filter(function(z) { return z.group_id !== 999; });
+            // Cache previous next-watering data
+            var prevNwCache = {};
+            zonesData.forEach(function(z) { if (z._nextWatering) prevNwCache[z.id] = z._nextWatering; });
+
+            try {
+                var nwResp = await fetch('/api/zones/next-watering-bulk', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
+                });
+                var nwData = await nwResp.json();
+                var nwMap = {};
+                (nwData.items || []).forEach(function(it) {
+                    nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
+                });
+                zonesData.forEach(function(z) {
+                    var v = nwMap[z.id];
+                    if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
+                    else if (v === 'Никогда') z._nextWatering = 'Никогда';
+                    else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
+                    else z._nextWatering = prevNwCache[z.id] || '—';
+                });
+            } catch(e3) {
+                // On NW fetch error, preserve cached next-watering data
+                zonesData.forEach(function(z) {
+                    if (!z._nextWatering && prevNwCache[z.id]) z._nextWatering = prevNwCache[z.id];
+                });
+            }
+
+            // Single render after ALL data is ready
             renderGroupTabs();
             renderZoneCards();
-
-            // Fetch next-watering bulk ASYNC (non-blocking)
-            var filteredZones = zonesData.filter(function(z) { return z.group_id !== 999; });
-            (async function() {
-                try {
-                    var nwResp = await fetch('/api/zones/next-watering-bulk', {
-                        method: 'POST',
-                        headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
-                    });
-                    var nwData = await nwResp.json();
-                    var nwMap = {};
-                    (nwData.items || []).forEach(function(it) {
-                        nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
-                    });
-                    zonesData.forEach(function(z) {
-                        var v = nwMap[z.id];
-                        if (statusData && statusData.emergency_stop) z._nextWatering = 'До отмены аварии';
-                        else if (v === 'Никогда') z._nextWatering = 'Никогда';
-                        else if (v) z._nextWatering = String(v).replace('T',' ').slice(0,16);
-                        else z._nextWatering = '—';
-                    });
-                    // Re-render with next-watering data
-                    renderZoneCards();
-                } catch(e3) {}
-            })();
 
             // Update sidebar indicators
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
@@ -328,12 +354,15 @@
         try {
             var zone = group.current_zone ? (zonesData || []).find(function(z){ return z.id === group.current_zone; }) : null;
             if (zone && zone.planned_end_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
-                var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
-                if (remain > 0) {
-                    span.dataset.remainingSeconds = String(remain);
-                    span.textContent = formatSeconds(remain);
-                    return;
+                var endDate = parseDate(zone.planned_end_time);
+                if (endDate) {
+                    var endMs = endDate.getTime();
+                    var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+                    if (remain > 0) {
+                        span.dataset.remainingSeconds = String(remain);
+                        span.textContent = formatSeconds(remain);
+                        return;
+                    }
                 }
             }
         } catch(e) {}
@@ -414,13 +443,21 @@
             }, 1000);
         }
         const container = document.getElementById('groups-container');
-        container.innerHTML = '';
         const resumeBtn = document.getElementById('resume-btn');
         if (statusData.emergency_stop) { resumeBtn.style.display = 'inline-block'; } else { resumeBtn.style.display = 'none'; }
+
+        // Track which group IDs are in the new data
+        var newGroupIds = {};
+        statusData.groups.forEach(function(g) { newGroupIds[String(g.id)] = true; });
+
+        // Remove cards for groups that no longer exist
+        container.querySelectorAll('[data-group-id]').forEach(function(el) {
+            if (!newGroupIds[el.getAttribute('data-group-id')]) el.remove();
+        });
+
         for (const group of statusData.groups) {
-            const card = document.createElement('div');
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
-            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
+            const flowActive = group.status === 'watering';
+            const newClassName = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
             let extraText = '—';
@@ -484,17 +521,54 @@
             }
             // pad to keep even number of cells for 2x2 symmetry on desktop
             const mvBlock = gridCells.length ? `<div class="group-info-grid">${gridCells.join('')}${gridCells.length % 2 ? '<div class="grid-item"></div>' : ''}</div>` : '';
-            card.innerHTML = `
-                <div class="group-header">${escapeHtml(group.name)}</div>
-                <div id="group-status-${group.id}">${statusText}</div>
-                <div class="postpone-until">${extraText}</div>
-                ${groupButtons}
-                ${mvBlock}
-            `;
-            card.id = `group-card-${group.id}`;
-            container.appendChild(card);
-            if (group.status === 'watering' && group.current_zone) {
-                initGroupTimer(group);
+
+            // DOM patching: reuse existing card if present
+            let card = document.getElementById(`group-card-${group.id}`);
+            const isNewCard = !card;
+            if (isNewCard) {
+                card = document.createElement('div');
+                card.id = `group-card-${group.id}`;
+                card.setAttribute('data-group-id', String(group.id));
+            }
+            card.className = newClassName;
+
+            // For watering groups, preserve timer span if it exists and has remaining seconds
+            const existingTimer = !isNewCard ? card.querySelector('.group-timer') : null;
+            const hasActiveTimer = existingTimer && existingTimer.dataset.remainingSeconds && Number(existingTimer.dataset.remainingSeconds) > 0;
+
+            if (group.status === 'watering' && group.current_zone && hasActiveTimer) {
+                // Patch without destroying timer: update status text and buttons, keep timer span
+                const statusEl = card.querySelector(`#group-status-${group.id}`);
+                if (statusEl) statusEl.innerHTML = statusText;
+                // Update buttons (they may change between start/stop)
+                const btnGroups = card.querySelectorAll('.btn-group');
+                if (btnGroups.length >= 2) {
+                    btnGroups[0].innerHTML = `
+                        <button class="delay" onclick="delayGroup(${group.id}, 1)">${_mob ? '1 день' : 'Остановить полив на 1 день'}</button>
+                        <button class="delay" onclick="delayGroup(${group.id}, 2)">${_mob ? '2 дня' : 'Остановить полив на 2 дня'}</button>
+                        <button class="delay" onclick="delayGroup(${group.id}, 3)">${_mob ? '3 дня' : 'Остановить полив на 3 дня'}</button>
+                        ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class="cancel-postpone" onclick="cancelPostpone(${group.id})">${_mob ? 'Продолжить' : 'Продолжить по расписанию'}</button>` : ''}`;
+                    btnGroups[1].innerHTML = groupActionHtml;
+                }
+                // Update data-attributes for timer (zone may have changed)
+                if (existingTimer) {
+                    existingTimer.setAttribute('data-zone-id', String(group.current_zone));
+                }
+            } else {
+                // Full rebuild of card content (first render or status changed)
+                card.innerHTML = `
+                    <div class="group-header">${escapeHtml(group.name)}</div>
+                    <div id="group-status-${group.id}">${statusText}</div>
+                    <div class="postpone-until">${extraText}</div>
+                    ${groupButtons}
+                    ${mvBlock}
+                `;
+                if (group.status === 'watering' && group.current_zone) {
+                    initGroupTimer(group);
+                }
+            }
+            if (isNewCard) {
+                container.appendChild(card);
             }
         }
     }
@@ -507,12 +581,20 @@
             var sec = Number(val);
             if (isNaN(sec) || sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
             sec--;
+            // Drift correction: compare with real planned_end_time
+            var zid = el.id.replace('ztimer-', '');
+            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
+            if (zone && zone.planned_end_time) {
+                var endD = parseDate(zone.planned_end_time);
+                if (endD) {
+                    var realRemain = Math.max(0, Math.floor((endD.getTime() - Date.now()) / 1000));
+                    if (Math.abs(sec - realRemain) > 2) sec = realRemain;
+                }
+            }
             el.dataset.remainingSeconds = String(sec);
             el.textContent = formatSeconds(sec);
             // Update progress bar
-            var zid = el.id.replace('ztimer-', '');
             var progEl = document.getElementById('zprog-' + zid);
-            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
             if (progEl && zone) {
                 var total;
                 if (zone.planned_end_time && zone.watering_start_time) {
@@ -543,8 +625,62 @@
                 return;
             }
             sec = sec - 1;
+            // Drift correction for group timers
+            var gZoneId = span.dataset.zoneId;
+            if (gZoneId) {
+                var gZone = (zonesData || []).find(function(z) { return String(z.id) === String(gZoneId); });
+                if (gZone && gZone.planned_end_time) {
+                    var gEndD = parseDate(gZone.planned_end_time);
+                    if (gEndD) {
+                        var gRealRemain = Math.max(0, Math.floor((gEndD.getTime() - Date.now()) / 1000));
+                        if (Math.abs(sec - gRealRemain) > 2) sec = gRealRemain;
+                    }
+                }
+            }
             span.dataset.remainingSeconds = String(sec);
             span.textContent = formatSeconds(sec);
+        });
+    }
+
+    // Recalculate ALL timers from real time (planned_end_time vs Date.now()).
+    // Called on visibilitychange (return from background) to fix frozen-timer drift.
+    // This is a SEPARATE function — tickCountdowns() is NOT modified.
+    function recalcTimersFromRealTime() {
+        var nowMs = Date.now();
+        // --- Zone card timers ---
+        document.querySelectorAll('.zc-running-timer').forEach(function(el) {
+            var zid = el.id.replace('ztimer-', '');
+            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
+            if (!zone || !zone.planned_end_time) return;
+            var endD = parseDate(zone.planned_end_time);
+            if (!endD) return;
+            var remain = Math.max(0, Math.floor((endD.getTime() - nowMs) / 1000));
+            el.dataset.remainingSeconds = String(remain);
+            el.textContent = formatSeconds(remain);
+            // Update progress bar
+            var progEl = document.getElementById('zprog-' + zid);
+            if (progEl && zone.watering_start_time) {
+                var startD = parseDate(zone.watering_start_time);
+                if (startD) {
+                    var total = Math.max(60, Math.floor((endD.getTime() - startD.getTime()) / 1000));
+                    var pct = Math.min(100, Math.max(0, ((total - remain) / total) * 100));
+                    progEl.style.width = pct + '%';
+                    var pctEl = document.getElementById('zpct-' + zid);
+                    if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+                }
+            }
+        });
+        // --- Group timers ---
+        document.querySelectorAll('.group-timer').forEach(function(span) {
+            var gZoneId = span.dataset.zoneId;
+            if (!gZoneId) return;
+            var zone = (zonesData || []).find(function(z) { return String(z.id) === String(gZoneId); });
+            if (!zone || !zone.planned_end_time) return;
+            var endD = parseDate(zone.planned_end_time);
+            if (!endD) return;
+            var remain = Math.max(0, Math.floor((endD.getTime() - nowMs) / 1000));
+            span.dataset.remainingSeconds = String(remain);
+            span.textContent = formatSeconds(remain);
         });
     }
 
@@ -560,7 +696,7 @@
             const card = document.getElementById(`group-card-${group.id}`);
             if (!card) return;
             // Полностью пересоберем содержимое карточки по актуальным данным
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
+            const flowActive = group.status === 'watering';
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             let extraText2 = '—';
@@ -1067,11 +1203,21 @@
         // Обновление времени каждую секунду
         setInterval(updateDateTime, 1000);
         
-        // Обновление данных каждые 5 секунд
+        // Обновление данных каждые 30 секунд (was 5s — caused flicker)
         setInterval(() => {
             Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
-        }, 5000);
+        }, 30000);
         setInterval(tickCountdowns, 1000);
+
+        // При возврате на страницу (iOS background freeze) — пересчитать таймеры + обновить данные
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) {
+                // Мгновенно пересчитать таймеры из planned_end_time (убираем drift от замороженных setInterval)
+                recalcTimersFromRealTime();
+                // Затем загружаем свежие данные с сервера
+                Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+            }
+        });
         
         // Обработчик аварийной остановки
         document.getElementById('emergency-btn').addEventListener('click', emergencyStop);
@@ -1439,7 +1585,8 @@
         if (nameEl) nameEl.textContent = active.name;
         // Timer
         if (active.planned_end_time && timerEl) {
-            var end = new Date(active.planned_end_time);
+            var end = parseDate(active.planned_end_time);
+            if (end) {
             var now = new Date();
             var remain = Math.max(0, Math.floor((end - now) / 1000));
             var mins = Math.floor(remain / 60);
@@ -1447,11 +1594,14 @@
             timerEl.innerHTML = 'осталось <strong>' + mins + ':' + (secs < 10 ? '0' : '') + secs + '</strong>';
             // Progress
             if (active.watering_start_time && progressEl) {
-                var start = new Date(active.watering_start_time);
+                var start = parseDate(active.watering_start_time);
+                if (start) {
                 var total = (end - start) / 1000;
                 var elapsed = (now - start) / 1000;
                 var pct = Math.min(100, Math.max(0, (elapsed / total) * 100));
                 progressEl.style.width = pct + '%';
+                }
+            }
             }
         }
         // Next zone
@@ -1568,12 +1718,6 @@
         var c = document.getElementById('zoneList');
         if (!c) return;
         var isAdmin = !!(statusData && statusData.is_admin);
-        // Preserve open accordion state across re-renders
-        var openIds = {};
-        c.querySelectorAll('.zone-card.open').forEach(function(el) {
-            var zid = el.getAttribute('data-zone-id');
-            if (zid) openIds[zid] = true;
-        });
         var zones = getFilteredZonesV2();
         var groups = zoneGroupsCache || [];
         var groupNameById = {};
@@ -1585,9 +1729,151 @@
             return;
         }
 
+        // Check if we can patch existing cards (same zone IDs in same order)
+        var existingCards = c.querySelectorAll('.zone-card[data-zone-id]');
+        var existingIds = [];
+        existingCards.forEach(function(el) { existingIds.push(el.getAttribute('data-zone-id')); });
+        var newIds = zones.map(function(z) { return String(z.id); });
+        var canPatch = existingIds.length > 0 && existingIds.length === newIds.length && existingIds.every(function(id, i) { return id === newIds[i]; });
+        var showSections = currentGroupFilter === null && !zoneSearchQuery;
+
+        if (canPatch) {
+            // DOM PATCHING: update existing cards without destroying them
+            zones.forEach(function(z) {
+                var card = document.getElementById('zcard-' + z.id);
+                if (!card) return;
+                var t = getZoneTypeInfo(z.icon);
+                var isRunning = z.state === 'on';
+                var statusCls = isRunning ? 'zs-running' : 'zs-enabled';
+                var gName2 = groupNameById[z.group_id] || '';
+
+                // Update card class (without losing 'open')
+                var isOpen = card.classList.contains('open');
+                card.className = 'zone-card ' + statusCls + (isOpen ? ' open' : '');
+
+                // Patch next-watering text (in header)
+                var nextEl = card.querySelector('.zc-next');
+                if (nextEl) {
+                    if (isRunning) {
+                        var valEl = nextEl.querySelector('.zc-next-val');
+                        var lblEl = nextEl.querySelector('.zc-next-lbl');
+                        if (valEl) { valEl.textContent = '⏱'; valEl.style.color = '#2196f3'; valEl.style.fontSize = ''; }
+                        if (lblEl) lblEl.textContent = 'полив';
+                    } else {
+                        var nextText = z._nextWatering || '';
+                        var valEl2 = nextEl.querySelector('.zc-next-val');
+                        var lblEl2 = nextEl.querySelector('.zc-next-lbl');
+                        if (nextText && nextText !== 'Никогда' && nextText !== '—') {
+                            var parts = nextText.split(' ');
+                            var timeOnly = parts.length >= 2 ? parts[1].slice(0, 5) : nextText.slice(0, 5);
+                            if (valEl2) { valEl2.textContent = timeOnly; valEl2.style.color = ''; valEl2.style.fontSize = ''; }
+                            if (lblEl2) lblEl2.textContent = 'след.';
+                        } else if (nextText === 'Никогда') {
+                            if (valEl2) { valEl2.textContent = '—'; valEl2.style.color = '#ccc'; valEl2.style.fontSize = '11px'; }
+                            if (lblEl2) lblEl2.textContent = 'нет';
+                        }
+                    }
+                }
+
+                // Patch duration badge
+                var badge = document.getElementById('zbadge-' + z.id);
+                if (badge) badge.textContent = z.duration + ' мин';
+
+                // Handle running state transition
+                var existingRunning = card.querySelector('.zc-running');
+                var existingProgress = card.querySelector('.zc-progress');
+                if (isRunning) {
+                    // If timer is already ticking (has remaining seconds), DON'T touch it
+                    var timerEl = document.getElementById('ztimer-' + z.id);
+                    var hasActiveTimer = timerEl && timerEl.dataset.remainingSeconds && Number(timerEl.dataset.remainingSeconds) > 0;
+                    if (!existingRunning) {
+                        // Zone just started — insert running block
+                        var mainEl = card.querySelector('.zone-card-main');
+                        if (mainEl) {
+                            var _timerText = '--:--';
+                            var _pctText = '';
+                            var _progWidth = '0%';
+                            var _remain = 0;
+                            if (z.planned_end_time && z.watering_start_time) {
+                                var _endD = parseDate(z.planned_end_time);
+                                var _startD = parseDate(z.watering_start_time);
+                                var _endMs = _endD ? _endD.getTime() : 0;
+                                var _startMs = _startD ? _startD.getTime() : 0;
+                                _remain = _endMs ? Math.max(0, Math.floor((_endMs - Date.now()) / 1000)) : 0;
+                                var _total = (_endMs && _startMs) ? Math.max(60, Math.floor((_endMs - _startMs) / 1000)) : (z.duration || 10) * 60;
+                                _timerText = formatSeconds(_remain);
+                                var _pct = Math.min(100, Math.max(0, ((_total - _remain) / _total) * 100));
+                                _pctText = Math.round(_pct) + '%';
+                                _progWidth = _pct + '%';
+                            }
+                            var runDiv = document.createElement('div');
+                            runDiv.className = 'zc-running';
+                            runDiv.innerHTML = '<span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + (_remain || '') + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span>';
+                            mainEl.after(runDiv);
+                            var progDiv = document.createElement('div');
+                            progDiv.className = 'zc-progress';
+                            progDiv.innerHTML = '<div class="zc-progress-bar" id="zprog-' + z.id + '" style="width:' + _progWidth + '"></div>';
+                            runDiv.after(progDiv);
+                            initZoneTimer(z);
+                        }
+                    }
+                    // If timer exists but no active countdown, re-init with server data
+                    if (existingRunning && !hasActiveTimer) {
+                        initZoneTimer(z);
+                    }
+                } else {
+                    // Zone stopped — remove running block if present
+                    if (existingRunning) existingRunning.remove();
+                    if (existingProgress) existingProgress.remove();
+                }
+
+                // Patch expanded details
+                var detailGrid = card.querySelector('.zc-detail-grid');
+                if (detailGrid) {
+                    var items = detailGrid.querySelectorAll('.zc-detail-item .zc-d-value');
+                    if (items.length >= 4) {
+                        items[0].textContent = z.duration + ' мин';
+                        items[1].textContent = gName2;
+                        var nextFull = z._nextWatering || '—';
+                        items[2].textContent = nextFull;
+                        items[2].className = 'zc-d-value' + (nextFull !== '—' && nextFull !== 'Никогда' ? ' highlight' : '');
+                        items[3].textContent = z.last_watering_time ? z.last_watering_time.replace('T',' ').slice(0,16) : '—';
+                    }
+                }
+
+                // Patch action buttons (run/stop state may change)
+                var actions = card.querySelector('.zc-actions');
+                if (actions) {
+                    var emergency = !!(statusData && statusData.emergency_stop);
+                    var startAction = emergency ? "showNotification('Аварийная остановка активна','warning')" : "toggleZoneRun(" + z.id + ")";
+                    var actHtml = '';
+                    if (isRunning) {
+                        actHtml = '<button class="zc-btn-stop" onclick="event.stopPropagation();' + startAction + '">⏹ Стоп</button>';
+                    } else {
+                        actHtml = '<button class="zc-btn-run" onclick="event.stopPropagation();showRunPopup(' + z.id + ',' + z.duration + ')">▶ Запустить</button>';
+                    }
+                    if (isAdmin) {
+                        actHtml += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
+                    }
+                    actions.innerHTML = actHtml;
+                }
+            });
+            updateZoneStats(zones);
+            // Signal render complete for perf
+            try{ window.dispatchEvent(new CustomEvent('zones-rendered')); }catch(e){}
+            return;
+        }
+
+        // FULL RENDER: first render or zone list changed
+        // Preserve open accordion state across re-renders
+        var openIds = {};
+        c.querySelectorAll('.zone-card.open').forEach(function(el) {
+            var zid = el.getAttribute('data-zone-id');
+            if (zid) openIds[zid] = true;
+        });
+
         var html = '';
         var lastGroupId = null;
-        var showSections = currentGroupFilter === null && !zoneSearchQuery;
 
         zones.forEach(function(z) {
             if (showSections && z.group_id !== lastGroupId) {
@@ -1624,10 +1910,12 @@
                 var _pctText = '';
                 var _progWidth = '0%';
                 if (z.planned_end_time && z.watering_start_time) {
-                    var _endMs = new Date(z.planned_end_time).getTime();
-                    var _startMs = new Date(z.watering_start_time).getTime();
-                    var _remain = Math.max(0, Math.floor((_endMs - Date.now()) / 1000));
-                    var _total = Math.max(60, Math.floor((_endMs - _startMs) / 1000));
+                    var _endD = parseDate(z.planned_end_time);
+                    var _startD = parseDate(z.watering_start_time);
+                    var _endMs = _endD ? _endD.getTime() : 0;
+                    var _startMs = _startD ? _startD.getTime() : 0;
+                    var _remain = _endMs ? Math.max(0, Math.floor((_endMs - Date.now()) / 1000)) : 0;
+                    var _total = (_endMs && _startMs) ? Math.max(60, Math.floor((_endMs - _startMs) / 1000)) : (z.duration || 10) * 60;
                     _timerText = formatSeconds(_remain);
                     var _pct = Math.min(100, Math.max(0, ((_total - _remain) / _total) * 100));
                     _pctText = Math.round(_pct) + '%';
@@ -1690,6 +1978,8 @@
         zones.forEach(function(z) {
             if (z.state === 'on') initZoneTimer(z);
         });
+        // Signal render complete for perf
+        try{ window.dispatchEvent(new CustomEvent('zones-rendered')); }catch(e){}
     }
 
     function updateZoneStats(zones) {
@@ -1712,9 +2002,9 @@
         function applyTimer(remain) {
             var total;
             if (zone.planned_end_time && zone.watering_start_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
-                var startMs = new Date(zone.watering_start_time).getTime();
-                total = Math.max(60, Math.floor((endMs - startMs) / 1000));
+                var endD = parseDate(zone.planned_end_time);
+                var startD = parseDate(zone.watering_start_time);
+                total = (endD && startD) ? Math.max(60, Math.floor((endD.getTime() - startD.getTime()) / 1000)) : (zone.duration || 10) * 60;
             } else {
                 total = (zone.duration || 10) * 60;
             }
@@ -1729,9 +2019,11 @@
         // Try local calc first (instant)
         try {
             if (zone.planned_end_time) {
-                var endMs = new Date(zone.planned_end_time).getTime();
-                var remain = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
-                if (remain > 0) { applyTimer(remain); return; }
+                var endD = parseDate(zone.planned_end_time);
+                if (endD) {
+                    var remain = Math.max(0, Math.floor((endD.getTime() - Date.now()) / 1000));
+                    if (remain > 0) { applyTimer(remain); return; }
+                }
             }
         } catch(e) {}
         // Fallback: fetch
