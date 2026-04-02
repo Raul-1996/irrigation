@@ -571,6 +571,20 @@
                 // Update data-attributes for timer (zone may have changed)
                 if (existingTimer) {
                     existingTimer.setAttribute('data-zone-id', String(group.current_zone));
+                    // If timer has empty/zero remaining, recompute from zonesData
+                    if (!existingTimer.dataset.remainingSeconds || Number(existingTimer.dataset.remainingSeconds) <= 0) {
+                        var _pZone = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
+                        if (_pZone && _pZone.planned_end_time) {
+                            var _pEnd = parseDate(_pZone.planned_end_time);
+                            if (_pEnd) {
+                                var _pRemain = Math.max(0, Math.floor((_pEnd.getTime() - Date.now()) / 1000));
+                                if (_pRemain > 0) {
+                                    existingTimer.dataset.remainingSeconds = String(_pRemain);
+                                    existingTimer.textContent = formatSeconds(_pRemain);
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 // Full rebuild of card content (first render or status changed)
