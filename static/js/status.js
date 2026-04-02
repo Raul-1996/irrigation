@@ -468,19 +468,21 @@
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
             let extraText = '—';
             if (group.status === 'watering' && group.current_zone) {
-                // Compute remaining time INLINE to avoid --:-- flash
+                // Compute remaining time INLINE (sync) to avoid --:-- flash
                 var _gZone = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
-                var _gRemain = '';
+                var _gRemain = 0;
                 var _gTimerText = '--:--';
                 if (_gZone && _gZone.planned_end_time) {
                     var _gEndD = parseDate(_gZone.planned_end_time);
                     if (_gEndD) {
-                        _gRemain = Math.max(0, Math.floor((_gEndD.getTime() - Date.now()) / 1000));
+                        // Use server-synced time to avoid timezone mismatch
+                        var _gNow = Date.now() + (_serverTimeOffset || 0);
+                        _gRemain = Math.max(0, Math.floor((_gEndD.getTime() - _gNow) / 1000));
                         if (_gRemain > 0) _gTimerText = formatSeconds(_gRemain);
-                        else _gRemain = '';
                     }
                 }
-                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gRemain}">${_gTimerText}</span>`;
+                var _gRemainAttr = _gRemain > 0 ? String(_gRemain) : '';
+                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gRemainAttr}">${_gTimerText}</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu = String(group.postpone_until);
                 const reason = String(group.postpone_reason || '').toLowerCase();
@@ -577,7 +579,8 @@
                         if (_pZone && _pZone.planned_end_time) {
                             var _pEnd = parseDate(_pZone.planned_end_time);
                             if (_pEnd) {
-                                var _pRemain = Math.max(0, Math.floor((_pEnd.getTime() - Date.now()) / 1000));
+                                var _pNow = Date.now() + (_serverTimeOffset || 0);
+                                var _pRemain = Math.max(0, Math.floor((_pEnd.getTime() - _pNow) / 1000));
                                 if (_pRemain > 0) {
                                     existingTimer.dataset.remainingSeconds = String(_pRemain);
                                     existingTimer.textContent = formatSeconds(_pRemain);
@@ -595,13 +598,8 @@
                     ${groupButtons}
                     ${mvBlock}
                 `;
-                if (group.status === 'watering' && group.current_zone) {
-                    // Only call initGroupTimer if inline computation didn't set a value
-                    var _inlineTimer = card.querySelector('.group-timer');
-                    if (!_inlineTimer || !_inlineTimer.dataset.remainingSeconds || Number(_inlineTimer.dataset.remainingSeconds) <= 0) {
-                        initGroupTimer(group);
-                    }
-                }
+                // No initGroupTimer call needed — remaining is computed inline above.
+                // tickCountdowns() + drift correction handle ongoing updates.
             }
             if (isNewCard) {
                 container.appendChild(card);
@@ -617,13 +615,14 @@
             var sec = Number(val);
             if (isNaN(sec) || sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
             sec--;
-            // Drift correction: compare with real planned_end_time
+            // Drift correction: compare with real planned_end_time (using server-synced time)
             var zid = el.id.replace('ztimer-', '');
             var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
             if (zone && zone.planned_end_time) {
                 var endD = parseDate(zone.planned_end_time);
                 if (endD) {
-                    var realRemain = Math.max(0, Math.floor((endD.getTime() - Date.now()) / 1000));
+                    var _dNow = Date.now() + (_serverTimeOffset || 0);
+                    var realRemain = Math.max(0, Math.floor((endD.getTime() - _dNow) / 1000));
                     if (Math.abs(sec - realRemain) > 2) sec = realRemain;
                 }
             }
@@ -634,9 +633,9 @@
             if (progEl && zone) {
                 var total;
                 if (zone.planned_end_time && zone.watering_start_time) {
-                    var endMs = new Date(zone.planned_end_time).getTime();
-                    var startMs = new Date(zone.watering_start_time).getTime();
-                    total = Math.max(60, Math.floor((endMs - startMs) / 1000));
+                    var endMs2 = parseDate(zone.planned_end_time);
+                    var startMs2 = parseDate(zone.watering_start_time);
+                    total = (endMs2 && startMs2) ? Math.max(60, Math.floor((endMs2.getTime() - startMs2.getTime()) / 1000)) : (zone.duration || 10) * 60;
                 } else {
                     total = (zone.duration || 10) * 60;
                 }
@@ -668,7 +667,8 @@
                 if (gZone && gZone.planned_end_time) {
                     var gEndD = parseDate(gZone.planned_end_time);
                     if (gEndD) {
-                        var gRealRemain = Math.max(0, Math.floor((gEndD.getTime() - Date.now()) / 1000));
+                        var _gDNow = Date.now() + (_serverTimeOffset || 0);
+                        var gRealRemain = Math.max(0, Math.floor((gEndD.getTime() - _gDNow) / 1000));
                         if (Math.abs(sec - gRealRemain) > 2) sec = gRealRemain;
                     }
                 }
@@ -738,17 +738,18 @@
             let extraText2 = '—';
             if (group.status === 'watering' && group.current_zone) {
                 var _gZone2 = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
-                var _gRemain2 = '';
+                var _gRemain2 = 0;
                 var _gTimerText2 = '--:--';
                 if (_gZone2 && _gZone2.planned_end_time) {
                     var _gEndD2 = parseDate(_gZone2.planned_end_time);
                     if (_gEndD2) {
-                        _gRemain2 = Math.max(0, Math.floor((_gEndD2.getTime() - Date.now()) / 1000));
+                        var _gNow2 = Date.now() + (_serverTimeOffset || 0);
+                        _gRemain2 = Math.max(0, Math.floor((_gEndD2.getTime() - _gNow2) / 1000));
                         if (_gRemain2 > 0) _gTimerText2 = formatSeconds(_gRemain2);
-                        else _gRemain2 = '';
                     }
                 }
-                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gRemain2}">${_gTimerText2}</span>`;
+                var _gRemainAttr2 = _gRemain2 > 0 ? String(_gRemain2) : '';
+                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="${_gRemainAttr2}">${_gTimerText2}</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu2 = String(group.postpone_until);
                 const reason2 = String(group.postpone_reason || '').toLowerCase();
