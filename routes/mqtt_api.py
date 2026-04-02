@@ -8,6 +8,7 @@ import logging
 from database import db
 from utils import normalize_topic
 from services.helpers import api_error, api_soft
+from services.security import admin_required
 
 try:
     import paho.mqtt.client as mqtt
@@ -23,15 +24,22 @@ mqtt_api_bp = Blueprint('mqtt_api', __name__)
 # ===== MQTT Servers CRUD =====
 
 @mqtt_api_bp.route('/api/mqtt/servers', methods=['GET'])
+@admin_required
 def api_mqtt_servers_list():
     try:
-        return jsonify({'success': True, 'servers': db.get_mqtt_servers()})
+        servers = db.get_mqtt_servers()
+        # SECURITY FIX (VULN-004): mask passwords in API responses
+        for s in (servers or []):
+            if 'password' in s and s['password']:
+                s['password'] = '***'
+        return jsonify({'success': True, 'servers': servers})
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка получения MQTT серверов: {e}")
         return jsonify({'success': False, 'message': 'Ошибка получения списка'}), 500
 
 
 @mqtt_api_bp.route('/api/mqtt/servers', methods=['POST'])
+@admin_required
 def api_mqtt_server_create():
     try:
         data = request.get_json() or {}
@@ -45,11 +53,15 @@ def api_mqtt_server_create():
 
 
 @mqtt_api_bp.route('/api/mqtt/servers/<int:server_id>', methods=['GET'])
+@admin_required
 def api_mqtt_server_get(server_id: int):
     try:
         server = db.get_mqtt_server(server_id)
         if not server:
             return jsonify({'success': False, 'message': 'Сервер не найден'}), 404
+        # SECURITY FIX (VULN-004): mask password in API response
+        if 'password' in server and server['password']:
+            server['password'] = '***'
         return jsonify({'success': True, 'server': server})
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка получения MQTT сервера {server_id}: {e}")
@@ -57,6 +69,7 @@ def api_mqtt_server_get(server_id: int):
 
 
 @mqtt_api_bp.route('/api/mqtt/servers/<int:server_id>', methods=['PUT'])
+@admin_required
 def api_mqtt_server_update(server_id: int):
     try:
         data = request.get_json() or {}
@@ -70,6 +83,7 @@ def api_mqtt_server_update(server_id: int):
 
 
 @mqtt_api_bp.route('/api/mqtt/servers/<int:server_id>', methods=['DELETE'])
+@admin_required
 def api_mqtt_server_delete(server_id: int):
     try:
         ok = db.delete_mqtt_server(server_id)
@@ -84,6 +98,7 @@ def api_mqtt_server_delete(server_id: int):
 # ===== MQTT Probe =====
 
 @mqtt_api_bp.route('/api/mqtt/<int:server_id>/probe', methods=['POST'])
+@admin_required
 def api_mqtt_probe(server_id: int):
     try:
         from flask import current_app
@@ -198,6 +213,7 @@ def api_mqtt_status(server_id: int):
 # ===== MQTT Scan SSE =====
 
 @mqtt_api_bp.route('/api/mqtt/<int:server_id>/scan-sse')
+@admin_required
 def api_mqtt_scan_sse(server_id: int):
     """Stream MQTT messages as SSE for continuous scanning."""
     try:

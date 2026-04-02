@@ -276,6 +276,19 @@ class AiogramBotRunner:
         self._dp: Optional[Dispatcher] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
+    def _is_authorized_chat(self, chat_id: int) -> bool:
+        """SECURITY FIX (VULN-005): Check if chat_id is the admin chat."""
+        try:
+            admin_chat = db.get_setting_value('telegram_admin_chat_id')
+            if not admin_chat:
+                # No admin chat configured — deny all for safety
+                logger.warning("telegram auth: no telegram_admin_chat_id configured, denying chat_id=%s", chat_id)
+                return False
+            return int(admin_chat) == int(chat_id)
+        except (ValueError, TypeError, sqlite3.Error, OSError) as e:
+            logger.error("telegram auth check failed: %s", e)
+            return False
+
     async def _on_message(self, message: Message):
         try:
             chat = message.chat
@@ -285,6 +298,11 @@ class AiogramBotRunner:
             first_name = getattr(chat, 'first_name', None)
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in __init__: %s", e)
+            return
+        # SECURITY FIX (VULN-005): verify chat is authorized
+        if not self._is_authorized_chat(chat_id):
+            logger.warning("Unauthorized telegram message from chat_id=%s user=%s", chat_id, username)
+            notifier.send_text(chat_id, '⛔ Доступ запрещён. Обратитесь к администратору.')
             return
         try:
             db.upsert_bot_user(int(chat_id), username, first_name)
@@ -335,6 +353,16 @@ class AiogramBotRunner:
             logger.info(f"ack callback id={cq.id} chat_id={getattr(cq.from_user,'id',None)} data={(cq.data or '')[:120]}")
         except (ValueError, TypeError, KeyError):
             logger.exception("callback ack failed")
+
+        # SECURITY FIX (VULN-005): verify chat is authorized for callbacks
+        try:
+            from_chat = int((cq.message.chat.id if cq.message and cq.message.chat else cq.from_user.id))
+            if not self._is_authorized_chat(from_chat):
+                logger.warning("Unauthorized telegram callback from chat_id=%s", from_chat)
+                return
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.warning("telegram callback auth check failed: %s", e)
+            return
 
         # 2) Load routes
         try:
@@ -440,6 +468,10 @@ class SimpleHTTPPoller:
                                     except (ConnectionError, TimeoutError, OSError, ValueError) as e:
                                         logger.debug("Handled exception in line_428: %s", e)
                                 from_chat = ((cq.get('message') or {}).get('chat') or {}).get('id')
+                                # SECURITY FIX (VULN-005): auth check in HTTP poller
+                                if from_chat and not _is_authorized_chat_id(int(from_chat)):
+                                    logger.warning("Unauthorized telegram callback from chat_id=%s (HTTP poller)", from_chat)
+                                    continue
                                 msg_id = ((cq.get('message') or {}).get('message_id'))
                                 data_cb = cq.get('data') or ''
                                 if from_chat and data_cb:
@@ -459,6 +491,14 @@ class SimpleHTTPPoller:
                         cid = chat.get('id')
 
                         if cid and text:
+                            # SECURITY FIX (VULN-005): auth check in HTTP poller
+                            if not _is_authorized_chat_id(int(cid)):
+                                logger.warning("Unauthorized telegram message from chat_id=%s (HTTP poller)", cid)
+                                try:
+                                    notifier.send_text(int(cid), '⛔ Доступ запрещён. Обратитесь к администратору.')
+                                except (ValueError, TypeError, KeyError) as e:
+                                    logger.debug("Handled exception sending deny msg: %s", e)
+                                continue
                             try:
                                 username = chat.get('username')
                                 first_name = chat.get('first_name')
@@ -495,6 +535,19 @@ _aiogram_runner: Optional[AiogramBotRunner] = None
 _http_poller: Optional[SimpleHTTPPoller] = None
 
 notifier = TelegramNotifier()
+
+
+def _is_authorized_chat_id(chat_id: int) -> bool:
+    """SECURITY FIX (VULN-005): Module-level auth check for HTTP poller."""
+    try:
+        admin_chat = db.get_setting_value('telegram_admin_chat_id')
+        if not admin_chat:
+            logger.warning("telegram auth: no telegram_admin_chat_id configured, denying chat_id=%s", chat_id)
+            return False
+        return int(admin_chat) == int(chat_id)
+    except (ValueError, TypeError, sqlite3.Error, OSError) as e:
+        logger.error("telegram auth check failed: %s", e)
+        return False
 
 def start_long_polling_if_needed():
     global _aiogram_runner, _http_poller

@@ -6,6 +6,7 @@ import logging
 from database import db
 from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
+from services.security import admin_required
 import sqlite3
 
 try:
@@ -61,6 +62,7 @@ def api_emergency_stop():
 
 @system_emergency_api_bp.route('/api/emergency-resume', methods=['POST'])
 @rate_limit('emergency', max_requests=5, window_sec=60)
+@admin_required
 def api_emergency_resume():
     """Resume after emergency stop."""
     try:

@@ -5,6 +5,7 @@ import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEMPLATE_PATH = os.path.join(PROJECT_ROOT, 'templates', 'status.html')
+CSS_PATH = os.path.join(PROJECT_ROOT, 'static', 'css', 'status.css')
 JS_PATH = os.path.join(PROJECT_ROOT, 'static', 'js', 'status.js')
 
 
@@ -29,6 +30,9 @@ class TestTemplateElements:
     def test_has_desktop_media_query(self):
         """Desktop media query for #bottomSheet exists."""
         html = _read(TEMPLATE_PATH)
+        # CSS may be inline or in external status.css
+        if os.path.exists(CSS_PATH):
+            html += _read(CSS_PATH)
         # Find @media (min-width: 768px) that contains bottomSheet or bottom-sheet
         pattern = r'@media\s*\(\s*min-width\s*:\s*768px\s*\)'
         matches = list(re.finditer(pattern, html))
@@ -46,6 +50,8 @@ class TestTemplateElements:
     def test_desktop_has_max_width(self):
         """Desktop #bottomSheet has max-width."""
         html = _read(TEMPLATE_PATH)
+        if os.path.exists(CSS_PATH):
+            html += _read(CSS_PATH)
         pattern = r'@media\s*\(\s*min-width\s*:\s*768px\s*\)'
         for m in re.finditer(pattern, html):
             block = html[m.start():m.start() + 600]
@@ -56,6 +62,8 @@ class TestTemplateElements:
     def test_desktop_has_border_radius(self):
         """Desktop #bottomSheet has border-radius for all corners."""
         html = _read(TEMPLATE_PATH)
+        if os.path.exists(CSS_PATH):
+            html += _read(CSS_PATH)
         pattern = r'@media\s*\(\s*min-width\s*:\s*768px\s*\)'
         for m in re.finditer(pattern, html):
             block = html[m.start():m.start() + 600]
@@ -66,6 +74,8 @@ class TestTemplateElements:
     def test_desktop_has_centering(self):
         """Desktop #bottomSheet is centered (translate(-50%, -50%) or equivalent)."""
         html = _read(TEMPLATE_PATH)
+        if os.path.exists(CSS_PATH):
+            html += _read(CSS_PATH)
         pattern = r'@media\s*\(\s*min-width\s*:\s*768px\s*\)'
         for m in re.finditer(pattern, html):
             block = html[m.start():m.start() + 600]
@@ -77,6 +87,8 @@ class TestTemplateElements:
     def test_mobile_no_max_width_on_bottom_sheet(self):
         """Mobile bottom-sheet base styles do NOT have max-width restriction."""
         html = _read(TEMPLATE_PATH)
+        if os.path.exists(CSS_PATH):
+            html += _read(CSS_PATH)
         # Find the base .bottom-sheet rule (outside desktop media query)
         # Look for .bottom-sheet { ... } that's NOT inside @media (min-width: 768px)
         # Strategy: find .bottom-sheet rule, check it doesn't have max-width

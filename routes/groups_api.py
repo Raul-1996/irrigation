@@ -11,6 +11,7 @@ from utils import normalize_topic
 from irrigation_scheduler import init_scheduler, get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services import sse_hub as _sse_hub
+from services.security import admin_required
 from constants import GROUP_DEBOUNCE_SEC, ZONE_CAP_DEFAULT_MIN
 import sqlite3
 
@@ -139,6 +140,7 @@ def api_delete_group(group_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/stop', methods=['POST'])
+@admin_required
 def api_stop_group(group_id):
     """Stop all zones in group."""
     try:
@@ -186,6 +188,7 @@ def api_stop_group(group_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/start-from-first', methods=['POST'])
+@admin_required
 def api_start_group_from_first(group_id):
     """Start sequential watering of the group from the first zone."""
     try:
@@ -290,6 +293,7 @@ def api_start_zone_exclusive(group_id, zone_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/master-valve/<action>', methods=['POST'])
+@admin_required
 def api_master_valve_toggle(group_id, action):
     try:
         if current_app.config.get('EMERGENCY_STOP') and str(action).lower() == 'open':

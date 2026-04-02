@@ -272,7 +272,7 @@ import atexit
 import signal
 import os
 
-from services.shutdown import shutdown_all_zones_off
+from services.shutdown import shutdown_all_zones_off, reset_shutdown  # noqa: F401 — re-exported for tests
 
 
 def shutdown_all_zones(db=None) -> None:

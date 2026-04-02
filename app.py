@@ -180,16 +180,13 @@ def dlog(msg: str, *args) -> None:
             logger.debug("dlog format error: %s", e)
 
 # ── Shared helper: check if a path is a "status action" allowed without admin ──
-_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
+# SECURITY FIX (VULN-001/002): Only truly safe endpoints allowed without admin.
+# Control actions (start/stop/emergency-resume/groups/zones) removed from whitelist.
+# Emergency-stop kept as fail-safe (anyone can stop, but only admin can resume).
+_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/postpone', '/api/zones/next-watering-bulk'}
 
 def _is_status_action(path):
     if path in _ALLOWED_PUBLIC_POSTS:
-        return True
-    if path.startswith('/api/mqtt/'):
-        return True
-    if path.startswith('/api/groups/') and (path.endswith('/start-from-first') or path.endswith('/stop') or '/master-valve/' in path):
-        return True
-    if path.startswith('/api/zones/') and ('/mqtt/start' in path or '/mqtt/stop' in path or path.endswith('/start') or path.endswith('/stop')):
         return True
     return False
 
@@ -252,7 +249,8 @@ def _require_admin_for_mutations():
         if role == 'viewer' and request.method in ['POST', 'PUT', 'DELETE'] and p != '/api/login':
             return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
         if request.method in ['POST', 'PUT', 'DELETE']:
-            if p == '/api/login' or p.startswith('/api/env') or p.startswith('/api/mqtt/') or p == '/api/password':
+            # SECURITY FIX (VULN-003): removed /api/mqtt/ from whitelist
+            if p == '/api/login' or p.startswith('/api/env') or p == '/api/password':
                 return None
             if role != 'admin' and not _is_status_action(p):
                 return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
