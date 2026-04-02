@@ -953,7 +953,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(`Группа "${gname}": ${data.message || 'запущена'}`, 'success');
-                await Promise.all([loadStatusData(), loadZonesData()]);
+                await loadZonesData().then(function(){ return loadStatusData(); });
             } else {
                 showNotification(data.message || `Ошибка запуска группы "${gname}"`, 'error');
             }
@@ -976,7 +976,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(data.message, 'success');
-                await Promise.all([loadStatusData(), loadZonesData()]);
+                await loadZonesData().then(function(){ return loadStatusData(); });
             } else {
                 showNotification(data.message || 'Ошибка остановки группы', 'error');
             }
@@ -1094,7 +1094,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(data.message, 'warning');
-                await Promise.all([loadStatusData(), loadZonesData()]);
+                await loadZonesData().then(function(){ return loadStatusData(); });
                 // Показать кнопку возобновления явно
                 document.getElementById('resume-btn').style.display = 'inline-block';
             } else {
@@ -1111,7 +1111,7 @@
             const data = await res.json();
             if (data && data.success) {
                 showNotification(data.message, 'success');
-                await Promise.all([loadStatusData(), loadZonesData()]);
+                await loadZonesData().then(function(){ return loadStatusData(); });
                 // Скрыть кнопку возобновления
                 document.getElementById('resume-btn').style.display = 'none';
             } else {
@@ -1122,10 +1122,16 @@
         }
     }
 
-    async function refreshAllUI() {
+    // Load zones FIRST, then status (status needs zonesData for timers)
+    async function refreshAllData() {
         try {
-            await Promise.all([loadStatusData(), loadZonesData()]);
+            await loadZonesData();
+            await loadStatusData();
         } catch (e) {}
+    }
+
+    async function refreshAllUI() {
+        await refreshAllData();
     }
 
     // Модальное окно для просмотра фотографий
@@ -1190,11 +1196,11 @@
             try { updateWaterMeter(zonesData); } catch(e) {}
             // Then refresh in background for live data
             setTimeout(function() {
-                Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+                loadZonesData().then(function(){ return loadStatusData(); }).catch(function(){});
             }, 1000);
         } else {
-            // No SSR data, fetch normally
-            Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+            // No SSR data, fetch normally — zones FIRST so statusDisplay can find them
+            loadZonesData().then(function(){ return loadStatusData(); }).catch(function(){});
         }
         
         // Синхронизация времени раз в 5 минут
@@ -1205,7 +1211,7 @@
         
         // Обновление данных каждые 30 секунд (was 5s — caused flicker)
         setInterval(() => {
-            Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+            loadZonesData().then(function(){ return loadStatusData(); }).catch(function(){});
         }, 30000);
         setInterval(tickCountdowns, 1000);
 
@@ -1214,8 +1220,8 @@
             if (!document.hidden) {
                 // Мгновенно пересчитать таймеры из planned_end_time (убираем drift от замороженных setInterval)
                 recalcTimersFromRealTime();
-                // Затем загружаем свежие данные с сервера
-                Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
+                // Затем загружаем свежие данные с сервера — zones first
+                loadZonesData().then(function(){ return loadStatusData(); }).catch(function(){});
             }
         });
         
@@ -1808,7 +1814,7 @@
                             }
                             var runDiv = document.createElement('div');
                             runDiv.className = 'zc-running';
-                            runDiv.innerHTML = '<span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + (_remain || '') + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span>';
+                            runDiv.innerHTML = '<span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + (_remain != null ? _remain : '') + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span>';
                             mainEl.after(runDiv);
                             var progDiv = document.createElement('div');
                             progDiv.className = 'zc-progress';
@@ -1921,7 +1927,7 @@
                     _pctText = Math.round(_pct) + '%';
                     _progWidth = _pct + '%';
                 }
-                runningHtml = '<div class="zc-running"><span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + (_remain || '') + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span></div>';
+                runningHtml = '<div class="zc-running"><span class="zc-running-dot"></span><span>Осталось</span><span class="zc-running-timer" id="ztimer-' + z.id + '" data-remaining-seconds="' + (_remain != null ? _remain : '') + '">' + _timerText + '</span><span class="zc-running-pct" id="zpct-' + z.id + '">' + _pctText + '</span></div>';
                 runningHtml += '<div class="zc-progress"><div class="zc-progress-bar" id="zprog-' + z.id + '" style="width:' + _progWidth + '"></div></div>';
             }
 
@@ -2161,14 +2167,14 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 showZoneToast(data && data.success ? '▶ Группа запущена' : ((data && data.message) || 'Ошибка'), data && data.success ? 'success' : 'error');
-                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                setTimeout(function() { loadZonesData().then(function(){ return loadStatusData(); }); }, 1500);
             }).catch(function() { showZoneToast('Ошибка', 'error'); });
         } else {
             (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
                 fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function() {});
             });
             showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            setTimeout(function() { loadZonesData().then(function(){ return loadStatusData(); }); }, 1500);
         }
     }
     window.runGroupWithDefaults = runGroupWithDefaults;
@@ -2339,7 +2345,7 @@
                 })).then(function() {
                     hideLoading();
                     showZoneToast('▶ Все группы запущены на ' + dur + ' мин', 'success');
-                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                    setTimeout(function() { loadZonesData().then(function(){ return loadStatusData(); }); }, 1500);
                 });
                 return;
             }
@@ -2361,7 +2367,7 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 showZoneToast(data && data.success ? '▶ Группа запущена' : 'Ошибка', data && data.success ? 'success' : 'error');
-                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                setTimeout(function() { loadZonesData().then(function(){ return loadStatusData(); }); }, 1500);
             });
             return;
         }
@@ -2418,7 +2424,7 @@
             .then(function(data) {
                 hideLoading();
                 showZoneToast(data && data.success ? '▶ Группа запущена с настройками зон' : 'Ошибка', data && data.success ? 'success' : 'error');
-                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                setTimeout(function() { loadZonesData().then(function(){ return loadStatusData(); }); }, 1500);
             });
         } else {
             (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
@@ -2426,7 +2432,7 @@
             });
             hideLoading();
             showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            setTimeout(function() { loadZonesData().then(function(){ return loadStatusData(); }); }, 1500);
         }
     }
     window.confirmRunWithDefaults = confirmRunWithDefaults;
