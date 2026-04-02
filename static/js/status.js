@@ -374,11 +374,17 @@
                 span.dataset.remainingSeconds = String(data.remaining_seconds ?? (data.remaining_time * 60));
                 span.textContent = formatSeconds(Number(span.dataset.remainingSeconds));
             } else {
-                span.dataset.remainingSeconds = '';
-                span.textContent = '--:--';
+                // Don't overwrite if timer already has a valid value (drift correction handles it)
+                if (!span.dataset.remainingSeconds || Number(span.dataset.remainingSeconds) <= 0) {
+                    span.dataset.remainingSeconds = '';
+                    span.textContent = '--:--';
+                }
             }
         } catch (e) {
-            span.textContent = '--:--';
+            // Don't overwrite working timer on fetch error
+            if (!span.dataset.remainingSeconds || Number(span.dataset.remainingSeconds) <= 0) {
+                span.textContent = '--:--';
+            }
         }
     }
     
@@ -576,7 +582,11 @@
                     ${mvBlock}
                 `;
                 if (group.status === 'watering' && group.current_zone) {
-                    initGroupTimer(group);
+                    // Only call initGroupTimer if inline computation didn't set a value
+                    var _inlineTimer = card.querySelector('.group-timer');
+                    if (!_inlineTimer || !_inlineTimer.dataset.remainingSeconds || Number(_inlineTimer.dataset.remainingSeconds) <= 0) {
+                        initGroupTimer(group);
+                    }
                 }
             }
             if (isNewCard) {
