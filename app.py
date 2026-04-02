@@ -180,14 +180,30 @@ def dlog(msg: str, *args) -> None:
             logger.debug("dlog format error: %s", e)
 
 # ── Shared helper: check if a path is a "status action" allowed without admin ──
-# SECURITY FIX (VULN-001/002): Only truly safe endpoints allowed without admin.
-# Control actions (start/stop/emergency-resume/groups/zones) removed from whitelist.
-# Emergency-stop kept as fail-safe (anyone can stop, but only admin can resume).
-_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/postpone', '/api/zones/next-watering-bulk'}
+# Service runs behind nginx basic auth. Internal Flask auth for zone/group
+# control is unnecessary — gardeners need start/stop without admin password.
+import re as _re
+
+_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
+
+# Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
+_ALLOWED_PUBLIC_PATTERNS = [
+    _re.compile(r'^/api/zones/\d+/mqtt/start$'),
+    _re.compile(r'^/api/zones/\d+/mqtt/stop$'),
+    _re.compile(r'^/api/zones/\d+/start$'),
+    _re.compile(r'^/api/zones/\d+/stop$'),
+    _re.compile(r'^/api/groups/\d+/start-from-first$'),
+    _re.compile(r'^/api/groups/\d+/stop$'),
+    _re.compile(r'^/api/groups/\d+/master-valve/\w+$'),
+    _re.compile(r'^/api/groups/\d+/start-zone/\d+$'),
+]
 
 def _is_status_action(path):
     if path in _ALLOWED_PUBLIC_POSTS:
         return True
+    for pat in _ALLOWED_PUBLIC_PATTERNS:
+        if pat.match(path):
+            return True
     return False
 
 # ── Auth before-request ────────────────────────────────────────────────────

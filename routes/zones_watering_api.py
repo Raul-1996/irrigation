@@ -11,7 +11,6 @@ from irrigation_scheduler import get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services import sse_hub as _sse_hub
 from services.api_rate_limiter import rate_limit
-from services.security import admin_required
 import sqlite3
 
 try:
@@ -27,7 +26,6 @@ zones_watering_api_bp = Blueprint('zones_watering_api', __name__)
 # ---- Zone start/stop ----
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/start', methods=['POST'])
-@admin_required
 def start_zone(zone_id):
     """Start zone watering."""
     try:
@@ -94,7 +92,6 @@ def start_zone(zone_id):
 
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/stop', methods=['POST'])
-@admin_required
 def stop_zone(zone_id):
     """Stop zone watering."""
     try:
@@ -213,7 +210,6 @@ def api_mqtt_zones_sse():
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
 @rate_limit('mqtt_control', max_requests=10, window_sec=60)
-@admin_required
 def api_zone_mqtt_start(zone_id: int):
     t0 = time.time()
     try:
@@ -447,7 +443,6 @@ def api_zone_mqtt_start(zone_id: int):
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
 @rate_limit('mqtt_control', max_requests=10, window_sec=60)
-@admin_required
 def api_zone_mqtt_stop(zone_id: int):
     z = db.get_zone(zone_id)
     if not z:
