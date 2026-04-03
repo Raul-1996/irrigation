@@ -93,6 +93,21 @@ csrf = CSRFProtect(app)
 from routes.auth import api_login as _api_login_view
 csrf.exempt(_api_login_view)
 
+# Exempt all API blueprints from CSRF — the service is behind nginx basic auth,
+# so CSRF tokens are not needed for API calls. Guest users (gardeners) access
+# the portal through basic auth and must be able to control zones without a
+# Flask session / CSRF token.
+csrf.exempt(zones_watering_api_bp)
+csrf.exempt(groups_api_bp)
+csrf.exempt(system_emergency_api_bp)
+csrf.exempt(system_status_api_bp)
+csrf.exempt(system_config_api_bp)
+csrf.exempt(weather_api_bp)
+csrf.exempt(zones_crud_api_bp)
+csrf.exempt(zones_photo_api_bp)
+csrf.exempt(mqtt_api_bp)
+csrf.exempt(programs_api_bp)
+
 _sse_hub.init(db=db, mqtt_module=mqtt, app_config=app.config, publish_mqtt_value=_publish_mqtt_value, normalize_topic=normalize_topic, get_scheduler=get_scheduler)
 
 try:
