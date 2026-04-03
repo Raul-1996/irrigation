@@ -265,7 +265,7 @@ except ImportError as _e:
 for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp):
     app.register_blueprint(bp)
 
-_initialize_app(app, db)
+_initialize_app(app, db, start_watchdog_fn=_start_single_zone_watchdog)
 
 # ── Mutation guard ─────────────────────────────────────────────────────────
 @app.before_request

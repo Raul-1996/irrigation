@@ -20,8 +20,14 @@ def reset_init():
     _INIT_DONE = False
 
 
-def initialize_app(app, db):
+def initialize_app(app, db, *, start_watchdog_fn=None):
     """Run once at boot: scheduler, watchdogs, boot-sync, monitors, MQTT warm-up.
+
+    Args:
+        app: Flask application instance.
+        db: database handle.
+        start_watchdog_fn: callable to start the single-zone exclusivity
+            watchdog.  Injected from app.py to avoid circular import.
 
     Safe to call multiple times — only the first invocation does real work.
     Skipped entirely when ``app.config['TESTING']`` is truthy.
@@ -43,13 +49,13 @@ def initialize_app(app, db):
         logger.error(f'Scheduler init failed: {e}')
 
     # ── 2. Single-zone exclusivity watchdog ─────────────────────────
-    try:
-        # _start_single_zone_watchdog is defined in app.py and imported below
-        # at runtime to avoid circular imports. It is idempotent.
-        from app import _start_single_zone_watchdog
-        _start_single_zone_watchdog()
-    except ImportError:
-        logger.exception('single-zone watchdog start failed')
+    if start_watchdog_fn is not None:
+        try:
+            start_watchdog_fn()
+        except Exception:
+            logger.exception('single-zone watchdog start failed')
+    else:
+        logger.warning('start_watchdog_fn not provided, skipping watchdog')
 
     # ── 3. Cap-time watchdog (TASK-010) ─────────────────────────────
     try:
