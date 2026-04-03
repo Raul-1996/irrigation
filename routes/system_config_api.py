@@ -12,6 +12,7 @@ from irrigation_scheduler import get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services.helpers import MAP_DIR, ALLOWED_MIME_TYPES
 from services.monitors import env_monitor, probe_env_values
+from services.api_rate_limiter import rate_limit
 from constants import MIN_PASSWORD_LENGTH
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
@@ -48,6 +49,7 @@ def api_logout():
 
 
 @system_config_api_bp.route('/api/password', methods=['POST'])
+@rate_limit('password_change', max_requests=3, window_sec=300)
 def api_change_password():
     try:
         if not session.get('logged_in') and not current_app.config.get('TESTING'):

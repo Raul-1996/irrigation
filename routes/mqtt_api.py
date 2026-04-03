@@ -18,6 +18,11 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
+# Per-IP SSE connection tracking (P2: prevent connection flood)
+_scan_sse_connections: dict[str, int] = {}  # {ip: active_count}
+_scan_sse_lock = threading.Lock()
+MAX_SCAN_SSE_PER_IP = 2
+
 mqtt_api_bp = Blueprint('mqtt_api', __name__)
 
 
@@ -218,17 +223,37 @@ def api_mqtt_scan_sse(server_id: int):
     """Stream MQTT messages as SSE for continuous scanning."""
     try:
         from flask import current_app
+
+        # Per-IP connection limit
+        ip = request.remote_addr or '0.0.0.0'
+        with _scan_sse_lock:
+            current = _scan_sse_connections.get(ip, 0)
+            if current >= MAX_SCAN_SSE_PER_IP:
+                return api_error('SSE_LIMIT', 'Too many SSE connections', 429)
+            _scan_sse_connections[ip] = current + 1
+
+        def _decrement_sse(ip_addr: str):
+            with _scan_sse_lock:
+                _scan_sse_connections[ip_addr] = max(0, _scan_sse_connections.get(ip_addr, 1) - 1)
+                if _scan_sse_connections[ip_addr] == 0:
+                    _scan_sse_connections.pop(ip_addr, None)
+
         server = db.get_mqtt_server(server_id)
         if not server:
+            _decrement_sse(ip)
             return api_error('MQTT_SERVER_NOT_FOUND', 'server not found', 404)
         if mqtt is None:
+            _decrement_sse(ip)
             return api_error('MQTT_LIB_MISSING', 'paho-mqtt not installed', 500)
         
         # Return mock SSE in tests
         if current_app.config.get('TESTING'):
             def mock_gen():
-                yield 'event: open\n' + 'data: {"success": true}\n\n'
-                yield 'data: {"topic": "/test/mock", "payload": "test"}\n\n'
+                try:
+                    yield 'event: open\n' + 'data: {"success": true}\n\n'
+                    yield 'data: {"topic": "/test/mock", "payload": "test"}\n\n'
+                finally:
+                    _decrement_sse(ip)
             return Response(mock_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache'})
 
         sub_filter = request.args.get('filter', '/devices/#') or '/devices/#'
@@ -303,7 +328,9 @@ def api_mqtt_scan_sse(server_id: int):
                         yield 'event: ping\n' + 'data: {}\n\n'
             finally:
                 stop_event.set()
+                _decrement_sse(ip)
         return Response(_gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     except (RuntimeError, OSError) as e:
         logger.error(f"MQTT scan SSE error: {e}")
+        _decrement_sse(ip)
         return api_error('SSE_FAILED', 'sse init failed', 500)
