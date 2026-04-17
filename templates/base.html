@@ -4,12 +4,30 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{% block title %}WB-Irrigation{% endblock %}</title>
-    
+
+    <!-- PWA -->
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <meta name="theme-color" content="#2196f3" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#1a1a1a" media="(prefers-color-scheme: dark)">
+    <meta name="application-name" content="WB-Irrigation">
+    <meta name="description" content="Управление системой автополива на Wirenboard">
+
+    <!-- iOS Home Screen / standalone -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Полив">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+    <link rel="apple-touch-icon" sizes="167x167" href="{{ url_for('static', filename='icons/apple-touch-icon-167.png') }}">
+    <link rel="apple-touch-icon" sizes="152x152" href="{{ url_for('static', filename='icons/apple-touch-icon-152.png') }}">
+
     <!-- Favicon -->
-    <link rel="icon" type="image/x-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
-    
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='icons/favicon-16.png') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+
     <!-- Preload critical fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -319,9 +337,44 @@
             header, footer, nav {
                 display: none;
             }
-            
+
             main {
                 padding: 0;
+            }
+        }
+
+        /* PWA / iOS safe area (notch, home indicator) */
+        body {
+            padding-top: env(safe-area-inset-top, 0);
+            padding-bottom: env(safe-area-inset-bottom, 0);
+        }
+        .header-content,
+        main {
+            padding-left: max(1rem, env(safe-area-inset-left));
+            padding-right: max(1rem, env(safe-area-inset-right));
+        }
+
+        /* Standalone (installed to Home Screen) tweaks */
+        @media (display-mode: standalone), (display-mode: fullscreen) {
+            html, body {
+                overscroll-behavior-y: contain;
+                -webkit-tap-highlight-color: transparent;
+            }
+            /* disable text selection on chrome-like UI elements */
+            header, nav, footer, .logo, button {
+                -webkit-user-select: none;
+                user-select: none;
+            }
+            /* keep sticky header under the notch */
+            header {
+                padding-top: calc(1rem + env(safe-area-inset-top, 0));
+            }
+        }
+
+        /* Ensure tap targets ≥ 44px on touch devices (iOS HIG) */
+        @media (hover: none) and (pointer: coarse) {
+            button, .btn, input[type="button"], input[type="submit"], .nav a {
+                min-height: 44px;
             }
         }
     </style>

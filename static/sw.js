@@ -1,7 +1,12 @@
 // Service Worker for WB-Irrigation (network-first for HTML to avoid stale auth state)
-const CACHE_NAME = 'wb-irrigation-v4';
+const CACHE_NAME = 'wb-irrigation-v5';
 const urlsToCache = [
-    // cache only static assets here if needed; do NOT pre-cache '/'
+    // PWA assets — small, safe to precache for offline install
+    '/static/manifest.json',
+    '/static/icons/icon-192.png',
+    '/static/icons/icon-512.png',
+    '/static/icons/apple-touch-icon.png',
+    '/static/icons/favicon-32.png'
 ];
 
 // Install event
