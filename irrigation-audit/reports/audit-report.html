@@ -1,0 +1,1728 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>wb-irrigation — Сводный аудит-отчёт (Phase 4)</title>
+<meta name="description" content="Итоговый аудит проекта wb-irrigation: физические риски, master-findings, план в 5 волн, Quick wins, открытые вопросы владельцу.">
+<style>
+:root {
+  --bg: #0f1419;
+  --bg-elev: #151b23;
+  --bg-card: #1a2029;
+  --bg-code: #1e2530;
+  --fg: #e6e6e6;
+  --fg-dim: #a3adb8;
+  --fg-muted: #6c7682;
+  --border: #2a3340;
+  --border-strong: #3a4454;
+  --accent: #4cc2ff;
+  --accent-2: #7dd3fc;
+  --heading: #8ed6ff;
+  --crit: #ef4444;
+  --high: #f59e0b;
+  --med: #eab308;
+  --low: #3b82f6;
+  --ok: #10b981;
+  --crit-bg: rgba(239,68,68,0.12);
+  --high-bg: rgba(245,158,11,0.12);
+  --med-bg: rgba(234,179,8,0.12);
+  --low-bg: rgba(59,130,246,0.12);
+  --ok-bg: rgba(16,185,129,0.12);
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.2);
+}
+[data-theme="light"] {
+  --bg: #f7f8fa;
+  --bg-elev: #ffffff;
+  --bg-card: #ffffff;
+  --bg-code: #f4f5f7;
+  --fg: #1a1f29;
+  --fg-dim: #4a5260;
+  --fg-muted: #6c7682;
+  --border: #e4e7eb;
+  --border-strong: #cbd2da;
+  --accent: #0369a1;
+  --accent-2: #0284c7;
+  --heading: #0c4a6e;
+  --crit-bg: rgba(239,68,68,0.09);
+  --high-bg: rgba(245,158,11,0.10);
+  --med-bg: rgba(234,179,8,0.10);
+  --low-bg: rgba(59,130,246,0.09);
+  --ok-bg: rgba(16,185,129,0.09);
+  --shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.08);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+code, kbd, .mono {
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+  font-size: 0.89em;
+}
+code:not(pre code) {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--accent-2);
+  white-space: nowrap;
+}
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+pre code { background: none; border: none; padding: 0; color: inherit; white-space: pre; }
+h1, h2, h3, h4 { color: var(--heading); font-weight: 600; line-height: 1.3; margin-top: 1.6em; margin-bottom: 0.6em; }
+h1 { font-size: 1.9rem; margin-top: 0; }
+h2 { font-size: 1.45rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+h3 { font-size: 1.15rem; color: var(--accent-2); }
+h4 { font-size: 1rem; color: var(--fg); }
+p { margin: 0.7em 0; }
+a { color: var(--accent); text-decoration: none; transition: color 0.15s, background 0.15s; }
+a:hover { color: var(--accent-2); background: var(--low-bg); border-radius: 3px; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+ul, ol { padding-left: 1.5em; }
+li { margin: 0.35em 0; }
+strong { color: var(--fg); font-weight: 600; }
+
+/* Layout */
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  max-width: 1400px;
+  margin: 0 auto;
+  gap: 32px;
+  padding: 24px;
+}
+.toc {
+  position: sticky;
+  top: 16px;
+  align-self: start;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  font-size: 13.5px;
+}
+.toc h4 {
+  margin: 0 0 10px 0;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 1px;
+  font-weight: 600;
+}
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: toc; }
+.toc li { counter-increment: toc; margin: 2px 0; }
+.toc li::before {
+  content: counter(toc) ". ";
+  color: var(--fg-muted);
+  margin-right: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.toc a { color: var(--fg-dim); padding: 3px 6px; border-radius: 4px; display: inline; }
+.toc a:hover { color: var(--accent); background: var(--low-bg); }
+.main { min-width: 0; }
+
+/* Hero */
+.hero {
+  background: linear-gradient(135deg, var(--bg-elev) 0%, var(--bg-card) 100%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 32px;
+  margin-bottom: 24px;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--crit), var(--high), var(--med), var(--low), var(--ok));
+}
+.hero h1 { margin: 0 0 4px 0; letter-spacing: -0.02em; }
+.hero .subtitle { color: var(--fg-dim); font-size: 1.05rem; margin-bottom: 14px; }
+.hero-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 20px;
+  font-size: 13px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.hero-meta div { display: flex; flex-direction: column; }
+.hero-meta .label { color: var(--fg-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+.hero-meta .value { color: var(--fg); font-weight: 500; }
+.hero-meta .value.mono { font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 12.5px; }
+
+.theme-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: var(--bg-code);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.theme-toggle:hover { background: var(--bg-card); border-color: var(--accent); }
+
+.traffic-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  margin-top: 10px;
+}
+.traffic-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 0 2px rgba(239,68,68,0.25);
+  background: var(--crit);
+  animation: pulse 2.5s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* TL;DR block */
+.tldr {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow);
+}
+.tldr h2 { margin-top: 0; border-bottom: none; padding-bottom: 0; color: var(--accent); font-size: 1.1rem; letter-spacing: 1px; text-transform: uppercase; }
+.tldr-three {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.tldr-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 13.5px;
+}
+.tldr-card .num {
+  display: inline-block;
+  width: 24px; height: 24px;
+  line-height: 24px;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--crit);
+  color: #fff;
+  font-weight: bold;
+  font-size: 12px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+/* Section */
+section {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px 28px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow);
+}
+section > h2:first-child { margin-top: 0; }
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  vertical-align: middle;
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  border: 1px solid transparent;
+}
+.badge.crit { background: var(--crit-bg); color: var(--crit); border-color: var(--crit); }
+.badge.high { background: var(--high-bg); color: var(--high); border-color: var(--high); }
+.badge.med  { background: var(--med-bg);  color: var(--med);  border-color: var(--med); }
+.badge.low  { background: var(--low-bg);  color: var(--low);  border-color: var(--low); }
+.badge.ok   { background: var(--ok-bg);   color: var(--ok);   border-color: var(--ok); }
+.badge.neutral { background: var(--bg-code); color: var(--fg-dim); border-color: var(--border); }
+
+/* Dashboard grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.status-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  transition: transform 0.15s, border-color 0.15s;
+}
+.status-card:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+.status-card.crit { border-left: 4px solid var(--crit); }
+.status-card.high { border-left: 4px solid var(--high); }
+.status-card.med  { border-left: 4px solid var(--med); }
+.status-card.ok   { border-left: 4px solid var(--ok); }
+.status-card .title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 6px;
+}
+.status-card .light {
+  font-size: 1.1rem;
+}
+.status-card .desc {
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+
+/* Physical risk block */
+.phys-block {
+  background: linear-gradient(135deg, rgba(239,68,68,0.06), rgba(245,158,11,0.04));
+  border: 1px solid var(--crit);
+  border-radius: 10px;
+  padding: 24px 28px;
+  margin-bottom: 24px;
+  position: relative;
+}
+[data-theme="light"] .phys-block {
+  background: linear-gradient(135deg, rgba(239,68,68,0.04), rgba(245,158,11,0.03));
+}
+.phys-block > h2 { color: var(--crit); border-bottom-color: rgba(239,68,68,0.25); }
+.phys-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--crit);
+  border-radius: 6px;
+  padding: 14px 18px;
+  margin: 14px 0;
+}
+.phys-card.p1 { border-left-color: var(--high); }
+.phys-card.p2 { border-left-color: var(--med); }
+.phys-card h3 { margin-top: 4px; }
+.phys-card .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  margin: 6px 0;
+}
+.phys-card .row b { color: var(--fg); font-weight: 600; }
+
+/* Findings */
+.finding {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 14px 0;
+  border-left: 4px solid var(--fg-muted);
+}
+.finding.crit { border-left-color: var(--crit); }
+.finding.high { border-left-color: var(--high); }
+.finding.med  { border-left-color: var(--med); }
+.finding.low  { border-left-color: var(--low); }
+.finding h3 {
+  margin: 0 0 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 1.05rem;
+}
+.finding .meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  margin: 6px 0 10px 0;
+  padding: 6px 0;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+}
+.finding .meta b { color: var(--fg); }
+.finding .label {
+  font-weight: 600;
+  color: var(--accent-2);
+  font-size: 12px;
+  margin-top: 10px;
+  margin-bottom: 2px;
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.finding ul { margin: 4px 0 10px 0; }
+.finding .xref {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.finding-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 28px 0 10px 0;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+.finding-group-heading::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin: 12px 0; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13.5px;
+  background: var(--bg-card);
+  border-radius: 6px;
+  overflow: hidden;
+}
+th, td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  background: var(--bg-code);
+  position: sticky;
+  top: 0;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 2px solid var(--border-strong);
+  z-index: 1;
+}
+tbody tr:nth-child(even) { background: rgba(255,255,255,0.015); }
+[data-theme="light"] tbody tr:nth-child(even) { background: rgba(0,0,0,0.015); }
+tbody tr:hover { background: var(--low-bg); }
+td.mono { font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 12.5px; }
+td.center { text-align: center; }
+
+/* Stepper timeline */
+.stepper { position: relative; padding-left: 28px; margin: 18px 0; }
+.stepper::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 4px; bottom: 4px;
+  width: 2px;
+  background: var(--border);
+}
+.step { position: relative; margin-bottom: 22px; }
+.step::before {
+  content: "";
+  position: absolute;
+  left: -23px;
+  top: 6px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 2px solid var(--accent);
+}
+.step.p0::before { border-color: var(--crit); }
+.step.p1::before { border-color: var(--high); }
+.step.p2::before { border-color: var(--med); }
+.step.p3::before { border-color: var(--low); }
+.step h3 { margin: 0 0 4px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.step .tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.step .desc { color: var(--fg-dim); font-size: 13.5px; margin: 4px 0 8px 0; }
+
+/* Quick wins */
+.qw-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.qw-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  display: flex;
+  align-items: start;
+  gap: 10px;
+}
+.qw-check {
+  flex-shrink: 0;
+  width: 18px; height: 18px;
+  border: 2px solid var(--ok);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ok);
+  font-size: 11px;
+  line-height: 1;
+  margin-top: 1px;
+}
+.qw-body { flex: 1; min-width: 0; }
+.qw-id { font-family: 'SF Mono', Monaco, Consolas, monospace; color: var(--accent-2); font-weight: 600; font-size: 11.5px; }
+.qw-time { color: var(--fg-muted); font-size: 11px; margin-left: 6px; }
+.qw-desc { color: var(--fg-dim); line-height: 1.45; margin-top: 2px; }
+
+/* Question cards */
+.q-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 10px 0;
+  position: relative;
+}
+.q-card.blocking { border-left: 4px solid var(--crit); }
+.q-card.nonblock { border-left: 4px solid var(--low); }
+.q-card .q-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+.q-card .q-rec {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: var(--bg-code);
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  border-left: 2px solid var(--ok);
+}
+.q-card .q-rec b { color: var(--ok); }
+
+/* Mobile nav */
+.mobile-toc-toggle { display: none; }
+.mobile-nav {
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 16px;
+  align-items: center;
+  justify-content: space-between;
+}
+.mobile-nav button {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* SVG diagram helpers */
+.svg-diag {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+  margin: 12px 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Footer */
+footer {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 28px 48px 28px;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  margin-top: 24px;
+}
+footer .src-list {
+  margin-top: 10px;
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: var(--fg-dim);
+}
+
+blockquote {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-code);
+  border-radius: 0 4px 4px 0;
+  color: var(--fg-dim);
+  font-size: 13.5px;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+  .toc {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 100;
+    max-height: 100vh;
+    border-radius: 0;
+    display: none;
+  }
+  .toc.open { display: block; }
+  .mobile-nav { display: flex; }
+  .hero { padding: 20px; }
+  .hero h1 { font-size: 1.5rem; }
+  section { padding: 18px 16px; }
+  .theme-toggle { top: 14px; right: 14px; }
+  .dashboard-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body data-theme="dark">
+
+<nav class="mobile-nav">
+  <button id="mobile-toc-btn" aria-label="Открыть оглавление">☰ Оглавление</button>
+  <button id="mobile-theme-btn" aria-label="Переключить тему">◐ Тема</button>
+</nav>
+
+<div class="layout">
+
+<aside class="toc" id="toc" aria-label="Содержание">
+  <h4>Содержание</h4>
+  <ol>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#status">Светофор доменов</a></li>
+    <li><a href="#phys">Физические риски</a></li>
+    <li><a href="#findings">Master-findings</a></li>
+    <li><a href="#bugs">Авторский BUGS-REPORT</a></li>
+    <li><a href="#plan">План в 5 волн</a></li>
+    <li><a href="#quickwins">Quick wins</a></li>
+    <li><a href="#keep">Что НЕ трогать</a></li>
+    <li><a href="#questions">Открытые вопросы</a></li>
+    <li><a href="#phase5">Phase 5 — исполнение</a></li>
+    <li><a href="#metrics">Метрики успеха</a></li>
+    <li><a href="#xref">Cross-reference</a></li>
+  </ol>
+</aside>
+
+<main class="main">
+
+<header class="hero">
+  <button class="theme-toggle" id="theme-toggle" aria-label="Переключить тему">◐ Тема</button>
+  <h1>wb-irrigation &mdash; Сводный аудит</h1>
+  <div class="subtitle">Итоговый отчёт Phase 4 &middot; консолидация 13 артефактов Phase 1&ndash;3</div>
+  <div class="traffic-status">
+    <span class="traffic-dot"></span>
+    <span><b>Общий статус:</b> требует вмешательства &mdash; 4 красных домена, 8 жёлтых, 1 зелёный</span>
+  </div>
+  <div class="hero-meta">
+    <div><span class="label">Дата</span><span class="value">2026-04-19</span></div>
+    <div><span class="label">Ветка</span><span class="value mono">refactor/v2</span></div>
+    <div><span class="label">Prod HEAD</span><span class="value mono">e37adb7</span></div>
+    <div><span class="label">Хост</span><span class="value mono">WB-Techpom, 10.2.5.244</span></div>
+    <div><span class="label">Аудитор</span><span class="value">command-team под руководством Tony</span></div>
+    <div><span class="label">Владелец</span><span class="value">Raul</span></div>
+    <div><span class="label">Uptime прода</span><span class="value">13.5 дней стабильно</span></div>
+    <div><span class="label">Зрелость</span><span class="value">4.5 / 10 (по enterprise-шкале)</span></div>
+  </div>
+</header>
+
+<section class="tldr" id="tldr">
+  <h2>TL;DR</h2>
+  <p>Система <b>работает</b>: прод держит uptime 13.5 дней, RSS стабильный 224 MB, CPU 0.27%, функциональный UX полива 24 зон закрыт. Это <b>не архитектурная катастрофа</b> и <b>не аварийная ситуация</b> &mdash; это <b>незавершённый рефакторинг с одним физически-опасным классом багов</b> (БД↔hardware расхождение) и <b>одним громким процессным провалом</b> (CI/CD никогда не запускался на <code>refactor/v2</code>, логи приложения 13 дней пустые, что делает диагностику любого инцидента слепой).</p>
+
+  <p><b>Три больших пункта до конца квартала:</b></p>
+  <div class="tldr-three">
+    <div class="tldr-card"><span class="num">1</span><b>Reconciliation БД↔клапан.</b> Сейчас его нет. При power-loss или MQTT-disconnect клапан может остаться открытым без ведома приложения &mdash; пролитая вода, сухой ход насоса.</div>
+    <div class="tldr-card"><span class="num">2</span><b>Логирование.</b> <code>app.log</code> 0 байт 13 дней (bug #4 автора подтверждается) &mdash; любая будущая проблема расследуется «по воздуху». Это первое, что нужно починить &mdash; 4 часа работы.</div>
+    <div class="tldr-card"><span class="num">3</span><b>SSE-зомби.</b> Фронт отключил, бэк-хаб жив, браузер бесконечно реконнектится на эндпоинт, возвращающий 204 (~28 800 запросов/сутки на клиента). Решение архитектора &mdash; выпилить; подтверждение владельца блокирует 5 мастер-пунктов.</div>
+  </div>
+
+  <p>Остальное (CSRF-exempt API на публичном URL, 8 прямых <code>sqlite3.connect</code> в обход репозиториев, scheduler-god-module с 89&nbsp;LOC дублем, WCAG 2.2 Level A fail, 113 KB dead JS, 55 XPASS тестов в limbo) &mdash; чинится поэтапно за 3&ndash;4 месяца параллельно с регулярной работой.</p>
+
+  <p><b>Общая оценка зрелости:</b> автор ставит 5/10, архитектор 4.5/10, я соглашаюсь с 4.5/10 с оговоркой: для <b>домашнего</b> контроллера полива эта оценка избыточно строгая &mdash; она применима к enterprise-мерке. Для домашнего single-user scope разумнее читать её как &laquo;работает, но требует профилактики до осеннего сезона&raquo;.</p>
+</section>
+
+<section id="status">
+<h2>2. Светофор по доменам</h2>
+<p>Светофор откалиброван под домашний single-user контекст, не под enterprise SaaS.<br>
+<span class="badge ok">🟢 OK</span> не мешает &middot;
+<span class="badge med">🟡 MED</span> чинить этим кварталом &middot;
+<span class="badge crit">🔴 CRIT</span> физический или диагностический риск, чинить сейчас.</p>
+
+<div class="dashboard-grid">
+  <div class="status-card crit"><div class="title">Physical safety <span class="light">🔴</span></div><div class="desc">Нет reconciler БД↔hardware (CRIT-R1, R3, RC1, CC1). Power-loss восстановление не закрывает сценарий «клапан физически открыт, приложение считает закрытым».</div></div>
+  <div class="status-card crit"><div class="title">Observability <span class="light">🔴</span></div><div class="desc"><code>app.log</code> пустой 13 дней (Bug #4). Нет <code>/healthz</code>/<code>/readyz</code>/<code>/metrics</code>; <code>telegram.txt</code> 520 KB без ротации; systemd без <code>WatchdogSec</code>.</div></div>
+  <div class="status-card crit"><div class="title">Deploy pipeline <span class="light">🔴</span></div><div class="desc">GitHub Actions CI смотрит на <code>main</code>, прод на <code>refactor/v2</code> &mdash; пайплайн не запускался ни разу. Rollback не проверен.</div></div>
+  <div class="status-card high"><div class="title">Security (public) <span class="light">🟡</span></div><div class="desc">CF Tunnel идёт напрямую на Flask <code>:8080</code> в обход <code>basic_auth_proxy:8011</code> (SEC-002). Все API CSRF-exempt. Default admin creds не форсятся.</div></div>
+  <div class="status-card med"><div class="title">Database integrity <span class="light">🟡</span></div><div class="desc"><code>PRAGMA foreign_keys=OFF</code> на проде (DB-001), <code>synchronous=FULL</code> (DB-004, eMMC wear), 8 прямых connect в обход <code>BaseRepository</code>, миграции не атомарны.</div></div>
+  <div class="status-card med"><div class="title">Scheduler (APScheduler) <span class="light">🟡</span></div><div class="desc">SQLAlchemy не установлен → MemoryJobStore fallback → <b>все jobs теряются при рестарте</b>. 1365-LOC god-module + 89 LOC дубль.</div></div>
+  <div class="status-card med"><div class="title">MQTT topology <span class="light">🟡</span></div><div class="desc">18 клиентов anonymous, per-request <code>mqtt.Client().connect()</code> &asymp;17k TCP-сессий/сут. Нет owner'a, нет таксономии, нет идемпотентности.</div></div>
+  <div class="status-card crit"><div class="title">Frontend SSE <span class="light">🔴</span></div><div class="desc">EventSource коннектится к 204 endpoint и реконнектится бесконечно. &asymp;28 800 запросов/сутки на одну вкладку. SSE hub пишет в SQLite без потребителя.</div></div>
+  <div class="status-card med"><div class="title">Frontend JS hygiene <span class="light">🟡</span></div><div class="desc">113 KB / 2243 LOC dead JS. 545 LOC inline <code>&lt;script&gt;</code> в programs.html. <code>status.js</code> 2187 LOC. 7/9 форм без double-submit. <code>var</code> 255× в одном файле.</div></div>
+  <div class="status-card crit"><div class="title">Accessibility (WCAG 2.2) <span class="light">🔴</span></div><div class="desc"><b>FAIL Level A.</b> 5 критичных блокеров для полевого оператора. <code>#999</code> на <code>#fff</code> (2.85:1) повторён 25+ раз. Одной рукой в перчатке управлять нельзя.</div></div>
+  <div class="status-card crit"><div class="title">Testing / CI <span class="light">🔴</span></div><div class="desc">CI не бежит. 60.78% coverage, zone_control 48%. 55 XPASS в limbo. 8 failing. 44× <code>time.sleep()</code> &rarr; flaky на ARM. Hardcoded prod IP.</div></div>
+  <div class="status-card med"><div class="title">Code quality <span class="light">🟡</span></div><div class="desc"><code>weather.py</code> 1404 LOC (6 ответственностей в одном), <code>irrigation_scheduler.py</code> 1365 LOC. Не блокирует, но хрупко.</div></div>
+  <div class="status-card med"><div class="title">Config / secrets <span class="light">🟡</span></div><div class="desc">5 источников (<code>config.py</code>, <code>constants.py</code>, <code>.env</code>, <code>os.environ</code>, <code>db.settings</code>). TG-токен и MQTT-пароли не в secure secrets. Сервис под <code>root</code>.</div></div>
+  <div class="status-card ok"><div class="title">Performance <span class="light">🟢</span></div><div class="desc">Нет SLO-нарушений. RSS стабильный, CPU &lt;1%, SQLite не bottleneck. Perf-теги — симптомы архитектурных проблем, не причина.</div></div>
+</div>
+
+<p style="margin-top: 16px;"><b>Итоговый баланс:</b> 4 домена 🔴 (физика, диагностика, deploy, SSE, a11y, тесты), 8 доменов 🟡 (фиксим квартально), 1 домен 🟢.</p>
+</section>
+
+<section class="phys-block" id="phys">
+<h2>3. ⚠️ Физические риски (elevated priority)</h2>
+<p>Раздел про <b>воду, клапаны и насос</b> &mdash; где программная ошибка становится материальным ущербом. Вынесен отдельно: в home-irrigation классе систем это <b>не «Severity-1»</b>, а <b>единственная Severity-0 категория</b>.</p>
+
+<div class="phys-card">
+  <h3>PHYS-1 &mdash; Расхождение БД↔hardware по состоянию зоны <span class="badge crit">CRIT</span> <span class="badge neutral">L</span> <span class="badge crit">P0</span></h3>
+  <div class="row"><span><b>Cross-ref:</b> CRIT-R1 + CRIT-R3 + CRIT-RC1 + CRIT-CC1 + HIGH-R2 → master <a href="#m-c1">MASTER-C1</a></span></div>
+  <p><b>Что:</b> в приложении нет механизма сверки «клапан в БД считается закрытым — он физически закрыт?». Четыре конкретных сценария пролива:</p>
+  <ol>
+    <li><b>Power loss посреди полива (CRIT-RC1).</b> Процесс падает, NO-клапаны остаются открытыми. При старте <code>boot_sync</code> полагается на БД, а не на GPIO echo. Если stop-job в MemoryJobStore потерялся &mdash; нет таймера, который зону закроет.</li>
+    <li><b>MQTT-disconnect в момент stop-команды (CRIT-R1).</b> <code>publish(..., qos=1)</code> без <code>wait_for_publish()</code> + без подтверждения от контроллера = команда «stop» могла не доехать. Приложение отмечает <code>state='off'</code> оптимистично.</li>
+    <li><b>Race watchdog vs user-stop (CRIT-CC1).</b> Пользователь нажал Stop, одновременно watchdog cap-time достиг лимита. Два UPDATE на <code>zones</code> без optimistic lock &mdash; старое &laquo;on&raquo; может перезатереть &laquo;off&raquo;.</li>
+    <li><b>Fire-and-forget verify (HIGH-R2).</b> <code>services/observed_state.py</code> использует <code>verify_async</code>. Успех/провал verify <b>не влияет</b> на <code>state</code> и не ведёт к alert.</li>
+  </ol>
+  <p><b>Где:</b> <code class="mono">services/zone_control.py</code> (48% coverage), <code class="mono">routes/zones_watering_api.py</code> (49%), <code class="mono">services/observed_state.py</code>, <code class="mono">services/watchdog.py</code>, <code class="mono">services/app_init.py</code>, <code class="mono">irrigation_scheduler.py:67-155</code> (второй boot-sync), таблица <code>zones</code> &mdash; нет полей <code>desired_state</code>/<code>commanded_state</code>/<code>observed_state</code>/<code>desired_version</code>.</p>
+
+  <div class="svg-diag">
+<pre style="background:none; border:none; padding:0; margin:0; color: var(--fg-dim);">   ┌────────────┐  desired     ┌──────────────┐  commanded   ┌──────────────┐  MQTT   ┌────────────┐
+   │   User /   ├─────────────▶│  Application ├─────────────▶│  client_pool ├────────▶│ Wirenboard │
+   │  Scheduler │              │  (domain)    │              │              │   ?     │ GPIO / WB  │
+   └────────────┘              └───────┬──────┘              └──────────────┘         └─────┬──────┘
+                                       │                                                    │
+                                       │  ❌ missing                                        │
+                                       │     observed feedback loop                         │
+                                       │                                                    │
+                                       ▼                                                    │
+                               ┌───────────────┐       zone/+/observed  (retained)          │
+                               │  SQLite zones │◀──────────────── ??? ◀─────────────────────┘
+                               │  .state only  │       (no subscriber, no reconciler)
+                               └───────────────┘</pre>
+  </div>
+
+  <p><b>Что делать (направление):</b></p>
+  <ul>
+    <li>Ввести state machine <code>desired → commanded → observed → confirmed</code> (target-state §3).</li>
+    <li>Subscriber на <code>wb-irrigation/zone/+/observed</code> → UPDATE <code>observed_state</code>.</li>
+    <li>APScheduler-job <code>reconcile_tick</code> каждые 10 сек: desired vs observed, retry через <code>command_id</code>, после 3 попыток &mdash; <code>state='fault'</code> + алерт.</li>
+    <li><code>boot_reconcile</code> при старте: retained MQTT snapshot, safety-first policy.</li>
+    <li>Optimistic lock: <code>UPDATE zones SET ... WHERE id=? AND desired_version=?</code>.</li>
+  </ul>
+</div>
+
+<div class="phys-card">
+  <h3>PHYS-2 &mdash; Scheduler теряет one-shot stop-jobs при рестарте <span class="badge crit">CRIT</span> <span class="badge neutral">S</span> <span class="badge crit">P0</span></h3>
+  <div class="row"><span><b>Cross-ref:</b> HIGH-R3 → master <a href="#m-h10">MASTER-H10</a></span></div>
+  <p><b>Что:</b> APScheduler настроен на SQLAlchemyJobStore, но <b>SQLAlchemy не установлен на проде</b>. Тихий fallback на MemoryJobStore &mdash; <b>все задачи теряются при <code>systemctl restart</code></b>.</p>
+  <p>Самый опасный класс &mdash; <code>zone_stop:N</code> (one-shot на конец полива). Если рестарт в середине полива — stop-job исчез, клапан открыт.</p>
+  <p><b>Что делать:</b> <code>SQLAlchemy</code> в <code>requirements.txt</code> (+~3 MB RSS), отдельный <code>jobs.db</code>, <code>coalesce=True, misfire_grace_time=300</code>. <b>НО</b> не единственная защита &mdash; critical one-shot jobs восстанавливаются через <code>boot_reconcile</code> (PHYS-1).</p>
+</div>
+
+<div class="phys-card p1">
+  <h3>PHYS-3 &mdash; Float-sensor монитор обходит репозиторный слой <span class="badge high">HIGH</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+  <div class="row"><span><b>Cross-ref:</b> DB-006 частный случай</span></div>
+  <p><b>Что:</b> <code>services/float_monitor.py</code> использует прямой <code>sqlite3.connect()</code> в обход <code>BaseRepository._connect()</code>. <code>PRAGMA foreign_keys=ON</code>, <code>synchronous=NORMAL</code>, <code>busy_timeout=30000</code> <b>не применяются</b>. Float-sensor &mdash; <b>safety-critical сенсор</b> (защита от сухого хода насоса).</p>
+  <p><b>Риск:</b> write float-event на busy-lock SQLite упадёт быстро без <code>busy_timeout</code>, reconciler не узнает что бак пустой.</p>
+</div>
+
+<div class="phys-card p1">
+  <h3>PHYS-4 &mdash; Weather-decision идёт мимо репозиториев, 7 прямых connect <span class="badge high">HIGH</span> <span class="badge neutral">M</span> <span class="badge med">P2</span></h3>
+  <div class="row"><span><b>Cross-ref:</b> DB-006 основной, MASTER-L1, MASTER-H3</span></div>
+  <p><b>Что:</b> <code>services/weather.py</code> (1404 LOC god-module) содержит 7 прямых <code>sqlite3.connect()</code>. Weather-adjustment влияет на объём полива (ratio может быть &gt; 1). В комбинации с PHYS-1 + PHYS-2 &mdash; пролив с мультипликатором.</p>
+  <p><b>Что делать:</b> <code>db/weather.py</code> репозиторий; разбить на <code>domain/weather/decision.py</code> (pure) + <code>infrastructure/weather_http</code> + <code>application/weather_service</code>.</p>
+</div>
+
+<div class="phys-card p1">
+  <h3>PHYS-5 &mdash; Manual API без confirm / rate-limit <span class="badge high">HIGH</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+  <div class="row"><span><b>Cross-ref:</b> SEC-002, SEC-003 → master <a href="#m-h6">MASTER-H6</a></span></div>
+  <p>Эндпоинты <code>/api/zones/N/start</code>, <code>/stop</code>, <code>/api/programs/N/run</code> &mdash; CSRF-exempt, без rate-limit, без confirm. В сочетании с публичным URL <code>poliv-kg.ops-lab.dev</code> (CF Tunnel прямо на Flask) &mdash; утечка session cookie / XSS = атакующий массово открывает клапаны.</p>
+  <blockquote><b>Из security.md (PoC концептуально, не на проде):</b><br>
+  <code class="mono">curl -X POST https://poliv-kg.ops-lab.dev/api/zones/5/start</code><br>
+  <code class="mono">curl -X POST https://poliv-kg.ops-lab.dev/api/groups/1/start-from-first</code><br>
+  <code class="mono">curl -X POST https://poliv-kg.ops-lab.dev/api/emergency-stop</code></blockquote>
+  <p><b>Что делать:</b> CF Access Application (OAuth) &mdash; см. <a href="#q-3">вопрос §9.3</a>. <code>flask-limiter</code> 30 rpm/user на start/stop. Убрать CSRF-exempt с session-authenticated эндпоинтов.</p>
+</div>
+
+<h3 style="margin-top: 24px;">Сводка физических рисков</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>ID</th><th>Риск</th><th>Probability</th><th>Impact</th><th>Приоритет</th></tr></thead>
+<tbody>
+<tr><td class="mono">PHYS-1</td><td>БД↔hardware рассинхрон при disconnect / power-loss</td><td>Средняя</td><td><b>Высокий</b> — пролив, возможен сухой ход</td><td><span class="badge crit">P0</span></td></tr>
+<tr><td class="mono">PHYS-2</td><td>Stop-jobs теряются при рестарте</td><td>Высокая</td><td><b>Высокий</b> — открытый клапан без таймера</td><td><span class="badge crit">P0</span></td></tr>
+<tr><td class="mono">PHYS-3</td><td>Float-sensor write на busy-lock</td><td>Низкая</td><td>Высокий — сухой насос</td><td><span class="badge high">P1</span></td></tr>
+<tr><td class="mono">PHYS-4</td><td>Weather-decision с косвенной записью</td><td>Низкая</td><td>Средний</td><td><span class="badge med">P2</span></td></tr>
+<tr><td class="mono">PHYS-5</td><td>Публичный API без confirm / rate-limit</td><td>Низкая, но постоянная</td><td><b>Высокий</b> — массовое открытие</td><td><span class="badge high">P1 после CF</span></td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section id="findings">
+<h2>4. Консолидированные master-findings</h2>
+<p>Находки сгруппированы по <b>корневой причине</b>, не по агенту. Один root-cause = одна мастер-точка. Severity откалибрована под домашний single-user scope. <b>C</b> — чинить эту неделю, <b>H</b> — этот месяц, <b>M</b> — этот квартал, <b>L</b> — когда-нибудь. Effort: <b>S</b> ≤ 1 день, <b>M</b> ≤ 1 спринт, <b>L</b> &gt; 1 спринт.</p>
+
+<div class="finding-group-heading"><span class="badge crit">CRITICAL &middot; 6</span></div>
+
+<div class="finding crit" id="m-c1">
+<h3>MASTER-C1: Отсутствует reconciliation-контур БД↔hardware <span class="badge crit">C</span> <span class="badge neutral">L</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Domain:</b> core</span><span><b>Deps:</b> C3, H2, M1</span><span><b>Cross-ref:</b> CRIT-R1, CRIT-R3, CRIT-RC1, CRIT-CC1, HIGH-R2, CQ-006, CQ-007, Bug 5.2</span></div>
+<p>Приложение оптимистично пишет в БД «зона открыта/закрыта», не проверяя, что контроллер реально выполнил команду. Нет поля <code>observed_state</code>, нет subscriber'а на echo-топик GPIO, нет периодического reconciler'а, нет optimistic-lock на UPDATE <code>zones</code>.</p>
+<span class="label">Где</span>
+<ul>
+<li><code class="mono">services/zone_control.py</code> (48% coverage, критический путь)</li>
+<li><code class="mono">routes/zones_watering_api.py</code> (49% coverage)</li>
+<li><code class="mono">services/observed_state.py</code> (<code>verify_async</code> fire-and-forget — HIGH-R2)</li>
+<li><code class="mono">services/watchdog.py</code> (race с user-stop — CRIT-CC1)</li>
+<li><code class="mono">irrigation_scheduler.py:67-155</code> (второй boot-sync — CQ-006 / BUG 5.2)</li>
+<li>Таблица <code>zones</code>: нет колонок <code>desired_state</code>, <code>desired_version</code>, <code>commanded_state</code>, <code>observed_state</code>, <code>observed_at</code>, <code>last_command_id</code></li>
+</ul>
+<blockquote><b>Из sre.md (CRIT-RC1):</b> <code class="mono">services/zone_control.py:242</code> сначала ставит <code>state='stopping'</code>, публикует MQTT, ждёт verifier <i>асинхронно</i>, затем <b>без проверки ack</b> ставит <code>state='off'</code> (line 300). Если publish провалился — БД скажет <code>off</code>, hardware останется <code>on</code>, watchdog не сработает (state=off в его выборке).</blockquote>
+<span class="label">Что делать</span>
+<ul><li>State machine <code>desired → commanded → observed → confirmed</code> (target-state §3).</li>
+<li>Subscriber на <code>wb-irrigation/zone/+/observed</code>.</li>
+<li>APScheduler job <code>reconcile_tick</code> каждые 10 сек; retry через <code>command_id</code>; после 3 попыток — <code>fault</code> + алерт.</li>
+<li><code>boot_reconcile</code>: safety-first, при сомнениях закрыть клапан.</li>
+<li>Optimistic lock через <code>desired_version++</code>.</li></ul>
+</div>
+
+<div class="finding crit" id="m-c2">
+<h3>MASTER-C2: Диагностический blackout — app.log пустой 13 дней <span class="badge crit">C</span> <span class="badge neutral">S</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Domain:</b> observability</span><span><b>Deps:</b> none — <b>first thing to fix</b></span><span><b>Cross-ref:</b> Bug #4, CRIT-O1, CQ-001..004, CQ-012</span></div>
+<p><code>app.log</code> 0 байт, прод работает 13.5 дней. Автор пометил как Bug #4 — <b>подтверждаю + расширяю</b>. Две корневые причины:</p>
+<ol>
+<li><b>Handler повешен на named logger <code>'app'</code></b>, а <code>logger = logging.getLogger(__name__)</code> в модулях использует <code>services.xxx</code> — сообщения идут не в тот logger.</li>
+<li><b><code>basicConfig(level=WARNING)</code> в <code>irrigation_scheduler.py</code> и <code>scheduler/jobs.py</code> на import-time</b>, <b>до</b> <code>logging_setup.py</code> → перебивает уровень (CQ-012).</li>
+</ol>
+<p><b>Расширение Bug #4:</b> в <code>routes/settings.py</code>, <code>services/locks.py</code>, <code>services/mqtt_pub.py</code>, <code>services/telegram_bot.py</code> <b>нет <code>import logging</code></b> — <code>logger.info(...)</code> будут NameError'ами, которые не стреляют только потому, что ветки не исполняются. <code>telegram.txt</code> 520 KB без ротации.</p>
+<span class="label">Что делать</span>
+<ul><li>Handler на root logger; <code>setup_logging()</code> вызывать в <code>app.py</code> <b>до</b> импортов scheduler/services.</li>
+<li>Убрать <code>basicConfig</code> из scheduler/jobs/database.</li>
+<li>Добавить <code>import logging; logger = logging.getLogger(__name__)</code> в 4 модуля.</li>
+<li><code>logrotate</code> для <code>telegram.txt</code>.</li>
+<li>Structured JSON formatter с <code>correlation_id</code>, <code>zone_id</code>, <code>command_id</code> — во вторую очередь.</li></ul>
+</div>
+
+<div class="finding crit" id="m-c3">
+<h3>MASTER-C3: MQTT — нет owner'а, 18 клиентов, per-request connect, anonymous <span class="badge crit">C</span> <span class="badge neutral">M</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Domain:</b> mqtt</span><span><b>Deps:</b> none на старт</span><span><b>Cross-ref:</b> API-01, SP-1, SEC-001</span></div>
+<ul>
+<li><code>services/mqtt_pub.py</code> держит кэш, но <code>routes/system_status_api.py:464-478</code> создаёт новый <code>mqtt.Client().connect()</code> per-request → <b>~17 000 TCP-сессий/сутки</b>.</li>
+<li>18 отдельных MQTT-клиентов в одном процессе — нет координатора, нет общего reconnect-policy.</li>
+<li>Все клиенты анонимные (broker без ACL) — любой в LAN может читать/писать любые топики.</li>
+<li>Нет таксономии, нет идемпотентности команд (QoS=1 + reconnect = double-delivery).</li>
+<li><code>publish()</code> без <code>wait_for_publish()</code> — команды могут молча потеряться.</li>
+</ul>
+<blockquote><b>Из security.md (SEC-001, CVSS 9.6):</b> на проде <code>allow_anonymous true</code> на listener'ах 1883 и 18883. Из любой машины в 10.2.0.0/16:<br>
+<code class="mono">mosquitto_pub -h 10.2.5.244 -p 1883 -t '/devices/wb-mr6c_&lt;ID&gt;/controls/K1/on' -m '1'</code></blockquote>
+<span class="label">Что делать</span>
+<ul><li>Единственный <code>infrastructure/mqtt/client_pool.py</code>; удалить per-request connect.</li>
+<li>Свести 18 клиентов к ≤ 3 ролям: <code>pub</code>, <code>sub-monitors</code>, <code>sub-scheduler</code>.</li>
+<li>MQTT contract v1: namespace <code>wb-irrigation/</code>, <code>zone/{id}/(command|desired|state|observed)</code>, <code>command_id</code> (ULID) для идемпотентности через <code>command_log</code>.</li>
+<li>ACL per identity: <code>irrigation_app</code>, <code>wb_controller</code>, <code>irrigation_tg</code>, <code>telegraf_ro</code>.</li>
+<li>Dual-publish 2 недели, потом cutover (решение владельца §9.6).</li></ul>
+</div>
+
+<div class="finding crit" id="m-c4">
+<h3>MASTER-C4: SSE-зомби — фронт отключил, бэк жив, браузер бесконечно реконнектится <span class="badge crit">C</span> <span class="badge neutral">S/L</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Domain:</b> frontend</span><span><b>Deps:</b> owner decision</span><span><b>Cross-ref:</b> FE-CRIT-1, SSE-01..04, SP-2, Bug #6</span></div>
+<p><code>static/js/zones.js:1472</code> создаёт <code>EventSource('/api/mqtt/zones-sse')</code>. Бэкенд возвращает <b>204 No Content</b>. EventSource видит EOF → реконнектится через 3 сек → <b>бесконечно</b>. <b>~28 800 запросов/сутки</b> на вкладку. 57 600 запросов при мобилке + десктопе ×24ч.</p>
+<p><code>services/sse_hub.py</code> (363 LOC) в бэке <b>жив</b> и пишет в SQLite на каждое MQTT-сообщение (SSE-03). 4 детерминированных test failures — все про SSE.</p>
+<p><b>Рекомендация архитектора:</b> <b>выпилить SSE полностью.</b> Заменить на polling <code>/api/status</code> 5 сек с <code>ETag</code> и <code>document.hidden</code> pause. Для home UX задержка 0–5 сек приемлема.</p>
+<p><b>⚠️ Блокирующий вопрос владельцу (<a href="#q-1">§9.1</a>):</b> подтвердить выпил. Если нет — задача меняется с S на L.</p>
+</div>
+
+<div class="finding crit" id="m-c5">
+<h3>MASTER-C5: CI/CD пайплайн не запускается на refactor/v2 <span class="badge crit">C</span> <span class="badge neutral">S</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Domain:</b> process</span><span><b>Deps:</b> none</span><span><b>Cross-ref:</b> tests.md §1, SP-6, Bug #13</span></div>
+<p><code>.github/workflows/ci.yml</code> триггерится на <code>main</code>, прод на <code>refactor/v2</code>. <b>Ни один коммит ветки не прошёл через CI.</b> Нет линта, нет тестов, rollback-механизм никогда не тестировался. Комбинация с MASTER-C2 (нет логов) = <b>любой регрессионный баг приходит напрямую на физические клапаны</b>, и расследовать его нечем.</p>
+<span class="label">Что делать</span>
+<ul><li>В <code>on.push.branches</code> добавить <code>refactor/v2</code>. И в <code>pull_request.branches</code>.</li>
+<li>Python matrix <code>['3.9', '3.11']</code> — 3.9 чтобы match prod.</li>
+<li>Jobs: lint (ruff), test (pytest), integration (mosquitto service container).</li>
+<li>После починки — baseline: 8 failing + 55 XPASS (ожидаемо, не блокер, но фиксируется явно).</li></ul>
+</div>
+
+<div class="finding crit" id="m-c6">
+<h3>MASTER-C6: WCAG 2.2 Level A — FAIL, 5 критичных блокеров <span class="badge crit">C</span> <span class="badge neutral">M</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Domain:</b> a11y</span><span><b>Deps:</b> none</span><span><b>Cross-ref:</b> a11y.md целиком</span></div>
+<p>Интерфейс не соответствует даже минимальному уровню A. Для домашнего компьютера — терпимо. Для <b>полевого оператора с мобилкой под солнцем, одной рукой в перчатке</b> — местами неработоспособно.</p>
+<ol>
+<li><b>Label-less inputs в <code>mqtt.html:16-41</code></b> — без <code>&lt;label&gt;</code>/<code>aria-label</code>. Screen-reader молчит.</li>
+<li><b>Custom <code>&lt;div class="toggle-switch"&gt;</code></b> без <code>role="switch"</code>, <code>aria-checked</code>, keyboard support — <code>templates/programs.html:174,484-485</code>. Работает только тапом.</li>
+<li><b>Sortable <code>&lt;th&gt;</code></b> без keyboard — <code>templates/zones.html:114-122</code>.</li>
+<li><b>SVG dial drag-only</b> — <code>templates/status.html:208-225</code>. Нет кнопок +/- и arrow-keys.</li>
+<li><b>Нет focus trap в 8 модалках + 2 sheet + 2 popup</b> — Tab уходит в фон, Esc не закрывает.</li>
+</ol>
+<p><b>Дополнительно:</b> контраст <code>#999</code> на <code>#fff</code> = 2.85:1 (fail AA 4.5:1) повторён <b>25+ раз</b> в <code>status.css</code>. Emergency button <code>#d32f2f</code> — 5.4:1 (fail AAA 7:1) для критической функции на улице.</p>
+<blockquote><b>Из a11y.md (топ-риск):</b> Аварийная остановка — одна кнопка <code>#d32f2f</code> на <code>#f5f5f5</code> даёт контраст ~5.7:1 (AA OK, AAA FAIL). На солнце белый текст на красном даст ~4.2:1 (AA <b>FAIL</b>). Это самая критичная функция продукта — должна быть AAA (7:1).</blockquote>
+<span class="label">Что делать (топ-3 для полевого)</span>
+<ul><li>Контраст <code>#999</code> → <code>#595959</code> или темнее.</li>
+<li><code>role="switch" aria-checked tabindex=0</code> + keyboard handler на toggle-switch.</li>
+<li>Focus-trap utility (~20 LOC) + вызов в открытии всех модалок.</li></ul>
+</div>
+
+<div class="finding-group-heading"><span class="badge high">HIGH &middot; 10</span></div>
+
+<div class="finding high">
+<h3>MASTER-H1: Scheduler dual-track — пакет + god-module 1365 LOC + 89 LOC дубль <span class="badge high">H</span> <span class="badge neutral">M</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> CQ-005, CQ-006, Bug 5.2, Bug #1, Bug #12, SP-3</span><span><b>Deps:</b> PHYS-2</span></div>
+<p>Автор начал декомпозировать <code>irrigation_scheduler.py</code> на пакет <code>scheduler/</code> через mixin-паттерн. Декомпозиция <b>не завершена</b>: <code>irrigation_scheduler.py</code> 1365 LOC остался, 89 LOC дублируются между <code>scheduler/jobs.py</code> и <code>irrigation_scheduler.py:67-155</code>. APScheduler dotted-path может ссылаться на любую из двух копий.</p>
+<span class="label">Что делать</span>
+<ul><li>Оставить <b>одну копию</b> job functions: <code>infrastructure/scheduler/jobs.py</code>.</li>
+<li>Очистить <code>apscheduler_jobs</code> и пересоздать из <code>db.programs</code> при старте.</li>
+<li>Удалить <code>irrigation_scheduler.py</code>.</li>
+<li>Mixin-паттерн → композиция: <code>runner.py</code> (APScheduler wrapper) + <code>jobs.py</code> (module-level).</li></ul>
+</div>
+
+<div class="finding high" id="m-h2">
+<h3>MASTER-H2: PRAGMA не применяются per-connection — FK=OFF, synchronous=FULL <span class="badge high">H</span> <span class="badge neutral">S</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> DB-001, DB-004, SP-8, Bug #10</span><span><b>Deps:</b> none — Phase 0</span></div>
+<p><code>BaseRepository._connect()</code> <b>не</b> устанавливает PRAGMA. На проде проверено: <code>foreign_keys=0</code>, <code>synchronous=2 (FULL)</code>, <code>busy_timeout</code> не установлен.</p>
+<span class="label">Что делать</span>
+<p>В <code>_connect()</code> добавить per-connection:</p>
+<pre><code>PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA foreign_keys=ON;
+PRAGMA busy_timeout=30000;
+PRAGMA temp_store=MEMORY;
+PRAGMA cache_size=-8000;</code></pre>
+</div>
+
+<div class="finding high">
+<h3>MASTER-H3: 8 прямых sqlite3.connect() в обход BaseRepository <span class="badge high">H</span> <span class="badge neutral">M</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> DB-006, DB-007, PHYS-3, PHYS-4, Bug #9</span><span><b>Deps:</b> MASTER-H2</span></div>
+<ul><li>7 в <code>services/weather.py</code> (god-module 1404 LOC)</li>
+<li>1 в <code>services/float_monitor.py</code></li>
+<li><code>database.py</code> facade 309 LOC — <b>дополнительная</b> дырявая граница</li></ul>
+<p><b>Что делать:</b> <code>db/weather.py</code>, <code>db/float.py</code>, постепенно выпилить facade. Unit-test rule: зелёный тест = нет <code>sqlite3.connect()</code> вне <code>db/base.py</code>.</p>
+</div>
+
+<div class="finding high">
+<h3>MASTER-H4: Миграции не атомарны <span class="badge high">H</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> DB-002, Bug #11</span></div>
+<p><code>db/migrations.py</code> применяет миграции без единой транзакции. Если падает посреди — часть DDL прошла, запись в <code>migrations</code> не поставлена — схема в промежуточном состоянии.</p>
+<p><b>Что делать:</b> <code>BEGIN IMMEDIATE ... COMMIT/ROLLBACK</code>; <code>ALTER TABLE ADD COLUMN</code> идемпотентно через <code>PRAGMA table_info</code>; <code>raise</code> при ошибке, не swallow.</p>
+</div>
+
+<div class="finding high">
+<h3>MASTER-H5: Foreign Keys не декларированы в схеме <span class="badge high">H</span> <span class="badge neutral">M</span> <span class="badge med">P2</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> DB-003</span><span><b>Deps:</b> MASTER-H2, H4</span></div>
+<p>В таблицах <code>zones</code>, <code>groups</code>, <code>water_usage</code>, <code>weather_log</code>, <code>program_cancellations</code>, <code>program_queue_log</code>, <code>float_events</code> <b>нет FK-деклараций</b>. Даже с <code>PRAGMA foreign_keys=ON</code> ограничения не сработают.</p>
+<p><b>Что делать:</b> миграция <code>add_foreign_keys_v2</code> (recreate-table). Приоритетные: <code>zones.group_id → groups.id ON DELETE SET NULL</code>, <code>water_usage.zone_id → zones.id ON DELETE CASCADE</code>, и др.</p>
+<p><b>⚠️ Блокирующий вопрос владельцу (<a href="#q-13">§9.13</a>):</b> ~5 сек downtime + full DB rewrite (~1 MB).</p>
+</div>
+
+<div class="finding high" id="m-h6">
+<h3>MASTER-H6: SSL/TLS на публичном URL + CF Tunnel bypass basic_auth_proxy <span class="badge high">H</span> <span class="badge neutral">S</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> SEC-002, SEC-003, SP-7, Bug #5.1</span><span><b>Deps:</b> owner decision</span></div>
+<p><code>poliv-kg.ops-lab.dev</code> (CF Tunnel) ведёт <b>напрямую на <code>localhost:8080</code> (Flask)</b>, в обход <code>basic_auth_proxy</code> на <code>:8011</code>. Flask login — единственный барьер из интернета. CSRF-exempt API + session cookie = session hijacking даёт полный контроль клапанами. Нет rate-limit на <code>/login</code>, нет MFA.</p>
+<span class="label">Что делать (рекомендация архитектора)</span>
+<ul><li>Cloudflare Access Application: OAuth (Google/GitHub), allow-list emails (2–3), session 24 ч.</li>
+<li>Flask читает <code>Cf-Access-Authenticated-User-Email</code> → SSO.</li>
+<li>Два слоя: CF Access (MFA через IdP) + Flask session (role-based authZ).</li></ul>
+<p><b>⚠️ Блокирующий вопрос владельцу (<a href="#q-3">§9.3</a>).</b></p>
+</div>
+
+<div class="finding high">
+<h3>MASTER-H7: Тесты — 60.78% coverage, 55 XPASS в limbo <span class="badge high">H</span> <span class="badge neutral">M</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> tests.md целиком</span><span><b>Deps:</b> MASTER-C5</span></div>
+<p>Локальный прогон: 1486 passed / 8 failed / 14 skipped / 31 xfailed / <b>55 xpassed</b>. Coverage 60.78%. Критические пути: <code>zone_control</code> 48%, <code>watering_api</code> 49%, <code>irrigation_scheduler</code> 57%, TG bot 18%.</p>
+<p><b>Отдельные грехи:</b> 55 XPASS, 8 failing (4 SSE уйдут с C4, 4 triage), 44× <code>time.sleep()</code> → flaky на ARM, hardcoded prod IP <code>10.2.5.244</code> в <code>test_mqtt_real.py</code>, <code>pytest.ini</code> vs <code>pyproject.toml</code> conflict.</p>
+</div>
+
+<div class="finding high">
+<h3>MASTER-H8: Config scatter — 5 источников, db.settings хранит runtime в БД <span class="badge high">H</span> <span class="badge neutral">M</span> <span class="badge med">P2</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> SP-4, Bug #2</span></div>
+<p>Конфигурация: <code>config.py</code>, <code>constants.py</code>, <code>.env</code>, <code>os.environ</code>, <code>db.settings</code> — 5 источников, нет приоритета. <code>db.settings</code> хранит runtime в БД — две копии системы не одинаковы, даже если код идентичен.</p>
+<p><b>Что делать:</b> один <code>config.py</code> с pydantic-settings; <code>db.settings</code> — только user-editable с <code>type</code>/<code>category</code>; secrets в <code>/etc/wb-irrigation/secrets.env</code> chmod 600; <code>constants.py</code> слить в <code>config.py</code>.</p>
+</div>
+
+<div class="finding high">
+<h3>MASTER-H9: Dead code / lying code на фронте <span class="badge high">H</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> FE-HIGH-1, FE-HIGH-2, FE-HIGH-6</span></div>
+<ul>
+<li><b>113 KB / 2243 LOC dead JS</b> — 9 файлов в <code>static/js/components/</code> не импортируются нигде.</li>
+<li><b>545 LOC inline <code>&lt;script&gt;</code> в <code>templates/programs.html:73-619</code></b> дублирует <code>static/js/programs.js</code> (который живой).</li>
+<li><b>CSRF interceptor в <code>app.js:17-49</code></b> добавляет <code>X-CSRFToken</code>, но все API blueprints <b>CSRF-exempt</b> → «lying code».</li>
+<li><code>status.js</code> — 2187 LOC / 118 KB синхронной загрузки; <code>var</code> 255×.</li>
+</ul>
+</div>
+
+<div class="finding high" id="m-h10">
+<h3>MASTER-H10: APScheduler без SQLAlchemyJobStore → MemoryJobStore (= PHYS-2) <span class="badge high">H</span> <span class="badge neutral">S</span> <span class="badge crit">P0</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> PHYS-2, HIGH-R3, Bug #7</span></div>
+<p>См. <a href="#phys">PHYS-2</a>. Ключевое: <code>requirements.txt</code> += SQLAlchemy; APScheduler → SQLAlchemyJobStore на отдельном <code>jobs.db</code>; <code>coalesce=True, misfire_grace_time=300, max_instances=1</code>.</p>
+</div>
+
+<div class="finding-group-heading"><span class="badge med">MEDIUM &middot; 7</span></div>
+
+<div class="finding med">
+<h3>MASTER-M1: Secrets storage — не в secure хранилище <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> SEC-010</span></div>
+<p>TG bot token и MQTT пароли в <code>db.settings</code> (SQLite доступен через admin UI) или в <code>.env</code>. <code>SECRET_KEY</code> Flask в <code>.irrig_secret_key</code> в рабочей директории (неправильное FHS место).</p>
+<p><b>Что делать:</b> <code>/etc/wb-irrigation/secrets.env</code> chmod 600 через systemd <code>EnvironmentFile=</code>; <code>SECRET_KEY</code> → <code>/var/lib/wb-irrigation/secret_key</code>; убрать secrets из <code>db.settings</code>. Опционально <code>LoadCredential=</code> — <a href="#q-2">§9.2</a>.</p>
+</div>
+
+<div class="finding med">
+<h3>MASTER-M2: systemd unit под root, нет WatchdogSec, TimeoutStopSec=20 мало <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> HIGH-R6</span></div>
+<ul><li><code>User=root</code> — нарушает least-privilege.</li>
+<li>Нет <code>WatchdogSec=</code> + <code>Type=notify</code>.</li>
+<li><code>TimeoutStopSec=20</code> — graceful shutdown может не успеть.</li>
+<li>Нет <code>MemoryMax=</code>/<code>CPUQuota=</code>.</li></ul>
+<p><b>Что делать:</b> system user <code>wb-irrigation</code>, <code>Type=notify</code>, <code>WatchdogSec=60</code>, <code>TimeoutStopSec=45</code>, <code>MemoryMax=512M</code>, <code>ProtectSystem=strict</code>, <code>NoNewPrivileges=true</code>.</p>
+</div>
+
+<div class="finding med">
+<h3>MASTER-M3: Default admin credentials не форсятся к смене <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> Bug #8</span><span><b>Deps:</b> MASTER-C2</span></div>
+<p>При первом запуске admin с дефолтным паролем. Для LAN — терпимо. Для <b>публичного CF URL</b> — опасно.</p>
+<p><b>Что делать:</b> при первом логине с дефолтным — redirect на <code>/force-password-change</code>. Либо генерить случайный пароль на первом старте и печатать в лог.</p>
+</div>
+
+<div class="finding med">
+<h3>MASTER-M4: Backup — keep_count=7, нет offsite, WAL checkpoint не PASSIVE <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> DB-005, DB-016</span></div>
+<p>Ежедневный <code>sqlite3 .backup</code>, keep_count=7 (неделя). 33 GB free, могли бы 30 дней. Нет offsite. WAL checkpoint — <code>TRUNCATE</code> (блокирует writers) вместо <code>PASSIVE</code>.</p>
+<p><b>Что делать:</b> <code>keep_days=30</code>, <code>PRAGMA wal_checkpoint(PASSIVE)</code>; offsite — <a href="#q-9">§9.9</a>.</p>
+</div>
+
+<div class="finding med">
+<h3>MASTER-M5: Нет health/readiness/metrics endpoints <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge med">P2</span></h3>
+<div class="meta"><span><b>Deps:</b> MASTER-C2, C1</span></div>
+<p>Есть <code>/health</code>, но нет <code>/readyz</code> (проверка MQTT + DB + scheduler + boot_reconcile), нет <code>/metrics</code> (Prometheus).</p>
+<p><b>Что делать:</b> <code>prometheus-client</code> ~200 KB; метрики <code>wb_zone_start_total</code>, <code>wb_zone_fault_total</code>, <code>wb_mqtt_publish_total</code>, <code>wb_observed_ack_latency_ms</code>, <code>wb_scheduler_lag_seconds</code>; Telegraf scrape → Zabbix (<a href="#q-15">§9.15</a>).</p>
+</div>
+
+<div class="finding med">
+<h3>MASTER-M6: Frontend — 7/9 форм без double-submit, polling игнорирует document.hidden <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge med">P2</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> FE-HIGH-4, FE-HIGH-5, FE-MED-1..9</span></div>
+<ul><li>7/9 форм не блокируют submit — дублирование зон/программ.</li>
+<li>Polling 5 сек даже при hidden вкладке — battery drain.</li>
+<li>Hamburger 36×36 px — меньше WCAG 44×44.</li>
+<li>Нет <code>loading="lazy"</code> на фото зон.</li>
+<li>Нет <code>AbortController</code>/fetch timeout.</li>
+<li>Нет <code>manifest.json</code> — SW есть, PWA-install не работает.</li></ul>
+</div>
+
+<div class="finding med">
+<h3>MASTER-M7: XPASS limbo — 55 тестов с @xfail проходят <span class="badge med">M</span> <span class="badge neutral">S</span> <span class="badge high">P1</span></h3>
+<div class="meta"><span><b>Cross-ref:</b> tests.md §5</span><span><b>Deps:</b> MASTER-C5</span></div>
+<p>55 тестов с <code>@pytest.mark.xfail</code> проходят. Эти тесты <b>не ловят регрессии</b>. Убрать маркеры или переквалифицировать в <code>@skipif</code>.</p>
+</div>
+
+<div class="finding-group-heading"><span class="badge low">LOW &middot; 4</span></div>
+
+<div class="finding low">
+<h3>MASTER-L1: god-modules — weather.py 1404 LOC, status.js 2187 LOC <span class="badge low">L</span> <span class="badge neutral">L</span> <span class="badge neutral">P3</span></h3>
+<p>Разобрать <code>weather.py</code> на <code>domain/weather</code>, <code>infrastructure/weather_http</code>, <code>db/weather</code>, <code>application/weather_service</code>. ruff + mypy постепенно с <code>domain/</code>.</p>
+</div>
+
+<div class="finding low">
+<h3>MASTER-L2: API — нет версионирования, нет единого error format <span class="badge low">L</span> <span class="badge neutral">M</span> <span class="badge neutral">P3</span></h3>
+<p>18 routes без <code>/api/v1/</code> префикса. Нет единого error-envelope. <code>/api/logs</code> без pagination. <b>Что делать:</b> <code>routes/api/v1/</code>, RFC 7807 <code>application/problem+json</code>, cursor-based pagination, OpenAPI spec.</p>
+</div>
+
+<div class="finding low">
+<h3>MASTER-L3: Password hashing — мигрировать на argon2id <span class="badge low">L</span> <span class="badge neutral">S/L</span> <span class="badge neutral">P3</span></h3>
+<p><code>werkzeug.generate_password_hash</code> default — scrypt/pbkdf2. Argon2id современнее. Lazy rehash on login, через 6 мес удалить legacy.</p>
+</div>
+
+<div class="finding low">
+<h3>MASTER-L4: Telegram bot — 18% coverage, whitelist в коде <span class="badge low">L</span> <span class="badge neutral">M</span> <span class="badge neutral">P3</span></h3>
+<p>TG bot coverage 18%. Whitelist <code>chat_id</code> в коде. <code>bot_users</code> таблица пустая. <b>Что делать:</b> migrate whitelist → <code>bot_users</code> с ролями; invite-flow; aiogram TestClient для coverage.</p>
+</div>
+
+<h3>Сводная таблица 32 master-points</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>ID</th><th>Sev</th><th>Eff</th><th>Pri</th><th>Domain</th><th>Deps</th></tr></thead>
+<tbody>
+<tr><td class="mono">PHYS-1</td><td><span class="badge crit">C</span></td><td>L</td><td>P0</td><td>physical</td><td>C3, C2, H2</td></tr>
+<tr><td class="mono">PHYS-2</td><td><span class="badge crit">C</span></td><td>S</td><td>P0</td><td>physical</td><td>none</td></tr>
+<tr><td class="mono">PHYS-3</td><td><span class="badge high">H</span></td><td>S</td><td>P1</td><td>physical</td><td>H2</td></tr>
+<tr><td class="mono">PHYS-4</td><td><span class="badge high">H</span></td><td>M</td><td>P2</td><td>physical</td><td>H2</td></tr>
+<tr><td class="mono">PHYS-5</td><td><span class="badge high">H</span></td><td>S</td><td>P1</td><td>phys/sec</td><td>H6</td></tr>
+<tr><td class="mono">MASTER-C1</td><td><span class="badge crit">C</span></td><td>L</td><td>P0</td><td>core</td><td>C3, H2, M1</td></tr>
+<tr><td class="mono">MASTER-C2</td><td><span class="badge crit">C</span></td><td>S</td><td>P0</td><td>observ</td><td>none (<b>first</b>)</td></tr>
+<tr><td class="mono">MASTER-C3</td><td><span class="badge crit">C</span></td><td>M</td><td>P0</td><td>mqtt</td><td>none</td></tr>
+<tr><td class="mono">MASTER-C4</td><td><span class="badge crit">C</span></td><td>S/L</td><td>P0</td><td>frontend</td><td>owner</td></tr>
+<tr><td class="mono">MASTER-C5</td><td><span class="badge crit">C</span></td><td>S</td><td>P0</td><td>process</td><td>none</td></tr>
+<tr><td class="mono">MASTER-C6</td><td><span class="badge crit">C</span></td><td>M</td><td>P1</td><td>a11y</td><td>none</td></tr>
+<tr><td class="mono">MASTER-H1</td><td><span class="badge high">H</span></td><td>M</td><td>P1</td><td>scheduler</td><td>PHYS-2</td></tr>
+<tr><td class="mono">MASTER-H2</td><td><span class="badge high">H</span></td><td>S</td><td>P0</td><td>db</td><td>none</td></tr>
+<tr><td class="mono">MASTER-H3</td><td><span class="badge high">H</span></td><td>M</td><td>P1</td><td>db</td><td>H2</td></tr>
+<tr><td class="mono">MASTER-H4</td><td><span class="badge high">H</span></td><td>S</td><td>P1</td><td>db</td><td>none</td></tr>
+<tr><td class="mono">MASTER-H5</td><td><span class="badge high">H</span></td><td>M</td><td>P2</td><td>db</td><td>H2, H4</td></tr>
+<tr><td class="mono">MASTER-H6</td><td><span class="badge high">H</span></td><td>S</td><td>P0</td><td>security</td><td>owner</td></tr>
+<tr><td class="mono">MASTER-H7</td><td><span class="badge high">H</span></td><td>M</td><td>P1</td><td>tests</td><td>C5</td></tr>
+<tr><td class="mono">MASTER-H8</td><td><span class="badge high">H</span></td><td>M</td><td>P2</td><td>config</td><td>none</td></tr>
+<tr><td class="mono">MASTER-H9</td><td><span class="badge high">H</span></td><td>S</td><td>P1</td><td>frontend</td><td>none</td></tr>
+<tr><td class="mono">MASTER-H10</td><td><span class="badge high">H</span></td><td>S</td><td>P0</td><td>scheduler</td><td>= PHYS-2</td></tr>
+<tr><td class="mono">MASTER-M1</td><td><span class="badge med">M</span></td><td>S</td><td>P1</td><td>security</td><td>owner</td></tr>
+<tr><td class="mono">MASTER-M2</td><td><span class="badge med">M</span></td><td>S</td><td>P1</td><td>systemd</td><td>none</td></tr>
+<tr><td class="mono">MASTER-M3</td><td><span class="badge med">M</span></td><td>S</td><td>P1</td><td>security</td><td>C2</td></tr>
+<tr><td class="mono">MASTER-M4</td><td><span class="badge med">M</span></td><td>S</td><td>P1</td><td>backup</td><td>none</td></tr>
+<tr><td class="mono">MASTER-M5</td><td><span class="badge med">M</span></td><td>S</td><td>P2</td><td>observ</td><td>C2, C1</td></tr>
+<tr><td class="mono">MASTER-M6</td><td><span class="badge med">M</span></td><td>S</td><td>P2</td><td>frontend</td><td>none</td></tr>
+<tr><td class="mono">MASTER-M7</td><td><span class="badge med">M</span></td><td>S</td><td>P1</td><td>tests</td><td>C5</td></tr>
+<tr><td class="mono">MASTER-L1</td><td><span class="badge low">L</span></td><td>L</td><td>P3</td><td>code</td><td>H1, H3</td></tr>
+<tr><td class="mono">MASTER-L2</td><td><span class="badge low">L</span></td><td>M</td><td>P3</td><td>api</td><td>C4</td></tr>
+<tr><td class="mono">MASTER-L3</td><td><span class="badge low">L</span></td><td>S</td><td>P3</td><td>security</td><td>none</td></tr>
+<tr><td class="mono">MASTER-L4</td><td><span class="badge low">L</span></td><td>M</td><td>P3</td><td>telegram</td><td>none</td></tr>
+</tbody>
+</table>
+</div>
+<p><b>Всего 32 master-point</b> (5 PHYS + 6 Critical + 10 High + 7 Medium + 4 Low). После дедупликации из ~60 исходных находок агентов.</p>
+</section>
+
+<section id="bugs">
+<h2>5. Авторский BUGS-REPORT &mdash; верификация</h2>
+<p>Автор ведёт <code>BUGS-REPORT.md</code> в репозитории. <b>Все 13 авторских пунктов верифицированы, 0 false positives.</b> 5 пунктов <b>extended</b> — найдены более глубокие причины или связанные симптомы. Добавлено <b>20 новых находок</b>, которых не было в BUGS-REPORT.</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>#</th><th>Bug (автор)</th><th>Статус</th><th>Master-point</th><th>Комментарий</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Scheduler dual-track (scheduler/ пакет + irrigation_scheduler.py)</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H1</td><td>Подтверждено code-quality, SRE, architecture. 89 LOC дубль reproducible.</td></tr>
+<tr><td>2</td><td>Config scatter (5 источников)</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H8</td><td>Подтверждено. Приоритет не блокер.</td></tr>
+<tr><td>3</td><td>MQTT per-request client в system_status_api</td><td><span class="badge high">Verified + extended</span></td><td class="mono">MASTER-C3</td><td>performance.md измерил — 17 000 TCP/day. Расширено: вся MQTT-топология без owner.</td></tr>
+<tr><td>4</td><td><code>app.log</code> 0 байт — логи не пишутся</td><td><span class="badge high">Verified + extended</span></td><td class="mono">MASTER-C2</td><td>+CQ-001..004 (NameError-бомбы), +<code>telegram.txt</code> без ротации.</td></tr>
+<tr><td>5.1</td><td>CSRF-exempt API на публичном URL</td><td><span class="badge high">Verified + extended</span></td><td class="mono">MASTER-H6</td><td>app.js шлёт X-CSRFToken, бэк не проверяет = «lying code».</td></tr>
+<tr><td>5.2</td><td>Boot-sync дубль (app_init vs irrigation_scheduler)</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H1</td><td>CQ-006 подтверждает.</td></tr>
+<tr><td>5.3</td><td>SSE в mqtt.html без reconnect/backoff</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-C4</td><td>FE-HIGH-3 подтверждает.</td></tr>
+<tr><td>6</td><td>SSE zones.js — бесконечный реконнект на 204</td><td><span class="badge high">Verified + extended</span></td><td class="mono">MASTER-C4</td><td>+sse_hub.py 363 LOC жив + 4 failing tests + SQLite writes.</td></tr>
+<tr><td>7</td><td>SQLAlchemy не установлен → MemoryJobStore</td><td><span class="badge ok">Verified</span></td><td class="mono">PHYS-2 / MASTER-H10</td><td>Подтверждено prod-snapshot. Критично — stop-jobs теряются при рестарте.</td></tr>
+<tr><td>8</td><td>Default admin password не форсится</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-M3</td><td>Medium для LAN, High при публичном CF URL.</td></tr>
+<tr><td>9</td><td>Weather.py — 1404 LOC god-module + 7 прямых sqlite3</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H3 + MASTER-L1</td><td>Подтверждено database.md и code-quality.md.</td></tr>
+<tr><td>10</td><td>PRAGMA FK=OFF на проде</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H2</td><td>database.md проверил на проде.</td></tr>
+<tr><td>11</td><td>Миграции не атомарны</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H4</td><td>DB-002.</td></tr>
+<tr><td>12</td><td>Scheduler не удалён после извлечения в пакет</td><td><span class="badge ok">Verified</span></td><td class="mono">MASTER-H1</td><td>&mdash;</td></tr>
+<tr><td>13</td><td>CI/CD на main, прод на refactor/v2</td><td><span class="badge high">Verified + extended</span></td><td class="mono">MASTER-C5</td><td>combined с отсутствием логов → диагностический blackout.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Новые находки (не было в BUGS-REPORT)</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>#</th><th>Находка</th><th>Master-point</th><th>Severity</th></tr></thead>
+<tbody>
+<tr><td>N1</td><td>Нет reconciliation БД↔hardware (4 сценария пролива)</td><td class="mono">PHYS-1 / MASTER-C1</td><td><span class="badge crit">Critical</span></td></tr>
+<tr><td>N2</td><td>WCAG 2.2 Level A FAIL — 5 критичных блокеров для полевого</td><td class="mono">MASTER-C6</td><td><span class="badge crit">Critical (поле)</span></td></tr>
+<tr><td>N3</td><td>55 XPASS тестов в limbo</td><td class="mono">MASTER-M7</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N4</td><td>44× <code>time.sleep()</code> → flaky tests на ARM</td><td class="mono">MASTER-H7</td><td><span class="badge high">High</span></td></tr>
+<tr><td>N5</td><td>Hardcoded prod IP в <code>test_mqtt_real.py</code></td><td class="mono">MASTER-H7</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N6</td><td><code>pytest.ini</code> vs <code>pyproject.toml</code> conflict</td><td class="mono">MASTER-H7</td><td><span class="badge low">Low</span></td></tr>
+<tr><td>N7</td><td>113 KB / 2243 LOC dead JS</td><td class="mono">MASTER-H9</td><td><span class="badge high">High</span></td></tr>
+<tr><td>N8</td><td>545 LOC inline script дублирует programs.js</td><td class="mono">MASTER-H9</td><td><span class="badge high">High</span></td></tr>
+<tr><td>N9</td><td>7/9 форм без double-submit protection</td><td class="mono">MASTER-M6</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N10</td><td>Polling не учитывает document.hidden</td><td class="mono">MASTER-M6</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N11</td><td>Contrast #999 на #fff — 25+ мест</td><td class="mono">MASTER-C6</td><td><span class="badge crit">Critical (поле)</span></td></tr>
+<tr><td>N12</td><td>Emergency button contrast 5.4:1 — fail AAA</td><td class="mono">MASTER-C6</td><td><span class="badge high">High (поле)</span></td></tr>
+<tr><td>N13</td><td>systemd без WatchdogSec, под root, TimeoutStopSec=20</td><td class="mono">MASTER-M2</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N14</td><td>Backup keep_count=7, нет offsite</td><td class="mono">MASTER-M4</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N15</td><td>Нет /readyz, /metrics</td><td class="mono">MASTER-M5</td><td><span class="badge med">Medium</span></td></tr>
+<tr><td>N16</td><td>Float-monitor прямой sqlite3 — safety-critical</td><td class="mono">PHYS-3</td><td><span class="badge high">High</span></td></tr>
+<tr><td>N17</td><td>18 MQTT-клиентов anonymous, нет ACL</td><td class="mono">MASTER-C3</td><td><span class="badge crit">Critical</span></td></tr>
+<tr><td>N18</td><td>CF Tunnel на :8080, обход :8011</td><td class="mono">MASTER-H6</td><td><span class="badge high">High</span></td></tr>
+<tr><td>N19</td><td><code>database.py</code> Facade 309 LOC дублирует <code>db/</code></td><td class="mono">MASTER-H3</td><td><span class="badge high">High</span></td></tr>
+<tr><td>N20</td><td>Нет manifest.json, SW без PWA</td><td class="mono">MASTER-M6</td><td><span class="badge med">Medium</span></td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section id="plan">
+<h2>6. План действий &mdash; 5 волн</h2>
+<p>План разбит на 5 волн. Каждая волна &mdash; deployable самостоятельно, не требует big-bang. Приоритет по <b>risk × effort</b>. Итого 8–12 спринтов (~3 месяца) параллельно с обычной разработкой.</p>
+
+<div class="stepper">
+
+<div class="step p0">
+<h3>Волна 1 &mdash; Починить обратную связь <span class="tag">≤ 1 неделя</span> <span class="badge crit">P0</span></h3>
+<div class="desc"><b>Цель:</b> вернуть способность увидеть, что происходит, и перестать терять данные при рестарте.</div>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>Задача</th><th>Master</th><th>Effort</th></tr></thead>
+<tbody>
+<tr><td>1.1</td><td>Handler на root logger, убрать <code>basicConfig</code>, <code>import logging</code> в 4 модуля</td><td class="mono">C2</td><td>4 ч</td></tr>
+<tr><td>1.2</td><td>logrotate для <code>telegram.txt</code></td><td class="mono">C2</td><td>30 мин</td></tr>
+<tr><td>1.3</td><td>PRAGMA в <code>BaseRepository._connect()</code></td><td class="mono">H2</td><td>1 ч</td></tr>
+<tr><td>1.4</td><td><code>requirements.txt</code> += SQLAlchemy, SQLAlchemyJobStore на <code>jobs.db</code></td><td class="mono">PHYS-2</td><td>2 ч</td></tr>
+<tr><td>1.5</td><td>CI триггерить на <code>refactor/v2</code>, baseline зафиксировать</td><td class="mono">C5</td><td>30 мин</td></tr>
+<tr><td>1.6</td><td>Миграции в <code>BEGIN IMMEDIATE ... COMMIT/ROLLBACK</code></td><td class="mono">H4</td><td>4 ч</td></tr>
+</tbody></table></div>
+<p><b>Выхлоп:</b> после рестарта stop-jobs восстанавливаются, лог пишется, CI бежит и ловит регрессии, БД целостность per-connection обеспечивается. <b>Максимально ценная неделя работы.</b></p>
+</div>
+
+<div class="step p0">
+<h3>Волна 2 &mdash; Закрыть физические риски <span class="tag">2 спринта</span> <span class="badge crit">P0</span></h3>
+<div class="desc"><b>Цель:</b> убрать PHYS-1..5. Ключевая доставка квартала.</div>
+<ul>
+<li><code>infrastructure/mqtt/client_pool.py</code>, удалить per-request connect (<b>1–2 дня</b>)</li>
+<li>Колонки в <code>zones</code>: desired/commanded/observed + version + миграция (<b>1 день</b>)</li>
+<li>MQTT topic <code>zone/+/observed</code> + subscriber (<b>2 дня</b>)</li>
+<li>WB rule publishing observed GPIO — <i>зависит от владельца (<a href="#q-14">§9.14</a>)</i> (<b>1 день</b>)</li>
+<li><code>application/reconciler.py</code> + 10-сек APScheduler job, retry через <code>command_id</code> (<b>2–3 дня</b>)</li>
+<li><code>boot_reconcile</code> с retained snapshot, safety-first (<b>2 дня</b>)</li>
+<li>Переписать <code>start_zone</code>/<code>stop_zone</code> на optimistic UPDATE (<b>2 дня</b>)</li>
+<li>Удалить <code>verify_async</code> thread, <code>_delayed_close</code> (<b>полдня</b>)</li>
+<li><code>command_log</code> + idempotency handler (<b>1 день</b>)</li>
+<li>CF Access (после <a href="#q-3">§9.3</a>) (<b>2 ч</b>)</li>
+<li><code>flask-limiter</code> rate-limit на login/start/stop (<b>полдня</b>)</li>
+<li>Force-password-change на первом логине (<b>полдня</b>)</li>
+</ul>
+<p><b>Выхлоп:</b> БД и hardware больше не расходятся. Публичный URL за MFA. Stop-команды идемпотентны.</p>
+</div>
+
+<div class="step p1">
+<h3>Волна 3 &mdash; Observability + SSE-выпил + frontend hygiene <span class="tag">1–2 спринта</span> <span class="badge high">P1</span></h3>
+<ul>
+<li><code>prometheus-client</code> + <code>/metrics</code> (IP allow-list)</li>
+<li><code>/healthz</code> + <code>/readyz</code> с checks {db, mqtt, scheduler, boot_reconcile}</li>
+<li>Correlation-ID middleware + structured JSON logs</li>
+<li>systemd <code>WatchdogSec=60</code> + <code>Type=notify</code> + <code>User=wb-irrigation</code> + <code>MemoryMax=512M</code></li>
+<li>Backup: <code>keep_days=30</code>, <code>wal_checkpoint(PASSIVE)</code></li>
+<li>Telegraf scrape → Zabbix (при подтверждении <a href="#q-15">§9.15</a>)</li>
+<li><b>Удалить SSE:</b> <code>sse_hub.py</code>, <code>/api/mqtt/zones-sse</code>, EventSource из <code>zones.js</code> и <code>mqtt.html</code>, 4 failing теста</li>
+<li>Polling: ETag на <code>/api/status</code>, <code>document.hidden → 30s</code></li>
+<li>Удалить 9 dead JS файлов (113 KB / 2243 LOC)</li>
+<li>Вынести inline из <code>programs.html</code> в <code>programs.html.js</code></li>
+<li>CSRF-ревизия: или включить csrf_protect, или удалить interceptor — <b>НЕ держать обе половины</b></li>
+<li><code>disableSubmit</code> на 7 формах, <code>AbortController</code>, hamburger ≥44px, <code>loading="lazy"</code>, <code>manifest.json</code></li>
+</ul>
+</div>
+
+<div class="step p1">
+<h3>Волна 4 &mdash; A11y + тесты <span class="tag">1–2 спринта</span> <span class="badge high">P1</span></h3>
+<ul>
+<li>Top-3 a11y: <code>#999</code> → <code>#595959</code>; toggle-switch <code>role="switch"</code>; focus-trap в 12 модалках</li>
+<li>Emergency button contrast 5.4 → 7:1 (AAA)</li>
+<li>Label/aria-label на inputs в <code>mqtt.html</code></li>
+<li>Sortable <code>&lt;th&gt;</code> keyboard support</li>
+<li>SVG dial в <code>status.html</code> — кнопки +/- + arrow-keys</li>
+<li><code>&lt;main&gt;</code> в login.html, 404.html; heading hierarchy fix</li>
+<li>XPASS ревизия: 55 маркеров</li>
+<li>4 non-SSE failing tests — триаж</li>
+<li><code>time.sleep()</code> → <code>wait_for_condition()</code> в 44 местах</li>
+<li><code>pytest.ini</code> → <code>pyproject.toml</code>; hardcoded IP → env var; parametrize</li>
+<li>Coverage <code>zone_control</code> 48% → 80%+; <code>watering_api</code> 49% → 80%+</li>
+<li>Unit-тесты <code>domain/zone/state_machine.py</code> → 95%</li>
+</ul>
+</div>
+
+<div class="step p2">
+<h3>Волна 5 &mdash; Долг и evolvability <span class="tag">2–3 спринта</span> <span class="badge med">P2</span></h3>
+<ul>
+<li><code>db/weather.py</code>, <code>db/float.py</code>, deprecate <code>database.py</code> facade</li>
+<li>Удалить <code>irrigation_scheduler.py</code> после миграции dotted-path</li>
+<li>Разобрать <code>services/weather.py</code> 1404 LOC на <code>domain/</code> + <code>infrastructure/</code> + <code>application/</code></li>
+<li>FK декларации <code>add_foreign_keys_v2</code> (ночью, с backup/rollback, <a href="#q-13">§9.13</a>)</li>
+<li>Composite индексы, retention job <code>logs &gt; 180 days</code></li>
+<li>Config consolidation: pydantic-settings + <code>db.settings</code> user-editable only</li>
+<li>Secrets → <code>/etc/wb-irrigation/secrets.env</code>, <code>SECRET_KEY</code> → FHS</li>
+<li>API v1: <code>routes/api/v1/</code>, RFC 7807 error envelope, cursor pagination, OpenAPI</li>
+<li>argon2id с lazy migration</li>
+<li>TG bot: <code>bot_users</code> с ролями, coverage 18% → 60%</li>
+</ul>
+</div>
+
+</div>
+
+<h3>Общий таймлайн</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Волна</th><th>Эффорт</th><th>Приоритет</th></tr></thead>
+<tbody>
+<tr><td>Волна 1 (обратная связь)</td><td>≤ 1 неделя</td><td><span class="badge crit">P0 — на этой неделе</span></td></tr>
+<tr><td>Волна 2 (физические риски)</td><td>2 спринта</td><td><span class="badge crit">P0 — в ближайший месяц</span></td></tr>
+<tr><td>Волна 3 (observability + SSE)</td><td>1–2 спринта</td><td><span class="badge high">P1 — до осеннего сезона</span></td></tr>
+<tr><td>Волна 4 (a11y + тесты)</td><td>1–2 спринта</td><td><span class="badge high">P1</span></td></tr>
+<tr><td>Волна 5 (долг)</td><td>2–3 спринта</td><td><span class="badge med">P2</span></td></tr>
+</tbody></table></div>
+</section>
+
+<section id="quickwins">
+<h2>7. Quick Wins (≤ 1 часа каждый)</h2>
+<p>Можно делать в любой день, в любой последовательности. Каждый &mdash; самостоятельный маленький PR. <b>Итого 26 quick wins, ~5–7 часов совокупно.</b> Можно сделать за одну субботу и закрыть ≈60% Волны 1 + значительную часть a11y / frontend hygiene.</p>
+
+<div class="qw-grid">
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-1</span><span class="qw-time">5 мин</span><div class="qw-desc"><code>import logging</code> + logger в <code>routes/settings.py</code> · <span class="mono">MASTER-C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-2</span><span class="qw-time">5 мин</span><div class="qw-desc">То же в <code>services/locks.py</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-3</span><span class="qw-time">5 мин</span><div class="qw-desc">То же в <code>services/mqtt_pub.py</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-4</span><span class="qw-time">5 мин</span><div class="qw-desc">То же в <code>services/telegram_bot.py</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-5</span><span class="qw-time">10 мин</span><div class="qw-desc">Убрать <code>logging.basicConfig()</code> из <code>irrigation_scheduler.py</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-6</span><span class="qw-time">10 мин</span><div class="qw-desc">То же из <code>scheduler/jobs.py</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-7</span><span class="qw-time">10 мин</span><div class="qw-desc">То же из <code>database.py</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-8</span><span class="qw-time">15 мин</span><div class="qw-desc"><code>logrotate</code> для <code>telegram.txt</code> в <code>/etc/logrotate.d/wb-irrigation</code> · <span class="mono">C2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-9</span><span class="qw-time">30 мин</span><div class="qw-desc">PRAGMA в <code>db/base.py::_connect()</code> · <span class="mono">H2</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-10</span><span class="qw-time">10 мин</span><div class="qw-desc"><code>.github/workflows/ci.yml</code>: добавить <code>refactor/v2</code> · <span class="mono">C5</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-11</span><span class="qw-time">30 мин</span><div class="qw-desc">Удалить 9 dead JS в <code>static/js/components/</code> · <span class="mono">H9</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-12</span><span class="qw-time">5 мин</span><div class="qw-desc">Удалить dead selenium из <code>requirements-dev.txt</code> · <span class="mono">H7</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-13</span><span class="qw-time">10 мин</span><div class="qw-desc"><code>&lt;main&gt;</code> в <code>login.html</code> и <code>404.html</code> · <span class="mono">C6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-14</span><span class="qw-time">5 мин</span><div class="qw-desc">Emergency <code>#d32f2f</code> → <code>#b71c1c</code> (5.4 → 7.1) · <span class="mono">C6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-15</span><span class="qw-time">15 мин</span><div class="qw-desc">Hamburger min-w/h 44px · <span class="mono">M6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-16</span><span class="qw-time">15 мин</span><div class="qw-desc"><code>loading="lazy"</code> на фото зон · <span class="mono">M6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-17</span><span class="qw-time">30 мин</span><div class="qw-desc"><code>manifest.json</code> + <code>&lt;link rel="manifest"&gt;</code> · <span class="mono">M6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-18</span><span class="qw-time">20 мин</span><div class="qw-desc"><code>document.hidden → 30s</code> в polling loop · <span class="mono">M6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-19</span><span class="qw-time">30 мин</span><div class="qw-desc"><code>disableSubmit(form)</code> helper + применить к login · <span class="mono">M6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-20</span><span class="qw-time">20 мин</span><div class="qw-desc"><code>aria-label</code> на 7 inputs в <code>mqtt.html:16-41</code> · <span class="mono">C6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-21</span><span class="qw-time">30 мин</span><div class="qw-desc">Heading fix h1→h3 skip (3 места) · <span class="mono">C6</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-22</span><span class="qw-time">10 мин</span><div class="qw-desc">Backup: <code>keep_count=7</code> → <code>keep_days=30</code> · <span class="mono">M4</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-23</span><span class="qw-time">5 мин</span><div class="qw-desc">Backup: <code>TRUNCATE</code> → <code>PASSIVE</code> · <span class="mono">M4</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-24</span><span class="qw-time">10 мин</span><div class="qw-desc">Hardcoded <code>10.2.5.244</code> → <code>os.environ.get("MQTT_BROKER","localhost")</code> · <span class="mono">H7</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-25</span><span class="qw-time">15 мин</span><div class="qw-desc">Удалить/xfail тесты <code>test_sse_*</code> после C4 · <span class="mono">C4</span></div></div></div>
+<div class="qw-item"><span class="qw-check">✓</span><div class="qw-body"><span class="qw-id">QW-26</span><span class="qw-time">5 мин</span><div class="qw-desc">Удалить <code>services/scheduler_service.py</code> dead stub · <span class="mono">L1</span></div></div></div>
+</div>
+</section>
+
+<section id="keep">
+<h2>8. Что НЕ трогать (don't break)</h2>
+<p>Список вещей, которые <b>работают правильно</b>. При чистке не откатывать и не «улучшать ради улучшения».</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>#</th><th>Компонент</th><th>Почему не трогать</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>db/</code> репозиторный слой</td><td>Правильная абстракция. Задача — сделать её <b>обязательной</b>, не переписывать.</td></tr>
+<tr><td>2</td><td>Разделение <code>routes/</code>: page routes + JSON API</td><td>Корректный шаг к thin controllers. Продолжать паттерн.</td></tr>
+<tr><td>3</td><td><code>monitors/</code> пакет</td><td>Самый зрелый extracted package. Служит образцом.</td></tr>
+<tr><td>4</td><td><code>services/locks.py</code> namespaced locks</td><td>Хорошая concurrency-abstraction.</td></tr>
+<tr><td>5</td><td>Graceful shutdown</td><td>Uptime 13.5 дней подтверждает стабильность.</td></tr>
+<tr><td>6</td><td>SSR (Jinja) + asset versioning</td><td>Правильный выбор для ARM edge. Не тянуть SPA.</td></tr>
+<tr><td>7</td><td>Optimistic UI с rollback в <code>zones.js</code></td><td>Хороший UX-паттерн. Сохранить при SSE-выпиле.</td></tr>
+<tr><td>8</td><td><code>MockMQTTClient</code></td><td>Единственная опора для тестирования MQTT. Не менять API.</td></tr>
+<tr><td>9</td><td>WAL mode + busy_timeout</td><td>Применить <b>везде</b> (MASTER-H2), а не менять.</td></tr>
+<tr><td>10</td><td>APScheduler как движок</td><td>Адекватно для масштаба. Не переходить на Celery/RQ.</td></tr>
+<tr><td>11</td><td>SQLite как БД</td><td>Для 24 зон достаточно. <b>Не</b> мигрировать на PostgreSQL.</td></tr>
+<tr><td>12</td><td>Jinja SSR для <code>programs.html</code></td><td>Проблема в 545 LOC inline, не в SSR.</td></tr>
+<tr><td>13</td><td><code>basic_auth_proxy</code> на <code>:8011</code></td><td>Работает. Использовать (или перейти на CF Access). Не удалять.</td></tr>
+<tr><td>14</td><td>aiogram</td><td>15 KB RSS приемлемо. Не переходить на webhooks.</td></tr>
+<tr><td>15</td><td>Service Worker</td><td>Работает. Дополнить <code>manifest.json</code>.</td></tr>
+<tr><td>16</td><td><code>bot_idempotency</code> таблица</td><td>Хороший pattern. Переиспользовать для <code>command_log</code>.</td></tr>
+<tr><td>17</td><td>35 миграций</td><td>Нужен фикс атомарности, сами миграции корректны.</td></tr>
+<tr><td>18</td><td>Hypercorn ASGI</td><td>Работает. Не переходить на gunicorn.</td></tr>
+<tr><td>19</td><td><code>services/notifications.py</code></td><td>Stateless utility, чистая cohesion.</td></tr>
+<tr><td>20</td><td>Cloudflare Tunnel</td><td>Работает. Проблема — направление (на :8080), см. H6.</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section id="questions">
+<h2>9. Открытые вопросы для владельца (Raul)</h2>
+<p>Без ответов на эти вопросы Волна 1&ndash;2 не может быть запущена полностью. <b>Блокирующие</b> для Волны 1&ndash;2: §9.1 SSE, §9.2 Secrets, §9.3 CF Access, §9.13 FK, §9.14 WB rule.</p>
+
+<div class="q-card blocking" id="q-1">
+<div class="q-head"><span class="badge crit">BLOCKING</span> 9.1 &mdash; SSE: выпил или вернуть?</div>
+<p>Блокирует ~5 master-points. Архитектор рекомендует выпилить (target-state §11). Готов ли согласиться на <b>5-сек задержку в UI</b> после manual start/stop при polling?</p>
+<div class="q-rec"><b>Рекомендация:</b> выпилить. Если позже понадобится real-time — MQTT.js в браузере.</div>
+</div>
+
+<div class="q-card blocking" id="q-2">
+<div class="q-head"><span class="badge crit">BLOCKING</span> 9.2 &mdash; Secrets: LoadCredential vs EnvironmentFile?</div>
+<p><code>LoadCredential</code> безопаснее — secrets не видны в <code>systemctl show</code>. <code>EnvironmentFile=</code> проще.</p>
+<div class="q-rec"><b>Рекомендация:</b> <code>EnvironmentFile=</code> для всего, кроме MQTT password и DB encryption key — их через <code>LoadCredential=</code>.</div>
+</div>
+
+<div class="q-card blocking" id="q-3">
+<div class="q-head"><span class="badge crit">BLOCKING</span> 9.3 &mdash; Cloudflare Access: включаем? IdP?</div>
+<p>Без CF Access <code>poliv-kg.ops-lab.dev</code> защищён только Flask-session.<br>Вопросы: IdP (Google/GitHub/GitLab/MS)? Список allow-emails? Session TTL?</p>
+<div class="q-rec"><b>Рекомендация:</b> Google OAuth + 2–3 email. Настройка — 2 часа на CF dashboard.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge low">non-blocking</span> 9.4 &mdash; Deploy trigger: manual или semi-auto?</div>
+<div class="q-rec"><b>Рекомендация:</b> <b>manual</b> — для embedded с physical hardware безопаснее.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge low">non-blocking</span> 9.5 &mdash; TG bot: тот же процесс или отдельный systemd unit?</div>
+<div class="q-rec"><b>Рекомендация:</b> оставить один процесс. Вынести позже, если бот станет активнее.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge low">non-blocking</span> 9.6 &mdash; MQTT contract: dual-publish 2 недели или cutover?</div>
+<div class="q-rec"><b>Рекомендация:</b> <b>dual publish 2 недели</b>, потом cutover.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge low">non-blocking</span> 9.7 &mdash; MQTT protocol: 3.1.1 или 5.0?</div>
+<div class="q-rec"><b>Рекомендация:</b> <b>v3.1.1</b> сейчас (меньше рисков с WB rule engine), переход на v5 по необходимости.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge low">non-blocking</span> 9.8 &mdash; Password rehash: lazy или batch?</div>
+<div class="q-rec"><b>Рекомендация:</b> <b>lazy rehash</b>, через 6 мес удалить legacy support.</div>
+</div>
+
+<div class="q-card nonblock" id="q-9">
+<div class="q-head"><span class="badge low">non-blocking</span> 9.9 &mdash; Backup retention: 30 дней на SD достаточно или offsite?</div>
+<div class="q-rec"><b>Рекомендация:</b> 30 дней на SD <b>плюс</b> weekly rsync на home NAS.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge ok">minor</span> 9.10 &mdash; Guest role в TG bot: нужна?</div>
+<div class="q-rec"><b>Рекомендация:</b> упразднить до <code>admin</code>/<code>user</code>.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge ok">minor</span> 9.11 &mdash; API версионирование: /api/v1 или /api/v2?</div>
+<div class="q-rec"><b>Рекомендация:</b> <code>/api/v1</code>.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge ok">minor</span> 9.12 &mdash; MFA для CF Access: обязательно или one-tap?</div>
+<div class="q-rec"><b>Рекомендация:</b> <b>required 2FA</b> для критичной системы.</div>
+</div>
+
+<div class="q-card blocking" id="q-13">
+<div class="q-head"><span class="badge crit">BLOCKING</span> 9.13 &mdash; FK миграция: risk tolerance на ~5 сек downtime?</div>
+<p>MASTER-H5 требует recreate-table. ~5 сек downtime, full DB rewrite ~1 MB.</p>
+<div class="q-rec"><b>Рекомендация:</b> <b>да</b>, в окне 04:00–04:30, с backup + readyz check + автоматический rollback.</div>
+</div>
+
+<div class="q-card blocking" id="q-14">
+<div class="q-head"><span class="badge crit">BLOCKING</span> 9.14 &mdash; WB rule engine: кто пишет observed-правило?</div>
+<p>MASTER-C1 / PHYS-1 требует публикации echo GPIO в MQTT. Это <b>вне Python-кода</b>, это WB-rules config.</p>
+<div class="q-rec"><b>Рекомендация:</b> владелец пишет сам (простое <code>whenChanged(gpio) → publish observed</code>).</div>
+</div>
+
+<div class="q-card nonblock" id="q-15">
+<div class="q-head"><span class="badge ok">minor</span> 9.15 &mdash; Prometheus: через Telegraf/Zabbix или отдельный Prometheus?</div>
+<div class="q-rec"><b>Рекомендация:</b> <b>через Telegraf/Zabbix</b>, не поднимать отдельный Prometheus.</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge ok">minor</span> 9.16 &mdash; Argon2id parameters</div>
+<div class="q-rec"><b>Рекомендация:</b> <code>memory=32MB, time=2, parallelism=1</code> (~200 мс на WB).</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge ok">minor</span> 9.17 &mdash; Runtime settings: миграция 22 существующих rows?</div>
+<div class="q-rec"><b>Рекомендация:</b> маппинг вручную (один commit).</div>
+</div>
+
+<div class="q-card nonblock">
+<div class="q-head"><span class="badge ok">minor</span> 9.18 &mdash; TLS на Mosquitto WS (18883)?</div>
+<div class="q-rec"><b>Рекомендация:</b> сейчас нет. Когда браузер MQTT-client — понадобится cert.</div>
+</div>
+</section>
+
+<section id="phase5">
+<h2>10. Phase 5 &mdash; план исполнения</h2>
+<p>Phase 5 &mdash; переход от документа к коду. Структура ниже &mdash; <b>мнение commander'а</b>, не директива.</p>
+
+<h3>10.1. Формат работы</h3>
+<ul>
+<li><b>Eng lead:</b> Raul (владелец, единственный developer)</li>
+<li><b>Командная модель:</b> developer + 3 агент-помощника (security, DB, frontend/a11y)</li>
+<li><b>Tracking:</b> GitHub Issues с метками <code>wave-1</code>, ..., <code>quick-win</code>, <code>phys-risk</code>, <code>a11y</code></li>
+<li><b>PR policy:</b> каждый PR ≤ 500 LOC, ссылка на master-ID в title</li>
+<li><b>Branch policy:</b> feature branches → <code>refactor/v2</code>, tags <code>v2.0.0</code>, <code>v2.0.1</code>, …</li>
+</ul>
+
+<h3>10.2. Sequencing</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Week</th><th>Волна</th><th>Фокус</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Волна 1</td><td>observability + CI + PRAGMA + SQLAlchemy</td></tr>
+<tr><td>2&ndash;3</td><td>Волна 2</td><td>физические риски — MQTT pool → state machine → reconciler</td></tr>
+<tr><td>4</td><td>Волна 3</td><td>SSE выпил + /metrics + systemd + frontend hygiene</td></tr>
+<tr><td>5</td><td>Волна 4 старт</td><td>a11y top-3 + XPASS ревизия</td></tr>
+<tr><td>6&ndash;7</td><td>Волна 4</td><td>тесты critical paths 80%+</td></tr>
+<tr><td>8&ndash;12</td><td>Волна 5</td><td>god-modules, FK migration, secrets, API v1</td></tr>
+</tbody></table></div>
+
+<h3>10.3. Агент → master-points</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Агент</th><th>Домен</th><th>Master-points</th></tr></thead>
+<tbody>
+<tr><td><b>security-engineer</b></td><td>CF Access, secrets, CSRF, MQTT ACL</td><td class="mono">H6, M1, M3, C3 (часть ACL), L3, PHYS-5</td></tr>
+<tr><td><b>DB-expert</b></td><td>PRAGMA, миграции, FK, репозитории</td><td class="mono">H2, H3, H4, H5, M4, PHYS-3, PHYS-4, L1 (weather)</td></tr>
+<tr><td><b>frontend/a11y</b></td><td>SSE выпил, JS hygiene, WCAG</td><td class="mono">C4, C6, H9, M6, L2 (часть API)</td></tr>
+<tr><td><b>Raul (владелец)</b></td><td>ядро, SRE, scheduler, reconciler</td><td class="mono">C1, C2, C5, H1, H7, H8, H10, M2, M5, M7, PHYS-1, PHYS-2</td></tr>
+</tbody></table></div>
+
+<h3>10.4. Definition of Done per master-point</h3>
+<ol>
+<li>Код-изменение в PR, ревью одним агентом.</li>
+<li>Тесты написаны или обновлены; CI зелёный.</li>
+<li>Если затрагивает физику — прогон на staging/mock + smoke-test manual.</li>
+<li>Если затрагивает прод-БД — backup до + rollback-план.</li>
+<li>Документация: BUGS-REPORT статус, CHANGELOG.</li>
+<li>Master-point помечен DONE при следующем пересмотре.</li>
+</ol>
+
+<h3>10.5. Review cadence</h3>
+<ul>
+<li><b>Daily (10 мин):</b> прогресс, блокеры, security incident review (<code>journalctl</code>)</li>
+<li><b>Weekly (30 мин):</b> статус master-points, переприоритизация, метрики</li>
+<li><b>Monthly:</b> квартальный review — обновить отчёт, DONE в «закрыто»</li>
+</ul>
+
+<h3>10.6. Game Day после Волны 2</h3>
+<p>Симуляция 4 сценариев пролива:</p>
+<ol>
+<li>Power loss посреди полива зоны 5</li>
+<li>MQTT-disconnect во время stop-команды</li>
+<li>Одновременный user-stop + watchdog-stop (race)</li>
+<li><code>verify_async</code> timeout</li>
+</ol>
+<p>Цель — reconciler закрывает клапан в каждом сценарии ≤ 30 сек. Если нет — Волна 2 не закрыта.</p>
+
+<h3>10.7. Rollback plan</h3>
+<ul>
+<li>Backup БД до начала каждой волны.</li>
+<li>Tag <code>pre-wave-N</code> на git commit.</li>
+<li>Если после deploy <code>readyz</code> не зелёный &gt;5 мин — <code>git checkout pre-wave-N && systemctl restart</code>.</li>
+<li>Для миграций БД (Волна 5, FK): restore БД из backup.</li>
+</ul>
+</section>
+
+<section id="metrics">
+<h2>11. Метрики успеха</h2>
+<p>Как понять, что квартальный план закрыт <b>фактически</b>, не на бумаге. Метрики откалиброваны под домашний single-user scope.</p>
+
+<h3>11.1. Safety (физика) &mdash; primary</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Метрика</th><th>Целевая</th><th>Как мерить</th></tr></thead>
+<tbody>
+<tr><td>Инцидентов «клапан открыт &gt; 2× cap-time»</td><td><b>0 / квартал</b></td><td><code>wb_zone_fault_total</code>, алерт Zabbix</td></tr>
+<tr><td>MTTR на «клапан не закрывается»</td><td>&lt; 30 сек</td><td><code>wb_observed_ack_latency_ms</code> histogram</td></tr>
+<tr><td>% команд с observed-ack ≤ 2 сек</td><td>≥ 99%</td><td>p99 &lt; 2000 мс</td></tr>
+<tr><td>Пролитой воды в инцидентах</td><td>0 литров</td><td>learning log</td></tr>
+</tbody></table></div>
+
+<h3>11.2. Observability</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Метрика</th><th>Целевая</th><th>Как мерить</th></tr></thead>
+<tbody>
+<tr><td>Размер <code>app.log</code> за 24 ч</td><td>&gt; 100 KB (пишется)</td><td><code>du -sh app.log</code></td></tr>
+<tr><td><code>/readyz</code> доступность</td><td>≥ 99.5%</td><td>Zabbix ping</td></tr>
+<tr><td>Correlation-ID в WARN/ERROR</td><td>100%</td><td>grep</td></tr>
+<tr><td>MTTD инцидента через алерты</td><td>&lt; 5 мин</td><td>Zabbix history</td></tr>
+</tbody></table></div>
+
+<h3>11.3. Процесс / CI</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Метрика</th><th>Целевая</th></tr></thead>
+<tbody>
+<tr><td>% коммитов <code>refactor/v2</code> через CI</td><td>100%</td></tr>
+<tr><td>Coverage критических путей</td><td>≥ 80%</td></tr>
+<tr><td>Coverage domain layer (pure)</td><td>≥ 95%</td></tr>
+<tr><td>Детерминированных failing tests</td><td>0</td></tr>
+<tr><td>XPASS тестов</td><td>0</td></tr>
+<tr><td>Время CI push → зелёного</td><td>&lt; 5 мин</td></tr>
+</tbody></table></div>
+
+<h3>11.4. Security</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Метрика</th><th>Целевая</th></tr></thead>
+<tbody>
+<tr><td>Анонимный доступ на <code>poliv-kg.ops-lab.dev</code></td><td>0 (через CF Access)</td></tr>
+<tr><td>Default admin password в использовании</td><td>0</td></tr>
+<tr><td>MQTT anonymous connections / день</td><td>0</td></tr>
+<tr><td>Secrets в <code>db.settings</code></td><td>0</td></tr>
+<tr><td>Root-run процессов</td><td>0 (все под <code>wb-irrigation</code>)</td></tr>
+</tbody></table></div>
+
+<h3>11.5. Frontend / UX</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Метрика</th><th>Целевая</th></tr></thead>
+<tbody>
+<tr><td>WCAG 2.2 Level A</td><td>PASS</td></tr>
+<tr><td>Contrast на status-page</td><td>все ≥ 4.5:1</td></tr>
+<tr><td>Dead JS (bytes)</td><td>0</td></tr>
+<tr><td>SSE reconnect storms</td><td>0</td></tr>
+<tr><td>Polling при <code>document.hidden</code></td><td>&lt; 2/min</td></tr>
+</tbody></table></div>
+
+<h3>11.6. Architecture</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Метрика</th><th>Целевая</th></tr></thead>
+<tbody>
+<tr><td>Direct <code>sqlite3.connect()</code> вне <code>db/base.py</code></td><td>0</td></tr>
+<tr><td>MQTT clients per process</td><td>≤ 3</td></tr>
+<tr><td>Per-request MQTT connect</td><td>0</td></tr>
+<tr><td>LOC в <code>irrigation_scheduler.py</code></td><td>0 (файл удалён)</td></tr>
+<tr><td>LOC в <code>services/weather.py</code></td><td>&lt; 400</td></tr>
+<tr><td>Duplicate job functions</td><td>0</td></tr>
+</tbody></table></div>
+
+<h3>11.7. Сводка KPI на конец квартала</h3>
+<div class="dashboard-grid">
+<div class="status-card ok"><div class="title">Baseline (минимум) <span class="light">✓</span></div><div class="desc">Волна 1 закрыта. Волна 2 ≥ 50%. 0 water-incidents. WCAG Level A top-3 закрыты.</div></div>
+<div class="status-card med"><div class="title">Target (целевой) <span class="light">◎</span></div><div class="desc">Волны 1–3 полностью. Волна 4 ≥ 70%. Coverage критических путей 80%+. <code>/metrics</code> → Zabbix → alerting.</div></div>
+<div class="status-card high"><div class="title">Stretch (аспирация) <span class="light">★</span></div><div class="desc">Все 5 волн закрыты. God-modules разобраны. API v1 + OpenAPI.</div></div>
+</div>
+</section>
+
+<section id="xref">
+<h2>12. Cross-reference index</h2>
+<p>Для быстрой навигации от агентской находки к master-point.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Agent finding</th><th>Master-point</th></tr></thead>
+<tbody>
+<tr><td class="mono">CRIT-R1, CRIT-R3, CRIT-RC1, CRIT-CC1 (SRE)</td><td class="mono">PHYS-1, MASTER-C1</td></tr>
+<tr><td class="mono">CRIT-O1 (SRE, app.log пустой)</td><td class="mono">MASTER-C2</td></tr>
+<tr><td class="mono">HIGH-R2 (verify_async fire-and-forget)</td><td class="mono">MASTER-C1</td></tr>
+<tr><td class="mono">HIGH-R3 (MemoryJobStore fallback)</td><td class="mono">PHYS-2, MASTER-H10</td></tr>
+<tr><td class="mono">HIGH-R6 (TimeoutStopSec=20)</td><td class="mono">MASTER-M2</td></tr>
+<tr><td class="mono">HIGH-O1 (telegram.txt rotation)</td><td class="mono">MASTER-C2</td></tr>
+<tr><td class="mono">CQ-001..004 (logger missing)</td><td class="mono">MASTER-C2</td></tr>
+<tr><td class="mono">CQ-005 (duplicate jobs)</td><td class="mono">MASTER-H1</td></tr>
+<tr><td class="mono">CQ-006 (boot-sync duplicate)</td><td class="mono">MASTER-H1</td></tr>
+<tr><td class="mono">CQ-007 (_delayed_close thread)</td><td class="mono">MASTER-C1</td></tr>
+<tr><td class="mono">CQ-012 (basicConfig in scheduler)</td><td class="mono">MASTER-C2</td></tr>
+<tr><td class="mono">DB-001 (FK=OFF)</td><td class="mono">MASTER-H2</td></tr>
+<tr><td class="mono">DB-002 (миграции не атомарны)</td><td class="mono">MASTER-H4</td></tr>
+<tr><td class="mono">DB-003 (FK не декларированы)</td><td class="mono">MASTER-H5</td></tr>
+<tr><td class="mono">DB-004 (synchronous=FULL)</td><td class="mono">MASTER-H2</td></tr>
+<tr><td class="mono">DB-005 (нет backup теста)</td><td class="mono">MASTER-M4</td></tr>
+<tr><td class="mono">DB-006 (weather.py прямые connect)</td><td class="mono">MASTER-H3, PHYS-4</td></tr>
+<tr><td class="mono">DB-007 (layer bypass)</td><td class="mono">MASTER-H3</td></tr>
+<tr><td class="mono">DB-009 (composite indices)</td><td class="mono">Волна 5</td></tr>
+<tr><td class="mono">DB-016 (backup retention)</td><td class="mono">MASTER-M4</td></tr>
+<tr><td class="mono">API-01 (per-request MQTT)</td><td class="mono">MASTER-C3</td></tr>
+<tr><td class="mono">SSE-01..04 (performance)</td><td class="mono">MASTER-C4</td></tr>
+<tr><td class="mono">SEC-001 (Mosquitto anonymous)</td><td class="mono">MASTER-C3</td></tr>
+<tr><td class="mono">SEC-002 (CF Tunnel bypass)</td><td class="mono">MASTER-H6</td></tr>
+<tr><td class="mono">SEC-003 (CSRF-exempt all API)</td><td class="mono">MASTER-H6, H9</td></tr>
+<tr><td class="mono">SEC-010 (TG token storage)</td><td class="mono">MASTER-M1</td></tr>
+<tr><td class="mono">SEC default creds</td><td class="mono">MASTER-M3</td></tr>
+<tr><td class="mono">FE-CRIT-1 (SSE zombie)</td><td class="mono">MASTER-C4</td></tr>
+<tr><td class="mono">FE-HIGH-1 (dead JS)</td><td class="mono">MASTER-H9</td></tr>
+<tr><td class="mono">FE-HIGH-2 (inline script dup)</td><td class="mono">MASTER-H9</td></tr>
+<tr><td class="mono">FE-HIGH-3 (mqtt.html SSE no backoff)</td><td class="mono">MASTER-C4</td></tr>
+<tr><td class="mono">FE-HIGH-4 (polling no document.hidden)</td><td class="mono">MASTER-M6</td></tr>
+<tr><td class="mono">FE-HIGH-5 (no double-submit)</td><td class="mono">MASTER-M6</td></tr>
+<tr><td class="mono">FE-HIGH-6 (status.js 2187 LOC)</td><td class="mono">MASTER-H9, L1</td></tr>
+<tr><td class="mono">FE-MED-1..9</td><td class="mono">MASTER-M6</td></tr>
+<tr><td class="mono">a11y 5 critical</td><td class="mono">MASTER-C6</td></tr>
+<tr><td class="mono">a11y contrast 25+</td><td class="mono">MASTER-C6</td></tr>
+<tr><td class="mono">tests CI не бежит</td><td class="mono">MASTER-C5</td></tr>
+<tr><td class="mono">tests 55 XPASS</td><td class="mono">MASTER-M7</td></tr>
+<tr><td class="mono">tests 8 failing (4 SSE, 4 other)</td><td class="mono">MASTER-H7, C4</td></tr>
+<tr><td class="mono">tests 44× time.sleep</td><td class="mono">MASTER-H7</td></tr>
+<tr><td class="mono">tests hardcoded IP</td><td class="mono">MASTER-H7</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+</main>
+</div>
+
+<footer>
+<p><b>wb-irrigation &mdash; Сводный аудит-отчёт (Phase 4)</b></p>
+<p>Дата: 2026-04-19 &middot; Версия 1.0 &middot; Следующий review: через 2 недели после Волны 1</p>
+<p>Generated by <b>command-team под руководством Tony</b> (incident-response commander)</p>
+<p class="src-list">
+Источники (Markdown):<br>
+/opt/claude-agents/irrigation-v2/irrigation-audit/reports/audit-report.md<br>
+/opt/claude-agents/irrigation-v2/irrigation-audit/landscape/{landscape, prod-snapshot, open-questions}.md<br>
+/opt/claude-agents/irrigation-v2/irrigation-audit/findings/{security, code-quality, database, sre, performance, tests, frontend, a11y}.md<br>
+/opt/claude-agents/irrigation-v2/irrigation-audit/architecture/{current-state, target-state}.md
+</p>
+</footer>
+
+<script>
+// Smooth scroll + minor interactions
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    const id = a.getAttribute('href').slice(1);
+    const el = document.getElementById(id);
+    if (!el) return;
+    e.preventDefault();
+    el.scrollIntoView({behavior: 'smooth', block: 'start'});
+    // close mobile TOC after nav
+    document.getElementById('toc').classList.remove('open');
+  });
+});
+
+const toggleTheme = () => {
+  const cur = document.body.getAttribute('data-theme') || 'dark';
+  document.body.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+};
+document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+document.getElementById('mobile-theme-btn').addEventListener('click', toggleTheme);
+document.getElementById('mobile-toc-btn').addEventListener('click', () => {
+  document.getElementById('toc').classList.toggle('open');
+});
+</script>
+
+</body>
+</html>
