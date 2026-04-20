@@ -194,12 +194,40 @@ def _inject_app_version():
 
 
 # ── Middleware ──────────────────────────────────────────────────────────────
+# Wave 2 F3 — correlation ID middleware.  `_assign_correlation_id` MUST run
+# BEFORE auth/rate-limit hooks so every log line emitted during auth carries
+# the ID.  It comes right after `_perf_start_timer` (which only stamps
+# `request._started_at`).
+from services.correlation import (
+    correlation_id_var as _correlation_id_var,
+    extract_or_generate as _extract_or_generate_cid,
+    reset_correlation_id as _reset_correlation_id,
+)
+
+
 @app.before_request
 def _perf_start_timer():
     try:
         request._started_at = _perf_time.time()
     except AttributeError as e:
         logger.debug("perf timer start: %s", e)
+
+
+@app.before_request
+def _assign_correlation_id():
+    """Extract X-Request-ID / X-Correlation-ID or generate UUIDv4.
+
+    Bind result to the ContextVar so WBJsonFormatter (F1) sees it on every
+    log record emitted during this request.  The teardown_request hook
+    below resets the token.
+    """
+    try:
+        cid = _extract_or_generate_cid(request.headers)
+        token = _correlation_id_var.set(cid)
+        request._correlation_id = cid
+        request._correlation_id_token = token
+    except (AttributeError, KeyError, TypeError) as e:
+        logger.debug("correlation_id assign: %s", e)
 
 @app.after_request
 def _perf_add_server_timing(resp: Response):
@@ -210,6 +238,34 @@ def _perf_add_server_timing(resp: Response):
     except (TypeError, ValueError, AttributeError) as e:
         logger.debug("perf timer end: %s", e)
     return resp
+
+
+@app.after_request
+def _propagate_correlation_id(resp: Response):
+    """Echo the correlation ID back in `X-Request-ID` response header.
+
+    Single canonical outbound name even when caller used `X-Correlation-ID`
+    on the way in — clients that want to trace a request through the logs
+    grab the header from the response verbatim.
+    """
+    try:
+        cid = getattr(request, '_correlation_id', None)
+        if cid:
+            resp.headers['X-Request-ID'] = cid
+    except (AttributeError, TypeError) as e:
+        logger.debug("correlation_id echo: %s", e)
+    return resp
+
+
+@app.teardown_request
+def _reset_correlation_id_on_teardown(exc):
+    """Reset the ContextVar so no leakage across requests on the same thread.
+
+    Runs even on exception paths (Flask guarantees teardown hooks fire).
+    """
+    token = getattr(request, '_correlation_id_token', None)
+    if token is not None:
+        _reset_correlation_id(token)
 
 @app.after_request
 def add_security_headers(resp):
