@@ -211,25 +211,53 @@ class StateVerifier:
         return confirmed[0]
 
     def _record_fault(self, zone_id: int, zone: dict, expected: str) -> None:
-        """Increment fault_count and send Telegram alert."""
+        """Mark zone as FAULT, increment fault_count, send Telegram alert.
+
+        PHYS-1 reconciliation: when the observed-state contract fails
+        (OBSERVED_STATE_MAX_RETRIES exhausted) we flip the zone's `state`
+        to 'fault' so the state machine stops trusting what the app thinks
+        the valve is doing. Downstream consumers (watchdog, UI badge,
+        emergency-stop) must treat state=='fault' as "physically unknown,
+        do NOT schedule new irrigation on this zone until an operator
+        clears it".
+
+        Fields updated on the zone row:
+            state        = 'fault'            # blocks further commands
+            fault_count += 1                  # observability counter
+            last_fault   = now (ISO)          # last failure timestamp
+            observed_state = expected+'?'     # mark the observation as
+                                              # failed so reconciler knows
+                                              # the last command was not
+                                              # confirmed physically
+        """
         db = self.db
         if not db:
             return
 
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         current_faults = int(zone.get('fault_count') or 0)
+        fields = {
+            'state': 'fault',
+            'fault_count': current_faults + 1,
+            'last_fault': now_str,
+        }
+        # observed_state is nullable — only set if schema has the column
         try:
-            db.update_zone(zone_id, {
-                'fault_count': current_faults + 1,
-                'last_fault': now_str,
-            })
+            if 'observed_state' in (zone.keys() if hasattr(zone, 'keys') else {}):
+                fields['observed_state'] = 'unconfirmed'
+        except (AttributeError, TypeError):
+            pass
+
+        try:
+            db.update_zone(zone_id, fields)
         except (sqlite3.Error, OSError):
-            logger.exception("StateVerifier: failed to update fault_count zone=%s", zone_id)
+            logger.exception("StateVerifier: failed to persist fault state zone=%s", zone_id)
 
         zone_name = zone.get('name') or f'#{zone_id}'
         alert_text = (
             f"⚠️ Зона «{zone_name}»: реле не подтвердило переключение в '{expected}'\n"
-            f"Попыток: 3, fault_count: {current_faults + 1}\n"
+            f"Попыток: {OBSERVED_STATE_MAX_RETRIES}, fault_count: {current_faults + 1}\n"
+            f"Зона переведена в state=fault и исключена из расписания до вмешательства оператора.\n"
             f"Время: {now_str}"
         )
         logger.critical("StateVerifier FAULT: %s", alert_text)
