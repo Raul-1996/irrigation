@@ -34,9 +34,17 @@ class BaseRepository:
         self.db_path: str = db_path
 
     def _connect(self) -> sqlite3.Connection:
-        """Create a new SQLite connection with WAL mode and foreign keys."""
+        """Create a new SQLite connection with WAL mode and foreign keys.
+
+        Wave 3: `PRAGMA busy_timeout=30000` is applied centrally here so
+        every repository waits up to 30s for lock contention instead of
+        failing fast with SQLITE_BUSY. Previously this was only on
+        FloatRepository; moving it up gives the same guarantee to all
+        write paths (zones/groups/programs/telegram/settings/mqtt/logs).
+        """
         conn = sqlite3.connect(self.db_path, timeout=5)
         conn.execute('PRAGMA journal_mode=WAL')
         conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA busy_timeout=30000')
         conn.row_factory = sqlite3.Row
         return conn

@@ -16,6 +16,8 @@ import time
 from datetime import datetime
 from typing import Dict, Optional, List, Any
 
+from db.base import BaseRepository
+
 logger = logging.getLogger(__name__)
 
 # Hysteresis constants (S6)
@@ -439,15 +441,11 @@ class FloatMonitor:
         """Legacy direct connection — retained only for subclasses that
         may still rely on it. All new code MUST use self._repo.
 
-        PHYS-3: this method is a fallback; primary path goes through
-        FloatRepository (BaseRepository._connect) which centralises
-        PRAGMA policy.
+        PHYS-3 / Wave 3: delegates to BaseRepository._connect() so the
+        fallback path inherits the central PRAGMA contract
+        (journal_mode=WAL, foreign_keys=ON, busy_timeout=30000).
         """
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.row_factory = sqlite3.Row
-        return conn
+        return BaseRepository(self.db_path)._connect()
 
     def _pause_active_zones_in_db(self, group_id):
         # type: (int) -> List[int]

@@ -15,7 +15,7 @@ class ZoneRepository(BaseRepository):
     def get_zones(self) -> List[Dict[str, Any]]:
         """Получить все зоны."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
@@ -36,7 +36,7 @@ class ZoneRepository(BaseRepository):
     def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
         """Получить зону по ID."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name 
@@ -58,7 +58,7 @@ class ZoneRepository(BaseRepository):
     def create_zone(self, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Создать новую зону."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 topic = (zone_data.get('topic') or '').strip()
                 mqtt_sid = zone_data.get('mqtt_server_id')
                 if mqtt_sid is None:
@@ -118,7 +118,7 @@ class ZoneRepository(BaseRepository):
     def update_zone(self, zone_id: int, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Обновить зону."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 current_zone = self.get_zone(zone_id)
                 if not current_zone:
                     return None
@@ -228,7 +228,7 @@ class ZoneRepository(BaseRepository):
     def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> bool:
         """Обновить зону с инкрементом version (optimistic lock)."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT version FROM zones WHERE id = ?', (zone_id,))
                 row = cur.fetchone()
@@ -258,7 +258,7 @@ class ZoneRepository(BaseRepository):
         if not updates:
             return {'updated': 0, 'failed': []}
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 for upd in updates:
                     try:
                         zone_id = int(upd.get('id'))
@@ -320,7 +320,7 @@ class ZoneRepository(BaseRepository):
         if not zones:
             return {'created': 0, 'updated': 0, 'failed': 0}
         try:
-            with sqlite3.connect(self.db_path, timeout=10) as conn:
+            with self._connect() as conn:
                 for z in zones:
                     try:
                         zid = int(z['id']) if z.get('id') is not None else None
@@ -416,7 +416,7 @@ class ZoneRepository(BaseRepository):
     def delete_zone(self, zone_id: int) -> bool:
         """Удалить зону."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.execute('DELETE FROM zones WHERE id = ?', (zone_id,))
                 conn.commit()
                 return True
@@ -427,7 +427,7 @@ class ZoneRepository(BaseRepository):
     def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
         """Получить зоны по группе."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name 
@@ -450,7 +450,7 @@ class ZoneRepository(BaseRepository):
     def clear_group_scheduled_starts(self, group_id: int) -> None:
         """Очистить плановые времена старта у всех зон в группе."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     UPDATE zones
                     SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
@@ -464,7 +464,7 @@ class ZoneRepository(BaseRepository):
     def set_group_scheduled_starts(self, group_id: int, schedule: Dict[int, str]) -> None:
         """Установить плановые времена старта по зоне в группе."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 for zone_id, ts in schedule.items():
                     conn.execute('''
                         UPDATE zones
@@ -479,7 +479,7 @@ class ZoneRepository(BaseRepository):
     def clear_scheduled_for_zone_group_peers(self, zone_id: int, group_id: int) -> None:
         """Очистить scheduled_start_time у всех зон группы, кроме указанной."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     UPDATE zones
                     SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
@@ -493,7 +493,7 @@ class ZoneRepository(BaseRepository):
     def update_zone_postpone(self, zone_id: int, postpone_until: str = None, reason: str = None) -> bool:
         """Обновить отложенный полив зоны с указанием причины."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     UPDATE zones 
                     SET postpone_until = ?, postpone_reason = ?, updated_at = CURRENT_TIMESTAMP
@@ -509,7 +509,7 @@ class ZoneRepository(BaseRepository):
     def update_zone_photo(self, zone_id: int, photo_path: Optional[str]) -> bool:
         """Обновить фотографию зоны."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     UPDATE zones 
                     SET photo_path = ?, updated_at = CURRENT_TIMESTAMP
@@ -524,7 +524,7 @@ class ZoneRepository(BaseRepository):
     def get_zone_duration(self, zone_id: int) -> int:
         """Получить продолжительность полива зоны."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute('SELECT duration FROM zones WHERE id = ?', (zone_id,))
                 result = cursor.fetchone()
                 return result[0] if result else 0
@@ -538,7 +538,7 @@ class ZoneRepository(BaseRepository):
                         start_raw_pulses: Optional[int], pulse_liters_at_start: int,
                         base_m3_at_start: Optional[float] = None) -> Optional[int]:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 cur = conn.execute('''
                     INSERT INTO zone_runs(zone_id, group_id, start_utc, start_monotonic, start_raw_pulses, pulse_liters_at_start, base_m3_at_start)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -554,7 +554,7 @@ class ZoneRepository(BaseRepository):
 
     def get_open_zone_run(self, zone_id: int) -> Optional[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('''
                     SELECT * FROM zone_runs WHERE zone_id = ? AND end_utc IS NULL ORDER BY id DESC LIMIT 1
@@ -569,7 +569,7 @@ class ZoneRepository(BaseRepository):
     def finish_zone_run(self, run_id: int, end_utc: str, end_monotonic: float, end_raw_pulses: Optional[int],
                         total_liters: Optional[float], avg_flow_lpm: Optional[float], status: str = 'ok') -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 fields = ['end_utc = ?', 'end_monotonic = ?', 'status = ?', 'updated_at = CURRENT_TIMESTAMP']
                 params: list = [str(end_utc), float(end_monotonic), str(status)]
                 if end_raw_pulses is not None:
