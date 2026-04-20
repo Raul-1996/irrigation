@@ -1,5 +1,5 @@
 """Zones Watering API — start/stop, watering time, SSE, MQTT control."""
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response, stream_with_context
 from datetime import datetime, timedelta
 import json
 import time
@@ -200,14 +200,52 @@ def api_zone_watering_time(zone_id):
 
 @zones_watering_api_bp.route('/api/mqtt/zones-sse')
 def api_mqtt_zones_sse():
-    """SSE endpoint — DISABLED to prevent event loop death on ARM/Hypercorn.
-    Frontend uses 5s polling instead. Returns 204 No Content."""
-    # Still start the hub for MQTT→DB state sync (zone state tracking)
+    """SSE endpoint: real-time zone state push.
+
+    Design:
+    - Client registers via sse_hub.register_client() -> a queue.Queue
+      with maxsize=100 (bumped from 20 in Wave 5).
+    - Generator pulls messages with a 15 s timeout; on timeout emits
+      a keepalive comment `: ping\\n\\n` so proxies (nginx) don't close
+      idle connections at 60 s.
+    - MAX_SSE_CLIENTS=20 (also bumped in Wave 5) evicts oldest via
+      sentinel `None` in the queue; generator treats `None` as shutdown.
+    - Headers: Cache-Control: no-cache, X-Accel-Buffering: no — prevent
+      nginx response buffering.
+    - ARM/Hypercorn concern (the reason the old stub returned 204) is
+      mitigated by: (1) per-client maxsize=100 instead of 20, so slow
+      clients don't get mass-evicted during burst; (2) MAX_SSE_CLIENTS
+      hard cap so hub thread doesn't accumulate unbounded queues.
+    """
     try:
         _sse_hub.ensure_hub_started()
     except (OSError, RuntimeError) as e:
         logger.debug("SSE hub start (background): %s", e)
-    return ('', 204)
+
+    msg_queue = _sse_hub.register_client()
+
+    def _generate():
+        import queue as _q
+        # Initial handshake + snapshot trigger
+        yield ': connected\n\n'
+        try:
+            while True:
+                try:
+                    data = msg_queue.get(timeout=15.0)
+                except _q.Empty:
+                    yield ': ping\n\n'  # keepalive
+                    continue
+                if data is None:
+                    break  # eviction sentinel
+                yield f'data: {data}\n\n'
+        finally:
+            _sse_hub.unregister_client(msg_queue)
+
+    resp = Response(stream_with_context(_generate()), mimetype='text/event-stream')
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    resp.headers['Connection'] = 'keep-alive'
+    return resp
 
 
 # ---- Zone MQTT start/stop ----
