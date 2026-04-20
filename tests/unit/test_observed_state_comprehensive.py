@@ -93,7 +93,6 @@ class TestStateVerifier:
             result = sv.verify(z['id'], 'on')
             assert result is False
 
-    @pytest.mark.xfail(reason="known bug: update_zone doesn't whitelist fault_count/last_fault columns")
     def test_record_fault(self, test_db):
         from services.observed_state import StateVerifier
         sv = StateVerifier()

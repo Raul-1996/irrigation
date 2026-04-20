@@ -52,7 +52,6 @@ class TestStateVerifier:
             result = sv.verify(zone['id'], 'on')
             assert result is True
 
-    @pytest.mark.xfail(reason="known bug: update_zone() does not handle fault_count/last_fault fields")
     def test_record_fault_increments_count(self, test_db):
         """Recording a fault should increment fault_count."""
         from services.observed_state import StateVerifier

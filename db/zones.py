@@ -180,6 +180,18 @@ class ZoneRepository(BaseRepository):
                 if 'commanded_state' in zone_data:
                     sql_fields.append('commanded_state = ?')
                     params.append(zone_data['commanded_state'])
+                # PHYS-1 / MASTER-C1: allow StateVerifier._record_fault() to
+                # persist observed_state/fault_count/last_fault so zones can
+                # be pinned to state='fault' after N MQTT-observation retries.
+                if 'observed_state' in zone_data:
+                    sql_fields.append('observed_state = ?')
+                    params.append(zone_data['observed_state'])
+                if 'fault_count' in zone_data:
+                    sql_fields.append('fault_count = ?')
+                    params.append(zone_data['fault_count'])
+                if 'last_fault' in zone_data:
+                    sql_fields.append('last_fault = ?')
+                    params.append(zone_data['last_fault'])
 
                 sql_fields.append('updated_at = CURRENT_TIMESTAMP')
                 params.append(zone_id)
