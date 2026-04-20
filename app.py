@@ -108,20 +108,59 @@ csrf = CSRFProtect(app)
 from routes.auth import api_login as _api_login_view
 csrf.exempt(_api_login_view)
 
-# Exempt all API blueprints from CSRF — the service is behind nginx basic auth,
-# so CSRF tokens are not needed for API calls. Guest users (gardeners) access
-# the portal through basic auth and must be able to control zones without a
-# Flask session / CSRF token.
-csrf.exempt(zones_watering_api_bp)
-csrf.exempt(groups_api_bp)
-csrf.exempt(system_emergency_api_bp)
-csrf.exempt(system_status_api_bp)
-csrf.exempt(system_config_api_bp)
-csrf.exempt(weather_api_bp)
-csrf.exempt(zones_crud_api_bp)
-csrf.exempt(zones_photo_api_bp)
-csrf.exempt(mqtt_api_bp)
-csrf.exempt(programs_api_bp)
+# ── CSRF policy (SEC-003 fix) ──────────────────────────────────────────────
+# Previously every API blueprint was `csrf.exempt(bp)`, leaving all mutating
+# endpoints open to CSRF from any site the admin visits.  Now we exempt
+# ONLY the endpoints that are meant to be callable by the nginx-basic-auth
+# guest flow (the gardener who does not hold a Flask session / CSRF token),
+# which corresponds 1-to-1 with `_ALLOWED_PUBLIC_POSTS` /
+# `_ALLOWED_PUBLIC_PATTERNS` below.  Every other admin-only CRUD endpoint
+# (photo upload/delete/rotate, zone/program/group create/update/delete,
+# weather settings, MQTT config, etc.) now requires the X-CSRFToken header
+# that `static/js/app.js` already attaches on all non-GET fetch calls.
+#
+# Guest-accessible endpoints (remain CSRF-exempt):
+from routes.system_emergency_api import api_emergency_stop, api_emergency_resume
+from routes.system_config_api import api_env_config, api_postpone
+from routes.system_status_api import api_status
+from routes.zones_watering_api import start_zone, stop_zone, api_zone_mqtt_start, api_zone_mqtt_stop
+from routes.zones_crud_api import api_zones_next_watering_bulk
+from routes.groups_api import (
+    api_stop_group,
+    api_start_group_from_first,
+    api_start_zone_exclusive,
+    api_master_valve_toggle,
+)
+
+for _view in (
+    api_env_config,        # /api/env
+    api_postpone,          # /api/postpone
+    api_emergency_stop,    # /api/emergency-stop
+    api_emergency_resume,  # /api/emergency-resume
+    api_status,            # /api/status
+    start_zone,            # /api/zones/<id>/start
+    stop_zone,             # /api/zones/<id>/stop
+    api_zone_mqtt_start,   # /api/zones/<id>/mqtt/start
+    api_zone_mqtt_stop,    # /api/zones/<id>/mqtt/stop
+    api_zones_next_watering_bulk,  # /api/zones/next-watering-bulk
+    api_stop_group,        # /api/groups/<id>/stop
+    api_start_group_from_first,  # /api/groups/<id>/start-from-first
+    api_start_zone_exclusive,    # /api/groups/<id>/start-zone/<zid>
+    api_master_valve_toggle,     # /api/groups/<id>/master-valve/<action>
+):
+    csrf.exempt(_view)
+
+# NOTE: the following blueprints are NOT globally csrf-exempt any more —
+# every non-GET request to them must carry X-CSRFToken (attached by app.js)
+# or return 400 CSRF:
+#   zones_crud_api_bp   (admin zone CRUD + bulk import)
+#   zones_photo_api_bp  (photo upload/delete/rotate)
+#   programs_api_bp     (program CRUD)
+#   weather_api_bp      (weather settings / location)
+#   mqtt_api_bp         (MQTT server config)
+#   system_config_api_bp except the three guest endpoints above
+#   system_status_api_bp except /api/status
+#   groups_api_bp       (admin group CRUD; control endpoints exempt above)
 
 _sse_hub.init(db=db, mqtt_module=mqtt, app_config=app.config, publish_mqtt_value=_publish_mqtt_value, normalize_topic=normalize_topic, get_scheduler=get_scheduler)
 
@@ -214,7 +253,7 @@ def dlog(msg: str, *args) -> None:
 # control is unnecessary — gardeners need start/stop without admin password.
 import re as _re
 
-_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
+_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
 
 # Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
 _ALLOWED_PUBLIC_PATTERNS = [
