@@ -123,6 +123,28 @@ if [[ -f "$REPO_UNIT" ]]; then
   fi
 fi
 
+# 3.6) Write current GIT_COMMIT into systemd EnvironmentFile (Wave 2 F2).
+# The wb_build_info Prometheus metric reads os.environ['GIT_COMMIT']; this
+# lets the deployed process advertise the exact sha it is running.  File
+# lives at /opt/wb-irrigation/.env (one level above $REPO_DIR).
+ENV_FILE=${ENV_FILE:-/opt/wb-irrigation/.env}
+CURRENT_COMMIT=$(git rev-parse HEAD)
+if [[ -d "$(dirname "$ENV_FILE")" ]]; then
+  touch "$ENV_FILE"
+  if grep -q '^GIT_COMMIT=' "$ENV_FILE" 2>/dev/null; then
+    # Update existing line in-place (portable sed: backup suffix then remove).
+    sed -i.bak "s|^GIT_COMMIT=.*|GIT_COMMIT=${CURRENT_COMMIT}|" "$ENV_FILE"
+    rm -f "${ENV_FILE}.bak"
+    info "GIT_COMMIT updated in $ENV_FILE -> ${CURRENT_COMMIT:0:12}"
+  else
+    echo "GIT_COMMIT=${CURRENT_COMMIT}" >> "$ENV_FILE"
+    info "GIT_COMMIT appended to $ENV_FILE -> ${CURRENT_COMMIT:0:12}"
+  fi
+  chmod 644 "$ENV_FILE" 2>/dev/null || true
+else
+  warn "GIT_COMMIT env not updated: $(dirname "$ENV_FILE") does not exist"
+fi
+
 # 4) Restart service
 info "Restarting service: $SERVICE"
 if systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then
