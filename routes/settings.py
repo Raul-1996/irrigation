@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from flask import Blueprint, render_template, current_app
 from services.security import admin_required
@@ -5,6 +6,8 @@ from database import db
 from flask import jsonify, request
 from utils import encrypt_secret, decrypt_secret
 
+
+logger = logging.getLogger(__name__)
 
 settings_bp = Blueprint('settings_bp', __name__)
 

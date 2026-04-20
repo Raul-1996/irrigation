@@ -39,6 +39,8 @@ def _load_routes_module():
     return _routes_mod
 # ----------------------------------------------------------------
 
+logger = logging.getLogger('TELEGRAM')
+
 try:
     # aiogram v3
     from aiogram import Bot, Dispatcher, F
@@ -53,7 +55,6 @@ except ImportError as e:
     _AInlineKeyboardMarkup = None
     _AInlineKeyboardButton = None
 
-logger = logging.getLogger('TELEGRAM')
 try:
     if not getattr(logger, '_telegram_configured', False):
         os.makedirs(LOGS_DIR, exist_ok=True)

@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Any, Optional, Dict, Tuple
 
+logger = logging.getLogger(__name__)
+
 try:
     import paho.mqtt.client as mqtt
 except ImportError as e:
@@ -16,8 +18,6 @@ try:
 except ImportError as e:
     logger.debug("Exception in line_15: %s", e)
     _db = None
-
-logger = logging.getLogger(__name__)
 
 # Caches and locks
 _MQTT_CLIENTS: Dict[int, object] = {}
