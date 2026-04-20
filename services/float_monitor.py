@@ -54,12 +54,27 @@ class _GroupState:
 class FloatMonitor:
     """Monitors tank float valves per-group via MQTT."""
 
-    def __init__(self, db_path, mqtt_clients, queue_manager, telegram_notify=None):
-        # type: (str, Dict[int, Any], Any, Optional[Any]) -> None
+    def __init__(self, db_path, mqtt_clients, queue_manager, telegram_notify=None,
+                 repo=None):
+        # type: (str, Dict[int, Any], Any, Optional[Any], Optional[Any]) -> None
         self.db_path = db_path
         self.mqtt_clients = mqtt_clients or {}
         self.queue_manager = queue_manager
         self.telegram_notify = telegram_notify
+
+        # PHYS-3: route all DB I/O through FloatRepository which uses
+        # BaseRepository._connect() (WAL + foreign_keys=ON + busy_timeout=30s).
+        # The `repo` kwarg allows tests to inject a fake; production
+        # instantiates the real repo bound to `db_path`.
+        if repo is None:
+            try:
+                from db.float import FloatRepository
+                repo = FloatRepository(db_path)
+            except ImportError:
+                logger.exception("FloatMonitor: FloatRepository import failed, "
+                                 "falling back to direct sqlite3 (PHYS-3 risk)")
+                repo = None
+        self._repo = repo
 
         self._lock = threading.Lock()
         self._states = {}              # type: Dict[int, _GroupState]
@@ -421,6 +436,13 @@ class FloatMonitor:
     # ------------------------------------------------------------------
 
     def _get_db(self):
+        """Legacy direct connection — retained only for subclasses that
+        may still rely on it. All new code MUST use self._repo.
+
+        PHYS-3: this method is a fallback; primary path goes through
+        FloatRepository (BaseRepository._connect) which centralises
+        PRAGMA policy.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
@@ -429,7 +451,13 @@ class FloatMonitor:
 
     def _pause_active_zones_in_db(self, group_id):
         # type: (int) -> List[int]
-        """Mark active zones as paused in DB, return list of paused zone IDs."""
+        """Mark active zones as paused in DB, return list of paused zone IDs.
+
+        PHYS-3: delegates to FloatRepository.pause_active_zones().
+        """
+        if self._repo is not None:
+            return self._repo.pause_active_zones(group_id)
+        # Fallback (repo unavailable): legacy direct path.
         paused = []
         try:
             conn = self._get_db()
@@ -456,7 +484,14 @@ class FloatMonitor:
 
     def _log_float_event(self, group_id, event_type, paused_zones):
         # type: (int, str, List[int]) -> None
-        """Log float event to DB."""
+        """Log float event to DB.
+
+        PHYS-3: delegates to FloatRepository.log_event().
+        """
+        if self._repo is not None:
+            self._repo.log_event(group_id, event_type, paused_zones)
+            return
+        # Fallback (repo unavailable): legacy direct path.
         try:
             conn = self._get_db()
             try:
@@ -475,17 +510,24 @@ class FloatMonitor:
     # ------------------------------------------------------------------
 
     def _load_all_groups(self):
-        """Load all float-enabled groups from DB and subscribe."""
+        """Load all float-enabled groups from DB and subscribe.
+
+        PHYS-3: delegates to FloatRepository.get_float_enabled_groups().
+        """
         try:
-            conn = self._get_db()
-            try:
-                rows = conn.execute(
-                    "SELECT id, name, float_enabled, float_mqtt_topic, float_mqtt_server_id, "
-                    "float_mode, float_timeout_minutes, float_debounce_seconds "
-                    "FROM groups WHERE float_enabled=1"
-                ).fetchall()
-            finally:
-                conn.close()
+            if self._repo is not None:
+                rows = self._repo.get_float_enabled_groups()
+            else:
+                conn = self._get_db()
+                try:
+                    raw = conn.execute(
+                        "SELECT id, name, float_enabled, float_mqtt_topic, float_mqtt_server_id, "
+                        "float_mode, float_timeout_minutes, float_debounce_seconds "
+                        "FROM groups WHERE float_enabled=1"
+                    ).fetchall()
+                    rows = [dict(r) for r in raw]
+                finally:
+                    conn.close()
 
             with self._lock:
                 for row in rows:
@@ -495,20 +537,27 @@ class FloatMonitor:
 
     def _load_group(self, group_id):
         # type: (int) -> None
-        """Load a single group from DB and subscribe (called with lock held)."""
-        try:
-            conn = self._get_db()
-            try:
-                row = conn.execute(
-                    "SELECT id, name, float_enabled, float_mqtt_topic, float_mqtt_server_id, "
-                    "float_mode, float_timeout_minutes, float_debounce_seconds "
-                    "FROM groups WHERE id=?",
-                    (group_id,)
-                ).fetchone()
-            finally:
-                conn.close()
+        """Load a single group from DB and subscribe (called with lock held).
 
-            if row and row['float_enabled']:
+        PHYS-3: delegates to FloatRepository.get_float_group().
+        """
+        try:
+            if self._repo is not None:
+                row = self._repo.get_float_group(group_id)
+            else:
+                conn = self._get_db()
+                try:
+                    raw = conn.execute(
+                        "SELECT id, name, float_enabled, float_mqtt_topic, float_mqtt_server_id, "
+                        "float_mode, float_timeout_minutes, float_debounce_seconds "
+                        "FROM groups WHERE id=?",
+                        (group_id,)
+                    ).fetchone()
+                    row = dict(raw) if raw else None
+                finally:
+                    conn.close()
+
+            if row and row.get('float_enabled'):
                 self._subscribe_group(dict(row))
         except Exception:
             logger.exception("FloatMonitor: _load_group failed for group %d", group_id)
