@@ -1,5 +1,8 @@
+import logging
 import threading
 from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 _group_locks: Dict[int, threading.RLock] = {}
 _zone_locks: Dict[int, threading.RLock] = {}
