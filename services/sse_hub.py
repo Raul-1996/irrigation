@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Global hub state
 # ---------------------------------------------------------------------------
-MAX_SSE_CLIENTS: int = 5
+MAX_SSE_CLIENTS: int = 20  # Was 5 — too restrictive for multi-tab / multi-device
+                           # ops usage (phone + laptop + admin panel already = 3).
+                           # 20 matches tests/performance/test_sse_load (10 clients)
+                           # + admin panel + mobile overhead.
 
 _SSE_HUB_STARTED: bool = False
 _SSE_HUB_LOCK: threading.Lock = threading.Lock()
@@ -348,7 +351,11 @@ def register_client() -> 'queue.Queue':
             except queue.Full:
                 pass
             logger.info("SSE client evicted (limit %d reached)", MAX_SSE_CLIENTS)
-        msg_queue = queue.Queue(maxsize=20)
+        # Per-client queue depth 100: absorbs burst fan-out during zone
+        # state changes without declaring slow clients dead. Was 20 —
+        # too small under realistic load (10+ concurrent SSE clients
+        # + scheduler tick broadcasting ~15 messages within 1s).
+        msg_queue = queue.Queue(maxsize=100)
         _SSE_HUB_CLIENTS.append(msg_queue)
     return msg_queue
 
