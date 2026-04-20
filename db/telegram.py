@@ -165,6 +165,11 @@ class TelegramRepository(BaseRepository):
 
     @retry_on_busy()
     def set_bot_user_notif_toggle(self, chat_id: int, key: str, enabled: bool) -> bool:
+        # SEC-004 pattern hygiene: explicit mapping `api_key -> db_column`
+        # means `col` can ONLY ever be one of five hard-coded identifier
+        # strings. The re-assertion below is defensive — it blocks any
+        # future refactor that accidentally sources `col` from request
+        # data from promoting this line to a full SQLi.
         allowed = {
             'critical': 'notif_critical',
             'emergency': 'notif_emergency',
@@ -175,9 +180,18 @@ class TelegramRepository(BaseRepository):
         col = allowed.get(key)
         if not col:
             return False
+        # Defensive: col must be one of the literal values above.
+        if col not in set(allowed.values()):
+            logger.error("set_bot_user_notif_toggle: refused non-whitelist column %r", col)
+            return False
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
-                conn.execute(f'UPDATE bot_users SET {col}=? WHERE chat_id=?', (1 if enabled else 0, int(chat_id)))
+                # col is proven to be a literal from the whitelist above;
+                # chat_id is cast to int.
+                conn.execute(
+                    f'UPDATE bot_users SET {col}=? WHERE chat_id=?',
+                    (1 if enabled else 0, int(chat_id)),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:

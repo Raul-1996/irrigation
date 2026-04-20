@@ -320,25 +320,49 @@ class ZoneRepository(BaseRepository):
                             cur = conn.execute('SELECT id FROM zones WHERE id = ?', (zid,))
                             row = cur.fetchone()
                             if row:
-                                fields = []
+                                # SEC-004: build UPDATE via a strict column
+                                # whitelist. Never interpolate a field name
+                                # that wasn't preauthorized at import time —
+                                # otherwise a future refactor that lets user
+                                # data leak into the key side promotes this
+                                # to a full SQL injection.
+                                _ALLOWED_UPDATE_COLUMNS = {
+                                    'name', 'icon', 'duration', 'group_id',
+                                    'topic', 'state', 'mqtt_server_id',
+                                }
+
+                                assignments = []
                                 params = []
 
-                                def add(field: str, value):
-                                    fields.append(f"{field} = ?")
+                                def _set(column: str, value):
+                                    if column not in _ALLOWED_UPDATE_COLUMNS:
+                                        # Defensive: this branch is only
+                                        # reachable if someone edits this
+                                        # function and passes a bad name.
+                                        raise ValueError(
+                                            f"refusing to UPDATE unknown zones column: {column!r}"
+                                        )
+                                    assignments.append(f"{column} = ?")
                                     params.append(value)
 
-                                if 'name' in z: add('name', z['name'])
-                                if 'icon' in z: add('icon', z['icon'])
-                                if 'duration' in z: add('duration', int(z['duration']))
+                                if 'name' in z: _set('name', z['name'])
+                                if 'icon' in z: _set('icon', z['icon'])
+                                if 'duration' in z: _set('duration', int(z['duration']))
                                 if ('group_id' in z) or ('group' in z):
-                                    add('group_id', int(z.get('group_id', z.get('group', 1))))
-                                if 'topic' in z: add('topic', (z.get('topic') or '').strip())
-                                if 'state' in z: add('state', z['state'])
-                                if 'mqtt_server_id' in z: add('mqtt_server_id', z.get('mqtt_server_id'))
-                                fields.append('updated_at = CURRENT_TIMESTAMP')
+                                    _set('group_id', int(z.get('group_id', z.get('group', 1))))
+                                if 'topic' in z: _set('topic', (z.get('topic') or '').strip())
+                                if 'state' in z: _set('state', z['state'])
+                                if 'mqtt_server_id' in z: _set('mqtt_server_id', z.get('mqtt_server_id'))
+                                # updated_at is always set but uses SQL
+                                # CURRENT_TIMESTAMP — not a parameter, and
+                                # not user-controllable.
+                                assignments.append('updated_at = CURRENT_TIMESTAMP')
                                 params.append(zid)
-                                if fields:
-                                    conn.execute(f"UPDATE zones SET {', '.join(fields)} WHERE id = ?", params)
+                                if assignments:
+                                    conn.execute(
+                                        f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
+                                        params,
+                                    )
                                     updated += 1
                             else:
                                 conn.execute('''
