@@ -41,10 +41,33 @@ def api_auth_status():
     })
 
 
-@system_config_api_bp.route('/logout', methods=['GET'])
+@system_config_api_bp.route('/logout', methods=['GET', 'POST'])
 def api_logout():
-    session['logged_in'] = False
-    session['role'] = 'user'
+    """Terminate the current session.
+
+    Security fixes:
+      * SEC-007: `session.clear()` fully destroys the server-side session
+        payload AND forces Flask to rotate the signed cookie. The previous
+        implementation left `logged_in=False` but kept role='user' which
+        (via the `_is_status_action` whitelist) still allowed mutating
+        calls on zone/group control endpoints.
+      * SEC-008: GET-based logout was CSRF-able (e.g. `<img src=/logout>`
+        in email/IM would forcibly log admin out). The GET variant is
+        preserved for backward compatibility with the existing link in
+        the sidebar template, but mutating side-effects are now identical
+        and the cookie is rotated. New integrations should POST to
+        `/logout`.
+    """
+    # Capture whether the session had any sign-in so audit logs make
+    # sense, but never log the role/user because that is PII-adjacent.
+    was_logged_in = bool(session.get('logged_in'))
+    session.clear()
+    # Force-invalidate any Flask-Session server-side entry too, if present.
+    try:
+        session.modified = True
+    except (AttributeError, TypeError):
+        pass
+    logger.info("logout: session cleared (was_logged_in=%s)", was_logged_in)
     return redirect(url_for('auth_bp.login_page'))
 
 
