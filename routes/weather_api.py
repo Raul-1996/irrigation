@@ -57,8 +57,16 @@ def api_get_weather_decisions():
     - limit (int, default 50): max records to return
     """
     try:
+        # SEC-015: guarantee int / range before building SQL modifier. If
+        # `days` ever escapes the clamp in a future refactor, the sqlite
+        # parameter binding will still reject it because we pass it as a
+        # bound parameter — never concatenated into the SQL string.
         days = min(90, max(1, int(request.args.get('days', 7))))
         limit = min(200, max(1, int(request.args.get('limit', 50))))
+        # Build the SQLite date-modifier string from the validated int.
+        # `'-N days'` with N strictly int is safe; we still pass it as a
+        # bound parameter (not an f-string into the query).
+        days_modifier = '-%d days' % days
 
         with db.logs._connect() as conn:
             # Get decisions
@@ -66,7 +74,7 @@ def api_get_weather_decisions():
                 'SELECT * FROM weather_decisions '
                 'WHERE created_at >= datetime("now", ?) '
                 'ORDER BY created_at DESC LIMIT ?',
-                ('-%d days' % days, limit),
+                (days_modifier, limit),
             )
             rows = cur.fetchall()
             decisions = []
@@ -86,7 +94,7 @@ def api_get_weather_decisions():
                 '  COALESCE(AVG(coefficient), 100) as avg_coeff '
                 'FROM weather_decisions '
                 'WHERE created_at >= datetime("now", ?)',
-                ('-%d days' % days,),
+                (days_modifier,),
             )
             stats_row = cur2.fetchone()
             skips_count = int(stats_row['skips']) if stats_row else 0
