@@ -94,6 +94,21 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     except Exception:
         logger.exception('init_metrics failed')
 
+    # ── 9. systemd sd_notify: watchdog heartbeat + READY=1 ──────────
+    # Must run LAST so that /readyz reflects true readiness before systemd
+    # marks the unit active (Type=notify).
+    try:
+        from services.systemd_notify import start_heartbeat, notify_ready
+        start_heartbeat()  # start BEFORE notify_ready to close the gap
+        zone_count = 0
+        try:
+            zone_count = len(db.get_zones() or [])
+        except Exception:
+            pass
+        notify_ready(status=f"boot_sync done, {zone_count} zones loaded")
+    except Exception:
+        logger.exception('systemd_notify wiring failed (non-fatal)')
+
     logger.info('Application initialisation complete')
 
 
@@ -318,13 +333,27 @@ def _register_shutdown_handlers(db=None):
 
     def _signal_handler(signum, frame):
         logger.info('Shutdown: received signal %s', signum)
+        try:
+            from services.systemd_notify import notify_stopping, stop_heartbeat
+            notify_stopping()
+            stop_heartbeat(timeout=2.0)
+        except Exception:
+            logger.debug('systemd_notify stop failed (non-fatal)', exc_info=True)
         shutdown_all_zones_off(db=db)
         # Re-raise default handler so process actually exits
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
+    def _atexit_handler():
+        try:
+            from services.systemd_notify import stop_heartbeat
+            stop_heartbeat(timeout=1.0)
+        except Exception:
+            pass
+        shutdown_all_zones_off(db=db)
+
     # atexit runs on normal exit and some signal scenarios
-    atexit.register(shutdown_all_zones_off, db=db)
+    atexit.register(_atexit_handler)
 
     # SIGTERM (systemctl stop, docker stop)
     try:
