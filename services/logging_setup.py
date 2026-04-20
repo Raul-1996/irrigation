@@ -117,57 +117,86 @@ def ensure_console_handler():
 
 
 def setup_logging(app_logger):
-    """Setup root filters, file handlers, and TZ."""
-    logging.basicConfig(level=logging.INFO)
+    """Setup root filters, file handlers, and TZ.
 
+    Fixes (MASTER-C2 / CQ-012):
+      * File handler is attached to the ROOT logger (not `app`), so messages from
+        `services.*`, `routes.*`, `db.*`, `irrigation_scheduler`, etc. end up in
+        `backups/app.log`. Previously the handler was on `logging.getLogger('app')`
+        only — any module using `logging.getLogger(__name__)` silently bypassed it.
+      * Idempotent: re-calling `setup_logging()` does not duplicate handlers.
+      * `force=True` on `basicConfig` guarantees our root level wins over any
+        earlier `basicConfig(level=WARNING)` calls performed at import time by
+        `irrigation_scheduler.py` / `scheduler/jobs.py` / `database.py`.
+    """
     use_json = _use_json_logging()
+
+    # Force-reset root logger level to INFO even if a prior basicConfig
+    # (from import-time modules) set it to WARNING.
+    logging.basicConfig(level=logging.INFO, force=True)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
 
     # Root PII filter
     try:
-        root = logging.getLogger()
         has_filter = any(isinstance(f, PIIMaskingFilter) for f in getattr(root, 'filters', []))
         if not has_filter:
             root.addFilter(PIIMaskingFilter())
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError):
         pass
 
     # Apply JSON formatter to existing console handlers
     if use_json:
-        root = logging.getLogger()
         for h in root.handlers:
             if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
                 h.setFormatter(JSONFormatter())
 
-    # Test propagation
+    # Test propagation: in pytest we keep propagate=False on the named app logger
+    # to avoid writes to a closed stdout; in prod we keep it True so app-logger
+    # records flow up to root where the console handler lives.
     try:
         _IN_TESTS = bool('PYTEST_CURRENT_TEST' in os.environ)
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError):
         _IN_TESTS = False
     app_logger.propagate = not _IN_TESTS
 
-    # File handlers
+    # File handlers — attach to ROOT so every logger (services.*, routes.*, etc.)
+    # that uses `logging.getLogger(__name__)` writes to app.log via propagation.
     try:
         from logging.handlers import TimedRotatingFileHandler
         log_dir = os.path.join(os.getcwd(), 'backups')
         os.makedirs(log_dir, exist_ok=True)
 
-        # Main app log — always JSON
-        fh = TimedRotatingFileHandler(os.path.join(log_dir, 'app.log'), when='midnight', interval=1, backupCount=7, encoding='utf-8', utc=False)
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(JSONFormatter())
-        fh.addFilter(PIIFilter())
-        app_logger.addHandler(fh)
+        app_log_path = os.path.join(log_dir, 'app.log')
+        # Idempotence: do not add a second TimedRotatingFileHandler for app.log
+        already_attached = any(
+            isinstance(h, TimedRotatingFileHandler) and getattr(h, 'baseFilename', '') == os.path.abspath(app_log_path)
+            for h in root.handlers
+        )
+        if not already_attached:
+            fh = TimedRotatingFileHandler(app_log_path, when='midnight', interval=1, backupCount=7, encoding='utf-8', utc=False)
+            fh.setLevel(logging.INFO)
+            fh.setFormatter(JSONFormatter())
+            fh.addFilter(PIIFilter())
+            root.addHandler(fh)
 
-        # Import/export log
+        # Import/export log — dedicated named logger, keep handler local
         imp_logger = logging.getLogger('import_export')
         imp_logger.setLevel(logging.INFO)
-        if not any(isinstance(h, TimedRotatingFileHandler) and 'import-export.log' in getattr(h, 'baseFilename', '') for h in imp_logger.handlers):
-            imp_fh = TimedRotatingFileHandler(os.path.join(log_dir, 'import-export.log'), when='midnight', interval=1, backupCount=7, encoding='utf-8', utc=False)
+        imp_path = os.path.join(log_dir, 'import-export.log')
+        if not any(isinstance(h, TimedRotatingFileHandler) and getattr(h, 'baseFilename', '') == os.path.abspath(imp_path) for h in imp_logger.handlers):
+            imp_fh = TimedRotatingFileHandler(imp_path, when='midnight', interval=1, backupCount=7, encoding='utf-8', utc=False)
             imp_fh.setLevel(logging.INFO)
             imp_fh.setFormatter(JSONFormatter())
             imp_logger.addHandler(imp_fh)
-    except ImportError as e:
+    except ImportError:
         pass
+    except (OSError, PermissionError) as e:
+        # Log directory not writable — degrade to console-only, don't crash startup
+        try:
+            root.warning("app.log file handler not attached: %s", e)
+        except (ValueError, TypeError):
+            pass
 
     # Set TZ from system timezone
     try:
