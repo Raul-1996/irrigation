@@ -1,9 +1,15 @@
 import sqlite3
+import logging
 from flask import Blueprint, render_template, current_app
 from services.security import admin_required
 from database import db
 from flask import jsonify, request
 from utils import encrypt_secret, decrypt_secret
+
+# CQ-001..004 (MASTER-C2 extension): previously this module used `logger.debug(...)`
+# but never imported logging, so those calls would raise NameError if any of the
+# exception branches ever executed. Fix: add the canonical logger binding.
+logger = logging.getLogger(__name__)
 
 
 settings_bp = Blueprint('settings_bp', __name__)

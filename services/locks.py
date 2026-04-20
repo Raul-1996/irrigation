@@ -1,5 +1,11 @@
+import logging
 import threading
 from typing import Dict
+
+# CQ-001..004 (MASTER-C2 extension): logger.debug(...) was used below without
+# `import logging`. Those branches (RuntimeError from lock acquire/release) are
+# rare in practice but if hit would raise NameError and crash the caller.
+logger = logging.getLogger(__name__)
 
 _group_locks: Dict[int, threading.RLock] = {}
 _zone_locks: Dict[int, threading.RLock] = {}
