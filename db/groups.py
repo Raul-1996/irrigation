@@ -13,7 +13,7 @@ class GroupRepository(BaseRepository):
     def get_groups(self) -> List[Dict[str, Any]]:
         """Получить все группы."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT g.*, COUNT(z.id) as zone_count
@@ -31,7 +31,7 @@ class GroupRepository(BaseRepository):
     def create_group(self, name: str) -> Optional[Dict[str, Any]]:
         """Создать новую группу."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute('INSERT INTO groups (name) VALUES (?)', (name,))
                 new_id = cursor.lastrowid
                 conn.commit()
@@ -46,7 +46,7 @@ class GroupRepository(BaseRepository):
         try:
             if group_id == 999:
                 return False
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute('SELECT COUNT(*) FROM zones WHERE group_id = ?', (group_id,))
                 cnt = cursor.fetchone()[0]
                 if cnt > 0:
@@ -62,7 +62,7 @@ class GroupRepository(BaseRepository):
     def update_group(self, group_id: int, name: str) -> bool:
         """Обновить название группы."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     UPDATE groups 
                     SET name = ?, updated_at = CURRENT_TIMESTAMP
@@ -95,7 +95,7 @@ class GroupRepository(BaseRepository):
             return False
         params.append(group_id)
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 sql = f"UPDATE groups SET {', '.join(set_parts)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
                 conn.execute(sql, tuple(params))
                 conn.commit()
@@ -106,7 +106,7 @@ class GroupRepository(BaseRepository):
 
     def get_group_use_rain(self, group_id: int) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT use_rain_sensor FROM groups WHERE id = ? LIMIT 1', (group_id,))
                 row = cur.fetchone()
@@ -121,7 +121,7 @@ class GroupRepository(BaseRepository):
     @retry_on_busy()
     def set_group_use_rain(self, group_id: int, enabled: bool) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('UPDATE groups SET use_rain_sensor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
                              (1 if enabled else 0, group_id))
                 conn.commit()
@@ -132,7 +132,7 @@ class GroupRepository(BaseRepository):
 
     def list_groups_min(self) -> List[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT id, name FROM groups ORDER BY id')
                 return [dict(r) for r in cur.fetchall()]
@@ -142,7 +142,7 @@ class GroupRepository(BaseRepository):
 
     def list_zones_by_group_min(self, group_id: int) -> List[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT id, name, duration, state FROM zones WHERE group_id=? ORDER BY id',
                                    (int(group_id),))

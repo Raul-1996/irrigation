@@ -14,7 +14,7 @@ class ProgramRepository(BaseRepository):
     def get_programs(self) -> List[Dict[str, Any]]:
         """Получить все программы."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('SELECT * FROM programs ORDER BY id')
                 programs = []
@@ -34,7 +34,7 @@ class ProgramRepository(BaseRepository):
     def get_program(self, program_id: int) -> Optional[Dict[str, Any]]:
         """Получить программу по ID."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('SELECT * FROM programs WHERE id = ?', (program_id,))
                 row = cursor.fetchone()
@@ -55,7 +55,7 @@ class ProgramRepository(BaseRepository):
     def create_program(self, program_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Создать новую программу."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 try:
                     norm_days = [int(d) for d in program_data.get('days', [])]
                 except (TypeError, ValueError, KeyError) as e:
@@ -93,7 +93,7 @@ class ProgramRepository(BaseRepository):
     def update_program(self, program_id: int, program_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Обновить программу."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 # Build dynamic UPDATE based on provided fields
                 updates = []
                 params = []
@@ -159,7 +159,7 @@ class ProgramRepository(BaseRepository):
     def delete_program(self, program_id: int) -> bool:
         """Удалить программу."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('DELETE FROM programs WHERE id = ?', (program_id,))
                 conn.commit()
                 return True
@@ -203,7 +203,7 @@ class ProgramRepository(BaseRepository):
         _v2 = weather_factor is not None or include_weather
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
 
                 query = 'SELECT id, name, time, days, zones FROM programs'
@@ -422,7 +422,7 @@ class ProgramRepository(BaseRepository):
     @retry_on_busy()
     def cancel_program_run_for_group(self, program_id: int, run_date: str, group_id: int) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     INSERT OR REPLACE INTO program_cancellations(program_id, run_date, group_id)
                     VALUES (?, ?, ?)
@@ -435,7 +435,7 @@ class ProgramRepository(BaseRepository):
 
     def is_program_run_cancelled_for_group(self, program_id: int, run_date: str, group_id: int) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('''
                     SELECT 1 FROM program_cancellations
@@ -450,7 +450,7 @@ class ProgramRepository(BaseRepository):
     def clear_program_cancellations_for_group_on_date(self, group_id: int, run_date: str) -> bool:
         """Удалить все отмены программ для указанной группы на указанную дату."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     DELETE FROM program_cancellations
                     WHERE group_id = ? AND run_date = ?
