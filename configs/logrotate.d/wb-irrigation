@@ -1,0 +1,33 @@
+# /etc/logrotate.d/wb-irrigation
+# Managed by wb-irrigation repo at configs/logrotate.d/wb-irrigation
+# Applies to Mosquitto log and Telegram bot log (telegram.txt).
+# The main app.log is rotated by Python's TimedRotatingFileHandler and
+# MUST NOT be listed here - two rotators on the same file cause races.
+
+/var/log/mosquitto/mosquitto.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+}
+
+/opt/wb-irrigation/irrigation/services/logs/telegram.txt {
+    # Telegram bot log: size-triggered (low volume, bursty on errors).
+    # `weekly` intentionally omitted because logrotate prefers the time
+    # directive over `size` when both are present; rotation would then be
+    # weekly-only and ignore the 1 MiB cap.
+    size 1M
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+}
