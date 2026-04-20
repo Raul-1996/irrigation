@@ -15,7 +15,7 @@ class TelegramRepository(BaseRepository):
     # --- Bot users ---
     def get_bot_user_by_chat(self, chat_id: int) -> Optional[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT * FROM bot_users WHERE chat_id = ? LIMIT 1', (int(chat_id),))
                 row = cur.fetchone()
@@ -27,7 +27,7 @@ class TelegramRepository(BaseRepository):
     @retry_on_busy()
     def upsert_bot_user(self, chat_id: int, username: Optional[str], first_name: Optional[str]) -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     INSERT INTO bot_users(chat_id, username, first_name, created_at)
                     VALUES(?, ?, ?, CURRENT_TIMESTAMP)
@@ -42,7 +42,7 @@ class TelegramRepository(BaseRepository):
     @retry_on_busy()
     def set_bot_user_authorized(self, chat_id: int, role: str = 'user') -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     'UPDATE bot_users SET is_authorized=1, role=?, failed_attempts=0, locked_until=NULL, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
                     (str(role), int(chat_id)))
@@ -55,7 +55,7 @@ class TelegramRepository(BaseRepository):
     @retry_on_busy()
     def inc_bot_user_failed(self, chat_id: int) -> int:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     'UPDATE bot_users SET failed_attempts=COALESCE(failed_attempts,0)+1, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
                     (int(chat_id),))
@@ -70,7 +70,7 @@ class TelegramRepository(BaseRepository):
     @retry_on_busy()
     def lock_bot_user_until(self, chat_id: int, until_iso: str) -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.execute('UPDATE bot_users SET locked_until=? WHERE chat_id=?', (str(until_iso), int(chat_id)))
                 conn.commit()
                 return True
@@ -82,7 +82,7 @@ class TelegramRepository(BaseRepository):
     @retry_on_busy()
     def set_bot_fsm(self, chat_id: int, state: Optional[str], data: Optional[dict]) -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 try:
                     payload = None if data is None else json.dumps(data, ensure_ascii=False)
                 except (TypeError, ValueError) as e:
@@ -100,7 +100,7 @@ class TelegramRepository(BaseRepository):
 
     def get_bot_fsm(self, chat_id: int) -> tuple:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT fsm_state, fsm_data FROM bot_users WHERE chat_id=?', (int(chat_id),))
                 row = cur.fetchone()
@@ -122,7 +122,7 @@ class TelegramRepository(BaseRepository):
     @retry_on_busy()
     def is_new_idempotency_token(self, token: str, chat_id: int, action: str, ttl_seconds: int = 600) -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 try:
                     conn.execute('DELETE FROM bot_idempotency WHERE created_at < datetime("now", ?)',
                                  (f'-{int(ttl_seconds)} seconds',))
@@ -143,7 +143,7 @@ class TelegramRepository(BaseRepository):
     # --- Notification toggles ---
     def get_bot_user_notif_settings(self, chat_id: int) -> dict:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('''
                     SELECT notif_critical, notif_emergency, notif_postpone, notif_zone_events, notif_rain
@@ -185,7 +185,7 @@ class TelegramRepository(BaseRepository):
             logger.error("set_bot_user_notif_toggle: refused non-whitelist column %r", col)
             return False
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 # col is proven to be a literal from the whitelist above;
                 # chat_id is cast to int.
                 conn.execute(
@@ -203,7 +203,7 @@ class TelegramRepository(BaseRepository):
         try:
             hhmm = now_local.strftime('%H:%M')
             dow = now_local.weekday()
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('''
                     SELECT bs.*, bu.chat_id FROM bot_subscriptions bs
@@ -234,7 +234,7 @@ class TelegramRepository(BaseRepository):
     def create_or_update_subscription(self, user_id: int, sub_type: str, fmt: str, time_local: str,
                                       dow_mask: Optional[str], enabled: bool = True) -> bool:
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with self._connect() as conn:
                 cur = conn.execute('SELECT id FROM bot_subscriptions WHERE user_id=? AND type=?',
                                    (int(user_id), str(sub_type)))
                 row = cur.fetchone()

@@ -14,7 +14,7 @@ class SettingsRepository(BaseRepository):
 
     def get_setting_value(self, key: str) -> Optional[str]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', (key,))
                 row = cur.fetchone()
@@ -26,7 +26,7 @@ class SettingsRepository(BaseRepository):
     @retry_on_busy()
     def set_setting_value(self, key: str, value: Optional[str]) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 if value is None:
                     conn.execute('DELETE FROM settings WHERE key = ?', (key,))
                 else:
@@ -41,7 +41,7 @@ class SettingsRepository(BaseRepository):
     def ensure_password_change_required(self) -> None:
         """Если пароль не установлен — генерируем случайный временный пароль и требуем смену."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
                 row = cur.fetchone()
@@ -167,7 +167,7 @@ class SettingsRepository(BaseRepository):
     # === Password ===
     def get_password_hash(self) -> Optional[str]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('password_hash',))
                 row = cur.fetchone()
                 return row[0] if row else None
@@ -178,7 +178,7 @@ class SettingsRepository(BaseRepository):
     @retry_on_busy()
     def set_password(self, new_password: str) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
                     'password_hash', generate_password_hash(new_password, method='pbkdf2:sha256')
                 ))
@@ -194,7 +194,7 @@ class SettingsRepository(BaseRepository):
     # === Early off seconds ===
     def get_early_off_seconds(self) -> int:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cur = conn.execute('SELECT value FROM settings WHERE key = ? LIMIT 1', ('early_off_seconds',))
                 row = cur.fetchone()
                 val = int(row[0]) if row and row[0] is not None else 3
@@ -211,7 +211,7 @@ class SettingsRepository(BaseRepository):
             val = int(seconds)
             if val < 0: val = 0
             if val > 15: val = 15
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', (
                     'early_off_seconds', str(val)
                 ))

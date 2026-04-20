@@ -21,7 +21,7 @@ class MqttRepository(BaseRepository):
 
     def get_mqtt_servers(self) -> List[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT * FROM mqtt_servers ORDER BY id')
                 return [self._decrypt_mqtt_password(dict(row)) for row in cur.fetchall()]
@@ -31,7 +31,7 @@ class MqttRepository(BaseRepository):
 
     def get_mqtt_server(self, server_id: int) -> Optional[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute('SELECT * FROM mqtt_servers WHERE id = ?', (server_id,))
                 row = cur.fetchone()
@@ -45,7 +45,7 @@ class MqttRepository(BaseRepository):
         try:
             raw_password = data.get('password')
             enc_password = ('ENC:' + encrypt_secret(raw_password)) if raw_password else raw_password
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cur = conn.execute('''
                     INSERT INTO mqtt_servers (name, host, port, username, password, client_id, enabled,
                                               tls_enabled, tls_ca_path, tls_cert_path, tls_key_path, tls_insecure, tls_version)
@@ -77,7 +77,7 @@ class MqttRepository(BaseRepository):
         try:
             raw_password = data.get('password')
             enc_password = ('ENC:' + encrypt_secret(raw_password)) if raw_password else raw_password
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     UPDATE mqtt_servers
                     SET name = ?, host = ?, port = ?, username = ?, password = ?, client_id = ?, enabled = ?,
@@ -109,7 +109,7 @@ class MqttRepository(BaseRepository):
     @retry_on_busy()
     def delete_mqtt_server(self, server_id: int) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('DELETE FROM mqtt_servers WHERE id = ?', (server_id,))
                 conn.commit()
                 return True

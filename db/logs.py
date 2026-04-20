@@ -20,7 +20,7 @@ class LogRepository(BaseRepository):
     def get_logs(self, event_type: str = None, from_date: str = None, to_date: str = None) -> List[Dict[str, Any]]:
         """Получить логи с фильтрацией."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 query = (
                     "SELECT id, type, details, "
@@ -50,7 +50,7 @@ class LogRepository(BaseRepository):
     def add_log(self, log_type: str, details: str = None) -> Optional[int]:
         """Добавить запись в лог."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute('''
                     INSERT INTO logs (type, details)
                     VALUES (?, ?)
@@ -67,7 +67,7 @@ class LogRepository(BaseRepository):
         try:
             days = int(days)
             day_modifier = f'-{days} days'
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 if zone_id:
                     cursor = conn.execute('''
@@ -94,7 +94,7 @@ class LogRepository(BaseRepository):
     def add_water_usage(self, zone_id: int, liters: float) -> bool:
         """Добавить запись о расходе воды."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute('''
                     INSERT INTO water_usage (zone_id, liters)
                     VALUES (?, ?)
@@ -110,7 +110,7 @@ class LogRepository(BaseRepository):
         try:
             days = int(days)
             day_modifier = f'-{days} days'
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute('''
                     SELECT SUM(liters) as total_liters
                     FROM water_usage
@@ -168,7 +168,7 @@ class LogRepository(BaseRepository):
                     with sqlite3.connect(backup_path) as dst_conn:
                         src_conn.backup(dst_conn)
                 try:
-                    with sqlite3.connect(self.db_path) as c:
+                    with self._connect() as c:
                         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                         c.commit()
                 except sqlite3.Error as e:
