@@ -6,7 +6,15 @@ import io
 import logging
 
 from database import db
-from services.helpers import UPLOAD_FOLDER, ZONE_MEDIA_SUBDIR, ALLOWED_EXTENSIONS, ALLOWED_MIME_TYPES, MAX_FILE_SIZE
+from services.helpers import (
+    UPLOAD_FOLDER,
+    ZONE_MEDIA_SUBDIR,
+    ALLOWED_EXTENSIONS,
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_SIZE,
+    safe_zone_photo_path,
+    UnsafePathError,
+)
 import sqlite3
 
 try:
@@ -107,8 +115,16 @@ def upload_zone_photo(zone_id):
             current = db.get_zone(zone_id)
             old_rel = (current or {}).get('photo_path')
             if old_rel:
-                old_abs = os.path.join('static', old_rel)
-                if os.path.exists(old_abs):
+                try:
+                    # SEC-009: validate DB-stored path before touching FS.
+                    old_abs = safe_zone_photo_path(old_rel)
+                except UnsafePathError as e:
+                    logger.warning(
+                        "upload_zone_photo: refused to archive zone %s old photo "
+                        "with unsafe path %r: %s", zone_id, old_rel, e,
+                    )
+                    old_abs = None
+                if old_abs and os.path.exists(old_abs):
                     old_dir = os.path.join(UPLOAD_FOLDER, 'OLD')
                     os.makedirs(old_dir, exist_ok=True)
                     os.replace(old_abs, os.path.join(old_dir, os.path.basename(old_abs)))
@@ -138,7 +154,24 @@ def delete_zone_photo(zone_id):
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         if zone.get('photo_path'):
-            filepath = os.path.join('static', zone['photo_path'])
+            # SEC-009: validate stored DB path before filesystem delete.
+            # A malicious/corrupted photo_path like `../../etc/secret.key`
+            # would otherwise delete arbitrary files.
+            try:
+                filepath = safe_zone_photo_path(zone['photo_path'])
+            except UnsafePathError as e:
+                logger.error(
+                    "delete_zone_photo: refused unsafe photo_path for zone %s: %s",
+                    zone_id, e,
+                )
+                # Clear the bad DB value so admin UI stops pointing at it,
+                # but do NOT touch the filesystem.
+                db.update_zone_photo(zone_id, None)
+                return jsonify({
+                    'success': False,
+                    'message': 'Некорректный путь к фото',
+                    'error_code': 'INVALID_PHOTO_PATH',
+                }), 400
             if os.path.exists(filepath):
                 os.remove(filepath)
             db.update_zone_photo(zone_id, None)
@@ -161,14 +194,40 @@ def rotate_zone_photo(zone_id):
         angle = 90
         try:
             data = request.get_json(silent=True) or {}
-            angle = int(data.get('angle', 90))
+            angle_raw = int(data.get('angle', 90))
+            # SEC-014: clamp to the only legitimate rotation steps. An
+            # attacker-controlled `angle=999999999` otherwise causes
+            # Pillow to allocate enormous canvases (DoS / OOM).
+            allowed_angles = {-270, -180, -90, 0, 90, 180, 270}
+            if angle_raw not in allowed_angles:
+                # Normalise to nearest 90deg multiple within one rotation.
+                angle_raw = angle_raw % 360
+                if angle_raw not in {0, 90, 180, 270}:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Допустимы только углы, кратные 90',
+                        'error_code': 'INVALID_ANGLE',
+                    }), 400
+            angle = angle_raw
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in rotate_zone_photo: %s", e)
             angle = 90
         photo_path = zone.get('photo_path')
         if not photo_path:
             return jsonify({'success': False, 'message': 'Фото отсутствует'}), 404
-        filepath = os.path.join('static', photo_path)
+        # SEC-009: validate DB-stored path before opening for rotate.
+        try:
+            filepath = safe_zone_photo_path(photo_path)
+        except UnsafePathError as e:
+            logger.error(
+                "rotate_zone_photo: refused unsafe photo_path for zone %s: %s",
+                zone_id, e,
+            )
+            return jsonify({
+                'success': False,
+                'message': 'Некорректный путь к фото',
+                'error_code': 'INVALID_PHOTO_PATH',
+            }), 400
         if not os.path.exists(filepath):
             return jsonify({'success': False, 'message': 'Файл не найден'}), 404
         try:
@@ -201,7 +260,21 @@ def get_zone_photo(zone_id):
             photo_path = zone.get('photo_path')
             if not photo_path:
                 return jsonify({'success': False, 'message': 'Фотография не найдена'}), 404
-            filepath = os.path.join('static', photo_path)
+            # SEC-009: validate DB-stored path before send_file (otherwise
+            # a corrupted `photo_path` like `../../etc/passwd` would be
+            # returned to the client).
+            try:
+                filepath = safe_zone_photo_path(photo_path)
+            except UnsafePathError as e:
+                logger.error(
+                    "get_zone_photo: refused unsafe photo_path for zone %s: %s",
+                    zone_id, e,
+                )
+                return jsonify({
+                    'success': False,
+                    'message': 'Некорректный путь к фото',
+                    'error_code': 'INVALID_PHOTO_PATH',
+                }), 400
             if not os.path.exists(filepath):
                 return jsonify({'success': False, 'message': 'Файл не найден'}), 404
             ext = os.path.splitext(filepath)[1].lower()
