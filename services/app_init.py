@@ -13,11 +13,19 @@ logger = logging.getLogger(__name__)
 
 _INIT_DONE = False
 
+# Wave 2 F2 — readiness gate.  Flipped to True at the end of _boot_sync() so
+# /readyz can tell the difference between "Flask is up but hasn't turned the
+# world off yet" and "fully ready to schedule watering".  The gate is a plain
+# module-level bool (not a threading primitive) because /readyz is a simple
+# read-only check.
+_boot_sync_done = False
+
 
 def reset_init():
     """Allow re-init in tests."""
-    global _INIT_DONE
+    global _INIT_DONE, _boot_sync_done
     _INIT_DONE = False
+    _boot_sync_done = False
 
 
 def initialize_app(app, db, *, start_watchdog_fn=None):
@@ -76,6 +84,15 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
 
     # ── 7. Graceful shutdown handlers ───────────────────────────────
     _register_shutdown_handlers(db)
+
+    # ── 8. Observability metrics (F2) ───────────────────────────────
+    try:
+        from routes.health_api import init_metrics as _init_metrics
+        _init_metrics(app, db)
+    except ImportError as e:
+        logger.warning('init_metrics not available: %s', e)
+    except Exception:
+        logger.exception('init_metrics failed')
 
     logger.info('Application initialisation complete')
 
@@ -211,6 +228,10 @@ def _boot_sync(app, db):
             logger.exception('boot sync OFF (secondary) failed')
 
         logger.info('Boot sync: all zones OFF, MQTT OFF published')
+        # F2 — readiness gate flipped on successful completion.  /readyz
+        # check #4 (boot_reconcile) reads this flag.
+        global _boot_sync_done
+        _boot_sync_done = True
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f'Boot sync failed: {e}')
 

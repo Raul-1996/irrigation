@@ -77,6 +77,12 @@ from routes.system_status_api import system_status_api_bp
 from routes.system_config_api import system_config_api_bp
 from routes.system_emergency_api import system_emergency_api_bp
 from routes.weather_api import weather_api_bp
+from routes.health_api import (
+    health_api_bp,
+    init_metrics as _init_metrics,
+    record_request_metrics as _record_request_metrics,
+    WB_HTTP_IN_FLIGHT as _WB_HTTP_IN_FLIGHT,
+)
 
 
 try:
@@ -211,6 +217,12 @@ def _perf_start_timer():
         request._started_at = _perf_time.time()
     except AttributeError as e:
         logger.debug("perf timer start: %s", e)
+    # F2 — in-flight gauge increment
+    try:
+        _WB_HTTP_IN_FLIGHT.inc()
+        request._wb_inflight_counted = True
+    except Exception:
+        pass
 
 
 @app.before_request
@@ -237,6 +249,25 @@ def _perf_add_server_timing(resp: Response):
             resp.headers['Server-Timing'] = f"app;dur={int((_perf_time.time() - t0) * 1000)}"
     except (TypeError, ValueError, AttributeError) as e:
         logger.debug("perf timer end: %s", e)
+    # F2 — record request-level Prometheus metrics
+    try:
+        t0 = getattr(request, '_started_at', None)
+        dur = (_perf_time.time() - t0) if t0 is not None else 0.0
+        _record_request_metrics(
+            method=request.method,
+            endpoint=request.endpoint or 'unknown',
+            status_code=resp.status_code,
+            duration_s=dur,
+        )
+    except Exception as e:
+        logger.debug("record request metrics: %s", e)
+    # F2 — in-flight gauge decrement (only if we incremented it in before_request)
+    try:
+        if getattr(request, '_wb_inflight_counted', False):
+            _WB_HTTP_IN_FLIGHT.dec()
+            request._wb_inflight_counted = False
+    except Exception:
+        pass
     return resp
 
 
@@ -374,6 +405,12 @@ except ImportError as _e:
 
 for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp):
     app.register_blueprint(bp)
+
+# F2 — observability endpoints: /healthz, /readyz, /metrics.
+# All GET-only; CSRF-exempt as defence-in-depth in case POST endpoints are
+# added later.  init_metrics() is called from services.app_init.initialize_app().
+csrf.exempt(health_api_bp)
+app.register_blueprint(health_api_bp)
 
 _initialize_app(app, db, start_watchdog_fn=lambda: _start_single_zone_watchdog())
 
