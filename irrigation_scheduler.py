@@ -184,22 +184,59 @@ class IrrigationScheduler:
         except (IOError, OSError, PermissionError) as e:
             logger.debug("Exception in __init__: %s", e)
             tz = None
-        # Инициализация APScheduler с SQLAlchemyJobStore (для персистентности), если доступен
+        # Инициализация APScheduler с SQLAlchemyJobStore (PHYS-2 / MASTER-H10).
+        #
+        # Persistence contract:
+        #   * 'default' → SQLAlchemyJobStore on a DEDICATED file `jobs.db`
+        #     (sibling of irrigation.db). Separate DB keeps APScheduler
+        #     WAL writes away from application backups and simplifies
+        #     disaster recovery — `jobs.db` can be deleted without losing
+        #     zones/programs/settings.
+        #   * 'volatile' → MemoryJobStore for one-shot helper jobs that
+        #     must not survive a restart (e.g., delayed_close tracking).
+        #
+        # If SQLAlchemy is missing (should not happen — it is now pinned in
+        # requirements.txt), we fall back to MemoryJobStore and emit a
+        # loud WARNING: persistence is a SAFETY property, not a convenience.
         scheduler_kwargs = {}
+        jobstores: Dict[str, Any] = {}
+        jobstore_backend = 'none'
         try:
-            jobstores = {}
             if SQLAlchemyJobStore is not None:
-                jobstores['default'] = SQLAlchemyJobStore(url=f'sqlite:///{self.db.db_path}')
+                # Dedicated file alongside irrigation.db
+                db_dir = os.path.dirname(os.path.abspath(self.db.db_path)) or '.'
+                jobs_db_path = os.path.join(db_dir, 'jobs.db')
+                jobstores['default'] = SQLAlchemyJobStore(url=f'sqlite:///{jobs_db_path}')
+                jobstore_backend = 'sqlalchemy'
+            elif MemoryJobStore is not None:
+                # Degraded mode — persistence lost, but we still want to run
+                jobstores['default'] = MemoryJobStore()
+                jobstore_backend = 'memory-fallback'
+                logger.warning(
+                    "APScheduler: SQLAlchemy unavailable, falling back to MemoryJobStore — "
+                    "one-shot zone_stop/master_close jobs WILL be lost on restart (PHYS-2 risk)."
+                )
             if MemoryJobStore is not None:
-                jobstores['volatile'] = MemoryJobStore()  # для эфемерных задач
+                jobstores['volatile'] = MemoryJobStore()  # эфемерные задачи (не требуют persist)
             if jobstores:
                 scheduler_kwargs['jobstores'] = jobstores
         except (sqlite3.Error, OSError) as e:
-            logger.debug("Exception in __init__: %s", e)
-            # Не критично: работаем без персистентности
-            pass
+            logger.error("APScheduler jobstore init failed: %s", e)
+
+        # Misfire / coalesce policy for persistent jobs (PHYS-2).
+        # If the service was down during a zone_stop time, we still want the
+        # job to fire within 5 min of restart (misfire_grace_time=300). If
+        # multiple fires accumulated (e.g., laptop suspend) coalesce into one.
+        # max_instances=1 prevents the same job running in parallel.
+        scheduler_kwargs['job_defaults'] = {
+            'coalesce': True,
+            'misfire_grace_time': 300,
+            'max_instances': 1,
+        }
+
         self.scheduler = BackgroundScheduler(timezone=tz, **scheduler_kwargs) if tz else BackgroundScheduler(**scheduler_kwargs)
-        # Флаги доступности jobstore-ов
+        # Флаги доступности jobstore-ов + backend идентификация для health endpoints
+        self.jobstore_backend = jobstore_backend
         try:
             stores = getattr(self.scheduler, '_jobstores', {}) or {}
             self.has_default_jobstore = 'default' in stores
@@ -221,7 +258,19 @@ class IrrigationScheduler:
         self.scheduler.start()
         self.is_running = True
         try:
-            logger.info("Планировщик полива (APScheduler) запущен, timezone=%s", str(getattr(self.scheduler, 'timezone', 'default')))
+            backend = getattr(self, 'jobstore_backend', 'unknown')
+            tz = str(getattr(self.scheduler, 'timezone', 'default'))
+            logger.info(
+                "Планировщик полива (APScheduler) запущен, timezone=%s, jobstore=%s (PHYS-2)",
+                tz, backend,
+            )
+            # Log the count of restored persistent jobs — observability for
+            # restart-recovery. If jobstore=memory-fallback this will always be 0.
+            try:
+                restored = len(self.scheduler.get_jobs(jobstore='default') or [])
+                logger.info("Восстановлено из persistent jobstore: %d задач", restored)
+            except (AttributeError, KeyError, ValueError) as _e:
+                logger.debug("restored jobs count failed: %s", _e)
         except (ValueError, TypeError, KeyError):
             logger.info("Планировщик полива (APScheduler) запущен")
         # Плановый джоб: регулярная очистка истекших отложек
