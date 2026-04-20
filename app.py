@@ -106,7 +106,7 @@ csrf.exempt(_api_login_view)
 #
 # Guest-accessible endpoints (remain CSRF-exempt):
 from routes.system_emergency_api import api_emergency_stop, api_emergency_resume
-from routes.system_config_api import api_change_password, api_env_config, api_postpone
+from routes.system_config_api import api_env_config, api_postpone
 from routes.system_status_api import api_status
 from routes.zones_watering_api import start_zone, stop_zone, api_zone_mqtt_start, api_zone_mqtt_stop
 from routes.zones_crud_api import api_zones_next_watering_bulk
@@ -118,7 +118,6 @@ from routes.groups_api import (
 )
 
 for _view in (
-    api_change_password,   # /api/password  (session-required; needs own CSRF? kept exempt for compat)
     api_env_config,        # /api/env
     api_postpone,          # /api/postpone
     api_emergency_stop,    # /api/emergency-stop
@@ -239,7 +238,7 @@ def dlog(msg: str, *args) -> None:
 # control is unnecessary — gardeners need start/stop without admin password.
 import re as _re
 
-_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/password', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
+_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
 
 # Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
 _ALLOWED_PUBLIC_PATTERNS = [

@@ -40,7 +40,6 @@ _ADMIN_ONLY_PATHS_REQUIRING_CSRF = [
 # not via Flask session).
 _GUEST_PUBLIC_POSTS = [
     '/api/login',
-    '/api/password',
     '/api/env',
     '/api/status',
     '/api/postpone',
@@ -92,7 +91,6 @@ def test_guest_endpoints_are_exempt(app):
     exempt = _csrf_exempt_view_names(app)
     expected_exempt = {
         'api_login',
-        'api_change_password',
         'api_env_config',
         'api_status',
         'api_postpone',
@@ -124,6 +122,7 @@ def test_admin_crud_endpoints_are_NOT_exempt(app):
     exempt = _csrf_exempt_view_names(app)
     # Names that MUST NOT appear in the exempt set.
     forbidden = {
+        'api_change_password',        # /api/password POST — session-auth only, must require CSRF (review BLOCKER fix)
         'api_create_zone',            # /api/zones POST
         'api_import_zones_bulk',      # /api/zones/import
         'upload_zone_photo',          # /api/zones/<id>/photo POST
