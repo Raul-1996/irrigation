@@ -10,19 +10,23 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Настройка логирования: по умолчанию WARNING; можно поднять через env SCHEDULER_LOG_LEVEL=INFO/DEBUG
-level_name = os.getenv('SCHEDULER_LOG_LEVEL', 'WARNING').upper()
-level = getattr(logging, level_name, logging.INFO)
-logging.basicConfig(level=level)
+# Логирование: не вызываем logging.basicConfig() на import-time (CQ-012 / MASTER-C2).
+# Уровень теперь выставляет setup_logging() в services/logging_setup.py.
 try:
-    fmt = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    for h in logging.getLogger().handlers:
-        if isinstance(h, logging.StreamHandler):
-            h.setFormatter(fmt)
+    _sched_level_name = os.getenv('SCHEDULER_LOG_LEVEL', '').upper()
+    if _sched_level_name:
+        _sched_level = getattr(logging, _sched_level_name, None)
+        if _sched_level is not None:
+            logger.setLevel(_sched_level)
 except (KeyError, TypeError, ValueError) as e:
-    logger.debug("Handled exception in logging setup: %s", e)
-# Избегаем записи в stdout/stderr из потоков APScheduler при закрытии пайпов тест-раннером
-logger.propagate = False
+    logger.debug("scheduler jobs log level from env: %s", e)
+# В тестах отключаем propagate, чтобы не писать в закрытый stdout; в проде — False
+# не нужен, записи должны доходить до root/app.log через propagation.
+try:
+    if 'PYTEST_CURRENT_TEST' in os.environ:
+        logger.propagate = False
+except (KeyError, TypeError):
+    pass
 # Урезаем болтливость APScheduler
 try:
     aps_logger = logging.getLogger('apscheduler')

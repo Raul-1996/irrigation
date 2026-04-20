@@ -17,18 +17,18 @@ from db.telegram import TelegramRepository
 from db.logs import LogRepository
 from db.migrations import MigrationRunner
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# Логирование: не вызываем logging.basicConfig() на import-time (CQ-012 / MASTER-C2).
+# До фикса этот вызов перебивал уровень root-логгера ДО того, как
+# services.logging_setup.setup_logging() успевал навесить file-handler на root —
+# в результате `backups/app.log` оставался пустым 13+ дней на проде.
 logger = logging.getLogger(__name__)
+import os as _os
+# В тестах отключаем propagate, чтобы не писать в закрытый stdout из фоновых потоков.
 try:
-    fmt = logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    for h in logging.getLogger().handlers:
-        if isinstance(h, logging.StreamHandler):
-            h.setFormatter(fmt)
-except (TypeError, ValueError, AttributeError) as _fmt_err:
-    logger.debug("log formatter setup: %s", _fmt_err)
-# В тестах отключаем распространение в root, чтобы не писать в закрытый stdout из фоновых ��отоков
-logger.propagate = False
+    if 'PYTEST_CURRENT_TEST' in _os.environ:
+        logger.propagate = False
+except (KeyError, TypeError):
+    pass
 
 
 class IrrigationDB:

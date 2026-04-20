@@ -3,6 +3,25 @@
 All API routes live in routes/*_api.py blueprints.
 This file handles: app creation, config, logging, middleware, blueprint registration, boot-init.
 """
+# ── Logging MUST be configured FIRST (MASTER-C2) ───────────────────────────
+# setup_logging() attaches the rotating file handler to the ROOT logger and
+# force-resets basicConfig so that subsequent `logging.getLogger(__name__)`
+# calls in any imported module route records into backups/app.log via
+# propagation. Keep this block above every other `from services...`/
+# `from irrigation_scheduler...` import.
+#
+# Under pytest (TESTING=1) we SKIP setup_logging here: adding the root
+# PIIMaskingFilter + file handler at import time breaks pytest's own
+# LogCaptureHandler and the numerous suites that assume a pristine root
+# logger. Tests that exercise setup_logging do so explicitly via
+# tests/unit/test_logging_setup.py.
+import logging
+import os as _os_early
+if _os_early.environ.get('TESTING') != '1' and 'PYTEST_CURRENT_TEST' not in _os_early.environ:
+    from services.logging_setup import setup_logging as _setup_logging_early
+    _setup_logging_early(logging.getLogger('app'))
+logger = logging.getLogger(__name__)
+
 import sqlite3
 from flask import Flask, render_template, jsonify, request, session, Response
 from datetime import datetime
@@ -10,7 +29,6 @@ import json
 from database import db
 from utils import normalize_topic
 import os
-import logging
 from irrigation_scheduler import init_scheduler, get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from flask_wtf.csrf import CSRFProtect
@@ -28,7 +46,6 @@ import time as _perf_time
 import threading
 import time
 from config import Config
-from services.logging_setup import setup_logging
 
 # Page-rendering blueprints
 from routes.status import status_bp
@@ -73,9 +90,7 @@ from services.api_rate_limiter import _is_allowed as _rate_check
 from services import sse_hub as _sse_hub
 from services.app_init import initialize_app as _initialize_app
 
-# ── Logging ────────────────────────────────────────────────────────────────
-logger = logging.getLogger(__name__)
-setup_logging(logger)
+# ── Logging already configured at the top of the file (MASTER-C2) ──────────
 
 # ── Flask app ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
