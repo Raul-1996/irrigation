@@ -5,14 +5,20 @@ Wants=network-online.target
 Requires=mosquitto.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 WorkingDirectory=/opt/wb-irrigation/irrigation
 Environment=TESTING=0
 Environment=UI_THEME=auto
+Environment=WB_WATCHDOG_ENABLED=1
 ExecStart=/opt/wb-irrigation/irrigation/venv/bin/python run.py
-TimeoutStopSec=20
-Restart=on-failure
+TimeoutStartSec=60
+TimeoutStopSec=45
+WatchdogSec=60
+Restart=always
 RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Install]
 WantedBy=multi-user.target
