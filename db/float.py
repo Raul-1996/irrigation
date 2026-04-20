@@ -12,9 +12,9 @@ bypassing `BaseRepository._connect()`. That meant:
   * `busy_timeout` was 30s via direct PRAGMA but only on THIS connection,
     not inherited from the central policy.
 
-This module centralises all float-related DB operations behind a single
-repository that uses the BaseRepository._connect() contract and also
-applies `PRAGMA busy_timeout=30000` for safety-critical writes.
+Wave 3 consolidation: `PRAGMA busy_timeout=30000` has moved up to
+`BaseRepository._connect()`, so FloatRepository no longer needs to
+override `_connect()` — every repo now gets the same 30s busy timeout.
 
 See audit-report.md PHYS-3 for the full rationale.
 """
@@ -33,18 +33,12 @@ class FloatRepository(BaseRepository):
     All writes go through BaseRepository._connect() which guarantees:
         PRAGMA journal_mode=WAL
         PRAGMA foreign_keys=ON
+        PRAGMA busy_timeout=30000
         connection timeout=5s
-    On top of that we raise busy_timeout to 30 seconds — float writes
-    are safety-critical (pump dry-run protection) and MUST wait for
-    WAL checkpoints instead of failing fast with SQLITE_BUSY.
+    Float writes are safety-critical (pump dry-run protection) and the
+    30s busy_timeout ensures they wait for WAL checkpoints instead of
+    failing fast with SQLITE_BUSY.
     """
-
-    # ------------------------------------------------------------------
-    def _connect(self) -> sqlite3.Connection:
-        conn = super()._connect()
-        # Safety-critical: wait up to 30s for lock before failing.
-        conn.execute('PRAGMA busy_timeout=30000')
-        return conn
 
     # ------------------------------------------------------------------
     @retry_on_busy()
