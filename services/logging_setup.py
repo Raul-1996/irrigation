@@ -137,6 +137,27 @@ def setup_logging(app_logger):
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
+    # Under pytest, remove any root StreamHandler attached to sys.stdout/stderr.
+    # Pytest replaces stdout with a buffered captor that closes between tests;
+    # background threads (APScheduler, atexit hooks) that log after pytest has
+    # finalized the capture will otherwise raise `ValueError: I/O operation on
+    # closed file`. File handlers on disk are fine and remain in place.
+    try:
+        _in_tests = bool('PYTEST_CURRENT_TEST' in os.environ) or os.environ.get('TESTING') == '1'
+    except (KeyError, TypeError):
+        _in_tests = False
+    if _in_tests:
+        for _h in list(root.handlers):
+            if isinstance(_h, logging.StreamHandler) and not isinstance(_h, logging.FileHandler):
+                try:
+                    root.removeHandler(_h)
+                except (ValueError, TypeError):
+                    pass
+        # Ensure root still has at least one handler so logging internals don't
+        # emit "No handlers could be found" warnings during teardown.
+        if not root.handlers:
+            root.addHandler(logging.NullHandler())
+
     # Root PII filter
     try:
         has_filter = any(isinstance(f, PIIMaskingFilter) for f in getattr(root, 'filters', []))

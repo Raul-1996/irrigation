@@ -9,9 +9,17 @@ This file handles: app creation, config, logging, middleware, blueprint registra
 # calls in any imported module route records into backups/app.log via
 # propagation. Keep this block above every other `from services...`/
 # `from irrigation_scheduler...` import.
+#
+# Under pytest (TESTING=1) we SKIP setup_logging here: adding the root
+# PIIMaskingFilter + file handler at import time breaks pytest's own
+# LogCaptureHandler and the numerous suites that assume a pristine root
+# logger. Tests that exercise setup_logging do so explicitly via
+# tests/unit/test_logging_setup.py.
 import logging
-from services.logging_setup import setup_logging
-setup_logging(logging.getLogger('app'))
+import os as _os_early
+if _os_early.environ.get('TESTING') != '1' and 'PYTEST_CURRENT_TEST' not in _os_early.environ:
+    from services.logging_setup import setup_logging as _setup_logging_early
+    _setup_logging_early(logging.getLogger('app'))
 logger = logging.getLogger(__name__)
 
 import sqlite3
