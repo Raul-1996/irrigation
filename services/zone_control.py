@@ -69,6 +69,7 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             try:
                 # Check ON or STARTING zones across all groups sharing the same master topic
                 any_on = False
+                blocking_zone_id = None
                 for gg in (db.get_groups() or []):
                     try:
                         gg_topic = (gg.get('master_mqtt_topic') or '').strip()
@@ -82,13 +83,17 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                         st = str(z2.get('state') or '').lower()
                         if st in ('on', 'starting'):
                             any_on = True
+                            blocking_zone_id = z2.get('id')
                             break
                     if any_on:
                         break
                 if any_on:
+                    logger.info("master close skipped: topic=%s blocked by zone=%s state=on/starting",
+                                t_norm, blocking_zone_id)
                     return
                 mserver = db.get_mqtt_server(int(msid))
                 if not mserver:
+                    logger.warning("master close skipped: topic=%s msid=%s server not found", t_norm, msid)
                     return
                 try:
                     mode = (group_dict.get('master_mode') or 'NC').strip().upper()
@@ -98,6 +103,8 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                 publish_mqtt_value(mserver, t_norm, close_val,
                                    min_interval_sec=0.0, qos=2, retain=True,
                                    meta={'cmd': 'master_off'})
+                logger.info("master close published: topic=%s val=%s mode=%s gid=%s",
+                            t_norm, close_val, mode, gid)
                 if gid:
                     try:
                         db.update_group_fields(int(gid), {'master_valve_observed': 'closed'})
@@ -106,8 +113,8 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                         _sse_hub_c.broadcast(_json_c.dumps({'mv_group_id': int(gid), 'mv_state': 'closed'}))
                     except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
                         logger.debug("master_valve_observed update (closed) failed: %s", e)
-            except (ConnectionError, TimeoutError, OSError):
-                logger.exception('master valve delayed close failed')
+            except Exception:
+                logger.exception('master valve delayed close failed (topic=%s)', t_norm)
 
         # Cancel any pending close for this topic (covers both delayed and immediate paths)
         with _PENDING_CLOSE_LOCK:
@@ -307,11 +314,14 @@ def exclusive_start_zone(zone_id: int) -> bool:
 
 
 def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
-              master_close_immediately: bool = False) -> bool:
+              master_close_immediately: bool = False,
+              skip_master_close: bool = False) -> bool:
     """Единый стоп зоны. Идемпотентно. Публикует OFF и фиксирует в БД.
     reason: для журналирования; force — останавливать даже если state уже off.
     master_close_immediately: при True мастер-клапан закрывается без задержки
     (используется для emergency_stop / rain).
+    skip_master_close: при True мастер-клапан вообще не планируется к закрытию
+    (вызывающий сам управляет master close, например emergency_stop_all Phase C).
     """
     try:
         z = db.get_zone(zone_id)
@@ -381,7 +391,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
                     except (sqlite3.Error, OSError) as _e:
                         logger.debug("stop_zone (already off): get_groups failed: %s", _e)
                         g_eo = None
-                    if g_eo and int(g_eo.get('use_master_valve') or 0) == 1:
+                    if g_eo and int(g_eo.get('use_master_valve') or 0) == 1 and not skip_master_close:
                         _schedule_master_close(g_eo, immediate=bool(master_close_immediately))
             except (ValueError, TypeError, KeyError) as _e:
                 logger.debug("stop_zone (already off): master close scheduling skipped: %s", _e)
@@ -406,7 +416,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
                     # (master_close_delay_sec) and proper cancellable timer.
                     try:
                         gid = int(z.get('group_id') or 0)
-                        if gid and gid != 999:
+                        if gid and gid != 999 and not skip_master_close:
                             g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
                             if g and int(g.get('use_master_valve') or 0) == 1:
                                 _schedule_master_close(g, immediate=bool(master_close_immediately))
@@ -479,18 +489,21 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
 
 
 def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool = False,
-                      master_close_immediately: bool = False) -> None:
+                      master_close_immediately: bool = False,
+                      skip_master_close: bool = False) -> None:
     """Немедленно остановить все зоны в группе (идемпотентно).
 
-    master_close_immediately: при True мастер-клапан закрывается без задержки
-    (используется для emergency_stop / rain).
+    master_close_immediately: при True мастер-клапан закрывается без задержки.
+    skip_master_close: при True мастер-клапан вообще не планируется
+    (вызывающий сам управляет закрытием — например emergency_stop_all).
     """
     try:
         zones = db.get_zones_by_group(int(group_id))
         for z in zones:
             try:
                 stop_zone(int(z['id']), reason=reason, force=force,
-                          master_close_immediately=master_close_immediately)
+                          master_close_immediately=master_close_immediately,
+                          skip_master_close=skip_master_close)
                 # Небольшая пауза, чтобы избежать всплесков при публикации на слабом железе (пропускаем в тестах)
                 try:
                     if os.environ.get('TESTING', '0') != '1':
@@ -501,3 +514,202 @@ def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool =
                 logger.exception('stop_all_in_group: stop_zone failed')
     except (sqlite3.Error, OSError):
         logger.exception('stop_all_in_group failed')
+
+
+def emergency_stop_all(reason: str = 'emergency_stop') -> dict:
+    """Синхронная аварийная остановка всех групп с детерминированной последовательностью.
+
+    Phase A: для каждой группы → последовательно stop_zone(skip_master_close=True)
+             для всех зон. Master-таймеры здесь не планируются вовсе — мастер
+             закроем явно в фазе C.
+    Phase B: ожидание до 2с, чтобы все зоны перешли в state='off'. Если по
+             таймауту остались зоны в on/starting — повторно force-стопаем их.
+    Phase C: для каждой группы с use_master_valve=1 → SYNC publish close_val
+             на master_mqtt_topic напрямую (без threading.Timer, без race).
+
+    Возвращает dict со счётчиками для логирования/диагностики.
+    """
+    stats = {
+        'groups_total': 0,
+        'zones_stopped': 0,
+        'zones_force_retried': 0,
+        'masters_closed': 0,
+        'masters_skipped_no_use_master': 0,
+        'masters_skipped_no_topic': 0,
+        'masters_skipped_dup_topic': 0,
+        'masters_failed_publish': 0,
+        'zones_still_active_after_wait': 0,
+    }
+    try:
+        groups = db.get_groups() or []
+    except (sqlite3.Error, OSError):
+        logger.exception('emergency_stop_all: get_groups failed')
+        return stats
+
+    stats['groups_total'] = len(groups)
+    logger.info("emergency_stop_all: starting phase A — stop zones across %d groups", len(groups))
+
+    # Phase A: stop all zones in all groups WITHOUT scheduling any master close.
+    # Master will be closed synchronously in Phase C — we do NOT want lingering
+    # delay=60 timers firing later and republishing close.
+    for g in groups:
+        try:
+            gid = int(g.get('id') or 0)
+        except (ValueError, TypeError):
+            continue
+        if not gid:
+            continue
+        try:
+            zones = db.get_zones_by_group(gid) or []
+        except (sqlite3.Error, OSError):
+            logger.exception('emergency_stop_all: get_zones_by_group(%s) failed', gid)
+            continue
+        for z in zones:
+            try:
+                stop_zone(int(z['id']), reason=reason, force=True,
+                          master_close_immediately=False, skip_master_close=True)
+                stats['zones_stopped'] += 1
+                if os.environ.get('TESTING', '0') != '1':
+                    time.sleep(0.02)
+            except (ValueError, TypeError, KeyError, sqlite3.Error, OSError):
+                logger.exception('emergency_stop_all: stop_zone failed (zone_id=%s)', z.get('id'))
+
+    # Phase B: wait up to 2s for all zones to reach state='off' (or 'stopping' is also OK
+    # — we treat 'stopping' as in-flight-but-OFF-published; only on/starting are blockers).
+    if os.environ.get('TESTING', '0') != '1':
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            still_active = 0
+            try:
+                for g in groups:
+                    try:
+                        gid = int(g.get('id') or 0)
+                    except (ValueError, TypeError):
+                        continue
+                    if not gid:
+                        continue
+                    for z in (db.get_zones_by_group(gid) or []):
+                        st = str(z.get('state') or '').lower()
+                        if st in ('on', 'starting'):
+                            still_active += 1
+            except (sqlite3.Error, OSError):
+                logger.exception('emergency_stop_all: phase B check failed')
+                break
+            if still_active == 0:
+                break
+            time.sleep(0.1)
+        # Re-issue stop_zone(force=True) for any zone STILL in on/starting at deadline.
+        try:
+            stuck_zones = []
+            for g in groups:
+                try:
+                    gid = int(g.get('id') or 0)
+                except (ValueError, TypeError):
+                    continue
+                if not gid:
+                    continue
+                for z in (db.get_zones_by_group(gid) or []):
+                    if str(z.get('state') or '').lower() in ('on', 'starting'):
+                        stuck_zones.append(int(z.get('id') or 0))
+            if stuck_zones:
+                logger.warning("emergency_stop_all: %d zones stuck after 2s — force-retry: %s",
+                               len(stuck_zones), stuck_zones)
+                for zid in stuck_zones:
+                    if not zid:
+                        continue
+                    try:
+                        stop_zone(zid, reason=reason + '_retry', force=True,
+                                  master_close_immediately=False, skip_master_close=True)
+                        stats['zones_force_retried'] += 1
+                        if os.environ.get('TESTING', '0') != '1':
+                            time.sleep(0.02)
+                    except (ValueError, TypeError, KeyError, sqlite3.Error, OSError):
+                        logger.exception('emergency_stop_all: force-retry failed (zone_id=%s)', zid)
+            stats['zones_still_active_after_wait'] = len(stuck_zones)
+        except (sqlite3.Error, OSError):
+            logger.exception('emergency_stop_all: phase B re-issue failed')
+
+    # Phase C: synchronously close each master valve (one publish per master topic)
+    logger.info("emergency_stop_all: phase C — closing master valves")
+    seen_topics = {}  # type: dict[str, str]  # t_norm -> mode used
+    for g in groups:
+        try:
+            gid = int(g.get('id') or 0)
+        except (ValueError, TypeError):
+            continue
+        if not gid:
+            continue
+        try:
+            use_mv = int(g.get('use_master_valve') or 0)
+        except (ValueError, TypeError):
+            use_mv = 0
+        if use_mv != 1:
+            stats['masters_skipped_no_use_master'] += 1
+            continue
+        mtopic = (g.get('master_mqtt_topic') or '').strip()
+        msid = g.get('master_mqtt_server_id')
+        if not mtopic or not msid:
+            stats['masters_skipped_no_topic'] += 1
+            logger.warning("emergency_stop_all: group=%s skipped — no master topic/server", gid)
+            continue
+        try:
+            t_norm = normalize_topic(mtopic)
+        except (ValueError, TypeError, OSError):
+            t_norm = mtopic
+        try:
+            mode = (g.get('master_mode') or 'NC').strip().upper()
+        except (ValueError, TypeError, AttributeError):
+            mode = 'NC'
+        # Cancel any pending timer for this topic so it can't override us later
+        with _PENDING_CLOSE_LOCK:
+            prev = _PENDING_CLOSE_TIMERS.pop(t_norm, None)
+        if prev is not None:
+            try:
+                prev.cancel()
+            except (RuntimeError, OSError):
+                pass
+        # Skip duplicate topics shared across groups (publish once per topic).
+        # If a previously-seen group used a different master_mode, that's a
+        # configuration smell — log a warning so ops can fix it.
+        if t_norm in seen_topics:
+            prev_mode = seen_topics[t_norm]
+            if prev_mode != mode:
+                logger.warning("emergency_stop_all: group=%s shares topic=%s with earlier "
+                               "group but master_mode differs (this=%s vs first=%s) — "
+                               "first wins, check group config", gid, t_norm, mode, prev_mode)
+            stats['masters_skipped_dup_topic'] += 1
+            continue
+        seen_topics[t_norm] = mode
+        try:
+            mserver = db.get_mqtt_server(int(msid))
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            logger.exception('emergency_stop_all: get_mqtt_server(%s) failed', msid)
+            stats['masters_failed_publish'] += 1
+            continue
+        if not mserver:
+            logger.warning("emergency_stop_all: group=%s msid=%s — server not found", gid, msid)
+            stats['masters_failed_publish'] += 1
+            continue
+        close_val = '1' if mode == 'NO' else '0'
+        try:
+            publish_mqtt_value(mserver, t_norm, close_val,
+                               min_interval_sec=0.0, qos=2, retain=True,
+                               meta={'cmd': 'master_off', 'src': 'emergency'})
+            stats['masters_closed'] += 1
+            logger.info("emergency_stop_all: master closed — group=%s topic=%s val=%s mode=%s",
+                        gid, t_norm, close_val, mode)
+            try:
+                db.update_group_fields(int(gid), {'master_valve_observed': 'closed'})
+                from services import sse_hub as _sse_hub_e
+                import json as _json_e
+                _sse_hub_e.broadcast(_json_e.dumps({'mv_group_id': int(gid), 'mv_state': 'closed'}))
+            except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
+                logger.debug("emergency_stop_all: master_valve_observed update failed (gid=%s): %s", gid, e)
+            if os.environ.get('TESTING', '0') != '1':
+                time.sleep(0.05)
+        except Exception:
+            stats['masters_failed_publish'] += 1
+            logger.exception('emergency_stop_all: publish failed group=%s topic=%s', gid, t_norm)
+
+    logger.info("emergency_stop_all: done — %s", stats)
+    return stats

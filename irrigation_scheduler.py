@@ -1215,8 +1215,13 @@ class IrrigationScheduler:
     def get_active_zones(self) -> Dict[int, datetime]:
         return self.active_zones.copy()
     
-    def cancel_group_jobs(self, group_id: int):
-        """Отменяет все активные задачи планировщика для указанной группы"""
+    def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False):
+        """Отменяет все активные задачи планировщика для указанной группы.
+
+        master_close_immediately: при True мастер-клапан закрывается без задержки.
+        Используется emergency_stop, чтобы внутренний _stop_all не перезаписал
+        уже выполненный синхронный master close таймером с delay=60.
+        """
         try:
             # Ставим флаг отмены немедленно
             try:
@@ -1228,7 +1233,8 @@ class IrrigationScheduler:
             # Немедленный OFF всем зонам группы через централизованный контроллер
             try:
                 from services.zone_control import stop_all_in_group as _stop_all
-                _stop_all(int(group_id), reason='group_cancel', force=True)
+                _stop_all(int(group_id), reason='group_cancel', force=True,
+                          master_close_immediately=bool(master_close_immediately))
             except (sqlite3.Error, OSError, ValueError, TypeError):
                 logger.exception('cancel_group_jobs: stop_all_in_group failed')
 
