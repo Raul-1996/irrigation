@@ -468,9 +468,18 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                     if server: _publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, qos=2, retain=True)
             except (ConnectionError, TimeoutError, OSError) as e:
                 logger.warning("group exclusive mqtt off for zone %s: %s", z.get('id'), e)
-            try: db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
-            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
-                logger.error("group exclusive db update zone %s: %s", z.get('id'), e)
+            try:
+                # Use central stop_zone to ensure master close scheduling runs
+                # alongside the DB transition (was: direct state='off' write).
+                from services.zone_control import stop_zone as _stop_central_gex
+                _stop_central_gex(int(z['id']), reason='group_exclusive', force=True)
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e:
+                logger.error("group exclusive stop_zone for %s: %s", z.get('id'), e)
+                # Fallback to direct DB update if central stop fails
+                try:
+                    db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e2:
+                    logger.error("group exclusive db update fallback for zone %s: %s", z.get('id'), e2)
         try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))
         except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError, TypeError, KeyError) as e:
             logger.debug("group exclusive log: %s", e)

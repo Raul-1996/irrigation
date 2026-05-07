@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from datetime import datetime
 from typing import Optional
 import time
@@ -14,6 +15,129 @@ from services.observed_state import state_verifier
 import sqlite3
 
 logger = logging.getLogger(__name__)
+
+
+# Pending master-valve close timers keyed by normalized master MQTT topic.
+# Used to coalesce/cancel concurrent close attempts so that a freshly
+# scheduled close supersedes a pending one for the same topic.
+_PENDING_CLOSE_TIMERS = {}  # type: dict[str, threading.Timer]
+_PENDING_CLOSE_LOCK = threading.Lock()
+
+
+def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
+    """Schedule (or perform immediately) a master-valve close for the given group.
+
+    - Reads ``master_close_delay_sec`` from the group dict (falls back to
+      ``MASTER_VALVE_CLOSE_DELAY_SEC``); ``immediate=True`` forces zero delay.
+    - Cancels any pending close for the same master topic before scheduling.
+    - When the timer fires (or immediately), checks zones across all groups
+      sharing this master topic — counts both ``state == 'on'`` and
+      ``state == 'starting'`` to avoid race conditions during transitions.
+    - Skips scheduling under TESTING (mirrors prior behaviour).
+    """
+    try:
+        if not group_dict:
+            return
+        try:
+            if int(group_dict.get('use_master_valve') or 0) != 1:
+                return
+        except (ValueError, TypeError):
+            return
+        mtopic = (group_dict.get('master_mqtt_topic') or '').strip()
+        msid = group_dict.get('master_mqtt_server_id')
+        if not mtopic or not msid:
+            return
+        try:
+            gid = int(group_dict.get('id') or 0)
+        except (ValueError, TypeError):
+            gid = 0
+        try:
+            _raw_delay = group_dict.get('master_close_delay_sec')
+            delay = int(_raw_delay) if _raw_delay is not None else MASTER_VALVE_CLOSE_DELAY_SEC
+        except (ValueError, TypeError):
+            delay = MASTER_VALVE_CLOSE_DELAY_SEC
+        delay = max(1, delay)
+        if immediate:
+            delay = 0
+
+        try:
+            t_norm = normalize_topic(mtopic)
+        except (ValueError, TypeError, OSError):
+            t_norm = mtopic
+
+        def _do_close():
+            try:
+                # Check ON or STARTING zones across all groups sharing the same master topic
+                any_on = False
+                for gg in (db.get_groups() or []):
+                    try:
+                        gg_topic = (gg.get('master_mqtt_topic') or '').strip()
+                        if not gg_topic:
+                            continue
+                        if normalize_topic(gg_topic) != t_norm:
+                            continue
+                    except (ValueError, TypeError, OSError):
+                        continue
+                    for z2 in (db.get_zones_by_group(int(gg.get('id'))) or []):
+                        st = str(z2.get('state') or '').lower()
+                        if st in ('on', 'starting'):
+                            any_on = True
+                            break
+                    if any_on:
+                        break
+                if any_on:
+                    return
+                mserver = db.get_mqtt_server(int(msid))
+                if not mserver:
+                    return
+                try:
+                    mode = (group_dict.get('master_mode') or 'NC').strip().upper()
+                except (ValueError, TypeError, KeyError):
+                    mode = 'NC'
+                close_val = '1' if mode == 'NO' else '0'
+                publish_mqtt_value(mserver, t_norm, close_val,
+                                   min_interval_sec=0.0, qos=2, retain=True,
+                                   meta={'cmd': 'master_off'})
+                if gid:
+                    try:
+                        db.update_group_fields(int(gid), {'master_valve_observed': 'closed'})
+                        from services import sse_hub as _sse_hub_c
+                        import json as _json_c
+                        _sse_hub_c.broadcast(_json_c.dumps({'mv_group_id': int(gid), 'mv_state': 'closed'}))
+                    except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
+                        logger.debug("master_valve_observed update (closed) failed: %s", e)
+            except (ConnectionError, TimeoutError, OSError):
+                logger.exception('master valve delayed close failed')
+
+        # Cancel any pending close for this topic (covers both delayed and immediate paths)
+        with _PENDING_CLOSE_LOCK:
+            prev = _PENDING_CLOSE_TIMERS.pop(t_norm, None)
+        if prev is not None:
+            try:
+                prev.cancel()
+            except (RuntimeError, OSError):
+                pass
+
+        if os.environ.get('TESTING'):
+            return
+
+        if delay <= 0:
+            # Run inline-but-non-blocking on a daemon thread to keep semantics
+            # consistent (callers don't expect to block on master close).
+            t = threading.Timer(0.0, _do_close)
+            t.daemon = True
+            with _PENDING_CLOSE_LOCK:
+                _PENDING_CLOSE_TIMERS[t_norm] = t
+            t.start()
+            return
+
+        timer = threading.Timer(float(delay), _do_close)
+        timer.daemon = True
+        with _PENDING_CLOSE_LOCK:
+            _PENDING_CLOSE_TIMERS[t_norm] = timer
+        timer.start()
+    except (RuntimeError, OSError, ValueError, TypeError):
+        logger.exception('schedule master close failed')
 
 
 def _versioned_update(zone_id: int, updates: dict) -> None:
@@ -105,6 +229,13 @@ def exclusive_start_zone(zone_id: int) -> bool:
                                     mode = 'NC'
                                 open_val = '0' if mode == 'NO' else '1'
                                 publish_mqtt_value(mserver, normalize_topic(mtopic), open_val, min_interval_sec=0.0, qos=2, retain=True)
+                                try:
+                                    db.update_group_fields(int(gid), {'master_valve_observed': 'open'})
+                                    from services import sse_hub as _sse_hub
+                                    import json as _json
+                                    _sse_hub.broadcast(_json.dumps({'mv_group_id': int(gid), 'mv_state': 'open'}))
+                                except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
+                                    logger.debug("master_valve_observed update (open) failed: %s", e)
                 if sid and topic:
                     server = db.get_mqtt_server(int(sid))
                     if server:
@@ -175,9 +306,12 @@ def exclusive_start_zone(zone_id: int) -> bool:
         return False
 
 
-def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool:
+def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
+              master_close_immediately: bool = False) -> bool:
     """Единый стоп зоны. Идемпотентно. Публикует OFF и фиксирует в БД.
     reason: для журналирования; force — останавливать даже если state уже off.
+    master_close_immediately: при True мастер-клапан закрывается без задержки
+    (используется для emergency_stop / rain).
     """
     try:
         z = db.get_zone(zone_id)
@@ -235,6 +369,22 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                             db.update_zone(int(zone_id), updates)
             except (sqlite3.Error, OSError, ValueError, TypeError):
                 logger.exception('stop_zone (already off): water stats update failed')
+            # Even when the zone was already off (idempotent path), the caller
+            # may want to (re)schedule a master-valve close — required for
+            # emergency_stop / rain monitor paths and for keeping idempotency
+            # on duplicate manual stops.
+            try:
+                gid_eo = int(z.get('group_id') or 0)
+                if gid_eo and gid_eo != 999:
+                    try:
+                        g_eo = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid_eo), None)
+                    except (sqlite3.Error, OSError) as _e:
+                        logger.debug("stop_zone (already off): get_groups failed: %s", _e)
+                        g_eo = None
+                    if g_eo and int(g_eo.get('use_master_valve') or 0) == 1:
+                        _schedule_master_close(g_eo, immediate=bool(master_close_immediately))
+            except (ValueError, TypeError, KeyError) as _e:
+                logger.debug("stop_zone (already off): master close scheduling skipped: %s", _e)
             return True
         last_time = z.get('watering_start_time')
         # Стейт: on/starting -> stopping
@@ -252,45 +402,14 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
                         state_verifier.verify_async(int(zone_id), 'off')
                     except (ValueError, TypeError, KeyError):
                         logger.debug("observed_state verify_async(off) launch failed")
-                    # Delayed master valve close (60s) if no zones ON on the same master topic across peer groups
+                    # Delayed master valve close — uses per-group delay
+                    # (master_close_delay_sec) and proper cancellable timer.
                     try:
                         gid = int(z.get('group_id') or 0)
                         if gid and gid != 999:
                             g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == gid), None)
                             if g and int(g.get('use_master_valve') or 0) == 1:
-                                mtopic = (g.get('master_mqtt_topic') or '').strip()
-                                msid = g.get('master_mqtt_server_id')
-                                if mtopic and msid:
-                                    def _delayed_close():
-                                        try:
-                                            time.sleep(MASTER_VALVE_CLOSE_DELAY_SEC)
-                                            # Check any ON zone in any group sharing this master topic
-                                            any_on = False
-                                            for gg in (db.get_groups() or []):
-                                                if (gg.get('master_mqtt_topic') or '').strip() != mtopic:
-                                                    continue
-                                                for z2 in (db.get_zones_by_group(int(gg.get('id'))) or []):
-                                                    if str(z2.get('state')).lower() == 'on':
-                                                        any_on = True
-                                                        break
-                                                if any_on:
-                                                    break
-                                            if not any_on:
-                                                mserver = db.get_mqtt_server(int(msid))
-                                                if mserver:
-                                                    try:
-                                                        mode = (g.get('master_mode') or 'NC').strip().upper()
-                                                    except (ValueError, TypeError, KeyError) as e:
-                                                        logger.debug("Exception in _delayed_close: %s", e)
-                                                        mode = 'NC'
-                                                    close_val = '1' if mode == 'NO' else '0'
-                                                    publish_mqtt_value(mserver, normalize_topic(mtopic), close_val, min_interval_sec=0.0, qos=2, retain=True, meta={'cmd':'master_off'})
-                                        except (ConnectionError, TimeoutError, OSError):
-                                            logger.exception('master valve delayed close failed')
-                                    import os
-                                    if not os.environ.get('TESTING'):
-                                        import threading as _th
-                                        _th.Thread(target=_delayed_close, daemon=True).start()
+                                _schedule_master_close(g, immediate=bool(master_close_immediately))
                     except (ConnectionError, TimeoutError, OSError, RuntimeError):
                         logger.exception('master valve close scheduling failed')
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
@@ -359,13 +478,19 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False) -> bool
         return False
 
 
-def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool = False) -> None:
-    """Немедленно остановить все зоны в группе (идемпотентно)."""
+def stop_all_in_group(group_id: int, reason: str = 'group_cancel', force: bool = False,
+                      master_close_immediately: bool = False) -> None:
+    """Немедленно остановить все зоны в группе (идемпотентно).
+
+    master_close_immediately: при True мастер-клапан закрывается без задержки
+    (используется для emergency_stop / rain).
+    """
     try:
         zones = db.get_zones_by_group(int(group_id))
         for z in zones:
             try:
-                stop_zone(int(z['id']), reason=reason, force=force)
+                stop_zone(int(z['id']), reason=reason, force=force,
+                          master_close_immediately=master_close_immediately)
                 # Небольшая пауза, чтобы избежать всплесков при публикации на слабом железе (пропускаем в тестах)
                 try:
                     if os.environ.get('TESTING', '0') != '1':

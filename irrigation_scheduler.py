@@ -1108,6 +1108,13 @@ class IrrigationScheduler:
                                             mode = 'NC'
                                         from services.mqtt_pub import publish_mqtt_value as _pub
                                         _pub(mserver, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0, qos=2, retain=True)
+                                        try:
+                                            self.db.update_group_fields(int(gid), {'master_valve_observed': 'open'})
+                                            from services import sse_hub as _sse_hub_o
+                                            import json as _json_o
+                                            _sse_hub_o.broadcast(_json_o.dumps({'mv_group_id': int(gid), 'mv_state': 'open'}))
+                                        except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as _e:
+                                            logger.debug("master_valve_observed update (open) failed: %s", _e)
                     # Publish zone ON
                     topic = (zone.get('topic') or '').strip()
                     sid = zone.get('mqtt_server_id')

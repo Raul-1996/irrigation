@@ -30,8 +30,9 @@ def api_emergency_stop():
             groups = db.get_groups() or []
             for g in groups:
                 try:
-                    _stop_all(int(g['id']), reason='emergency_stop', force=True)
-                except (ValueError, TypeError, KeyError):
+                    _stop_all(int(g['id']), reason='emergency_stop', force=True,
+                              master_close_immediately=True)
+                except (ValueError, KeyError):
                     logger.exception('emergency stop: stop_all_in_group failed')
         except (ValueError, TypeError, RuntimeError):
             logger.exception('emergency stop: controller unavailable')

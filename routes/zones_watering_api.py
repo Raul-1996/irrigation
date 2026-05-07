@@ -167,7 +167,11 @@ def api_zone_watering_time(zone_id):
         elapsed_seconds = max(0, int((now - start_dt).total_seconds()))
         total_seconds = int(total_duration * 60)
         if elapsed_seconds >= total_seconds:
-            db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
+            try:
+                from services.zone_control import stop_zone as _stop_central
+                _stop_central(int(zone_id), reason='time_expired_poll', force=True)
+            except (ValueError, TypeError, KeyError) as e:
+                logger.debug("stop_zone from polling failed: %s", e)
             resp = jsonify({
                 'success': True, 'zone_id': zone_id, 'is_watering': False,
                 'elapsed_time': total_duration, 'remaining_time': 0, 'total_duration': total_duration,
@@ -350,6 +354,13 @@ def api_zone_mqtt_start(zone_id: int):
                                 logger.debug("Exception in line_1046: %s", e)
                                 mode = 'NC'
                             _publish_mqtt_value(server_mv, normalize_topic(mtopic), ('0' if mode == 'NO' else '1'), min_interval_sec=0.0, qos=2, retain=True)
+                            try:
+                                db.update_group_fields(int(gid2), {'master_valve_observed': 'open'})
+                                from services import sse_hub as _sse_hub2
+                                import json as _json2
+                                _sse_hub2.broadcast(_json2.dumps({'mv_group_id': int(gid2), 'mv_state': 'open'}))
+                            except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
+                                logger.debug("master_valve_observed update (open) failed: %s", e)
             sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
             if mqtt and sid and topic:
                 tpc = normalize_topic(topic)

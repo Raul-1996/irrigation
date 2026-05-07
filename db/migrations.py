@@ -132,6 +132,7 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'zones_add_commanded_observed', self._migrate_add_commanded_observed)
                 self._apply_named_migration(conn, 'groups_add_master_and_sensors', self._migrate_add_groups_master_and_sensors)
                 self._apply_named_migration(conn, 'groups_add_master_valve_observed', self._migrate_add_groups_master_valve_observed)
+                self._apply_named_migration(conn, 'groups_add_master_close_delay_sec', self._migrate_add_groups_master_close_delay_sec)
                 self._apply_named_migration(conn, 'groups_add_water_meter_extended', self._migrate_add_groups_water_meter_extended)
                 self._apply_named_migration(conn, 'zones_add_water_stats', self._migrate_add_zones_water_stats)
                 self._apply_named_migration(conn, 'create_zone_runs_v1', self._migrate_create_zone_runs)
@@ -493,6 +494,7 @@ class MigrationRunner:
             add('master_mode', 'ALTER TABLE groups ADD COLUMN master_mode TEXT DEFAULT "NC"')
             add('master_mqtt_server_id', 'ALTER TABLE groups ADD COLUMN master_mqtt_server_id INTEGER')
             add('master_valve_observed', 'ALTER TABLE groups ADD COLUMN master_valve_observed TEXT')
+            add('master_close_delay_sec', 'ALTER TABLE groups ADD COLUMN master_close_delay_sec INTEGER DEFAULT 60')
             add('use_pressure_sensor', 'ALTER TABLE groups ADD COLUMN use_pressure_sensor INTEGER DEFAULT 0')
             add('pressure_mqtt_topic', 'ALTER TABLE groups ADD COLUMN pressure_mqtt_topic TEXT DEFAULT ""')
             add('pressure_unit', 'ALTER TABLE groups ADD COLUMN pressure_unit TEXT DEFAULT "bar"')
@@ -518,6 +520,17 @@ class MigrationRunner:
                 logger.info('Добавлено поле master_valve_observed в groups')
         except sqlite3.Error as e:
             logger.error("Ошибка миграции groups_add_master_valve_observed: %s", e)
+
+    def _migrate_add_groups_master_close_delay_sec(self, conn):
+        try:
+            cursor = conn.execute("PRAGMA table_info(groups)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if 'master_close_delay_sec' not in cols:
+                conn.execute('ALTER TABLE groups ADD COLUMN master_close_delay_sec INTEGER DEFAULT 60')
+                conn.commit()
+                logger.info('Добавлено поле master_close_delay_sec в groups')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции groups_add_master_close_delay_sec: %s", e)
 
     def _migrate_add_groups_water_meter_extended(self, conn):
         try:

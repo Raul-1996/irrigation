@@ -62,6 +62,10 @@ function renderGroupsGrid() {
                             <input type="text" id="mv-topic-${group.id}" value="${(group.master_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-mr6c_101/controls/K1" oninput="scheduleAutoSave(${group.id})" onblur="saveGroupMasterTopic(${group.id})">
                         </div>
                         <div class="form-group">
+                            <label>Удержание мастера после стопа (сек)</label>
+                            <input type="number" min="1" max="3600" id="mv-delay-${group.id}" value="${(group.master_close_delay_sec ?? 60)}" onblur="saveGroupMasterCloseDelay(${group.id})">
+                        </div>
+                        <div class="form-group">
                             <label>Режим</label>
                             <select id="mv-mode-${group.id}" onchange="saveGroupMasterMode(${group.id})">
                                 <option value="NC" ${((group.master_mode||'NC')==='NC')?'selected':''}>NC (нормально закрыт)</option>

@@ -110,7 +110,8 @@ class RainMonitor:
                 from services.zone_control import stop_all_in_group
                 for gid in target_groups:
                     try:
-                        stop_all_in_group(gid, reason='rain', force=True)
+                        stop_all_in_group(gid, reason='rain', force=True,
+                                          master_close_immediately=True)
                     except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
                         logger.exception('RainMonitor: stop_all_in_group failed')
             except ImportError:

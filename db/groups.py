@@ -83,7 +83,8 @@ class GroupRepository(BaseRepository):
             'use_master_valve', 'master_mqtt_topic', 'master_mode', 'master_mqtt_server_id',
             'use_pressure_sensor', 'pressure_mqtt_topic', 'pressure_unit', 'pressure_mqtt_server_id',
             'use_water_meter', 'water_mqtt_topic', 'water_mqtt_server_id', 'master_valve_observed',
-            'water_pulse_size', 'water_base_value_m3', 'water_base_pulses'
+            'water_pulse_size', 'water_base_value_m3', 'water_base_pulses',
+            'master_close_delay_sec'
         }
         set_parts = []
         params = []

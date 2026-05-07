@@ -73,6 +73,7 @@ def api_update_group(group_id):
         'water_pulse_size': ('water_pulse_size', lambda v: (str(v or '1l') if str(v or '1l') in ('1l', '10l', '100l') else '1l')),
         'water_base_value_m3': ('water_base_value_m3', lambda v: float(v) if v not in (None, '') else 0.0),
         'water_base_pulses': ('water_base_pulses', lambda v: int(v) if v not in (None, '') else 0),
+        'master_close_delay_sec': ('master_close_delay_sec', lambda v: max(1, min(3600, int(v or 60)))),
     }
     updates = {}
     for k, (col, norm) in fields_map.items():
@@ -109,7 +110,7 @@ def api_update_group(group_id):
             for k in ('use_master_valve', 'master_mqtt_topic', 'master_mode', 'master_mqtt_server_id',
                       'use_pressure_sensor', 'pressure_mqtt_topic', 'pressure_unit', 'pressure_mqtt_server_id',
                       'use_water_meter', 'water_mqtt_topic', 'water_mqtt_server_id', 'water_pulse_size',
-                      'water_base_value_m3', 'water_base_pulses'):
+                      'water_base_value_m3', 'water_base_pulses', 'master_close_delay_sec'):
                 if k in data:
                     payload[k] = data.get(k)
             db.add_log('group_edit', json.dumps(payload))
