@@ -89,6 +89,11 @@ info "Resetting to origin/$BRANCH"
 git reset --hard "origin/$BRANCH" -q
 ok "Code updated to $(git rev-parse --short HEAD)"
 
+# 2.5) Purge stale __pycache__ (not removed by git reset; can shadow fresh .py)
+info "Purging stale __pycache__..."
+find . -path ./venv -prune -o -path ./.git -prune -o -type d -name __pycache__ -print -exec rm -rf {} + 2>/dev/null || true
+ok "__pycache__ purged"
+
 # 3) Ensure venv and requirements
 if [[ ! -d "venv" ]]; then
   info "Creating virtualenv..."
@@ -158,6 +163,45 @@ if systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then
   fi
 else
   warn "Service $SERVICE not enabled. Launching app manually is required."
+  exit 0
+fi
+
+# 5) Smoke check — wait for sd_notify READY, then probe /readyz
+SMOKE_PORT=${SMOKE_PORT:-8080}
+info "Waiting up to 30s for service to settle..."
+for i in $(seq 1 15); do
+  sleep 2
+  if journalctl -u "$SERVICE" --since "1 minute ago" --no-pager 2>/dev/null | grep -q "sd_notify READY=1 sent"; then
+    ok "sd_notify READY=1 observed in journal"
+    break
+  fi
+  if [[ $i -eq 15 ]]; then
+    warn "sd_notify READY=1 not seen in journal within 30s (continuing)"
+  fi
+done
+
+info "Probing /readyz on 127.0.0.1:${SMOKE_PORT}..."
+READYZ_BODY=$(curl -fsS --max-time 5 "http://127.0.0.1:${SMOKE_PORT}/readyz" 2>/dev/null || true)
+if [[ -z "$READYZ_BODY" ]]; then
+  err "/readyz did not respond. Service: $(systemctl is-active "$SERVICE")"
+  err "Last 30 log lines: journalctl -u $SERVICE -n 30"
+  exit 1
+fi
+
+SCHED_STATUS=$(echo "$READYZ_BODY" | python3 -c "import sys,json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('checks', {}).get('scheduler', {}).get('status', 'missing'))
+except Exception as e:
+    print(f'parse_error:{e}')
+" 2>/dev/null || echo "parse_failed")
+
+if [[ "$SCHED_STATUS" == "ok" ]]; then
+  ok "/readyz scheduler check: ok"
+else
+  err "/readyz scheduler check: $SCHED_STATUS"
+  err "Body: $READYZ_BODY"
+  exit 1
 fi
 
 ok "Update completed successfully. Backup stored at: $BACKUP_DIR"

@@ -269,11 +269,11 @@ def _check_scheduler() -> Dict[str, Any]:
     if sched is None:
         return {'status': 'fail', 'duration_ms': dur_ms,
                 'reason': 'scheduler not initialised'}
-    running = bool(getattr(sched, 'running', False))
+    running = bool(getattr(sched, 'is_running', False))
     return {
         'status': 'ok' if running else 'fail',
         'duration_ms': dur_ms,
-        'reason': None if running else 'scheduler.running is False',
+        'reason': None if running else 'scheduler.is_running is False',
     }
 
 

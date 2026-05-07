@@ -8,6 +8,8 @@ Protocol: datagram to $NOTIFY_SOCKET with ASCII payload.
 
 When $NOTIFY_SOCKET is not set (dev / not under systemd), every call is a no-op.
 """
+from __future__ import annotations
+
 import logging
 import os
 import socket

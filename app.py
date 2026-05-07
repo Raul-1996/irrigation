@@ -412,8 +412,6 @@ for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_
 csrf.exempt(health_api_bp)
 app.register_blueprint(health_api_bp)
 
-_initialize_app(app, db, start_watchdog_fn=lambda: _start_single_zone_watchdog())
-
 # ── Mutation guard ─────────────────────────────────────────────────────────
 @app.before_request
 def _require_admin_for_mutations():
@@ -594,6 +592,8 @@ def _publish_mqtt_async(server, topic, value, min_interval_sec=0.0):
         threading.Thread(target=lambda: _publish_mqtt_value(server, topic, value, min_interval_sec=min_interval_sec), daemon=True).start()
     except (RuntimeError, OSError) as e:
         logger.warning("_publish_mqtt_async thread start: %s", e)
+
+_initialize_app(app, db, start_watchdog_fn=lambda: _start_single_zone_watchdog())
 
 # ── Main ───────────────────────────────────────────────────────────────────
 if __name__ == '__main__':

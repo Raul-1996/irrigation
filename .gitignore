@@ -162,6 +162,9 @@ env/
 
 # WB-Irrigation runtime artifacts
 backups/
+backups
+*.bak
+*.bak.*
 server.out
 server.pid
 emulator.out
