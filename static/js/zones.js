@@ -853,6 +853,28 @@
         }
     }
 
+    async function saveGroupMasterCloseDelay(groupId) {
+        try {
+            const el = document.getElementById(`mv-delay-${groupId}`);
+            if (!el) return;
+            let v = parseInt(el.value, 10);
+            if (isNaN(v)) v = 60;
+            if (v < 1) v = 1;
+            if (v > 3600) v = 3600;
+            el.value = v;
+            const ok = await api.put(`/api/groups/${groupId}`, { master_close_delay_sec: v });
+            if (!ok) {
+                showNotification('Не удалось сохранить задержку закрытия мастера', 'error');
+            } else {
+                const gi = groupsData.findIndex(g=>g.id===groupId);
+                if (gi>=0) { groupsData[gi].master_close_delay_sec = v; }
+                showNotification('Задержка закрытия мастера сохранена', 'success');
+            }
+        } catch (e) {
+            showNotification('Ошибка сохранения задержки мастер-клапана', 'error');
+        }
+    }
+
     async function saveEnvConfig() {
         try {
             const temp = {
