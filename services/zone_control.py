@@ -316,25 +316,31 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
-                                # Close the open zone_run before flipping
-                                # state — leaves a clean 'ok' row in history
-                                # so get_last_watering_time() picks it up.
-                                # Pre-refactor this path leaked open runs:
-                                # they would only be marked 'aborted' on the
-                                # next reboot via _boot_sync, never count as
-                                # a successful watering.
-                                try:
-                                    _run = db.get_open_zone_run(oid)
-                                    if _run:
-                                        db.finish_zone_run(
-                                            int(_run['id']),
-                                            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                            time.monotonic(),
-                                            None, None, None, status='ok',
-                                        )
-                                except (sqlite3.Error, OSError):
-                                    logger.exception('peer_off finish_zone_run failed oid=%s', oid)
-                                _versioned_update(oid, {'state': 'off', 'watering_start_time': None}, audit_reason='peer_off')
+                                with zone_lock(oid):
+                                    # Close the open zone_run before flipping
+                                    # state — leaves a clean 'ok' row in
+                                    # history so get_last_watering_time()
+                                    # picks it up. Pre-refactor this path
+                                    # leaked open runs: they would only be
+                                    # marked 'aborted' on the next reboot via
+                                    # _boot_sync, never count as a successful
+                                    # watering. The whole find-open-run →
+                                    # finish-run → state-update sequence runs
+                                    # under the same lock so concurrent
+                                    # exclusive_start_zone calls cannot
+                                    # double-finish the same run.
+                                    try:
+                                        _run = db.get_open_zone_run(oid)
+                                        if _run:
+                                            db.finish_zone_run(
+                                                int(_run['id']),
+                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                time.monotonic(),
+                                                None, None, None, status='ok',
+                                            )
+                                    except (sqlite3.Error, OSError):
+                                        logger.exception('peer_off finish_zone_run failed oid=%s', oid)
+                                    _versioned_update(oid, {'state': 'off', 'watering_start_time': None}, audit_reason='peer_off')
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed")
 
@@ -357,21 +363,26 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
-                                # Close the open zone_run (see parallel branch
-                                # comment above) — required for peer_off to
-                                # show up in get_last_watering_time().
-                                try:
-                                    _run = db.get_open_zone_run(oid)
-                                    if _run:
-                                        db.finish_zone_run(
-                                            int(_run['id']),
-                                            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                            time.monotonic(),
-                                            None, None, None, status='ok',
-                                        )
-                                except (sqlite3.Error, OSError):
-                                    logger.exception('peer_off finish_zone_run failed oid=%s', oid)
-                                _versioned_update(oid, {'state': 'off', 'watering_start_time': None}, audit_reason='peer_off')
+                                with zone_lock(oid):
+                                    # Close the open zone_run (see parallel
+                                    # branch comment above) — required for
+                                    # peer_off to show up in
+                                    # get_last_watering_time(). Run-close +
+                                    # state update are atomic under the lock
+                                    # to prevent double-finish under
+                                    # concurrent exclusive_start_zone calls.
+                                    try:
+                                        _run = db.get_open_zone_run(oid)
+                                        if _run:
+                                            db.finish_zone_run(
+                                                int(_run['id']),
+                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                time.monotonic(),
+                                                None, None, None, status='ok',
+                                            )
+                                    except (sqlite3.Error, OSError):
+                                        logger.exception('peer_off finish_zone_run failed oid=%s', oid)
+                                    _versioned_update(oid, {'state': 'off', 'watering_start_time': None}, audit_reason='peer_off')
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed (sequential)")
         try:
