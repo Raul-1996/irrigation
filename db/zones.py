@@ -634,9 +634,30 @@ class ZoneRepository(BaseRepository):
             logger.error("Ошибка завершения zone_run %s: %s", run_id, e)
             return False
 
+    @staticmethod
+    def _parse_postpone_dt(s: Optional[str]) -> Optional[datetime]:
+        """Local datetime parser mirroring irrigation_scheduler._parse_dt.
+
+        Duplicated (instead of imported from services.helpers) to avoid a
+        layering violation: db/* must not depend on services/*.
+        """
+        if not s:
+            return None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+            try:
+                return datetime.strptime(s, fmt)
+            except (ValueError, TypeError, KeyError):
+                continue
+        return None
+
     def compute_next_run_for_zone(self, zone_id: int, programs_getter=None) -> Optional[str]:
         """Рассчитать ближайшее будущее время запуска зоны по всем программам.
         programs_getter: callable that returns list of programs (injected from facade).
+
+        Если у зоны установлен ``postpone_until`` в будущем, нижняя граница
+        поиска (``now``) сдвигается вперёд до конца окна отложки — иначе UI
+        показывал бы ближайший старт программы внутри отложенного окна, хотя
+        реальный планировщик его пропустит.
         """
         try:
             zone = self.get_zone(zone_id)
@@ -646,6 +667,9 @@ class ZoneRepository(BaseRepository):
             if not programs:
                 return None
             now = datetime.now()
+            postpone_dt = self._parse_postpone_dt(zone.get('postpone_until'))
+            if postpone_dt and postpone_dt > now:
+                now = postpone_dt
             best_dt: Optional[datetime] = None
             for prog in programs:
                 if zone_id not in prog.get('zones', []):

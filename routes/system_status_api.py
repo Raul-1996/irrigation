@@ -7,7 +7,7 @@ import logging
 
 from database import db
 from irrigation_scheduler import get_scheduler
-from services.helpers import api_error
+from services.helpers import api_error, parse_dt
 from services.security import admin_required
 from services.audit import audit_log
 from services.monitors import rain_monitor, env_monitor, water_monitor
@@ -316,12 +316,16 @@ def api_status():
             pu = z.get('postpone_until')
             if not pu:
                 continue
-            try:
-                pu_dt = datetime.strptime(pu, '%Y-%m-%d %H:%M')
-                if pu_dt > datetime.now():
-                    postponed_zones.append(z)
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in line_679: %s", e)
+            # Canonical postpone values are written as YYYY-MM-DD HH:MM:SS
+            # (system_config_api uses '%Y-%m-%d 23:59:59'); the previous
+            # strptime('%Y-%m-%d %H:%M') silently failed and short-circuited
+            # the "is postponed" check.  parse_dt accepts both formats.
+            pu_dt = parse_dt(pu)
+            if pu_dt is None:
+                # Unparseable — treat as postponed (defensive: matches the
+                # prior except-branch behaviour).
+                postponed_zones.append(z)
+            elif pu_dt > datetime.now():
                 postponed_zones.append(z)
 
         if current_app.config.get('EMERGENCY_STOP'):
@@ -350,7 +354,7 @@ def api_status():
                 if any(zone_id in group_zone_ids for zone_id in program_zones):
                     group_programs.append(program)
             if group_programs:
-                from services.helpers import parse_dt
+                # parse_dt imported at module level (top of file).
                 search_from = datetime.now()
                 try:
                     pu_candidates = []
