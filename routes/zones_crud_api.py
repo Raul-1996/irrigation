@@ -14,6 +14,16 @@ logger = logging.getLogger(__name__)
 zones_crud_api_bp = Blueprint('zones_crud_api', __name__)
 
 
+# Fields that drive the zone state machine. They MUST flow through
+# services.zones_state.update_zone_state so an audit row is emitted and the
+# optimistic-lock / observed-state machinery is exercised. Any CRUD or bulk
+# entry point silently strips these to keep audit integrity intact (B1).
+_STATE_MACHINE_FIELDS = {
+    'state', 'commanded_state', 'observed_state',
+    'fault_count', 'last_fault',
+}
+
+
 # ---- Zone CRUD ----
 
 @zones_crud_api_bp.route('/api/zones')
@@ -41,10 +51,6 @@ def api_zone(zone_id):
         # an audit-evading backdoor.  Returning 400 makes any frontend that
         # accidentally tries this path break loudly instead of silently
         # writing an unaudited transition.
-        _STATE_MACHINE_FIELDS = {
-            'state', 'commanded_state', 'observed_state',
-            'fault_count', 'last_fault',
-        }
         bad_fields = sorted(set(data.keys()) & _STATE_MACHINE_FIELDS)
         if bad_fields:
             logger.warning(
@@ -157,7 +163,25 @@ def api_import_zones_bulk():
         zones = body.get('zones') or []
         if not isinstance(zones, list) or not zones:
             return jsonify({'success': False, 'message': 'Нет данных для импорта'}), 400
-        stats = db.bulk_upsert_zones(zones)
+        # B1 FIX: defence-in-depth — strip state-machine fields from the payload
+        # BEFORE handing it to bulk_upsert_zones.  The DB-layer whitelist
+        # (db/zones.py::_ALLOWED_UPDATE_COLUMNS) is the primary guard, but
+        # filtering here keeps the audit log honest: even if a caller smuggled
+        # such fields, they never reach SQL nor the audit context.
+        sanitised = []
+        for z in zones:
+            if not isinstance(z, dict):
+                sanitised.append(z)
+                continue
+            stripped = {k: v for k, v in z.items() if k not in _STATE_MACHINE_FIELDS}
+            if len(stripped) != len(z):
+                logger.warning(
+                    "api_import_zones_bulk: stripped state-machine fields %s from zone payload (id=%s)",
+                    sorted(set(z.keys()) & _STATE_MACHINE_FIELDS),
+                    z.get('id'),
+                )
+            sanitised.append(stripped)
+        stats = db.bulk_upsert_zones(sanitised)
         try:
             db.add_log('zones_import', json.dumps({'counts': stats}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

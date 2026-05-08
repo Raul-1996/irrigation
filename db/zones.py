@@ -370,9 +370,20 @@ class ZoneRepository(BaseRepository):
                                 # otherwise a future refactor that lets user
                                 # data leak into the key side promotes this
                                 # to a full SQL injection.
+                                #
+                                # B1 FIX: 'state' and other state-machine
+                                # fields are deliberately EXCLUDED here —
+                                # bulk-upsert must never bypass the
+                                # state-machine guard, optimistic-lock, and
+                                # audit trail in services.zones_state.  Any
+                                # caller that wants to change zone runtime
+                                # state must use /api/zones/<id>/start|stop
+                                # or services.zones_state.update_zone_state
+                                # so a zone_state_change audit row is
+                                # emitted.
                                 _ALLOWED_UPDATE_COLUMNS = {
                                     'name', 'icon', 'duration', 'group_id',
-                                    'topic', 'state', 'mqtt_server_id',
+                                    'topic', 'mqtt_server_id',
                                 }
 
                                 assignments = []
@@ -395,7 +406,8 @@ class ZoneRepository(BaseRepository):
                                 if ('group_id' in z) or ('group' in z):
                                     _set('group_id', int(z.get('group_id', z.get('group', 1))))
                                 if 'topic' in z: _set('topic', (z.get('topic') or '').strip())
-                                if 'state' in z: _set('state', z['state'])
+                                # B1 FIX: 'state' deliberately not handled — see
+                                # _ALLOWED_UPDATE_COLUMNS comment above.
                                 if 'mqtt_server_id' in z: _set('mqtt_server_id', z.get('mqtt_server_id'))
                                 # updated_at is always set but uses SQL
                                 # CURRENT_TIMESTAMP — not a parameter, and
