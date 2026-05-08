@@ -262,12 +262,29 @@ def ensure_hub_started() -> None:
                                 except (ValueError, TypeError, KeyError) as e:
                                     logger.debug("Handled exception in line_238: %s", e)
                             else:
-                                # Issue #2: last_watering_time must be the END time
-                                # (when zone went off), not the start time. We still
-                                # gate on having had a start so we don't overwrite
-                                # on idempotent off->off transitions.
+                                # last_watering_time is no longer a column —
+                                # we close the open zone_run here so the
+                                # MQTT-observed off (e.g. someone hit the
+                                # physical valve, or a retained '0' arrived)
+                                # is reflected in get_last_watering_time().
+                                # Gate on watering_start_time so an
+                                # idempotent off->off transition doesn't
+                                # try to find/close a non-existent open run.
                                 if z.get('watering_start_time'):
-                                    updates['last_watering_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    try:
+                                        run = _db.get_open_zone_run(int(zid))
+                                        if run:
+                                            _db.finish_zone_run(
+                                                int(run['id']),
+                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                time.monotonic(),
+                                                None, None, None,
+                                                status='ok',
+                                            )
+                                    except (sqlite3.Error, OSError):
+                                        logger.exception(
+                                            'sse_hub: finish_zone_run on observed off failed zid=%s', zid,
+                                        )
                                 updates['watering_start_time'] = None
                                 try:
                                     sched = _get_scheduler_fn()

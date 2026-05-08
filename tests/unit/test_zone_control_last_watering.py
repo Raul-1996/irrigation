@@ -1,12 +1,16 @@
-"""Issue #2 — last_watering_time must reflect when watering ENDED.
+"""last_watering_time semantics, post-zone_runs-as-history refactor.
 
-Prior to the fix, ~8 callsites wrote the original watering_start_time
-into ``zones.last_watering_time``. This module pins down the contract:
+Originally written for issue-#2 to ensure last_watering_time was the
+END time, not the start. After the refactor, last_watering_time is
+no longer a column on zones — it is derived at read time from
+``zone_runs.end_utc`` (status='ok'). The contract remains the same
+from the caller's perspective:
 
-    last_watering_time >= watering_start_time
+    db.get_last_watering_time(zid) >= watering_start_time
 
-i.e. the timestamp written must be at-or-after the start, never the
-start itself, for every code path that transitions a zone to OFF.
+Each test that historically read ``z['last_watering_time']`` now reads
+``test_db.get_last_watering_time(zone['id'])`` instead, exercising the
+helper that the dict injection delegates to.
 """
 import os
 from datetime import datetime
@@ -38,13 +42,16 @@ class TestStopZoneEndTime:
             'name': 'EndTime', 'duration': 10, 'group_id': 1,
             'topic': '/test/end',
         })
-        # Pretend the zone started a minute ago so the end-time will be
-        # noticeably newer than the start-time.
+        # Open a zone_run so stop_zone has something to finish.
         old_start = '2026-01-01 10:00:00'
         test_db.update_zone(zone['id'], {
             'state': 'on',
             'watering_start_time': old_start,
         })
+        run_id = test_db.create_zone_run(
+            int(zone['id']), 1, old_start, 0.0, None, 1, None,
+        )
+        assert run_id is not None
 
         with patch('services.zone_control.db', test_db), \
              patch('services.zone_control.publish_mqtt_value', return_value=True), \
@@ -59,9 +66,10 @@ class TestStopZoneEndTime:
         z = test_db.get_zone(zone['id'])
         assert z['state'] == 'off'
         assert z['watering_start_time'] is None
-        last = _parse(z['last_watering_time'])
+        last_str = test_db.get_last_watering_time(int(zone['id']))
+        last = _parse(last_str)
         # End time must be a NOW-ish timestamp, NOT the old start time.
-        assert z['last_watering_time'] != old_start, (
+        assert last_str != old_start, (
             'last_watering_time still equals the old start time — '
             'the issue-#2 bug is back'
         )
@@ -71,21 +79,24 @@ class TestStopZoneEndTime:
         )
 
     def test_idempotent_stop_does_not_overwrite(self, test_db):
-        """Calling stop_zone on an already-off zone must NOT clobber a
-        previously recorded end-time. The pre-fix code would have written
-        zone['watering_start_time'] (None at this point) anyway via the
-        non-idempotent branch, but the modern idempotent guard returns
-        early — pin that behaviour.
+        """Calling stop_zone on an already-off zone must NOT change
+        get_last_watering_time. Without an open zone_run, there's
+        nothing to finish — the prior most-recent ok run wins.
         """
         zone = test_db.create_zone({
             'name': 'Idempo', 'duration': 10, 'group_id': 1,
             'topic': '/test/idem',
         })
+        # Seed a closed zone_run to act as the "prior end time".
         prior_end = '2026-04-01 09:30:15'
-        test_db.update_zone(zone['id'], {
-            'state': 'off',
-            'last_watering_time': prior_end,
-        })
+        run_id = test_db.create_zone_run(
+            int(zone['id']), 1, '2026-04-01 09:00:00', 0.0, None, 1, None,
+        )
+        assert test_db.finish_zone_run(
+            int(run_id), prior_end, 1.0, None, None, None, status='ok',
+        )
+        # Zone is already off (no open run, watering_start_time None).
+        test_db.update_zone(zone['id'], {'state': 'off'})
 
         with patch('services.zone_control.db', test_db), \
              patch('services.zone_control.publish_mqtt_value', return_value=True), \
@@ -94,15 +105,12 @@ class TestStopZoneEndTime:
             from services.zone_control import stop_zone
             assert stop_zone(zone['id'], reason='test') is True
 
-        z = test_db.get_zone(zone['id'])
-        assert z['last_watering_time'] == prior_end, (
-            'idempotent stop must not rewrite last_watering_time'
-        )
+        # Idempotent stop must not have moved the most-recent ok end_utc.
+        assert test_db.get_last_watering_time(int(zone['id'])) == prior_end
 
     def test_stop_zone_format_matches_finish_zone_run(self, test_db):
         """Format must be 'YYYY-MM-DD HH:MM:SS' — the UI does
-        replace('T',' ').slice(0,16) and the same string is written by
-        finish_zone_run for end_utc. Pin format to avoid drift.
+        replace('T',' ').slice(0,16). Pin format to avoid drift.
         """
         zone = test_db.create_zone({
             'name': 'Fmt', 'duration': 10, 'group_id': 1,
@@ -112,24 +120,27 @@ class TestStopZoneEndTime:
             'state': 'on',
             'watering_start_time': '2026-01-01 10:00:00',
         })
+        test_db.create_zone_run(
+            int(zone['id']), 1, '2026-01-01 10:00:00', 0.0, None, 1, None,
+        )
         with patch('services.zone_control.db', test_db), \
              patch('services.zone_control.publish_mqtt_value', return_value=True), \
              patch('services.zone_control.water_monitor'), \
              patch('services.zone_control.state_verifier'):
             from services.zone_control import stop_zone
             assert stop_zone(zone['id']) is True
-        z = test_db.get_zone(zone['id'])
+        last = test_db.get_last_watering_time(int(zone['id']))
         # Strict parse — will raise if format is wrong.
-        _parse(z['last_watering_time'])
+        _parse(last)
         # And explicitly: no 'T' separator (ISO with T is the wrong shape).
-        assert 'T' not in z['last_watering_time']
+        assert 'T' not in last
 
 
 class TestPeerOffEndTime:
     def test_peer_off_writes_end_time(self, test_db):
         """exclusive_start_zone() peer-stops siblings in the same group.
-        Each peer must get its last_watering_time set to a NOW timestamp,
-        not the value of its own watering_start_time.
+        Each peer must have its open zone_run closed so the end time is
+        recorded — pre-refactor this leaked open runs forever.
         """
         import time as _time
         z_running = test_db.create_zone({
@@ -145,6 +156,10 @@ class TestPeerOffEndTime:
             'state': 'on',
             'watering_start_time': old_start,
         })
+        # Open a zone_run for the running zone so peer_off has one to finish.
+        test_db.create_zone_run(
+            int(z_running['id']), 1, old_start, 0.0, None, 1, None,
+        )
 
         with patch('services.zone_control.db', test_db), \
              patch('services.zone_control.publish_mqtt_value', return_value=True), \
@@ -160,13 +175,13 @@ class TestPeerOffEndTime:
 
         peer = test_db.get_zone(z_running['id'])
         # peer_off path may leave state='stopping' briefly on slower runners,
-        # but by 1s after exclusive_start_zone the DB write of
-        # last_watering_time should already be visible.
+        # but by 1s after exclusive_start_zone the zone_run should be closed.
         assert peer['state'] in ('off', 'stopping')
-        if peer['last_watering_time'] is not None:
-            last = _parse(peer['last_watering_time'])
-            assert peer['last_watering_time'] != old_start, (
-                'peer_off path still writes start-time (issue #2)'
+        last_str = test_db.get_last_watering_time(int(z_running['id']))
+        if last_str is not None:
+            last = _parse(last_str)
+            assert last_str != old_start, (
+                'peer_off path still records start-time as last_watering_time'
             )
             assert before <= last <= after
 
@@ -174,12 +189,19 @@ class TestPeerOffEndTime:
 class TestSchedulerAutoStopEndTime:
     """Auto-stop fallback paths in irrigation_scheduler / zone_runner.
 
-    We cannot easily exercise the live APScheduler-driven path in a unit
-    test, but we CAN drive the fallback branch by making the central
-    stop_zone raise — that's exactly what the production fallback covers.
+    The fallbacks no longer write last_watering_time directly (column
+    is gone). They delegate state transitions to the audited helper or
+    raw update_zone; the actual end-time recording happens via the
+    central stop_zone path closing the zone_run. We can still assert
+    that an open zone_run gets finished.
     """
 
-    def test_irrigation_scheduler_fallback_writes_end_time(self, test_db):
+    def test_irrigation_scheduler_central_path_closes_run(self, test_db):
+        """When the central stop_zone succeeds, it should close the
+        open zone_run via finish_zone_run, and get_last_watering_time
+        should now report a fresh timestamp.
+        """
+        import time as _time
         zone = test_db.create_zone({
             'name': 'AutoStop', 'duration': 10, 'group_id': 1,
             'topic': '/test/auto',
@@ -189,43 +211,44 @@ class TestSchedulerAutoStopEndTime:
             'state': 'on',
             'watering_start_time': old_start,
         })
-        # Build a minimal scheduler-like object that has just the bits
-        # _stop_zone needs: a `db` attribute. We invoke the bound method
-        # directly to avoid spinning up real APScheduler in a unit test.
+        test_db.create_zone_run(
+            int(zone['id']), 1, old_start, 0.0, None, 1, None,
+        )
         from irrigation_scheduler import IrrigationScheduler
 
         class _StubSched:
             db = test_db
 
-        # Monkey-patch the central stop_zone to fail so we exercise the
-        # fallback branch that actually contains the issue-#2 fix.
-        with patch('services.zone_control.stop_zone',
-                   side_effect=ValueError('forced fail for test')):
+        with patch('services.zone_control.db', test_db), \
+             patch('services.zone_control.publish_mqtt_value', return_value=True), \
+             patch('services.zone_control.water_monitor'), \
+             patch('services.zone_control.state_verifier'):
             before = datetime.now().replace(microsecond=0)
+            _time.sleep(0.01)
             IrrigationScheduler._stop_zone(_StubSched(), zone['id'])
             after = datetime.now()
 
         z = test_db.get_zone(zone['id'])
         assert z['state'] == 'off'
-        assert z['last_watering_time'] is not None
-        last = _parse(z['last_watering_time'])
-        assert z['last_watering_time'] != old_start
+        last_str = test_db.get_last_watering_time(int(zone['id']))
+        assert last_str is not None
+        last = _parse(last_str)
+        assert last_str != old_start
         assert before <= last <= after
 
-    def test_irrigation_scheduler_fallback_skips_when_never_started(self, test_db):
-        """If the zone never had a watering_start_time, the auto-stop
-        fallback should not overwrite a previous last_watering_time —
-        we have no evidence anything actually ran.
+    def test_irrigation_scheduler_fallback_when_central_fails(self, test_db):
+        """If the central stop_zone raises, the fallback still flips the
+        zone state to 'off'. The open zone_run is left for boot_sync to
+        abort — we assert state transition and clean watering_start_time.
         """
         zone = test_db.create_zone({
-            'name': 'NeverStarted', 'duration': 10, 'group_id': 1,
-            'topic': '/test/never',
+            'name': 'AutoStopFb', 'duration': 10, 'group_id': 1,
+            'topic': '/test/auto-fb',
         })
-        prior_end = '2026-04-01 09:30:15'
+        old_start = '2026-01-01 10:00:00'
         test_db.update_zone(zone['id'], {
-            'state': 'off',
-            'watering_start_time': None,
-            'last_watering_time': prior_end,
+            'state': 'on',
+            'watering_start_time': old_start,
         })
         from irrigation_scheduler import IrrigationScheduler
 
@@ -237,20 +260,18 @@ class TestSchedulerAutoStopEndTime:
             IrrigationScheduler._stop_zone(_StubSched(), zone['id'])
 
         z = test_db.get_zone(zone['id'])
-        assert z['last_watering_time'] == prior_end, (
-            'never-started zone must not have last_watering_time clobbered'
-        )
+        assert z['state'] == 'off'
+        assert z['watering_start_time'] is None
 
-    def test_zone_runner_fallback_writes_end_time(self, test_db):
+    def test_zone_runner_fallback_when_central_fails(self, test_db):
         """Same contract for the scheduler.zone_runner mixin path."""
         zone = test_db.create_zone({
             'name': 'RunnerStop', 'duration': 10, 'group_id': 1,
             'topic': '/test/runner',
         })
-        old_start = '2026-01-01 10:00:00'
         test_db.update_zone(zone['id'], {
             'state': 'on',
-            'watering_start_time': old_start,
+            'watering_start_time': '2026-01-01 10:00:00',
         })
         from scheduler.zone_runner import ZoneRunnerMixin
 
@@ -259,12 +280,8 @@ class TestSchedulerAutoStopEndTime:
 
         with patch('services.zone_control.stop_zone',
                    side_effect=ValueError('forced fail for test')):
-            before = datetime.now().replace(microsecond=0)
             ZoneRunnerMixin._stop_zone(_StubSched(), zone['id'])
-            after = datetime.now()
 
         z = test_db.get_zone(zone['id'])
         assert z['state'] == 'off'
-        last = _parse(z['last_watering_time'])
-        assert z['last_watering_time'] != old_start
-        assert before <= last <= after
+        assert z['watering_start_time'] is None

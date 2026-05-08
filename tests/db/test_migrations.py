@@ -89,9 +89,16 @@ class TestMigrations:
         expected_cols = {
             'id', 'state', 'name', 'icon', 'duration', 'group_id', 'topic',
             'postpone_until', 'postpone_reason', 'photo_path',
-            'watering_start_time', 'last_watering_time', 'mqtt_server_id',
+            'watering_start_time', 'mqtt_server_id',
             'planned_end_time', 'version', 'commanded_state', 'observed_state',
             'fault_count', 'last_fault',
         }
         for c in expected_cols:
             assert c in cols, f"Column {c} missing from zones table"
+        # Pin the post-migration drop: last_watering_time was removed by
+        # 'zones_drop_last_watering_time' and replaced with a derived value
+        # injected by ZoneRepository.get_zone(s).
+        assert 'last_watering_time' not in cols, (
+            "last_watering_time column should have been dropped by "
+            "the zones_drop_last_watering_time migration"
+        )

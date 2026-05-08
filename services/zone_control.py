@@ -233,16 +233,27 @@ def exclusive_start_zone(zone_id: int) -> bool:
                     except (sqlite3.Error, OSError):
                         logger.exception("exclusive_start_zone: get_groups failed (zone=%s gid=%s)", zone_id, gid)
                         g = None
+                    # ALWAYS open a zone_runs row — meter snapshot is best-effort.
+                    # Pre-refactor this was gated on use_water_meter=1, leaving
+                    # non-meter zones with no run history at all and forcing
+                    # last_watering_time to live on the zones row. Now zone_runs
+                    # is the single source of truth, so every start writes a row;
+                    # meter columns stay NULL when the group has no meter.
+                    raw: Optional[int] = None
+                    liters: int = 1
+                    base_m3: Optional[float] = None
                     if g and int(g.get('use_water_meter') or 0) == 1:
                         try:
-                            # Берём пульсы на/до момента старта, чтобы избежать лагов подписки
                             raw = water_monitor.get_pulses_at_or_before(gid, time.time())
                             pulse = str(g.get('water_pulse_size') or '1l')
                             liters = 100 if pulse == '100l' else 10 if pulse == '10l' else 1
                             base_m3 = float(g.get('water_base_value_m3') or 0.0)
-                            db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3)
                         except (sqlite3.Error, OSError):
-                            logger.exception('start snapshot failed')
+                            logger.exception('start meter snapshot failed (continuing without)')
+                    try:
+                        db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3)
+                    except (sqlite3.Error, OSError):
+                        logger.exception('start: create_zone_run failed (zone=%s gid=%s)', zone_id, gid)
             except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in line_81: %s", e)
             try:
@@ -305,9 +316,31 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
-                                # Issue #2: last_watering_time must reflect when watering ENDED, not when it started.
-                                last_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time}, audit_reason='peer_off')
+                                with zone_lock(oid):
+                                    # Close the open zone_run before flipping
+                                    # state — leaves a clean 'ok' row in
+                                    # history so get_last_watering_time()
+                                    # picks it up. Pre-refactor this path
+                                    # leaked open runs: they would only be
+                                    # marked 'aborted' on the next reboot via
+                                    # _boot_sync, never count as a successful
+                                    # watering. The whole find-open-run →
+                                    # finish-run → state-update sequence runs
+                                    # under the same lock so concurrent
+                                    # exclusive_start_zone calls cannot
+                                    # double-finish the same run.
+                                    try:
+                                        _run = db.get_open_zone_run(oid)
+                                        if _run:
+                                            db.finish_zone_run(
+                                                int(_run['id']),
+                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                time.monotonic(),
+                                                None, None, None, status='ok',
+                                            )
+                                    except (sqlite3.Error, OSError):
+                                        logger.exception('peer_off finish_zone_run failed oid=%s', oid)
+                                    _versioned_update(oid, {'state': 'off', 'watering_start_time': None}, audit_reason='peer_off')
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed")
 
@@ -330,9 +363,26 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
-                                # Issue #2: last_watering_time must reflect when watering ENDED, not when it started.
-                                last_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time}, audit_reason='peer_off')
+                                with zone_lock(oid):
+                                    # Close the open zone_run (see parallel
+                                    # branch comment above) — required for
+                                    # peer_off to show up in
+                                    # get_last_watering_time(). Run-close +
+                                    # state update are atomic under the lock
+                                    # to prevent double-finish under
+                                    # concurrent exclusive_start_zone calls.
+                                    try:
+                                        _run = db.get_open_zone_run(oid)
+                                        if _run:
+                                            db.finish_zone_run(
+                                                int(_run['id']),
+                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                time.monotonic(),
+                                                None, None, None, status='ok',
+                                            )
+                                    except (sqlite3.Error, OSError):
+                                        logger.exception('peer_off finish_zone_run failed oid=%s', oid)
+                                    _versioned_update(oid, {'state': 'off', 'watering_start_time': None}, audit_reason='peer_off')
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed (sequential)")
         try:
@@ -443,13 +493,11 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
             except (ValueError, TypeError, KeyError) as _e:
                 logger.debug("stop_zone (already off): master close scheduling skipped: %s", _e)
             return True
-        # Issue #2: separate start/end timestamps.
         # `start_iso` is the original watering start — used as the lower bound
         # for summarize_run() water-stats fallback below (must NOT be touched).
-        # `end_iso` is the moment the zone is actually being stopped — that's
-        # what UI/users mean by "last watering time".
+        # The "last watering time" is now derived from zone_runs.end_utc;
+        # we no longer write last_watering_time on the zones row.
         start_iso = z.get('watering_start_time')
-        end_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # Стейт: on/starting -> stopping
         with zone_lock(zone_id):
             _versioned_update(zone_id, {'state': 'stopping', 'commanded_state': 'off'}, audit_reason=f'stop_{reason}')
@@ -477,9 +525,12 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
                         logger.exception('master valve close scheduling failed')
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
             logger.exception('stop_zone: mqtt off failed')
-        # Завершаем переход: stopping -> off
+        # Завершаем переход: stopping -> off.
+        # last_watering_time is no longer a column — the open zone_run
+        # row will be finished a few lines below and that becomes the
+        # canonical history entry.
         with zone_lock(zone_id):
-            _versioned_update(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': end_iso, 'planned_end_time': None}, audit_reason=f'stop_{reason}_complete')
+            _versioned_update(zone_id, {'state': 'off', 'watering_start_time': None, 'planned_end_time': None}, audit_reason=f'stop_{reason}_complete')
         # Обновим статистику воды для зоны, если группа использует счётчик
         try:
             gid = int(z.get('group_id') or 0)

@@ -134,6 +134,26 @@ def _boot_sync(app, db):
         except ImportError as e:
             logger.debug("Handled exception in _boot_sync: %s", e)
 
+        # Mark any zone_runs left open by a previous (crashed / killed)
+        # process as 'aborted' so they don't shadow real history.
+        # get_last_watering_time filters status='ok', so without this the
+        # MAX(end_utc) would still skip them — but stale-open rows still
+        # confuse get_open_zone_run, which would then try to finish a
+        # run from before the reboot. Cheaper to mop them up here.
+        try:
+            import sqlite3 as _sq
+            with _sq.connect(db.db_path, timeout=5) as conn:
+                conn.execute(
+                    "UPDATE zone_runs SET status = 'aborted', "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE end_utc IS NULL "
+                    "AND (status IS NULL OR status = '')"
+                )
+                conn.commit()
+            logger.info('boot_sync: aborted open zone_runs from prior run')
+        except (sqlite3.Error, OSError) as e:
+            logger.warning('boot_sync: aborted-run cleanup failed: %s', e)
+
         # Close master-valves (mode-aware, retain)
         try:
             seen: set = set()

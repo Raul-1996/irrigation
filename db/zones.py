@@ -13,14 +13,19 @@ class ZoneRepository(BaseRepository):
     """Repository for zone CRUD, bulk operations, and zone_runs."""
 
     def get_zones(self) -> List[Dict[str, Any]]:
-        """Получить все зоны."""
+        """Получить все зоны.
+
+        Injects ``last_watering_time`` (derived from ``zone_runs.end_utc``)
+        into each row so API/UI consumers keep working after the
+        ``zones_drop_last_watering_time`` migration.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
-                    FROM zones z 
-                    LEFT JOIN groups g ON z.group_id = g.id 
+                    FROM zones z
+                    LEFT JOIN groups g ON z.group_id = g.id
                     ORDER BY z.id
                 ''')
                 zones = []
@@ -28,26 +33,50 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone['group'] = zone['group_id']
                     zones.append(zone)
+                # Single batched query — derive last_watering_time from
+                # zone_runs (idx_zone_runs_active covers it). Done after
+                # row.fetchall() so the cursor isn't held while we issue
+                # a second statement on the same connection.
+                try:
+                    cur2 = conn.execute(
+                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
+                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
+                        "GROUP BY zone_id"
+                    )
+                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
+                except sqlite3.Error as e:
+                    logger.debug("get_zones: zone_runs aggregation failed: %s", e)
+                    last_map = {}
+                for z in zones:
+                    z['last_watering_time'] = last_map.get(int(z['id']))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон: %s", e)
             return []
 
     def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
-        """Получить зону по ID."""
+        """Получить зону по ID.
+
+        Injects ``last_watering_time`` derived from ``zone_runs.end_utc``
+        (see :meth:`get_last_watering_time`) so consumers don't have to
+        know about the schema change.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
-                    SELECT z.*, g.name as group_name 
-                    FROM zones z 
-                    LEFT JOIN groups g ON z.group_id = g.id 
+                    SELECT z.*, g.name as group_name
+                    FROM zones z
+                    LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.id = ?
                 ''', (zone_id,))
                 row = cursor.fetchone()
                 if row:
                     zone = dict(row)
                     zone['group'] = zone['group_id']
+                    zone['last_watering_time'] = self.get_last_watering_time(
+                        int(zone_id)
+                    )
                     return zone
                 return None
         except sqlite3.Error as e:
@@ -159,9 +188,10 @@ class ZoneRepository(BaseRepository):
                 if 'scheduled_start_time' in updated_data:
                     sql_fields.append('scheduled_start_time = ?')
                     params.append(updated_data['scheduled_start_time'])
-                if 'last_watering_time' in updated_data:
-                    sql_fields.append('last_watering_time = ?')
-                    params.append(updated_data['last_watering_time'])
+                # 'last_watering_time' is no longer a column on zones —
+                # it is derived from zone_runs.end_utc and injected at
+                # read time. Silently ignore the key in the update payload
+                # so legacy callers that still pass it don't crash.
                 if 'last_avg_flow_lpm' in updated_data:
                     sql_fields.append('last_avg_flow_lpm = ?')
                     params.append(updated_data['last_avg_flow_lpm'])
@@ -324,7 +354,7 @@ class ZoneRepository(BaseRepository):
                     if 'photo_path' in merged: add('photo_path', merged['photo_path'])
                     if 'watering_start_time' in merged: add('watering_start_time', merged['watering_start_time'])
                     if 'scheduled_start_time' in merged: add('scheduled_start_time', merged['scheduled_start_time'])
-                    if 'last_watering_time' in merged: add('last_watering_time', merged['last_watering_time'])
+                    # 'last_watering_time' was dropped — derived from zone_runs now.
                     if 'last_avg_flow_lpm' in merged: add('last_avg_flow_lpm', merged['last_avg_flow_lpm'])
                     if 'last_total_liters' in merged: add('last_total_liters', merged['last_total_liters'])
                     if 'mqtt_server_id' in merged: add('mqtt_server_id', merged.get('mqtt_server_id'))
@@ -469,14 +499,18 @@ class ZoneRepository(BaseRepository):
             return False
 
     def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
-        """Получить зоны по группе."""
+        """Получить зоны по группе.
+
+        Injects ``last_watering_time`` from ``zone_runs`` so callers get the
+        same schema as :meth:`get_zones`.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
-                    SELECT z.*, g.name as group_name 
-                    FROM zones z 
-                    LEFT JOIN groups g ON z.group_id = g.id 
+                    SELECT z.*, g.name as group_name
+                    FROM zones z
+                    LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.group_id = ?
                     ORDER BY z.id
                 ''', (group_id,))
@@ -485,6 +519,18 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone['group'] = zone['group_id']
                     zones.append(zone)
+                try:
+                    cur2 = conn.execute(
+                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
+                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
+                        "GROUP BY zone_id"
+                    )
+                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
+                except sqlite3.Error as e:
+                    logger.debug("get_zones_by_group: zone_runs aggregation failed: %s", e)
+                    last_map = {}
+                for z in zones:
+                    z['last_watering_time'] = last_map.get(int(z['id']))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон группы %s: %s", group_id, e)
@@ -633,6 +679,31 @@ class ZoneRepository(BaseRepository):
         except sqlite3.Error as e:
             logger.error("Ошибка завершения zone_run %s: %s", run_id, e)
             return False
+
+    def get_last_watering_time(self, zone_id: int) -> Optional[str]:
+        """Return the most recent successful watering end-time for a zone.
+
+        Single source of truth = ``zone_runs``. The denormalised
+        ``zones.last_watering_time`` column was dropped by migration
+        ``zones_drop_last_watering_time``; this helper computes the value
+        on-demand from ``MAX(end_utc)`` over rows with ``status='ok'`` and
+        a non-NULL ``end_utc`` (i.e. the run actually finished cleanly).
+
+        The covering index ``idx_zone_runs_active(zone_id, end_utc)`` keeps
+        this O(log n) per zone. Returns ``None`` for a zone that has never
+        been watered (or whose only runs are aborted / still open).
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "SELECT MAX(end_utc) FROM zone_runs "
+                    "WHERE zone_id = ? AND status = 'ok' AND end_utc IS NOT NULL",
+                    (int(zone_id),))
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+        except sqlite3.Error as e:
+            logger.error("get_last_watering_time(%s): %s", zone_id, e)
+            return None
 
     @staticmethod
     def _parse_postpone_dt(s: Optional[str]) -> Optional[datetime]:

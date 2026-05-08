@@ -476,17 +476,16 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                 # transitions are visible to triage.  If even that path
                 # blows up, drop to raw update_zone last.
                 try:
-                    # Issue #2: last_watering_time = stop time (now), not start time.
-                    _gex_end_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    # last_watering_time is no longer a column — derived
+                    # from zone_runs at read time. Just transition state.
                     from services.zones_state import update_zone_state as _uzs
                     _uzs(int(z['id']),
-                         {'state': 'off', 'watering_start_time': None, 'last_watering_time': _gex_end_iso},
+                         {'state': 'off', 'watering_start_time': None},
                          audit_reason='group_exclusivity')
                 except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e2:
                     logger.error("group exclusive audited fallback for zone %s: %s", z.get('id'), e2)
                     try:
-                        _gex_end_iso2 = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': _gex_end_iso2})
+                        db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
                     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e3:
                         logger.error("group exclusive db update fallback for zone %s: %s", z.get('id'), e3)
         try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))

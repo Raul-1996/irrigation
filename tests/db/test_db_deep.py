@@ -106,7 +106,6 @@ class TestZonesDeep:
             'state': 'on',
             'watering_start_time': '2026-01-01 10:00:00',
             'scheduled_start_time': '2026-01-01 11:00:00',
-            'last_watering_time': '2026-01-01 09:00:00',
             'last_avg_flow_lpm': 2.5,
             'last_total_liters': 150.0,
         })

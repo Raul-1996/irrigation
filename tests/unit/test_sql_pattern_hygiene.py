@@ -51,7 +51,6 @@ def test_import_zones_rejects_unknown_column_in_update(tmp_path):
                 state TEXT,
                 mqtt_server_id INTEGER,
                 watering_start_time TEXT,
-                last_watering_time TEXT,
                 updated_at TEXT,
                 version INTEGER DEFAULT 0
             )
