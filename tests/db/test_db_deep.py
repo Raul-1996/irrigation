@@ -1,6 +1,7 @@
 """Deep DB tests for maximum coverage of db/ layer."""
 import pytest
 import os
+from datetime import datetime, timedelta
 
 os.environ['TESTING'] = '1'
 
@@ -15,6 +16,39 @@ class TestZonesDeep:
         result = test_db.compute_next_run_for_zone(z['id'])
         # Should return a datetime string or None
 
+    def test_compute_next_run_skips_postpone(self, test_db):
+        # Postpone tomorrow 23:59:59 → returned datetime is day-after-tomorrow.
+        z = test_db.create_zone({'name': 'NRP', 'duration': 10, 'group_id': 1})
+        test_db.create_program({
+            'name': 'PP', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d 23:59:59')
+        test_db.update_zone_postpone(z['id'], tomorrow, 'manual')
+        result = test_db.compute_next_run_for_zone(z['id'])
+        assert result is not None
+        nxt = datetime.strptime(result, '%Y-%m-%d %H:%M:%S')
+        day_after = (datetime.now() + timedelta(days=2)).replace(
+            hour=4, minute=0, second=0, microsecond=0)
+        assert nxt >= day_after
+
+    def test_compute_next_run_postpone_expired(self, test_db):
+        # Postpone in past → unaffected (returns the normal next run).
+        z = test_db.create_zone({'name': 'NRX', 'duration': 10, 'group_id': 1})
+        test_db.create_program({
+            'name': 'PX', 'time': '06:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        past = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        test_db.update_zone_postpone(z['id'], past, 'manual')
+        result = test_db.compute_next_run_for_zone(z['id'])
+        assert result is not None
+        nxt = datetime.strptime(result, '%Y-%m-%d %H:%M:%S')
+        now = datetime.now()
+        assert nxt > now
+        # Daily program → next run within 24h.
+        assert nxt < now + timedelta(days=2)
+
     def test_reschedule_group(self, test_db):
         g = test_db.create_group('Resched')
         z = test_db.create_zone({'name': 'RS', 'duration': 10, 'group_id': g['id']})
@@ -23,6 +57,25 @@ class TestZonesDeep:
             'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
         })
         test_db.reschedule_group_to_next_program(g['id'])
+
+    def test_reschedule_group_writes_post_postpone_time(self, test_db):
+        # Set postpone, call reschedule_group_to_next_program, read back
+        # scheduled_start_time, assert it is past the postpone window.
+        g = test_db.create_group('ReschedPP')
+        z = test_db.create_zone({'name': 'RPP', 'duration': 10, 'group_id': g['id']})
+        test_db.create_program({
+            'name': 'PRPP', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d 23:59:59')
+        test_db.update_zone_postpone(z['id'], tomorrow, 'manual')
+        test_db.reschedule_group_to_next_program(g['id'])
+        zone = test_db.get_zone(z['id'])
+        sched = zone.get('scheduled_start_time')
+        assert sched is not None
+        sched_dt = datetime.strptime(sched, '%Y-%m-%d %H:%M:%S')
+        end_postpone = datetime.strptime(tomorrow, '%Y-%m-%d %H:%M:%S')
+        assert sched_dt > end_postpone
 
     def test_clear_scheduled_for_peers(self, test_db):
         z1 = test_db.create_zone({'name': 'P1', 'duration': 10, 'group_id': 1})

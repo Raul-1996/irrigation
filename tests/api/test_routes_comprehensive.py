@@ -2,6 +2,7 @@
 import pytest
 import json
 import os
+from datetime import datetime, timedelta
 
 os.environ['TESTING'] = '1'
 
@@ -38,6 +39,193 @@ class TestZoneNextWatering:
             data=json.dumps({}),
             content_type='application/json')
         assert resp.status_code == 200
+
+
+class TestZoneNextWateringPostpone:
+    """Regression coverage for issue #1.
+
+    The bulk next-watering endpoint and compute_next_run_for_zone must
+    advance their lower-bound 'now' to the zone's postpone_until when it
+    is in the future, so that zone cards never display a next-run time
+    that the scheduler will skip.
+    """
+
+    @staticmethod
+    def _bulk(client, zone_id):
+        resp = client.post(
+            '/api/zones/next-watering-bulk',
+            data=json.dumps({'zone_ids': [zone_id]}),
+            content_type='application/json',
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        items = body.get('items') or []
+        assert len(items) == 1
+        return items[0]
+
+    def test_bulk_skips_postpone_window(self, admin_client, app):
+        # Program runs daily at 04:00; zone postponed until tomorrow 23:59:59
+        # → next must be >= day-after-tomorrow 04:00.
+        z = app.db.create_zone({'name': 'PP1', 'duration': 10, 'group_id': 1})
+        app.db.create_program({
+            'name': 'Daily04', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d 23:59:59')
+        app.db.update_zone_postpone(z['id'], tomorrow, 'manual')
+
+        item = self._bulk(admin_client, z['id'])
+        assert item['next_datetime'] is not None
+        nxt = datetime.strptime(item['next_datetime'], '%Y-%m-%d %H:%M:%S')
+        day_after = (datetime.now() + timedelta(days=2)).replace(
+            hour=4, minute=0, second=0, microsecond=0)
+        assert nxt >= day_after, f"{nxt} should be >= {day_after}"
+
+    def test_bulk_unpostponed_unaffected(self, admin_client, app):
+        # postpone_until in the past → no effect.
+        z = app.db.create_zone({'name': 'PP2', 'duration': 10, 'group_id': 1})
+        app.db.create_program({
+            'name': 'DailyMorning', 'time': '06:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        past = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        app.db.update_zone_postpone(z['id'], past, 'manual')
+
+        item = self._bulk(admin_client, z['id'])
+        assert item['next_datetime'] is not None
+        nxt = datetime.strptime(item['next_datetime'], '%Y-%m-%d %H:%M:%S')
+        # Must be in the future, and within the next 8 days.
+        now = datetime.now()
+        assert nxt > now
+        assert nxt < now + timedelta(days=8)
+
+        # And NULL postpone_until → also unaffected.
+        z2 = app.db.create_zone({'name': 'PP2b', 'duration': 10, 'group_id': 1})
+        app.db.create_program({
+            'name': 'DailyMorning2', 'time': '06:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z2['id']],
+        })
+        item2 = self._bulk(admin_client, z2['id'])
+        assert item2['next_datetime'] is not None
+
+    def test_bulk_group_postpone_via_api(self, admin_client, app):
+        # POST /api/postpone for the group, then verify bulk respects it.
+        g = app.db.create_group('PPGroup')
+        z = app.db.create_zone({'name': 'PP3', 'duration': 10, 'group_id': g['id']})
+        app.db.create_program({
+            'name': 'DailyDawn', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        resp = admin_client.post(
+            '/api/postpone',
+            data=json.dumps({'group_id': g['id'], 'days': 1, 'action': 'postpone'}),
+            content_type='application/json',
+        )
+        assert resp.status_code == 200
+        body = resp.get_json() or {}
+        # API returns postpone_until on success.
+        pu = body.get('postpone_until')
+        assert pu, body
+
+        item = self._bulk(admin_client, z['id'])
+        assert item['next_datetime'] is not None
+        nxt = datetime.strptime(item['next_datetime'], '%Y-%m-%d %H:%M:%S')
+        # Postpone is until "today + days 23:59:59" → next 04:00 must be
+        # at least the day after.
+        end_of_postpone = (datetime.now() + timedelta(days=1)).replace(
+            hour=23, minute=59, second=59, microsecond=0)
+        assert nxt > end_of_postpone
+
+    def test_bulk_postpone_exact_boundary(self, admin_client, app):
+        # postpone_until = 04:00 exactly, program at 04:00 → must pick the
+        # NEXT day's 04:00 (strict >).
+        z = app.db.create_zone({'name': 'PP4', 'duration': 10, 'group_id': 1})
+        app.db.create_program({
+            'name': 'Boundary04', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        # Pick a fixed-future date so the test is deterministic regardless of
+        # weekday/clock skew.
+        target_day = datetime.now() + timedelta(days=3)
+        boundary = target_day.replace(hour=4, minute=0, second=0, microsecond=0)
+        boundary_str = boundary.strftime('%Y-%m-%d %H:%M:%S')
+        app.db.update_zone_postpone(z['id'], boundary_str, 'manual')
+
+        item = self._bulk(admin_client, z['id'])
+        assert item['next_datetime'] is not None
+        nxt = datetime.strptime(item['next_datetime'], '%Y-%m-%d %H:%M:%S')
+        # Strict >: 04:00 itself is excluded → next day 04:00.
+        next_day = (boundary + timedelta(days=1))
+        assert nxt == next_day, f"{nxt} should equal {next_day}"
+
+    def test_bulk_postpone_other_zones_unaffected(self, admin_client, app):
+        # Two groups, two zones, two programs.  Postpone group A only;
+        # group B's zone keeps its normal next time.
+        ga = app.db.create_group('A')
+        gb = app.db.create_group('B')
+        za = app.db.create_zone({'name': 'ZA', 'duration': 10, 'group_id': ga['id']})
+        zb = app.db.create_zone({'name': 'ZB', 'duration': 10, 'group_id': gb['id']})
+        app.db.create_program({
+            'name': 'PA', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [za['id']],
+        })
+        app.db.create_program({
+            'name': 'PB', 'time': '05:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [zb['id']],
+        })
+        # Postpone A only.
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d 23:59:59')
+        app.db.update_zone_postpone(za['id'], tomorrow, 'manual')
+
+        ia = self._bulk(admin_client, za['id'])
+        ib = self._bulk(admin_client, zb['id'])
+        assert ia['next_datetime'] is not None
+        assert ib['next_datetime'] is not None
+        nxt_a = datetime.strptime(ia['next_datetime'], '%Y-%m-%d %H:%M:%S')
+        nxt_b = datetime.strptime(ib['next_datetime'], '%Y-%m-%d %H:%M:%S')
+
+        day_after = (datetime.now() + timedelta(days=2)).replace(
+            hour=4, minute=0, second=0, microsecond=0)
+        assert nxt_a >= day_after
+        # B is not postponed — must be within the next ~2 days.
+        assert nxt_b <= datetime.now() + timedelta(days=2)
+
+    def test_single_zone_endpoint_consistency(self, admin_client, app):
+        # /api/zones/<id>/next-watering and bulk endpoint must agree for
+        # a postponed zone.
+        z = app.db.create_zone({'name': 'PP6', 'duration': 10, 'group_id': 1})
+        app.db.create_program({
+            'name': 'P6', 'time': '04:00',
+            'days': [0, 1, 2, 3, 4, 5, 6], 'zones': [z['id']],
+        })
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d 23:59:59')
+        app.db.update_zone_postpone(z['id'], tomorrow, 'manual')
+
+        bulk_item = self._bulk(admin_client, z['id'])
+        single = admin_client.get(f'/api/zones/{z["id"]}/next-watering')
+        assert single.status_code == 200
+        single_body = single.get_json() or {}
+        # Single endpoint returns next_watering as ISO datetime string under
+        # one of these keys depending on shape; we accept either.
+        single_dt = (single_body.get('next_datetime')
+                     or single_body.get('next_watering'))
+        # Both should be either both None or both pointing past the
+        # postpone window; if single is unavailable, just assert bulk
+        # produced a post-postpone time (consistency-with-self).
+        bulk_dt = bulk_item['next_datetime']
+        assert bulk_dt is not None
+        bulk_parsed = datetime.strptime(bulk_dt, '%Y-%m-%d %H:%M:%S')
+        end_postpone = datetime.strptime(tomorrow, '%Y-%m-%d %H:%M:%S')
+        assert bulk_parsed > end_postpone
+        if isinstance(single_dt, str):
+            try:
+                single_parsed = datetime.strptime(single_dt, '%Y-%m-%d %H:%M:%S')
+                assert single_parsed > end_postpone
+            except ValueError:
+                # Single endpoint may use a different shape; bulk-side
+                # invariant already verified above.
+                pass
 
 
 class TestZoneImport:

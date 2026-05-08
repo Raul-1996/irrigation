@@ -283,6 +283,33 @@ def api_zone_next_watering(zone_id):
         return jsonify({'error': 'Ошибка получения времени полива'}), 500
 
 
+def _first_program_start_after(prog, lower_bound):
+    """Return the first scheduled program-start datetime strictly > lower_bound.
+
+    Mirrors the inline 0..14 day search used by api_zones_next_watering_bulk
+    for prog_info[...]['next_start'], but anchored at *lower_bound* instead of
+    the global *now*.  Returns None if the program has no day list or its
+    time string is malformed.
+    """
+    if not prog:
+        return None
+    try:
+        hh, mm = [int(x) for x in str(prog.get('time') or '00:00').split(':', 1)]
+    except (ValueError, TypeError, KeyError) as e:
+        logger.debug("Exception in _first_program_start_after time parse: %s", e)
+        return None
+    days = prog.get('days') or []
+    if not days:
+        return None
+    for off in range(0, 15):
+        d = lower_bound + timedelta(days=off)
+        if d.weekday() in days:
+            cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand > lower_bound:
+                return cand
+    return None
+
+
 @zones_crud_api_bp.route('/api/zones/next-watering-bulk', methods=['POST'])
 @audit_log('zones_next_watering_bulk', target_extractor=lambda *a, **kw: 'zones:bulk')
 def api_zones_next_watering_bulk():
@@ -309,6 +336,9 @@ def api_zones_next_watering_bulk():
                 cum += int(duration_by_zone.get(zid, 0))
             offset_map_per_program.append({'prog': p, 'offsets': offsets})
         now = datetime.now()
+        # Per-zone postpone lookup — lets us advance the per-zone lower bound
+        # so cards never display a next-run inside an active postpone window.
+        zone_by_id = {int(z['id']): z for z in all_zones}
         prog_info = {}
         for pm in offset_map_per_program:
             p = pm['prog']
@@ -352,6 +382,15 @@ def api_zones_next_watering_bulk():
         items = []
         for zid in zone_ids:
             best_dt = None
+            # Per-zone lower bound: if zone has an active postpone_until in the
+            # future, advance zone_now to it so we never display a next-run
+            # that the scheduler would skip.
+            z = zone_by_id.get(int(zid))
+            zone_now = now
+            if z:
+                pu_dt = parse_dt(z.get('postpone_until'))
+                if pu_dt and pu_dt > zone_now:
+                    zone_now = pu_dt
             for pm in offset_map_per_program:
                 p = pm['prog']; offsets = pm['offsets']
                 if zid not in offsets:
@@ -368,7 +407,16 @@ def api_zones_next_watering_bulk():
                     logger.debug("Exception in line_376: %s", e)
                     cancelled_today = False
 
-                if pinfo.get('in_progress') and pinfo.get('today_start') and not cancelled_today:
+                # When the zone is postponed (zone_now > now), an in-progress
+                # program for the cohort is irrelevant for THIS zone — the
+                # scheduler will skip it. Fall through to "search future
+                # programs from zone_now".
+                if (
+                    pinfo.get('in_progress')
+                    and pinfo.get('today_start')
+                    and not cancelled_today
+                    and zone_now <= now
+                ):
                     off_min = int(offsets.get(zid, 0))
                     if off_min >= int(pinfo.get('elapsed_min') or 0):
                         cand = pinfo['today_start'] + timedelta(minutes=off_min)
@@ -378,12 +426,28 @@ def api_zones_next_watering_bulk():
                             continue
                         cand = start_dt + timedelta(minutes=off_min)
                 else:
-                    start_dt = pinfo.get('next_start')
+                    # Common path: cached next_start (anchored at global now).
+                    # When the zone is postponed (or the start landed inside
+                    # the postpone window), recompute from zone_now.
+                    if zone_now != now:
+                        start_dt = _first_program_start_after(p, zone_now)
+                    else:
+                        start_dt = pinfo.get('next_start')
                     if not start_dt:
                         continue
                     cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
                     try:
-                        if p.get('id') is not None and pinfo.get('today_start') and cancelled_today:
+                        # cancelled_today shifts to next-week's run — but if
+                        # zone is postponed, we already searched from zone_now
+                        # which strictly skips the postpone window, so the
+                        # cancelled_today shift is unnecessary (and would be
+                        # incorrect — it ignores postpone_until).
+                        if (
+                            p.get('id') is not None
+                            and pinfo.get('today_start')
+                            and cancelled_today
+                            and zone_now == now
+                        ):
                             hh, mm = map(int, str(p.get('time') or '00:00').split(':', 1))
                             ns = None
                             for off in range(1, 15):
@@ -395,7 +459,7 @@ def api_zones_next_watering_bulk():
                                 cand = ns + timedelta(minutes=int(offsets.get(zid, 0)))
                     except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Handled exception in line_405: %s", e)
-                if cand <= now:
+                if cand <= zone_now:
                     continue
                 if best_dt is None or cand < best_dt:
                     best_dt = cand
