@@ -149,3 +149,39 @@ def test_mobile_buttons_responsive(client):
             or '@media (max-width: 767px)' in combined), (
         f"No expected @media query found in HTML or linked CSS"
     )
+
+
+def test_bottom_sheet_hidden_by_default(client):
+    """Regression for issue #4: bottom-sheet must be invisible & non-interactive without .show.
+
+    On desktop (>=768px), translate(-50%, 100%) leaves the sheet partially in
+    viewport (top:50% + max-height:75vh), so it captured clicks at center of the
+    page.  Fix: base rule sets visibility:hidden + pointer-events:none, .show
+    overrides both, with a delayed visibility transition so slide-down animates
+    out before the sheet becomes non-interactive.
+    """
+    combined = _fetch_inline_and_external_css(client, '/status')
+    # Locate the base .bottom-sheet block (the one before the @media query).
+    base_match = re.search(
+        r'\.bottom-sheet\s*\{[^}]*\}', combined, re.DOTALL
+    )
+    assert base_match, ".bottom-sheet base rule not found in CSS"
+    base_block = base_match.group(0)
+    assert 'visibility:hidden' in base_block.replace(' ', ''), (
+        "base .bottom-sheet must set visibility:hidden so it cannot capture clicks"
+    )
+    assert 'pointer-events:none' in base_block.replace(' ', ''), (
+        "base .bottom-sheet must set pointer-events:none"
+    )
+
+    show_match = re.search(
+        r'\.bottom-sheet\.show\s*\{[^}]*\}', combined, re.DOTALL
+    )
+    assert show_match, ".bottom-sheet.show rule not found in CSS"
+    show_block = show_match.group(0)
+    assert 'visibility:visible' in show_block.replace(' ', ''), (
+        ".bottom-sheet.show must restore visibility:visible"
+    )
+    assert 'pointer-events:auto' in show_block.replace(' ', ''), (
+        ".bottom-sheet.show must restore pointer-events:auto"
+    )
