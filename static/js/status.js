@@ -1108,23 +1108,13 @@
         }
     }
 
-    async function rotateStatusPhoto(zoneIdOrAngle, maybeAngle) {
-        // Support both rotateStatusPhoto(angle) from sheet and rotateStatusPhoto(zoneId, angle)
-        var id, angle;
-        if (typeof maybeAngle === 'number' || typeof maybeAngle === 'undefined') {
-            // Called from sheet: single arg = angle (uses editingZoneId)
-            if (typeof maybeAngle === 'undefined' && typeof zoneIdOrAngle !== 'undefined' && Math.abs(zoneIdOrAngle) <= 360) {
-                id = editingZoneId;
-                angle = zoneIdOrAngle;
-            } else {
-                id = zoneIdOrAngle;
-                angle = (typeof maybeAngle === 'number') ? maybeAngle : 90;
-            }
-        } else {
-            id = zoneIdOrAngle;
-            angle = maybeAngle;
+    async function rotateStatusPhoto(angle) {
+        // Always operates on the zone currently being edited via the sheet.
+        var id = editingZoneId;
+        if (!id) {
+            showZoneToast('Нет активной зоны для поворота', 'error');
+            return;
         }
-        if (!id) return;
 
         var btn = document.getElementById('sheetPhotoRotateBtn');
         if (btn) btn.disabled = true;
