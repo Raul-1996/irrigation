@@ -124,6 +124,10 @@ class IrrigationDB:
     def finish_zone_run(self, run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status='ok'):
         return self.zones.finish_zone_run(run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status)
 
+    def get_last_watering_time(self, zone_id: int) -> Optional[str]:
+        """Most recent successful watering end-time for a zone (from zone_runs)."""
+        return self.zones.get_last_watering_time(zone_id)
+
     def compute_next_run_for_zone(self, zone_id: int) -> Optional[str]:
         return self.zones.compute_next_run_for_zone(zone_id, programs_getter=self.programs.get_programs)
 

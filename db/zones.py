@@ -634,6 +634,31 @@ class ZoneRepository(BaseRepository):
             logger.error("Ошибка завершения zone_run %s: %s", run_id, e)
             return False
 
+    def get_last_watering_time(self, zone_id: int) -> Optional[str]:
+        """Return the most recent successful watering end-time for a zone.
+
+        Single source of truth = ``zone_runs``. The denormalised
+        ``zones.last_watering_time`` column was dropped by migration
+        ``zones_drop_last_watering_time``; this helper computes the value
+        on-demand from ``MAX(end_utc)`` over rows with ``status='ok'`` and
+        a non-NULL ``end_utc`` (i.e. the run actually finished cleanly).
+
+        The covering index ``idx_zone_runs_active(zone_id, end_utc)`` keeps
+        this O(log n) per zone. Returns ``None`` for a zone that has never
+        been watered (or whose only runs are aborted / still open).
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "SELECT MAX(end_utc) FROM zone_runs "
+                    "WHERE zone_id = ? AND status = 'ok' AND end_utc IS NOT NULL",
+                    (int(zone_id),))
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+        except sqlite3.Error as e:
+            logger.error("get_last_watering_time(%s): %s", zone_id, e)
+            return None
+
     @staticmethod
     def _parse_postpone_dt(s: Optional[str]) -> Optional[datetime]:
         """Local datetime parser mirroring irrigation_scheduler._parse_dt.
