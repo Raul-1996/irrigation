@@ -1445,10 +1445,16 @@
     .bottom-sheet {
         position:fixed; bottom:0; left:0; right:0; background:white;
         border-radius:14px 14px 0 0; padding:16px; z-index:201;
-        transform:translateY(100%); transition:transform 0.3s;
+        transform:translateY(100%);
+        visibility:hidden; pointer-events:none;
+        transition: transform 0.3s, visibility 0s linear 0.3s;
         max-height:80vh; overflow-y:auto;
     }
-    .bottom-sheet.show { transform:translateY(0); }
+    .bottom-sheet.show {
+        transform:translateY(0);
+        visibility:visible; pointer-events:auto;
+        transition: transform 0.3s, visibility 0s linear 0s;
+    }
 
     /* Desktop: centered modal instead of bottom sheet */
     @media (min-width: 768px) {
