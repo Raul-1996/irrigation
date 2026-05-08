@@ -2100,7 +2100,8 @@
         var wasRunning = z && z.state === 'on';
         
         // If already running — stop first, then restart
-        showLoading('Запуск зоны #' + id + '...');
+        var zName = (z && z.name) ? ' ' + z.name : '';
+        showLoading('Запуск зоны #' + id + zName + '...');
         var startFn = function() {
             // Optimistic: set state + times BEFORE fetch for instant timer
             if (z) {
@@ -2115,7 +2116,7 @@
             .then(function(data) {
                 if (data && data.success) {
                     hideLoading();
-                    showZoneToast('▶ #' + id + ' запущена на ' + dur + ' мин', 'success');
+                    showZoneToast('▶ #' + id + zName + ' запущена на ' + dur + ' мин', 'success');
                     // Refresh timer (server times may differ slightly)
                     initZoneTimer(z);
                     setTimeout(function() { loadStatusData(); }, 2000);
