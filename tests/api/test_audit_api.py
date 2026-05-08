@@ -177,3 +177,81 @@ class TestAuditTypes:
         assert body['success'] is True
         assert isinstance(body['types'], list)
         assert 'type_test_action' in body['types']
+
+
+class TestAdminRequiredJSONForAPI:
+    """S2 regression: admin_required must return JSON for /api/* paths.
+
+    @admin_required used to redirect non-admin callers to the HTML login page
+    even for fetch('/api/audit') XHR — the audit page silently broke for
+    viewers because r.json() choked on the login HTML.
+
+    Under TESTING=1 the in-process decorator short-circuits (see
+    services/security.py), so we exercise the wrapper directly with a fake
+    Flask request context rather than spinning a non-TESTING app.
+    """
+
+    def _wrap(self, role):
+        """Build an admin_required-wrapped handler under a non-TESTING app."""
+        from flask import Flask
+        from services.security import admin_required
+
+        flask_app = Flask(__name__)
+        flask_app.config['SECRET_KEY'] = 'unit-test'
+        flask_app.config['TESTING'] = False  # disable TESTING bypass
+
+        @flask_app.route('/api/<path:rest>', endpoint='api_handler')
+        @admin_required
+        def api_handler(rest):
+            return {'ok': True}
+
+        @flask_app.route('/page', endpoint='page_handler')
+        @admin_required
+        def page_handler():
+            return 'PAGE'
+
+        # auth_bp.login_page is referenced by url_for in admin_required —
+        # register a stub so url_for() resolves.
+        @flask_app.route('/login', endpoint='auth_bp.login_page')
+        def _login():
+            return 'LOGIN'
+
+        cli = flask_app.test_client()
+        with cli.session_transaction() as sess:
+            if role:
+                sess['role'] = role
+                sess['logged_in'] = True
+        return cli
+
+    def test_anonymous_api_returns_401_json(self):
+        cli = self._wrap(role=None)
+        resp = cli.get('/api/audit')
+        assert resp.status_code == 401
+        body = resp.get_json()
+        assert body == {'success': False, 'error_code': 'UNAUTHENTICATED'}
+
+    def test_viewer_api_returns_403_json(self):
+        cli = self._wrap(role='viewer')
+        resp = cli.get('/api/audit')
+        assert resp.status_code == 403
+        body = resp.get_json()
+        assert body == {'success': False, 'error_code': 'FORBIDDEN'}
+
+    def test_guest_api_returns_403_json(self):
+        cli = self._wrap(role='guest')
+        resp = cli.get('/api/audit')
+        assert resp.status_code == 403
+        assert resp.get_json()['error_code'] == 'FORBIDDEN'
+
+    def test_admin_api_succeeds(self):
+        cli = self._wrap(role='admin')
+        resp = cli.get('/api/audit')
+        assert resp.status_code == 200
+        assert resp.get_json() == {'ok': True}
+
+    def test_html_page_keeps_redirect_for_non_admin(self):
+        """Non-API paths must still 302 to /login (no behaviour change)."""
+        cli = self._wrap(role='viewer')
+        resp = cli.get('/page')
+        assert resp.status_code == 302
+        assert '/login' in resp.headers.get('Location', '')
