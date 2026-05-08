@@ -103,12 +103,16 @@
             capsEl.style.display = caps ? 'block' : 'none';
         }
     </script>
+    <script src="/static/js/audit.js" defer></script>
     </head>
 <body>
     <div class="container">
         <h1>Вход</h1>
         <div class="subtitle">WB‑Irrigation</div>
-        <form onsubmit="onSubmit(event)">
+        <form onsubmit="onSubmit(event)"
+              data-audit-action="login_attempt"
+              data-audit-target="auth:login"
+              data-audit-fields="">
             <label for="password">Пароль</label>
             <div class="input-group">
                 <input id="password" name="password" type="password" placeholder="Введите пароль" autocomplete="current-password" minlength="4" required autofocus onkeyup="handleCaps(event)" />

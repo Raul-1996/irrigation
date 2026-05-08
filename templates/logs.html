@@ -8,6 +8,14 @@
 {% endblock %}
 
 {% block content %}
+<div class="logs-tabs" style="display:flex;gap:8px;margin-bottom:12px;border-bottom:2px solid #e0e0e0;">
+    <button class="logs-tab active" data-tab="events" onclick="switchLogsTab('events')"
+            style="padding:8px 16px;background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;font-size:15px;font-weight:600;">События (logs)</button>
+    <button class="logs-tab" data-tab="audit" onclick="switchLogsTab('audit')"
+            style="padding:8px 16px;background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;font-size:15px;font-weight:600;">Аудит (audit_log)</button>
+</div>
+
+<div id="tab-events" class="logs-tab-pane">
 <div class="filter-bar">
     <div class="filter-row">
         <label>
@@ -49,6 +57,58 @@
             </tr>
         </tbody>
     </table>
+</div>
+</div>
+
+<div id="tab-audit" class="logs-tab-pane" style="display:none;">
+    <div class="filter-bar">
+        <div class="filter-row">
+            <label><span>С:</span><input type="date" id="auditFromDate"></label>
+            <label><span>По:</span><input type="date" id="auditToDate"></label>
+        </div>
+        <div class="filter-row">
+            <label><span>Действие:</span>
+                <select id="auditActionType">
+                    <option value="">Все</option>
+                </select>
+            </label>
+            <label><span>Источник:</span>
+                <select id="auditSource">
+                    <option value="">Все</option>
+                    <option value="api">api</option>
+                    <option value="ui">ui</option>
+                    <option value="scheduler">scheduler</option>
+                </select>
+            </label>
+            <label><span>Поиск:</span><input type="text" id="auditQuery" placeholder="zone:5, error..."></label>
+        </div>
+        <div class="filter-buttons">
+            <button onclick="applyAuditFilter()">Фильтровать</button>
+            <button class="export-btn" onclick="exportAuditCSV()">Экспорт CSV</button>
+        </div>
+    </div>
+    <div style="margin:8px 0;color:#666;font-size:14px;">
+        <span id="auditStats">Записей: 0</span>
+    </div>
+    <div style="overflow-x: auto;">
+        <table class="logs-table">
+            <thead>
+                <tr>
+                    <th class="nowrap">Время</th>
+                    <th>Кто</th>
+                    <th>Источник</th>
+                    <th>Действие</th>
+                    <th>Цель</th>
+                    <th>Результат</th>
+                    <th>IP</th>
+                    <th>Детали</th>
+                </tr>
+            </thead>
+            <tbody id="audit-body">
+                <tr><td colspan="8" class="loading">Загрузка аудита...</td></tr>
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endblock %}
 
@@ -303,5 +363,124 @@
             } catch(e){}
         });
     });
+
+    // ===== Audit-tab helpers =====
+    let auditRows = [];
+
+    function switchLogsTab(name) {
+        document.querySelectorAll('.logs-tab').forEach(b => {
+            const active = b.dataset.tab === name;
+            b.classList.toggle('active', active);
+            b.style.borderBottomColor = active ? '#1976d2' : 'transparent';
+            b.style.color = active ? '#1976d2' : '#666';
+        });
+        document.getElementById('tab-events').style.display = (name === 'events') ? '' : 'none';
+        document.getElementById('tab-audit').style.display = (name === 'audit') ? '' : 'none';
+        if (name === 'audit' && !auditRows.length) loadAuditTypes().then(loadAudit);
+    }
+
+    async function loadAuditTypes() {
+        try {
+            const r = await fetch('/api/audit/types');
+            const j = await r.json();
+            const sel = document.getElementById('auditActionType');
+            const cur = sel.value;
+            sel.innerHTML = '<option value="">Все</option>';
+            (j.types || []).forEach(t => {
+                const o = document.createElement('option');
+                o.value = t; o.textContent = t;
+                sel.appendChild(o);
+            });
+            if (cur) sel.value = cur;
+        } catch (e) { /* ignore */ }
+    }
+
+    async function loadAudit() {
+        const tbody = document.getElementById('audit-body');
+        tbody.innerHTML = '<tr><td colspan="8" class="loading">Загрузка...</td></tr>';
+        const params = new URLSearchParams();
+        const f = document.getElementById('auditFromDate').value;
+        const t = document.getElementById('auditToDate').value;
+        const a = document.getElementById('auditActionType').value;
+        const s = document.getElementById('auditSource').value;
+        const q = document.getElementById('auditQuery').value;
+        if (f) params.append('from', f);
+        if (t) params.append('to', t);
+        if (a) params.append('action_type', a);
+        if (s) params.append('source', s);
+        if (q) params.append('q', q);
+        params.append('limit', '500');
+        try {
+            const r = await fetch('/api/audit?' + params.toString());
+            const j = await r.json();
+            auditRows = j.rows || [];
+            document.getElementById('auditStats').textContent = `Записей: ${auditRows.length} из ${j.total || 0}`;
+            renderAudit();
+        } catch (e) {
+            tbody.innerHTML = '<tr><td colspan="8" class="no-data">Ошибка загрузки аудита</td></tr>';
+        }
+    }
+
+    function renderAudit() {
+        const tbody = document.getElementById('audit-body');
+        if (!auditRows.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="no-data">Нет записей</td></tr>';
+            return;
+        }
+        tbody.innerHTML = '';
+        auditRows.forEach(r => {
+            const tr = document.createElement('tr');
+            const cells = [
+                r.ts || '',
+                r.actor || 'guest',
+                r.source || '',
+                r.action_type || '',
+                r.target || '',
+                r.result || '',
+                r.ip || '',
+            ];
+            cells.forEach(v => {
+                const td = document.createElement('td');
+                td.textContent = v;
+                tr.appendChild(td);
+            });
+            const detTd = document.createElement('td');
+            const pre = document.createElement('pre');
+            pre.className = 'log-details';
+            let detail = '';
+            if (r.payload_json) detail += r.payload_json;
+            if (r.error_msg) detail += '\n' + r.error_msg;
+            if (r.duration_ms != null) detail += `\n[${r.duration_ms}ms]`;
+            pre.textContent = detail.trim();
+            detTd.appendChild(pre);
+            tr.appendChild(detTd);
+            tbody.appendChild(tr);
+        });
+    }
+
+    function applyAuditFilter() { loadAudit(); }
+
+    function exportAuditCSV() {
+        if (!auditRows.length) {
+            showNotification('Нет данных для экспорта', 'warning'); return;
+        }
+        const sanitize = (v) => {
+            let s = String(v == null ? '' : v).replace(/"/g, '""');
+            if (/^[=+\-@]/.test(s)) s = "'" + s;
+            return `"${s}"`;
+        };
+        const header = ['ts','actor','source','action_type','target','result','error_msg','ip','duration_ms','payload_json'];
+        const rows = [header.join(',')];
+        auditRows.forEach(r => {
+            rows.push(header.map(k => sanitize(r[k])).join(','));
+        });
+        const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `audit_${new Date().toISOString().slice(0, 10)}.csv`;
+        a.style.display = 'none'; document.body.appendChild(a); a.click();
+        document.body.removeChild(a); URL.revokeObjectURL(url);
+        showNotification(`Экспортировано ${auditRows.length} записей`, 'success');
+    }
 </script>
 {% endblock %}

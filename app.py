@@ -77,6 +77,7 @@ from routes.system_status_api import system_status_api_bp
 from routes.system_config_api import system_config_api_bp
 from routes.system_emergency_api import system_emergency_api_bp
 from routes.weather_api import weather_api_bp
+from routes.audit_api import audit_api_bp
 from routes.health_api import (
     health_api_bp,
     init_metrics as _init_metrics,
@@ -101,7 +102,8 @@ from services.app_init import initialize_app as _initialize_app
 # ── Flask app ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
 # Use TestConfig when TESTING=1 to disable CSRF
-if os.environ.get('TESTING') == '1':
+from config import TESTING as _TESTING_FLAG
+if _TESTING_FLAG:
     from config import TestConfig
     app.config.from_object(TestConfig)
 else:
@@ -137,6 +139,7 @@ from routes.groups_api import (
     api_start_zone_exclusive,
     api_master_valve_toggle,
 )
+from routes.audit_api import api_audit_ui_event
 
 for _view in (
     api_env_config,        # /api/env
@@ -153,6 +156,7 @@ for _view in (
     api_start_group_from_first,  # /api/groups/<id>/start-from-first
     api_start_zone_exclusive,    # /api/groups/<id>/start-zone/<zid>
     api_master_valve_toggle,     # /api/groups/<id>/master-valve/<action>
+    api_audit_ui_event,    # /api/audit/ui — guests/viewers must record clicks
 ):
     csrf.exempt(_view)
 
@@ -340,7 +344,7 @@ def dlog(msg: str, *args) -> None:
 # control is unnecessary — gardeners need start/stop without admin password.
 import re as _re
 
-_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk'}
+_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk', '/api/audit/ui'}
 
 # Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
 _ALLOWED_PUBLIC_PATTERNS = [
@@ -403,7 +407,7 @@ try:
 except ImportError as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
 
-for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp):
+for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp, audit_api_bp):
     app.register_blueprint(bp)
 
 # F2 — observability endpoints: /healthz, /readyz, /metrics.
@@ -473,11 +477,21 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                 _stop_central_gex(int(z['id']), reason='group_exclusive', force=True)
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e:
                 logger.error("group exclusive stop_zone for %s: %s", z.get('id'), e)
-                # Fallback to direct DB update if central stop fails
+                # Fallback to direct DB update if central stop fails — but
+                # still go through the audited helper so 'group_exclusivity'
+                # transitions are visible to triage.  If even that path
+                # blows up, drop to raw update_zone last.
                 try:
-                    db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
-                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e2:
-                    logger.error("group exclusive db update fallback for zone %s: %s", z.get('id'), e2)
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(int(z['id']),
+                         {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')},
+                         audit_reason='group_exclusivity')
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e2:
+                    logger.error("group exclusive audited fallback for zone %s: %s", z.get('id'), e2)
+                    try:
+                        db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None, 'last_watering_time': z.get('watering_start_time')})
+                    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e3:
+                        logger.error("group exclusive db update fallback for zone %s: %s", z.get('id'), e3)
         try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))
         except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError, TypeError, KeyError) as e:
             logger.debug("group exclusive log: %s", e)
