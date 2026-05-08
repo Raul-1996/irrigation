@@ -42,7 +42,9 @@
       </div>
     </div>
     <div class="actions" style="margin-top:.5rem;">
-      <button class="btn btn-primary" onclick="createServer()">Создать</button>
+      <button class="btn btn-primary" onclick="createServer()"
+              data-audit-action="mqtt_server_create_click"
+              data-audit-target="mqtt:new">Создать</button>
     </div>
   </div>
 
@@ -51,16 +53,24 @@
     <div class="browser-controls">
       <select id="serverSelect" onchange="onServerChange()"></select>
       <input id="filterInput" placeholder="Фильтр (например: wb/#)" style="flex:1; padding:.5rem; border:1px solid var(--border-color); border-radius:8px;">
-      <button class="btn btn-secondary" onclick="toggleSubscribe()" id="subBtn">Подписаться</button>
+      <button class="btn btn-secondary" onclick="toggleSubscribe()" id="subBtn"
+              data-audit-action="mqtt_subscribe_toggle_click"
+              data-audit-target="mqtt:browser">Подписаться</button>
       <select id="durationSel" title="Время ожидания" style="padding:.45rem; border:1px solid var(--border-color); border-radius:8px;">
         <option value="2">2s</option>
         <option value="3" selected>3s</option>
         <option value="5">5s</option>
         <option value="10">10s</option>
       </select>
-      <button class="btn btn-primary" id="scanBtn" onclick="toggleScan()">Сканировать топики</button>
-      <button class="btn btn-secondary" onclick="showConnectLogs()">Показать логи подключения</button>
-      <button class="btn btn-danger" onclick="clearBrowser()">Очистить</button>
+      <button class="btn btn-primary" id="scanBtn" onclick="toggleScan()"
+              data-audit-action="mqtt_scan_toggle_click"
+              data-audit-target="mqtt:browser">Сканировать топики</button>
+      <button class="btn btn-secondary" onclick="showConnectLogs()"
+              data-audit-action="mqtt_show_logs_click"
+              data-audit-target="mqtt:browser">Показать логи подключения</button>
+      <button class="btn btn-danger" onclick="clearBrowser()"
+              data-audit-action="mqtt_clear_browser_click"
+              data-audit-target="mqtt:browser">Очистить</button>
     </div>
     <div class="browser-log" id="topicLog"></div>
     <div style="margin-top:.6rem">
@@ -107,8 +117,12 @@
             </select>
           </td>
           <td>
-            <button class="btn btn-primary" onclick="updateRow(this, ${s.id})">Сохранить</button>
-            <button class="btn btn-danger" onclick="deleteServer(${s.id})">Удалить</button>
+            <button class="btn btn-primary" onclick="updateRow(this, ${s.id})"
+                    data-audit-action="mqtt_server_update_click"
+                    data-audit-target="mqtt:${s.id}">Сохранить</button>
+            <button class="btn btn-danger" onclick="deleteServer(${s.id})"
+                    data-audit-action="mqtt_server_delete_click"
+                    data-audit-target="mqtt:${s.id}">Удалить</button>
           </td>
         `;
         tbody.appendChild(tr);

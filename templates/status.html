@@ -116,8 +116,12 @@
 <!-- Легенда убрана: статусы видны из текста/цвета/emoji карточек -->
 
 <div style="display:flex; gap:.5rem; justify-content:center; margin-bottom:.5rem;">
-    <button id="emergency-btn" class="emergency">Аварийная остановка</button>
-    <button id="resume-btn" class="emergency" style="background:#4caf50; display:none;">Продолжить полив</button>
+    <button id="emergency-btn" class="emergency"
+            data-audit-action="emergency_stop_click"
+            data-audit-target="system">Аварийная остановка</button>
+    <button id="resume-btn" class="emergency" style="background:#4caf50; display:none;"
+            data-audit-action="emergency_resume_click"
+            data-audit-target="system">Продолжить полив</button>
  </div>
 
 <!-- ========== ZONES v2: Hunter-style ========== -->
@@ -140,7 +144,8 @@
 
 <!-- Quick Actions -->
 <div class="zone-quick-actions">
-  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runSelectedGroup()">▶ Запустить</button>
+  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runSelectedGroup()"
+          data-audit-action="group_run_click">▶ Запустить</button>
   <button class="zq-btn zq-search" onclick="toggleZoneSearch()">🔍</button>
 </div>
 
@@ -183,7 +188,8 @@
   </div>
   <div class="sheet-actions">
     <button class="sheet-btn-cancel" onclick="closeZoneSheet()">Отмена</button>
-    <button class="sheet-btn-save" onclick="saveZoneEdit()">Сохранить</button>
+    <button class="sheet-btn-save" onclick="saveZoneEdit()"
+            data-audit-action="zone_edit_save_click">Сохранить</button>
   </div>
 </div>
 
@@ -235,7 +241,8 @@
   </div>
   <div class="run-popup-actions" id="runPopupActions">
     <button class="sheet-btn-cancel" onclick="closeRunPopup()">Отмена</button>
-    <button class="sheet-btn-save" onclick="confirmRun()" style="background:#4caf50">▶ Запустить</button>
+    <button class="sheet-btn-save" onclick="confirmRun()" style="background:#4caf50"
+            data-audit-action="zone_run_confirm_click">▶ Запустить</button>
   </div>
   <!-- Extra button for group: run with zone defaults -->
   <div class="run-popup-defaults" id="runPopupDefaults" style="display:none;margin-top:8px">

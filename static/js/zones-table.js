@@ -88,8 +88,12 @@ function renderZonesTable() {
             </td>
             <td>
                 <div class="zone-actions">
-                    <button class="start-btn" onclick="toggleZone(${zone.id})">${zone.state === 'on' ? '⏹️' : '▶️'}</button>
-                    <button class="delete-btn" onclick="deleteZone(${zone.id})">🗑️</button>
+                    <button class="start-btn" onclick="toggleZone(${zone.id})"
+                            data-audit-action="zone_toggle_click"
+                            data-audit-target="zone:${zone.id}">${zone.state === 'on' ? '⏹️' : '▶️'}</button>
+                    <button class="delete-btn" onclick="deleteZone(${zone.id})"
+                            data-audit-action="zone_delete_click"
+                            data-audit-target="zone:${zone.id}">🗑️</button>
                 </div>
             </td>
         `;

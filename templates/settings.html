@@ -17,7 +17,9 @@
         </div>
       </div>
       <div class="settings-actions">
-        <button type="button" id="sys-save" class="settings-btn">Сохранить название</button>
+        <button type="button" id="sys-save" class="settings-btn"
+                data-audit-action="settings_system_name_save"
+                data-audit-target="setting:system_name">Сохранить название</button>
       </div>
       <div class="settings-msg" id="sys-msg"></div>
     </form>
@@ -51,8 +53,12 @@
         </div>
       </div>
       <div class="settings-actions" style="display:flex; gap:8px; align-items:center;">
-        <button type="button" id="tg-save" class="settings-btn">Сохранить</button>
-        <button type="button" id="tg-test" class="settings-btn">Протестировать бота</button>
+        <button type="button" id="tg-save" class="settings-btn"
+                data-audit-action="settings_telegram_save"
+                data-audit-target="setting:telegram">Сохранить</button>
+        <button type="button" id="tg-test" class="settings-btn"
+                data-audit-action="settings_telegram_test"
+                data-audit-target="setting:telegram">Протестировать бота</button>
       </div>
       <div class="settings-msg" id="tg-msg"></div>
     </form>
@@ -73,7 +79,9 @@
         <label for="weather_lon">Долгота (lon)</label>
         <div class="settings-input" style="display:flex; gap:6px; align-items:center;">
           <input type="text" id="weather_lon" name="weather_lon" placeholder="37.6176" style="flex:1">
-          <button type="button" id="geo-detect" class="settings-btn" style="white-space:nowrap; padding:8px 10px; font-size:12px;">📍 По IP</button>
+          <button type="button" id="geo-detect" class="settings-btn" style="white-space:nowrap; padding:8px 10px; font-size:12px;"
+                  data-audit-action="settings_geo_detect"
+                  data-audit-target="setting:weather_location">📍 По IP</button>
         </div>
       </div>
       <div class="settings-row">
@@ -127,15 +135,21 @@
         </div>
       </details>
       <div class="settings-actions" style="display:flex; gap:8px; align-items:center;">
-        <button type="button" id="weather-save" class="settings-btn">Сохранить</button>
-        <button type="button" id="weather-test" class="settings-btn">Проверить погоду</button>
+        <button type="button" id="weather-save" class="settings-btn"
+                data-audit-action="settings_weather_save"
+                data-audit-target="setting:weather">Сохранить</button>
+        <button type="button" id="weather-test" class="settings-btn"
+                data-audit-action="settings_weather_test"
+                data-audit-target="setting:weather">Проверить погоду</button>
       </div>
       <div class="settings-msg" id="weather-msg"></div>
       <div id="weather-preview" style="display:none; margin-top:8px; padding:8px; background:rgba(0,0,0,.04); border-radius:8px; font-size:12px;"></div>
     </form>
 
     <p class="settings-note">Минимальная длина пароля — 4 символа.</p>
-    <form id="pwd-form" class="settings-form" autocomplete="off">
+    <form id="pwd-form" class="settings-form" autocomplete="off"
+          data-audit-action="settings_password_submit"
+          data-audit-target="setting:password">
       <div class="settings-row">
         <label for="old_password">Текущий пароль</label>
         <div class="settings-input">

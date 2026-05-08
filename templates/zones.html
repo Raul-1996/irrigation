@@ -13,7 +13,8 @@
     <div class="groups-header" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
         <h3 style="margin:0;">Группы зон</h3>
         <div class="groups-actions" style="display:flex; gap:8px; align-items:center;">
-            <button class="btn btn-success" onclick="showAddGroupModal()">
+            <button class="btn btn-success" onclick="showAddGroupModal()"
+                    data-audit-action="group_create_open">
                 ➕ Добавить группу
             </button>
         </div>
@@ -28,9 +29,9 @@
     <div class="zones-header">
         <h3>🌿 Зоны полива (<span id="zones-count">0</span>)</h3>
         <div class="zones-actions">
-            <button class="group-edit-btn" onclick="exportZonesCSV()">📤 Экспорт CSV</button>
-            <button class="group-edit-btn" onclick="importZonesCSV()">📥 Импорт CSV</button>
-            <button class="group-edit-btn" onclick="showZoneModal()">➕ Добавить зону</button>
+            <button class="group-edit-btn" onclick="exportZonesCSV()" data-audit-action="zones_export_csv">📤 Экспорт CSV</button>
+            <button class="group-edit-btn" onclick="importZonesCSV()" data-audit-action="zones_import_csv">📥 Импорт CSV</button>
+            <button class="group-edit-btn" onclick="showZoneModal()" data-audit-action="zone_create_open">➕ Добавить зону</button>
         </div>
     </div>
     
@@ -102,7 +103,7 @@
                 <select id="bulkMqtt"></select>
             </div>
             
-            <button onclick="applyBulkAction()" class="save-all-btn">💾 Применить к выбранным</button>
+            <button onclick="applyBulkAction()" class="save-all-btn" data-audit-action="zones_bulk_apply">💾 Применить к выбранным</button>
         </div>
     </div>
     
@@ -134,7 +135,7 @@
   <div style="color:#333;">
     <label for="early-off-seconds" style="color:#333;">За сколько секунд до конца таймера отключать зону:</label>
     <input id="early-off-seconds" type="number" min="0" max="15" step="1" value="3" style="width:80px; margin: 0 8px; color:#333;" />
-    <button class="save-all-btn" onclick="saveEarlyOff()">Сохранить</button>
+    <button class="save-all-btn" onclick="saveEarlyOff()" data-audit-action="setting_early_off_save">Сохранить</button>
     <div class="muted" style="color:#333;">Допустимо: 0–15 секунд. Выключение выполняется заранее, запуск следующей зоны остаётся по расписанию.</div>
   </div>
   <hr style="margin:12px 0;">
@@ -289,7 +290,7 @@
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn-secondary" onclick="closeGroupModal()">Отмена</button>
-                <button type="submit" class="btn-primary">Сохранить</button>
+                <button type="submit" class="btn-primary" data-audit-action="group_save_submit">Сохранить</button>
             </div>
         </form>
     </div>

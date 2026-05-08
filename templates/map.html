@@ -53,7 +53,9 @@
 <div class="map-card">
   <div id="map-container" class="map-list"></div>
   <div class="upload-area">
-    <label for="mapFile" class="btn btn-primary">Загрузить карту</label>
+    <label for="mapFile" class="btn btn-primary"
+           data-audit-action="map_upload_click"
+           data-audit-target="map">Загрузить карту</label>
     <input id="mapFile" type="file" accept="image/*" />
     <span class="hint">Поддерживаются изображения JPG, PNG, GIF, WEBP.</span>
   </div>
@@ -89,6 +91,8 @@ async function loadMap() {
         del.className = 'btn btn-danger btn-delete-circle';
         del.title = 'Удалить карту';
         del.textContent = '✖';
+        del.setAttribute('data-audit-action', 'map_delete_click');
+        del.setAttribute('data-audit-target', 'map:' + (it.name || 'unknown'));
         del.addEventListener('click', async ()=>{
           if (!confirm('Вы точно хотите удалить это фото карты?')) return;
           const r = await fetch('/api/map/' + encodeURIComponent(it.name), {method:'DELETE'});

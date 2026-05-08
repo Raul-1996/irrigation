@@ -16,7 +16,9 @@ function renderGroupsGrid() {
         card.dataset.groupId = group.id;
         card.style.position = 'relative';
         card.innerHTML = `
-            <button class="delete-btn" title="Удалить группу" onclick="deleteGroup(${group.id})">✖</button>
+            <button class="delete-btn" title="Удалить группу" onclick="deleteGroup(${group.id})"
+                    data-audit-action="group_delete_click"
+                    data-audit-target="group:${group.id}">✖</button>
             <div class="group-head-grid">
                 <div>
                     <label style="display:block; color:#555; font-weight:500; margin-bottom:4px;">Имя группы</label>

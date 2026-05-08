@@ -61,7 +61,8 @@
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="wizardPrev()" id="prev-btn">← Назад</button>
-      <button class="btn btn-primary" onclick="wizardNext()" id="next-btn">Далее →</button>
+      <button class="btn btn-primary" onclick="wizardNext()" id="next-btn"
+              data-audit-action="program_wizard_next_or_save_click">Далее →</button>
     </div>
   </div>
 </div>
@@ -203,10 +204,18 @@ function renderList() {
             </div>
             
             <div class="program-actions">
-              <button class="icon-btn" onclick="editProgram(${p.id})">✏️ Редактировать</button>
-              <button class="icon-btn" onclick="duplicateProgram(${p.id})">📋 Дублировать</button>
-              <button class="icon-btn" onclick="runProgram(${p.id})">▶️ Запустить</button>
-              <button class="icon-btn danger" onclick="deleteProgram(${p.id})">🗑 Удалить</button>
+              <button class="icon-btn" onclick="editProgram(${p.id})"
+                      data-audit-action="program_edit_click"
+                      data-audit-target="program:${p.id}">✏️ Редактировать</button>
+              <button class="icon-btn" onclick="duplicateProgram(${p.id})"
+                      data-audit-action="program_duplicate_click"
+                      data-audit-target="program:${p.id}">📋 Дублировать</button>
+              <button class="icon-btn" onclick="runProgram(${p.id})"
+                      data-audit-action="program_run_click"
+                      data-audit-target="program:${p.id}">▶️ Запустить</button>
+              <button class="icon-btn danger" onclick="deleteProgram(${p.id})"
+                      data-audit-action="program_delete_click"
+                      data-audit-target="program:${p.id}">🗑 Удалить</button>
             </div>
           </div>
         </div>
