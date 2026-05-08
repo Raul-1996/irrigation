@@ -13,14 +13,19 @@ class ZoneRepository(BaseRepository):
     """Repository for zone CRUD, bulk operations, and zone_runs."""
 
     def get_zones(self) -> List[Dict[str, Any]]:
-        """Получить все зоны."""
+        """Получить все зоны.
+
+        Injects ``last_watering_time`` (derived from ``zone_runs.end_utc``)
+        into each row so API/UI consumers keep working after the
+        ``zones_drop_last_watering_time`` migration.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
                     SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
-                    FROM zones z 
-                    LEFT JOIN groups g ON z.group_id = g.id 
+                    FROM zones z
+                    LEFT JOIN groups g ON z.group_id = g.id
                     ORDER BY z.id
                 ''')
                 zones = []
@@ -28,26 +33,50 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone['group'] = zone['group_id']
                     zones.append(zone)
+                # Single batched query — derive last_watering_time from
+                # zone_runs (idx_zone_runs_active covers it). Done after
+                # row.fetchall() so the cursor isn't held while we issue
+                # a second statement on the same connection.
+                try:
+                    cur2 = conn.execute(
+                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
+                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
+                        "GROUP BY zone_id"
+                    )
+                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
+                except sqlite3.Error as e:
+                    logger.debug("get_zones: zone_runs aggregation failed: %s", e)
+                    last_map = {}
+                for z in zones:
+                    z['last_watering_time'] = last_map.get(int(z['id']))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон: %s", e)
             return []
 
     def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
-        """Получить зону по ID."""
+        """Получить зону по ID.
+
+        Injects ``last_watering_time`` derived from ``zone_runs.end_utc``
+        (see :meth:`get_last_watering_time`) so consumers don't have to
+        know about the schema change.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
-                    SELECT z.*, g.name as group_name 
-                    FROM zones z 
-                    LEFT JOIN groups g ON z.group_id = g.id 
+                    SELECT z.*, g.name as group_name
+                    FROM zones z
+                    LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.id = ?
                 ''', (zone_id,))
                 row = cursor.fetchone()
                 if row:
                     zone = dict(row)
                     zone['group'] = zone['group_id']
+                    zone['last_watering_time'] = self.get_last_watering_time(
+                        int(zone_id)
+                    )
                     return zone
                 return None
         except sqlite3.Error as e:
@@ -469,14 +498,18 @@ class ZoneRepository(BaseRepository):
             return False
 
     def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
-        """Получить зоны по группе."""
+        """Получить зоны по группе.
+
+        Injects ``last_watering_time`` from ``zone_runs`` so callers get the
+        same schema as :meth:`get_zones`.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute('''
-                    SELECT z.*, g.name as group_name 
-                    FROM zones z 
-                    LEFT JOIN groups g ON z.group_id = g.id 
+                    SELECT z.*, g.name as group_name
+                    FROM zones z
+                    LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.group_id = ?
                     ORDER BY z.id
                 ''', (group_id,))
@@ -485,6 +518,18 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone['group'] = zone['group_id']
                     zones.append(zone)
+                try:
+                    cur2 = conn.execute(
+                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
+                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
+                        "GROUP BY zone_id"
+                    )
+                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
+                except sqlite3.Error as e:
+                    logger.debug("get_zones_by_group: zone_runs aggregation failed: %s", e)
+                    last_map = {}
+                for z in zones:
+                    z['last_watering_time'] = last_map.get(int(z['id']))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон группы %s: %s", group_id, e)
