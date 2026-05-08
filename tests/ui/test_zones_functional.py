@@ -317,12 +317,29 @@ class TestPageRender:
             assert elem in html, f'Missing: {elem}'
 
     def test_zone_card_css_classes(self, client):
+        """Verify CSS class definitions present (HTML or linked stylesheets).
+
+        After CSS extraction (commit 791ff0e) zone-card styles live in
+        /static/css/status.css.  Fetch linked stylesheets and grep the
+        combined content rather than only the HTML body.
+        """
+        import re
         resp = client.get('/')
+        assert resp.status_code == 200
         html = resp.data.decode()
+        pieces = [html]
+        for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
+            if href.startswith('http'):
+                continue
+            path = href if href.startswith('/') else '/' + href.lstrip('./')
+            css_resp = client.get(path)
+            if css_resp.status_code == 200:
+                pieces.append(css_resp.data.decode('utf-8', errors='replace'))
+        combined = '\n'.join(pieces)
         classes = ['zone-card', 'zc-icon', 'zc-name', 'zc-dur-badge',
                    'zc-running', 'zc-expanded', 'zc-actions', 'group-tab']
         for cls in classes:
-            assert cls in html, f'Missing CSS class: {cls}'
+            assert cls in combined, f'Missing CSS class: {cls}'
 
     def test_status_js_v2_loaded(self, client):
         resp = client.get('/')

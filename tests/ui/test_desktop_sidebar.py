@@ -1,5 +1,34 @@
 """Tests for desktop sidebar layout in status.html."""
+import re
 import pytest
+
+
+def _fetch_inline_and_external_css(client, page_path: str) -> str:
+    """Return concatenated CSS visible to the rendered page.
+
+    The HTML response only contains <link rel="stylesheet" href=...> tags after
+    CSS extraction (commit 791ff0e moved inline <style> blocks into
+    static/css/*.css).  Tests that previously grep'd HTML for class names or
+    media queries must now fetch every linked stylesheet via the test client
+    and concatenate them with the HTML body so existing assertions still match.
+    """
+    resp = client.get(page_path)
+    if resp.status_code != 200:
+        return resp.data.decode('utf-8', errors='replace')
+    html = resp.data.decode('utf-8', errors='replace')
+    pieces = [html]
+    for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
+        # Normalise to a path the test client can fetch
+        if href.startswith('http'):
+            continue
+        path = href if href.startswith('/') else '/' + href.lstrip('./')
+        try:
+            css_resp = client.get(path)
+            if css_resp.status_code == 200:
+                pieces.append(css_resp.data.decode('utf-8', errors='replace'))
+        except (OSError, ValueError):
+            continue
+    return '\n'.join(pieces)
 
 
 @pytest.mark.xfail(reason="Implementation pending")
@@ -105,10 +134,18 @@ def test_mobile_zones_cards_class(client):
 
 
 def test_mobile_buttons_responsive(client):
-    """Verify CSS contains media query for responsive layout."""
+    """Verify CSS contains media query for responsive layout.
+
+    After CSS extraction (commit 791ff0e) the @media rules live in
+    /static/css/status.css, not inline.  Fetch the linked stylesheets and grep
+    the combined content.
+    """
     response = client.get('/status')
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
+    combined = _fetch_inline_and_external_css(client, '/status')
     # v2: breakpoint raised to 1023px
-    assert '@media (max-width: 1023px)' in html or '@media(max-width:1023px)' in html or '@media (max-width: 767px)' in html
+    assert ('@media (max-width: 1023px)' in combined
+            or '@media(max-width:1023px)' in combined
+            or '@media (max-width: 767px)' in combined), (
+        f"No expected @media query found in HTML or linked CSS"
+    )
