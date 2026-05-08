@@ -180,16 +180,10 @@ except (TypeError, ValueError) as e:
     logger.debug("SEND_FILE_MAX_AGE_DEFAULT config: %s", e)
 
 # ── App version ────────────────────────────────────────────────────────────
-def _compute_app_version() -> str:
-    try:
-        version_file = os.path.join(os.path.dirname(__file__), 'VERSION')
-        with open(version_file, 'r') as f:
-            return f.read().strip()
-    except (IOError, OSError, PermissionError) as e:
-        logger.debug("VERSION file read failed: %s", e)
-        return '2.0.0'
+# Resolution: git describe → VERSION file → 'unknown'. See services/version.py.
+from services.version import get_app_version as _get_app_version
 
-APP_VERSION = _compute_app_version()
+APP_VERSION = _get_app_version()
 
 @app.context_processor
 def _inject_app_version():

@@ -33,6 +33,8 @@ from prometheus_client import (
     generate_latest,
 )
 
+from services.version import get_app_version as _get_app_version
+
 logger = logging.getLogger(__name__)
 
 health_api_bp = Blueprint('health_api', __name__)
@@ -180,7 +182,7 @@ def init_metrics(app, db) -> None:
     """
     global _LOG_COUNT_HANDLER_ATTACHED
     try:
-        version = app.config.get('APP_VERSION') or _read_app_version()
+        version = app.config.get('APP_VERSION') or _get_app_version()
     except Exception:
         version = 'unknown'
     commit = os.environ.get('GIT_COMMIT', 'unknown')
@@ -212,15 +214,6 @@ def init_metrics(app, db) -> None:
         _LOG_COUNT_HANDLER_ATTACHED = True
 
     logger.info('observability: init_metrics completed (version=%s commit=%s)', version, commit)
-
-
-def _read_app_version() -> str:
-    try:
-        from pathlib import Path
-        vf = Path(__file__).resolve().parent.parent / 'VERSION'
-        return vf.read_text(encoding='utf-8').strip() or 'unknown'
-    except (OSError, UnicodeDecodeError):
-        return 'unknown'
 
 
 # ── Readiness checks ───────────────────────────────────────────────────────
