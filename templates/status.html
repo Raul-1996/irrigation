@@ -186,12 +186,32 @@
     <label class="sheet-label">Группа</label>
     <select class="sheet-select" id="editZoneGroup"></select>
   </div>
+  <div class="sheet-form-group" id="sheetPhotoGroup">
+    <label class="sheet-label">Фото зоны</label>
+    <div class="sheet-photo-row">
+      <div class="sheet-photo-preview" id="sheetPhotoPreview">
+        <span class="sheet-photo-placeholder">Нет фото</span>
+      </div>
+      <div class="sheet-photo-actions" id="sheetPhotoActions">
+        <button type="button" class="sheet-photo-btn sheet-photo-btn-upload" id="sheetPhotoUploadBtn"
+                onclick="uploadStatusPhoto()">📷 Загрузить</button>
+        <button type="button" class="sheet-photo-btn sheet-photo-btn-rotate" id="sheetPhotoRotateBtn"
+                onclick="rotateStatusPhoto(90)" style="display:none">⟳ 90°</button>
+        <button type="button" class="sheet-photo-btn sheet-photo-btn-delete" id="sheetPhotoDeleteBtn"
+                onclick="deleteStatusPhoto()" style="display:none">🗑 Удалить</button>
+      </div>
+    </div>
+  </div>
   <div class="sheet-actions">
     <button class="sheet-btn-cancel" onclick="closeZoneSheet()">Отмена</button>
     <button class="sheet-btn-save" onclick="saveZoneEdit()"
             data-audit-action="zone_edit_save_click">Сохранить</button>
   </div>
 </div>
+
+<!-- Hidden file input for photo upload (status page) -->
+<input type="file" id="photoInputStatus" accept="image/*" style="display:none"
+       onchange="handleStatusPhotoUpload(event)">
 
 <!-- Photo Modal -->
 <div id="photoModal" class="photo-modal">

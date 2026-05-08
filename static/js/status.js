@@ -1010,6 +1010,135 @@
     function closePhotoModal() {
         document.getElementById('photoModal').style.display = 'none';
     }
+
+    // ===== Photo upload/delete/rotate (issue #6) =====
+    // Parallel implementation to zones.js (separate IIFE scope).
+    // Backend: POST/DELETE /api/zones/{id}/photo, POST /api/zones/{id}/photo/rotate
+    var currentStatusPhotoZoneId = null;
+
+    // Bump cache-busting timestamp on a zone in zonesData so img URLs reload.
+    function _bumpZonePhotoTs(zoneId) {
+        var z = (zonesData || []).find(function(zz) { return zz.id === zoneId; });
+        if (z) z._photoTs = Date.now();
+    }
+
+    // After mutation: reload zones from server, then re-render and refresh sheet preview.
+    async function _afterPhotoMutation(zoneId) {
+        try { await loadZonesData(); } catch (e) {}
+        // Preserve cache-bust timestamp set before reload (loadZonesData may overwrite array).
+        _bumpZonePhotoTs(zoneId);
+        try { renderZoneCards(); } catch (e) {}
+        if (editingZoneId === zoneId) {
+            var z = (zonesData || []).find(function(zz) { return zz.id === zoneId; });
+            if (z) refreshSheetPhotoPreview(z);
+        }
+    }
+
+    function uploadStatusPhoto(zoneId) {
+        // If invoked from sheet without arg, use editingZoneId.
+        var id = zoneId || editingZoneId;
+        if (!id) return;
+        currentStatusPhotoZoneId = id;
+        var input = document.getElementById('photoInputStatus');
+        if (input) input.click();
+    }
+
+    async function handleStatusPhotoUpload(event) {
+        var file = event.target.files && event.target.files[0];
+        var zoneId = currentStatusPhotoZoneId;
+        // Always clear input + state, even on early return, to allow retrying same file.
+        event.target.value = '';
+        currentStatusPhotoZoneId = null;
+        if (!file || !zoneId) return;
+
+        if (!file.type || !file.type.startsWith('image/')) {
+            showZoneToast('Выберите изображение', 'error');
+            return;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+            showZoneToast('Файл больше 5 МБ', 'error');
+            return;
+        }
+
+        var formData = new FormData();
+        formData.append('photo', file);
+
+        showZoneToast('Загрузка фото...', 'info');
+        try {
+            var resp = await fetch('/api/zones/' + zoneId + '/photo', {
+                method: 'POST',
+                body: formData
+            });
+            if (resp.ok) {
+                _bumpZonePhotoTs(zoneId);
+                showZoneToast('✅ Фото загружено', 'success');
+                await _afterPhotoMutation(zoneId);
+            } else {
+                var err = {};
+                try { err = await resp.json(); } catch (e) {}
+                showZoneToast(err.message || 'Ошибка загрузки', 'error');
+            }
+        } catch (e) {
+            showZoneToast('Ошибка загрузки', 'error');
+        }
+    }
+
+    async function deleteStatusPhoto(zoneId) {
+        var id = zoneId || editingZoneId;
+        if (!id) return;
+        if (!confirm('Удалить фото этой зоны?')) return;
+
+        var btn = document.getElementById('sheetPhotoDeleteBtn');
+        if (btn) btn.disabled = true;
+        try {
+            var resp = await fetch('/api/zones/' + id + '/photo', { method: 'DELETE' });
+            if (resp.ok) {
+                _bumpZonePhotoTs(id);
+                showZoneToast('🗑 Фото удалено', 'success');
+                await _afterPhotoMutation(id);
+            } else {
+                var err = {};
+                try { err = await resp.json(); } catch (e) {}
+                showZoneToast(err.message || 'Ошибка удаления', 'error');
+            }
+        } catch (e) {
+            showZoneToast('Ошибка удаления', 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function rotateStatusPhoto(angle) {
+        // Always operates on the zone currently being edited via the sheet.
+        var id = editingZoneId;
+        if (!id) {
+            showZoneToast('Нет активной зоны для поворота', 'error');
+            return;
+        }
+
+        var btn = document.getElementById('sheetPhotoRotateBtn');
+        if (btn) btn.disabled = true;
+        try {
+            var resp = await fetch('/api/zones/' + id + '/photo/rotate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ angle: angle })
+            });
+            var data = {};
+            try { data = await resp.json(); } catch (e) {}
+            if (resp.ok && data && data.success) {
+                _bumpZonePhotoTs(id);
+                showZoneToast('Фото повёрнуто', 'success');
+                await _afterPhotoMutation(id);
+            } else {
+                showZoneToast((data && data.message) || 'Ошибка поворота', 'error');
+            }
+        } catch (e) {
+            showZoneToast('Ошибка поворота', 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
     
     // Инициализация
     document.addEventListener('DOMContentLoaded', () => {
@@ -1099,6 +1228,11 @@
     window.showPhotoModal = showPhotoModal;
     window.closePhotoModal = closePhotoModal;
     window.startOrStopZone = startOrStopZone;
+    // Photo upload/delete/rotate (issue #6)
+    window.uploadStatusPhoto = uploadStatusPhoto;
+    window.handleStatusPhotoUpload = handleStatusPhotoUpload;
+    window.deleteStatusPhoto = deleteStatusPhoto;
+    window.rotateStatusPhoto = rotateStatusPhoto;
 
     // Точечное обновление строк зон группы (без полной перерисовки таблицы)
     async function refreshZonesRowsForGroup(groupId) {
@@ -1649,7 +1783,18 @@
 
             html += '<div class="zone-card ' + statusCls + '" id="zcard-' + z.id + '" data-zone-id="' + z.id + '">';
             html += '<div class="zone-card-main" onclick="toggleZoneCard(' + z.id + ')">';
-            html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
+            // Photo thumbnail if exists, otherwise icon (issue #6)
+            if (z.photo_path) {
+                var _ts = z._photoTs || '';
+                var _photoUrl = '/api/zones/' + z.id + '/photo' + (_ts ? '?ts=' + _ts : '');
+                html += '<div class="zc-photo" onclick="event.stopPropagation();showPhotoModal(\'' + _photoUrl + '\')" title="Открыть фото">';
+                // alt is escaped (XSS); src is server-controlled URL (no user input).
+                // onerror falls back to hiding the img (parent gets default grey background).
+                html += '<img src="' + _photoUrl + '" alt="Фото зоны ' + escapeHtml(z.name || '') + '" onerror="this.style.display=\'none\'">';
+                html += '</div>';
+            } else {
+                html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
+            }
             html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + escapeHtml(z.name || '') + '</div>';
             html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
             if (!showSections) html += '<span style="color:#ddd">·</span><span>' + escapeHtml(gName2) + '</span>';
@@ -1924,10 +2069,45 @@
         gs.innerHTML = (zoneGroupsCache || []).map(function(g) {
             return '<option value="' + g.id + '"' + (g.id === z.group_id ? ' selected' : '') + '>' + escapeHtml(g.name) + '</option>';
         }).join('');
+        // Populate photo section (issue #6)
+        refreshSheetPhotoPreview(z);
         document.getElementById('sheetOverlay').classList.add('show');
         document.getElementById('bottomSheet').classList.add('show');
     }
     window.openZoneSheet = openZoneSheet;
+
+    // Refresh the photo preview area inside the bottom sheet for a given zone
+    function refreshSheetPhotoPreview(z) {
+        var preview = document.getElementById('sheetPhotoPreview');
+        var rotateBtn = document.getElementById('sheetPhotoRotateBtn');
+        var deleteBtn = document.getElementById('sheetPhotoDeleteBtn');
+        var uploadBtn = document.getElementById('sheetPhotoUploadBtn');
+        if (!preview) return;
+        if (z && z.photo_path) {
+            var ts = z._photoTs || '';
+            var url = '/api/zones/' + z.id + '/photo' + (ts ? '?ts=' + ts : '');
+            // Build via DOM (no string interpolation of arbitrary attributes — XSS-safe).
+            preview.innerHTML = '';
+            var img = document.createElement('img');
+            img.src = url;
+            // alt is a DOM property (no HTML parsing), but escape defensively to satisfy XSS guards.
+            img.alt = 'Фото зоны ' + escapeHtml(z.name || '');
+            img.onclick = function() { showPhotoModal(url); };
+            preview.appendChild(img);
+            preview.style.cursor = 'pointer';
+            preview.onclick = function() { showPhotoModal(url); };
+            if (rotateBtn) rotateBtn.style.display = '';
+            if (deleteBtn) deleteBtn.style.display = '';
+            if (uploadBtn) uploadBtn.textContent = '📷 Заменить';
+        } else {
+            preview.innerHTML = '<span class="sheet-photo-placeholder">Нет фото</span>';
+            preview.onclick = null;
+            preview.style.cursor = 'default';
+            if (rotateBtn) rotateBtn.style.display = 'none';
+            if (deleteBtn) deleteBtn.style.display = 'none';
+            if (uploadBtn) uploadBtn.textContent = '📷 Загрузить';
+        }
+    }
 
     function closeZoneSheet() {
         document.getElementById('sheetOverlay').classList.remove('show');
