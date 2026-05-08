@@ -29,6 +29,15 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterable, Optional
 
+# werkzeug HTTPException — needed so we can classify 4xx aborts as
+# `failure:{code}` instead of bucket them with real handler errors.  Import
+# guard keeps the module loadable in environments where flask/werkzeug isn't
+# present (tooling, schema-migration scripts, etc.).
+try:
+    from werkzeug.exceptions import HTTPException as _WerkzeugHTTPException
+except Exception:  # noqa: BLE001 — broad on purpose
+    _WerkzeugHTTPException = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # ─── Debug-flag TTL cache ──────────────────────────────────────────────────
@@ -296,6 +305,25 @@ def audit_log(
                 # ``finally`` block below still runs for BaseException
                 # propagation, so the audit row gets written if a write was
                 # in flight.
+                #
+                # S1 FIX: werkzeug HTTPException 4xx is a CLIENT problem, not
+                # an audit-pipeline error.  Things like
+                # ``request.get_json()`` raising BadRequest on malformed JSON
+                # used to mark every such call as result='error', drowning
+                # legitimate server-side audit failures in noise (and
+                # firing ops alerts daily).  Reclassify 4xx as
+                # ``failure:{code}`` (mirrors the explicit-status path
+                # above) and leave error_msg None.  5xx HTTPException and
+                # all other Exception subclasses still flag 'error'.
+                if (
+                    _WerkzeugHTTPException is not None
+                    and isinstance(exc, _WerkzeugHTTPException)
+                ):
+                    code = getattr(exc, 'code', None)
+                    if isinstance(code, int) and 400 <= code < 500:
+                        status_code = code
+                        result_str = f'failure:{code}'
+                        raise
                 error_msg = f"{type(exc).__name__}: {exc}"[:512]
                 result_str = 'error'
                 raise

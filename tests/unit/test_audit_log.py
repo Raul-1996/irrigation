@@ -202,3 +202,102 @@ class TestRecordAudit:
         from services.audit import record_audit
         # Should not raise
         record_audit(action_type='boom', payload={'k': 1})
+
+
+# --------------------------------------------------------------------------- #
+# @audit_log decorator: HTTPException 4xx classification (S1)                  #
+# --------------------------------------------------------------------------- #
+
+class TestAuditLogHTTPExceptionClassification:
+    """werkzeug HTTPException 4xx must surface as failure:{code}, not error.
+
+    Regression test for S1: @audit_log used to write result='error' whenever a
+    handler raised werkzeug.exceptions.HTTPException (e.g. BadRequest from
+    request.get_json() with malformed JSON), conflating client mistakes with
+    server-side audit failures and triggering daily ops alerts.
+
+    Decorator pulls IP/headers off ``flask.request``, so we drive every test
+    through ``app.test_request_context``.
+    """
+
+    def _captured_rows(self, monkeypatch):
+        captured: list[dict] = []
+        import database as db_mod
+
+        class _Capture:
+            def add_audit(self, **kw):
+                captured.append(kw)
+                return 1
+
+        monkeypatch.setattr(db_mod, 'db', _Capture(), raising=False)
+        return captured
+
+    def test_4xx_httpexception_is_failure_not_error(self, monkeypatch, app):
+        captured = self._captured_rows(monkeypatch)
+
+        from werkzeug.exceptions import BadRequest
+        from services.audit import audit_log
+
+        @audit_log('test_4xx', source='unit')
+        def handler():
+            raise BadRequest('malformed json')
+
+        with app.test_request_context('/api/test', method='POST'):
+            with pytest.raises(BadRequest):
+                handler()
+
+        assert captured, 'audit row was not written'
+        row = captured[-1]
+        assert row['result'] == 'failure:400', row
+        # 4xx is a client problem, not an audit-pipeline error
+        assert row.get('error') in (None, ''), row
+
+    def test_403_httpexception_is_failure(self, monkeypatch, app):
+        captured = self._captured_rows(monkeypatch)
+
+        from werkzeug.exceptions import Forbidden
+        from services.audit import audit_log
+
+        @audit_log('test_403', source='unit')
+        def handler():
+            raise Forbidden()
+
+        with app.test_request_context('/api/test', method='POST'):
+            with pytest.raises(Forbidden):
+                handler()
+
+        assert captured[-1]['result'] == 'failure:403'
+
+    def test_5xx_httpexception_still_error(self, monkeypatch, app):
+        captured = self._captured_rows(monkeypatch)
+
+        from werkzeug.exceptions import InternalServerError
+        from services.audit import audit_log
+
+        @audit_log('test_5xx', source='unit')
+        def handler():
+            raise InternalServerError('oops')
+
+        with app.test_request_context('/api/test', method='POST'):
+            with pytest.raises(InternalServerError):
+                handler()
+
+        row = captured[-1]
+        assert row['result'] == 'error', row
+        assert row.get('error'), 'error_msg should be set for 5xx'
+
+    def test_non_httpexception_still_error(self, monkeypatch, app):
+        captured = self._captured_rows(monkeypatch)
+        from services.audit import audit_log
+
+        @audit_log('test_runtime', source='unit')
+        def handler():
+            raise RuntimeError('boom')
+
+        with app.test_request_context('/api/test', method='POST'):
+            with pytest.raises(RuntimeError):
+                handler()
+
+        row = captured[-1]
+        assert row['result'] == 'error', row
+        assert 'RuntimeError' in (row.get('error') or '')
