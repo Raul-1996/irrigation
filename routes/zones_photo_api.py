@@ -6,6 +6,7 @@ import io
 import logging
 
 from database import db
+from services.audit import audit_log
 from services.helpers import (
     UPLOAD_FOLDER,
     ZONE_MEDIA_SUBDIR,
@@ -78,6 +79,8 @@ def normalize_image(image_data, max_long_side=1024, fmt='WEBP', quality=90, loss
 # ---- Photo endpoints ----
 
 @zones_photo_api_bp.route('/api/zones/<int:zone_id>/photo', methods=['POST'])
+@audit_log('photo_upload',
+           target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def upload_zone_photo(zone_id):
     """Upload photo for a zone."""
     try:
@@ -147,6 +150,8 @@ def upload_zone_photo(zone_id):
 
 
 @zones_photo_api_bp.route('/api/zones/<int:zone_id>/photo', methods=['DELETE'])
+@audit_log('photo_delete',
+           target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def delete_zone_photo(zone_id):
     """Delete zone photo."""
     try:
@@ -185,6 +190,8 @@ def delete_zone_photo(zone_id):
 
 
 @zones_photo_api_bp.route('/api/zones/<int:zone_id>/photo/rotate', methods=['POST'])
+@audit_log('photo_rotate',
+           target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def rotate_zone_photo(zone_id):
     """Rotate zone photo by a multiple of 90 degrees."""
     try:

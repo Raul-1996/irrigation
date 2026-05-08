@@ -6,6 +6,7 @@ import logging
 from database import db
 from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
+from services.audit import audit_log, debug_audit
 import sqlite3
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ def api_programs():
 
 @programs_api_bp.route('/api/programs/<int:prog_id>', methods=['GET', 'PUT', 'DELETE'])
 @rate_limit('programs', max_requests=20, window_sec=60)
+@audit_log('program_modify',
+           target_extractor=lambda *a, **kw: f"program:{kw.get('prog_id', a[0] if a else '?')}")
 def api_program(prog_id):
     if request.method == 'GET':
         program = db.get_program(prog_id)
@@ -66,6 +69,7 @@ def api_program(prog_id):
 
 @programs_api_bp.route('/api/programs', methods=['POST'])
 @rate_limit('programs', max_requests=20, window_sec=60)
+@audit_log('program_create')
 def api_create_program():
     data = request.get_json() or {}
     # Validate required fields
@@ -107,9 +111,33 @@ def check_program_conflicts():
         days = data.get('days', [])
 
         if not time_val or not zones or not days:
+            # Best-effort debug trace of UI intent — only when debug logging is on.
+            try:
+                debug_audit(
+                    action_type='program_check_conflicts',
+                    source='api',
+                    target=f"program:{program_id}" if program_id else None,
+                    payload={'time': time_val, 'zones': zones, 'days': days,
+                             'result': 'invalid_input'},
+                )
+            except Exception:  # noqa: BLE001 — audit must never break handler
+                logger.debug("check_program_conflicts: debug_audit failed", exc_info=True)
             return jsonify({'success': False, 'message': 'Необходимо указать время, дни и зоны'}), 400
 
         conflicts = db.check_program_conflicts(program_id, time_val, zones, days)
+        # Debug-level trace — this is read-only intent, useful for triaging
+        # "why did the UI block save" without flooding audit_log in prod.
+        try:
+            debug_audit(
+                action_type='program_check_conflicts',
+                source='api',
+                target=f"program:{program_id}" if program_id else None,
+                payload={'time': time_val, 'zones': zones, 'days': days,
+                         'has_conflicts': len(conflicts) > 0,
+                         'conflict_count': len(conflicts)},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("check_program_conflicts: debug_audit failed", exc_info=True)
         return jsonify({'success': True, 'conflicts': conflicts, 'has_conflicts': len(conflicts) > 0})
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка проверки конфликтов программ: {e}")
@@ -118,6 +146,8 @@ def check_program_conflicts():
 
 @programs_api_bp.route('/api/programs/<int:prog_id>/duplicate', methods=['POST'])
 @rate_limit('programs', max_requests=10, window_sec=60)
+@audit_log('program_duplicate',
+           target_extractor=lambda *a, **kw: f"program:{kw.get('prog_id', a[0] if a else '?')}")
 def api_duplicate_program(prog_id):
     """Duplicate program (create copy with '(копия)' suffix)."""
     try:
@@ -139,6 +169,8 @@ def api_duplicate_program(prog_id):
 
 @programs_api_bp.route('/api/programs/<int:prog_id>/enabled', methods=['PATCH'])
 @rate_limit('programs', max_requests=20, window_sec=60)
+@audit_log('program_toggle',
+           target_extractor=lambda *a, **kw: f"program:{kw.get('prog_id', a[0] if a else '?')}")
 def api_toggle_program_enabled(prog_id):
     """Toggle program enabled/disabled state."""
     try:

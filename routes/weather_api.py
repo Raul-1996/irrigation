@@ -18,6 +18,7 @@ import time
 from flask import Blueprint, jsonify, request
 from database import db
 from services.security import admin_required
+from services.audit import audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,7 @@ def api_get_weather_settings():
 
 @weather_api_bp.route('/api/settings/weather', methods=['PUT'])
 @admin_required
+@audit_log('weather_settings_save', target_extractor=lambda *a, **kw: 'weather_settings')
 def api_put_weather_settings():
     """Update weather adjustment settings (extended in v2)."""
     try:
@@ -239,6 +241,7 @@ def api_get_location():
 
 @weather_api_bp.route('/api/settings/location', methods=['PUT'])
 @admin_required
+@audit_log('weather_location_save', target_extractor=lambda *a, **kw: 'weather_location')
 def api_put_location():
     """Set location (lat/lon)."""
     try:
@@ -258,6 +261,7 @@ def api_put_location():
 
 @weather_api_bp.route('/api/weather/refresh', methods=['POST'])
 @admin_required
+@audit_log('weather_refresh', target_extractor=lambda *a, **kw: 'weather')
 def api_refresh_weather():
     """Force refresh weather data from API."""
     try:

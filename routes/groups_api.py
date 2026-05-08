@@ -11,6 +11,7 @@ from utils import normalize_topic
 from irrigation_scheduler import init_scheduler, get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services import sse_hub as _sse_hub
+from services.audit import audit_log
 from constants import GROUP_DEBOUNCE_SEC, ZONE_CAP_DEFAULT_MIN
 import sqlite3
 
@@ -45,6 +46,7 @@ def api_groups():
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>', methods=['PUT'])
+@audit_log('group_save', target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
 def api_update_group(group_id):
     data = request.get_json() or {}
     updated = False
@@ -121,6 +123,7 @@ def api_update_group(group_id):
 
 
 @groups_api_bp.route('/api/groups', methods=['POST'])
+@audit_log('group_create', target_extractor=lambda *a, **kw: 'group:new')
 def api_create_group():
     data = request.get_json() or {}
     name = data.get('name') or 'Новая группа'
@@ -132,6 +135,7 @@ def api_create_group():
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>', methods=['DELETE'])
+@audit_log('group_delete', target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
 def api_delete_group(group_id):
     if db.delete_group(group_id):
         db.add_log('group_delete', json.dumps({"group": group_id}))
@@ -140,6 +144,7 @@ def api_delete_group(group_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/stop', methods=['POST'])
+@audit_log('group_stop', target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
 def api_stop_group(group_id):
     """Stop all zones in group."""
     try:
@@ -187,6 +192,7 @@ def api_stop_group(group_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/start-from-first', methods=['POST'])
+@audit_log('group_start_from_first', target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
 def api_start_group_from_first(group_id):
     """Start sequential watering of the group from the first zone."""
     try:
@@ -222,6 +228,7 @@ def api_start_group_from_first(group_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/start-zone/<int:zone_id>', methods=['POST'])
+@audit_log('zone_start_exclusive', target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[1] if len(a) > 1 else '?')}")
 def api_start_zone_exclusive(group_id, zone_id):
     """Start a zone, stopping all others in the group."""
     try:
@@ -291,6 +298,8 @@ def api_start_zone_exclusive(group_id, zone_id):
 
 
 @groups_api_bp.route('/api/groups/<int:group_id>/master-valve/<action>', methods=['POST'])
+@audit_log('master_valve_toggle',
+           target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}:{kw.get('action', a[1] if len(a) > 1 else '?')}")
 def api_master_valve_toggle(group_id, action):
     try:
         if current_app.config.get('EMERGENCY_STOP') and str(action).lower() == 'open':

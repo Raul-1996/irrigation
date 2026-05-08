@@ -9,6 +9,7 @@ from database import db
 from irrigation_scheduler import get_scheduler
 from services.helpers import api_error
 from services.security import admin_required
+from services.audit import audit_log
 from services.monitors import rain_monitor, env_monitor, water_monitor
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services import sse_hub as _sse_hub
@@ -103,6 +104,8 @@ def api_health_details():
 
 @system_status_api_bp.route('/api/health/job/<path:job_id>/cancel', methods=['POST'])
 @admin_required
+@audit_log('scheduler_job_cancel',
+           target_extractor=lambda *a, **kw: f"job:{kw.get('job_id', a[0] if a else '?')}")
 def api_health_cancel_job(job_id):
     try:
         sched = get_scheduler()
@@ -121,6 +124,8 @@ def api_health_cancel_job(job_id):
 
 @system_status_api_bp.route('/api/health/group/<int:group_id>/cancel', methods=['POST'])
 @admin_required
+@audit_log('scheduler_group_cancel',
+           target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
 def api_health_cancel_group(group_id):
     try:
         sched = get_scheduler()
@@ -144,6 +149,7 @@ def api_health_cancel_group(group_id):
 
 
 @system_status_api_bp.route('/api/scheduler/init', methods=['POST'])
+@audit_log('scheduler_init', target_extractor=lambda *a, **kw: 'scheduler')
 def api_scheduler_init():
     """Explicit scheduler init for UI/tests."""
     try:

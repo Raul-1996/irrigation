@@ -13,6 +13,7 @@ from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services.helpers import MAP_DIR, ALLOWED_MIME_TYPES
 from services.monitors import env_monitor, probe_env_values
 from services.api_rate_limiter import rate_limit
+from services.audit import audit_log
 from constants import MIN_PASSWORD_LENGTH
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
@@ -42,6 +43,7 @@ def api_auth_status():
 
 
 @system_config_api_bp.route('/logout', methods=['GET', 'POST'])
+@audit_log('logout', target_extractor=lambda *a, **kw: 'session')
 def api_logout():
     """Terminate the current session.
 
@@ -73,6 +75,9 @@ def api_logout():
 
 @system_config_api_bp.route('/api/password', methods=['POST'])
 @rate_limit('password_change', max_requests=3, window_sec=300)
+@audit_log('password_change',
+           target_extractor=lambda *a, **kw: 'admin',
+           payload_filter=lambda p: {'changed': True})
 def api_change_password():
     try:
         if not session.get('logged_in') and not current_app.config.get('TESTING'):
@@ -102,6 +107,7 @@ def api_change_password():
 # ===== Map =====
 
 @system_config_api_bp.route('/api/map', methods=['GET', 'POST'])
+@audit_log('map_upload', target_extractor=lambda *a, **kw: 'map')
 def api_map():
     try:
         if request.method == 'GET':
@@ -142,6 +148,8 @@ def api_map():
 
 
 @system_config_api_bp.route('/api/map/<string:filename>', methods=['DELETE'])
+@audit_log('map_delete',
+           target_extractor=lambda *a, **kw: f"map:{kw.get('filename', a[0] if a else '?')}")
 def api_map_delete(filename):
     try:
         if not (current_app.config.get('TESTING') or session.get('role') == 'admin'):
@@ -162,6 +170,7 @@ def api_map_delete(filename):
 # ===== Rain config =====
 
 @system_config_api_bp.route('/api/rain', methods=['GET', 'POST'])
+@audit_log('rain_config_save', target_extractor=lambda *a, **kw: 'rain_config')
 def api_rain_config():
     try:
         if request.method == 'GET':
@@ -194,6 +203,7 @@ def api_rain_config():
 # ===== Env config =====
 
 @system_config_api_bp.route('/api/env', methods=['GET', 'POST'])
+@audit_log('env_config_save', target_extractor=lambda *a, **kw: 'env_config')
 def api_env_config():
     try:
         if request.method == 'GET':
@@ -252,6 +262,7 @@ def api_env_values():
 # ===== Postpone =====
 
 @system_config_api_bp.route('/api/postpone', methods=['POST'])
+@audit_log('postpone_action', target_extractor=lambda *a, **kw: 'group')
 def api_postpone():
     """Postpone watering."""
     data = request.get_json()
@@ -283,7 +294,20 @@ def api_postpone():
             for zone in group_zones:
                 try:
                     if (zone.get('state') == 'on') or zone.get('watering_start_time'):
-                        db.update_zone(zone['id'], {'state': 'off', 'watering_start_time': None})
+                        # Postpone applies to a group — each zone going OFF
+                        # is an audited transition (operator action via
+                        # /api/postpone) that we want to see in audit_log.
+                        try:
+                            from services.zones_state import update_zone_state as _uzs
+                            _uzs(zone['id'],
+                                 {'state': 'off', 'watering_start_time': None},
+                                 audit_reason='postpone_action')
+                        except (sqlite3.Error, OSError, ImportError):
+                            logger.exception(
+                                "system_config.postpone: audited path failed zone=%s — "
+                                "falling back to raw update_zone", zone.get('id'),
+                            )
+                            db.update_zone(zone['id'], {'state': 'off', 'watering_start_time': None})
                         sid = zone.get('mqtt_server_id')
                         topic = (zone.get('topic') or '').strip()
                         if mqtt and sid and topic:
@@ -310,6 +334,7 @@ def api_postpone():
 # ===== Settings =====
 
 @system_config_api_bp.route('/api/settings/early-off', methods=['GET', 'POST'])
+@audit_log('setting_early_off', target_extractor=lambda *a, **kw: 'setting:early_off')
 def api_setting_early_off():
     try:
         if request.method == 'GET':
@@ -328,6 +353,7 @@ def api_setting_early_off():
 
 
 @system_config_api_bp.route('/api/settings/system-name', methods=['GET', 'POST'])
+@audit_log('setting_system_name', target_extractor=lambda *a, **kw: 'setting:system_name')
 def api_setting_system_name():
     try:
         if request.method == 'GET':
@@ -347,13 +373,75 @@ def api_setting_system_name():
 
 # ===== Logging debug toggle =====
 
+def _disable_debug_logging_job():
+    """APScheduler job: turn off DEBUG mode automatically.
+
+    Persists 'logging.debug=0' to settings, drops root logger to WARNING,
+    records an audit event so operators can see the auto-off in /logs.
+    Best-effort — never raises.
+    """
+    try:
+        db.set_logging_debug(False)
+        # Invalidate the debug_audit() TTL cache so the flip takes effect
+        # immediately for high-volume diagnostic emits (mqtt_publish, scheduler
+        # timers) instead of waiting up to ~5s for the cache to expire.
+        try:
+            from services.audit import invalidate_debug_audit_cache
+            invalidate_debug_audit_cache()
+        except (ImportError, RuntimeError) as e:
+            logger.debug("auto-off: invalidate_debug_audit_cache failed: %s", e)
+        try:
+            logging.getLogger().setLevel(logging.WARNING)
+        except (TypeError, ValueError) as e:
+            logger.debug("auto-off: setLevel failed: %s", e)
+        try:
+            from services.audit import record_audit
+            record_audit(
+                action_type='debug_log_auto_off',
+                source='scheduler',
+                target='logging:debug',
+                payload={'auto_off': True},
+                actor='system',
+            )
+        except (ImportError, RuntimeError) as e:
+            logger.debug("auto-off: record_audit failed: %s", e)
+        logger.info("debug logging auto-off triggered (job=debug_auto_off)")
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("debug_auto_off job failed: %s", e)
+
+
 @system_config_api_bp.route('/api/logging/debug', methods=['GET', 'POST'])
+@audit_log('debug_log_toggle', target_extractor=lambda *a, **kw: 'logging:debug')
 def api_logging_debug_toggle():
+    """Toggle DEBUG-level logging (Level 2 — operational debug).
+
+    POST body:
+        {"enabled": true|false, "auto_off_minutes": 60}
+
+    `auto_off_minutes` is optional (1..720 = 12h). When supplied with
+    enabled=true, schedules a one-shot APScheduler DateTrigger to flip
+    the flag back off — protects against operators forgetting to disable
+    debug mode and filling the disk with logs.
+    """
     try:
         if request.method == 'POST':
             payload = request.get_json(force=True, silent=True) or {}
             enable = bool(payload.get('enabled'))
+            try:
+                auto_off_min = payload.get('auto_off_minutes')
+                auto_off_min = int(auto_off_min) if auto_off_min is not None else None
+                if auto_off_min is not None and (auto_off_min < 1 or auto_off_min > 720):
+                    auto_off_min = max(1, min(720, auto_off_min))
+            except (TypeError, ValueError):
+                auto_off_min = None
             db.set_logging_debug(enable)
+            # Invalidate debug_audit() TTL cache so manual toggle takes effect
+            # immediately instead of waiting for the ~5s cache to expire.
+            try:
+                from services.audit import invalidate_debug_audit_cache
+                invalidate_debug_audit_cache()
+            except (ImportError, RuntimeError) as e:
+                logger.debug("debug toggle: invalidate_debug_audit_cache failed: %s", e)
             # Apply runtime log level
             try:
                 is_debug = db.get_logging_debug()
@@ -362,7 +450,41 @@ def api_logging_debug_toggle():
                 root.setLevel(level)
             except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in api_logging_debug_toggle: %s", e)
-        return jsonify({'debug': db.get_logging_debug()})
+            # Manage the auto-off job
+            try:
+                from apscheduler.triggers.date import DateTrigger
+                sched = get_scheduler()
+                if sched and getattr(sched, 'scheduler', None):
+                    # Remove any pending auto-off first
+                    try:
+                        sched.scheduler.remove_job('debug_auto_off')
+                    except (ValueError, KeyError):
+                        pass  # not scheduled — fine
+                    if enable and auto_off_min:
+                        run_at = datetime.now() + timedelta(minutes=auto_off_min)
+                        sched.scheduler.add_job(
+                            _disable_debug_logging_job,
+                            trigger=DateTrigger(run_date=run_at),
+                            id='debug_auto_off',
+                            replace_existing=True,
+                            coalesce=True,
+                            max_instances=1,
+                        )
+                        logger.info("debug logging auto-off scheduled for %s (in %d min)",
+                                    run_at.isoformat(timespec='seconds'), auto_off_min)
+            except (ImportError, RuntimeError, KeyError, ValueError) as e:
+                logger.warning("Failed to (re)schedule debug auto-off: %s", e)
+        # GET (and POST response): include auto_off info if known
+        info = {'debug': db.get_logging_debug()}
+        try:
+            sched = get_scheduler()
+            if sched and getattr(sched, 'scheduler', None):
+                job = sched.scheduler.get_job('debug_auto_off')
+                if job and job.next_run_time:
+                    info['auto_off_at'] = job.next_run_time.isoformat(timespec='seconds')
+        except (ImportError, RuntimeError, AttributeError):
+            pass
+        return jsonify(info)
     except (sqlite3.Error, OSError) as e:
         logger.error(f"api_logging_debug_toggle error: {e}")
         return jsonify({'debug': db.get_logging_debug()}), 500

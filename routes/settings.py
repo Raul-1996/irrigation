@@ -3,6 +3,7 @@ import sqlite3
 import logging
 from flask import Blueprint, render_template, current_app
 from services.security import admin_required
+from services.audit import audit_log
 from database import db
 from flask import jsonify, request
 from utils import encrypt_secret, decrypt_secret
@@ -45,6 +46,7 @@ def api_get_telegram_settings():
 
 @settings_bp.route('/api/settings/telegram', methods=['PUT'])
 @admin_required
+@audit_log('telegram_settings_save', target_extractor=lambda *a, **kw: 'settings:telegram')
 def api_put_telegram_settings():
     try:
         data = request.get_json() or {}
@@ -87,6 +89,7 @@ def api_put_telegram_settings():
 
 @settings_bp.route('/api/settings/telegram/test', methods=['POST'])
 @admin_required
+@audit_log('telegram_test_send', target_extractor=lambda *a, **kw: 'settings:telegram_test')
 def api_test_telegram():
     try:
         # Skip actual telegram operations in TESTING mode

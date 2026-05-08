@@ -6,6 +6,7 @@ import logging
 from database import db
 from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
+from services.audit import audit_log
 import sqlite3
 
 try:
@@ -22,6 +23,7 @@ system_emergency_api_bp = Blueprint('system_emergency_api', __name__)
 
 @system_emergency_api_bp.route('/api/emergency-stop', methods=['POST'])
 @rate_limit('emergency', max_requests=5, window_sec=60)
+@audit_log('emergency_stop', target_extractor=lambda *a, **kw: 'system')
 def api_emergency_stop():
     """Emergency stop all zones."""
     stats = None
@@ -81,6 +83,7 @@ def api_emergency_stop():
 
 @system_emergency_api_bp.route('/api/emergency-resume', methods=['POST'])
 @rate_limit('emergency', max_requests=5, window_sec=60)
+@audit_log('emergency_resume', target_extractor=lambda *a, **kw: 'system')
 def api_emergency_resume():
     """Resume after emergency stop."""
     try:
@@ -100,6 +103,7 @@ def api_emergency_resume():
 # ===== Backup =====
 
 @system_emergency_api_bp.route('/api/backup', methods=['POST'])
+@audit_log('backup_create', target_extractor=lambda *a, **kw: 'system')
 def api_backup():
     try:
         backup_path = db.create_backup()

@@ -11,6 +11,7 @@ from irrigation_scheduler import get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services import sse_hub as _sse_hub
 from services.api_rate_limiter import rate_limit
+from services.audit import audit_log
 import sqlite3
 
 try:
@@ -26,6 +27,7 @@ zones_watering_api_bp = Blueprint('zones_watering_api', __name__)
 # ---- Zone start/stop ----
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/start', methods=['POST'])
+@audit_log('zone_start', target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def start_zone(zone_id):
     """Start zone watering."""
     try:
@@ -59,8 +61,13 @@ def start_zone(zone_id):
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("Ошибка публикации MQTT '0' при ручном запуске: выключение соседей")
                     try:
-                        db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
-                    except (sqlite3.Error, OSError) as e:
+                        # Manual start of one zone in a group force-stops
+                        # peers — audited so each peer's transition is visible.
+                        from services.zones_state import update_zone_state as _uzs
+                        _uzs(int(gz['id']),
+                             {'state': 'off', 'watering_start_time': None},
+                             audit_reason='peer_off_manual_start')
+                    except (sqlite3.Error, OSError, ImportError) as e:
                         logger.debug("Handled exception in line_796: %s", e)
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in line_798: %s", e)
@@ -92,6 +99,7 @@ def start_zone(zone_id):
 
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/stop', methods=['POST'])
+@audit_log('zone_stop', target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def stop_zone(zone_id):
     """Stop zone watering."""
     try:
@@ -252,6 +260,7 @@ def api_mqtt_zones_sse():
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/mqtt/start', methods=['POST'])
 @rate_limit('mqtt_control', max_requests=10, window_sec=60)
+@audit_log('zone_mqtt_start', target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def api_zone_mqtt_start(zone_id: int):
     t0 = time.time()
     try:
@@ -352,8 +361,15 @@ def api_zone_mqtt_start(zone_id: int):
                                 except (ConnectionError, TimeoutError, OSError) as e:
                                     logger.debug("Handled exception in _off_peer: %s", e)
                                 try:
-                                    db.update_zone(int(peer['id']), {'state': 'off', 'watering_start_time': None})
-                                except (sqlite3.Error, OSError) as e:
+                                    # Same peer-off path as above but inside
+                                    # the thread-pool worker; audit so we can
+                                    # tell which peers were stopped during
+                                    # the parallel kill.
+                                    from services.zones_state import update_zone_state as _uzs
+                                    _uzs(int(peer['id']),
+                                         {'state': 'off', 'watering_start_time': None},
+                                         audit_reason='peer_off_thread_pool')
+                                except (sqlite3.Error, OSError, ImportError) as e:
                                     logger.debug("Handled exception in _off_peer: %s", e)
                             list(pool.map(_off_peer, peers_on))
                     except (ConnectionError, TimeoutError, OSError) as e:
@@ -414,13 +430,29 @@ def api_zone_mqtt_start(zone_id: int):
         now_dt = datetime.now()
         planned_end = (now_dt + timedelta(minutes=override_dur)).strftime('%Y-%m-%d %H:%M:%S')
         try:
-            db.update_zone(int(zone_id), {
-                'state': 'on',
-                'watering_start_time': now_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                'watering_start_source': 'manual',
-                'commanded_state': 'on',
-                'planned_end_time': planned_end
-            })
+            # Manual MQTT start with optional duration override —
+            # principal-critical transition (operator pressed "go").
+            try:
+                from services.zones_state import update_zone_state as _uzs
+                _uzs(int(zone_id), {
+                    'state': 'on',
+                    'watering_start_time': now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                    'watering_start_source': 'manual',
+                    'commanded_state': 'on',
+                    'planned_end_time': planned_end,
+                }, audit_reason='manual_start_with_override')
+            except (sqlite3.Error, OSError, ImportError):
+                logger.exception(
+                    "api_zone_mqtt_start: audited start failed zone=%s — "
+                    "falling back to raw update_zone", zone_id,
+                )
+                db.update_zone(int(zone_id), {
+                    'state': 'on',
+                    'watering_start_time': now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                    'watering_start_source': 'manual',
+                    'commanded_state': 'on',
+                    'planned_end_time': planned_end
+                })
         except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in line_1063: %s", e)
         t4 = time.time()
@@ -492,6 +524,7 @@ def api_zone_mqtt_start(zone_id: int):
 
 @zones_watering_api_bp.route('/api/zones/<int:zone_id>/mqtt/stop', methods=['POST'])
 @rate_limit('mqtt_control', max_requests=10, window_sec=60)
+@audit_log('zone_mqtt_stop', target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def api_zone_mqtt_stop(zone_id: int):
     z = db.get_zone(zone_id)
     if not z:
@@ -513,8 +546,11 @@ def api_zone_mqtt_stop(zone_id: int):
         logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
         _publish_mqtt_value(server, t, '0', min_interval_sec=0.0, qos=2, retain=True)
         try:
-            db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
-        except (sqlite3.Error, OSError) as e:
+            # Manual MQTT stop — operator action, audited.
+            from services.zones_state import update_zone_state as _uzs
+            _uzs(zone_id, {'state': 'off', 'watering_start_time': None},
+                 audit_reason='mqtt_stop')
+        except (sqlite3.Error, OSError, ImportError) as e:
             logger.debug("Handled exception in api_zone_mqtt_stop: %s", e)
         return jsonify({'success': True, 'message': 'Зона остановлена'})
     except (ConnectionError, TimeoutError, OSError) as e:

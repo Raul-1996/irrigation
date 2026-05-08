@@ -6,6 +6,7 @@ import logging
 
 from database import db
 from services.helpers import parse_dt
+from services.audit import audit_log, debug_audit
 import sqlite3
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,8 @@ def api_zones():
 
 
 @zones_crud_api_bp.route('/api/zones/<int:zone_id>', methods=['GET', 'PUT', 'DELETE'])
+@audit_log('zone_modify',
+           target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def api_zone(zone_id):
     if request.method == 'GET':
         zone = db.get_zone(zone_id)
@@ -31,6 +34,28 @@ def api_zone(zone_id):
 
     elif request.method == 'PUT':
         data = request.get_json() or {}
+        # Reject state-machine fields in the generic CRUD endpoint — they
+        # MUST go through services.zones_state.update_zone_state so audit
+        # rows are emitted and the optimistic-lock state machine isn't
+        # bypassed.  Reviewer (audit-logging-expansion / C1) flagged this as
+        # an audit-evading backdoor.  Returning 400 makes any frontend that
+        # accidentally tries this path break loudly instead of silently
+        # writing an unaudited transition.
+        _STATE_MACHINE_FIELDS = {
+            'state', 'commanded_state', 'observed_state',
+            'fault_count', 'last_fault',
+        }
+        bad_fields = sorted(set(data.keys()) & _STATE_MACHINE_FIELDS)
+        if bad_fields:
+            logger.warning(
+                "api_zone PUT rejected state-machine field(s) %s for zone %s — "
+                "callers must use /api/zones/<id>/start|stop or zones_state.update_zone_state",
+                bad_fields, zone_id,
+            )
+            return jsonify({
+                'success': False,
+                'message': f"state-machine fields not allowed via CRUD: {bad_fields}",
+            }), 400
         try:
             if 'duration' in data:
                 d = int(data['duration'])
@@ -75,6 +100,7 @@ def api_zone(zone_id):
 
 
 @zones_crud_api_bp.route('/api/zones', methods=['POST'])
+@audit_log('zone_create')
 def api_create_zone():
     data = request.get_json() or {}
     try:
@@ -123,6 +149,7 @@ def api_create_zone():
 
 
 @zones_crud_api_bp.route('/api/zones/import', methods=['POST'])
+@audit_log('zones_import_bulk')
 def api_import_zones_bulk():
     """Import/bulk apply zone changes in one transaction."""
     try:
@@ -233,6 +260,7 @@ def api_zone_next_watering(zone_id):
 
 
 @zones_crud_api_bp.route('/api/zones/next-watering-bulk', methods=['POST'])
+@audit_log('zones_next_watering_bulk', target_extractor=lambda *a, **kw: 'zones:bulk')
 def api_zones_next_watering_bulk():
     try:
         data = request.get_json(silent=True) or {}
@@ -368,6 +396,17 @@ def api_check_zone_duration_conflicts():
         zone_id = data.get('zone_id')
         new_duration = data.get('new_duration')
 
+        # Debug-level trace of UI intent — read-only by design, no DB mutation.
+        try:
+            debug_audit(
+                action_type='zones_check_duration_conflicts',
+                source='api',
+                target=f"zone:{zone_id}" if zone_id is not None else None,
+                payload={'zone_id': zone_id, 'new_duration': new_duration},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("check-duration-conflicts: debug_audit failed", exc_info=True)
+
         if not isinstance(zone_id, int) or not isinstance(new_duration, int):
             return jsonify({'success': False, 'message': 'Некорректные параметры'}), 400
 
@@ -460,6 +499,19 @@ def api_check_zone_duration_conflicts_bulk():
             except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in api_check_zone_duration_conflicts_bulk: %s", e)
                 continue
+
+        # Debug-level trace of UI intent — read-only by design.
+        try:
+            debug_audit(
+                action_type='zones_check_duration_conflicts_bulk',
+                source='api',
+                target='zones:bulk',
+                payload={'change_count': len(normalized),
+                         'changes_preview': normalized[:10]},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("check-duration-conflicts-bulk: debug_audit failed", exc_info=True)
+
         if not normalized:
             return jsonify({'success': False, 'message': 'Нет валидных изменений'}), 400
 

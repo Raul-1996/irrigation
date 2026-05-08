@@ -1,6 +1,7 @@
 from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for
 from services.auth_service import verify_password
 from services.rate_limiter import login_limiter
+from services.audit import audit_log
 
 auth_bp = Blueprint('auth_bp', __name__)
 
@@ -40,6 +41,9 @@ def login_page():
 
 
 @auth_bp.route('/api/login', methods=['POST'])
+@audit_log('login',
+           target_extractor=lambda *a, **kw: 'session',
+           payload_filter=lambda p: {k: v for k, v in p.items() if k != 'password'})
 def api_login():
     data = request.get_json(silent=True) or {}
     password = (data.get('password') or '').strip()

@@ -9,6 +9,7 @@ from database import db
 from utils import normalize_topic
 from services.helpers import api_error, api_soft
 from services.security import admin_required
+from services.audit import audit_log
 
 try:
     import paho.mqtt.client as mqtt
@@ -45,6 +46,9 @@ def api_mqtt_servers_list():
 
 @mqtt_api_bp.route('/api/mqtt/servers', methods=['POST'])
 @admin_required
+@audit_log('mqtt_server_create',
+           target_extractor=lambda *a, **kw: 'mqtt_server',
+           payload_filter=lambda p: {k: v for k, v in p.items() if k != 'password'})
 def api_mqtt_server_create():
     try:
         data = request.get_json() or {}
@@ -75,6 +79,9 @@ def api_mqtt_server_get(server_id: int):
 
 @mqtt_api_bp.route('/api/mqtt/servers/<int:server_id>', methods=['PUT'])
 @admin_required
+@audit_log('mqtt_server_update',
+           target_extractor=lambda *a, **kw: f"mqtt_server:{kw.get('server_id', a[0] if a else '?')}",
+           payload_filter=lambda p: {k: v for k, v in p.items() if k != 'password'})
 def api_mqtt_server_update(server_id: int):
     try:
         data = request.get_json() or {}
@@ -89,6 +96,8 @@ def api_mqtt_server_update(server_id: int):
 
 @mqtt_api_bp.route('/api/mqtt/servers/<int:server_id>', methods=['DELETE'])
 @admin_required
+@audit_log('mqtt_server_delete',
+           target_extractor=lambda *a, **kw: f"mqtt_server:{kw.get('server_id', a[0] if a else '?')}")
 def api_mqtt_server_delete(server_id: int):
     try:
         ok = db.delete_mqtt_server(server_id)
@@ -104,6 +113,8 @@ def api_mqtt_server_delete(server_id: int):
 
 @mqtt_api_bp.route('/api/mqtt/<int:server_id>/probe', methods=['POST'])
 @admin_required
+@audit_log('mqtt_server_probe',
+           target_extractor=lambda *a, **kw: f"mqtt_server:{kw.get('server_id', a[0] if a else '?')}")
 def api_mqtt_probe(server_id: int):
     try:
         from flask import current_app
