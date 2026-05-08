@@ -263,9 +263,28 @@ def ensure_hub_started() -> None:
                                     logger.debug("Handled exception in line_238: %s", e)
                             else:
                                 # last_watering_time is no longer a column —
-                                # the open zone_run for this zone is closed
-                                # below (see step 5 edge case) so the value
-                                # appears via get_last_watering_time().
+                                # we close the open zone_run here so the
+                                # MQTT-observed off (e.g. someone hit the
+                                # physical valve, or a retained '0' arrived)
+                                # is reflected in get_last_watering_time().
+                                # Gate on watering_start_time so an
+                                # idempotent off->off transition doesn't
+                                # try to find/close a non-existent open run.
+                                if z.get('watering_start_time'):
+                                    try:
+                                        run = _db.get_open_zone_run(int(zid))
+                                        if run:
+                                            _db.finish_zone_run(
+                                                int(run['id']),
+                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                time.monotonic(),
+                                                None, None, None,
+                                                status='ok',
+                                            )
+                                    except (sqlite3.Error, OSError):
+                                        logger.exception(
+                                            'sse_hub: finish_zone_run on observed off failed zid=%s', zid,
+                                        )
                                 updates['watering_start_time'] = None
                                 try:
                                     sched = _get_scheduler_fn()
