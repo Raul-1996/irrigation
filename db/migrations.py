@@ -168,6 +168,15 @@ class MigrationRunner:
                     'backfill_last_watering_from_zone_runs',
                     self._migrate_backfill_last_watering_from_zone_runs,
                 )
+                # Single-source-of-truth refactor: drop the denormalised
+                # zones.last_watering_time column entirely. Reads now derive
+                # the value from zone_runs.end_utc via get_last_watering_time.
+                # IRREVERSIBLE — no downgrade registered.
+                self._apply_named_migration(
+                    conn,
+                    'zones_drop_last_watering_time',
+                    self._migrate_drop_last_watering_time,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1041,6 +1050,53 @@ class MigrationRunner:
             logger.error(
                 "Ошибка миграции backfill_last_watering_from_zone_runs: %s", e
             )
+
+    def _migrate_drop_last_watering_time(self, conn):
+        """Drop the denormalised ``zones.last_watering_time`` column.
+
+        Single source of truth for "when did this zone last finish watering"
+        is now ``zone_runs.end_utc`` (status='ok'). The value is injected
+        into zone dicts at read time by :meth:`db.zones.ZoneRepository.get_zones`
+        / :meth:`db.zones.ZoneRepository.get_zone` so all API/UI consumers
+        keep working unchanged.
+
+        SQLite < 3.35 (Debian 11 / WB-244 has 3.34.1) has no native
+        ``ALTER TABLE … DROP COLUMN``, so we use the table-rebuild helper
+        :meth:`_recreate_table_without_columns` which preserves PK
+        AUTOINCREMENT and column defaults. The rebuild drops all indexes on
+        the table, so we reissue the indexes from
+        :meth:`_migrate_add_zones_indexes` here as well.
+
+        IRREVERSIBLE: no downgrade is registered. The column is gone with
+        no preserved data; reverting the migration alone would re-create
+        the column NULL — callers must re-run the issue-#2 backfill from
+        zone_runs to restore values. See the rollback notes in the PR.
+        """
+        try:
+            cur = conn.execute("PRAGMA table_info(zones)")
+            cols = [c[1] for c in cur.fetchall()]
+            if 'last_watering_time' not in cols:
+                return
+            self._recreate_table_without_columns(
+                conn, 'zones', ['last_watering_time']
+            )
+            # Table rebuild drops all indexes — reissue ours.
+            # (Mirror of _migrate_add_zones_indexes; IF NOT EXISTS so the
+            # call is also safe to re-run on a manually-fixed DB.)
+            conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_zones_mqtt_server '
+                'ON zones(mqtt_server_id)'
+            )
+            conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_zones_topic ON zones(topic)'
+            )
+            conn.commit()
+            logger.info(
+                'Dropped zones.last_watering_time '
+                '(single source of truth = zone_runs)'
+            )
+        except sqlite3.Error as e:
+            logger.error("drop_last_watering_time: %s", e)
 
     def _migrate_create_audit_log(self, conn):
         """Create the audit_log table for principal-critical mutation tracking.
