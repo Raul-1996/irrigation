@@ -425,7 +425,9 @@
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
             let extraText = '—';
             if (group.status === 'watering' && group.current_zone) {
-                extraText = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                const _zw = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
+                const _zLbl = (_zw && _zw.name) ? `#${_zw.id} ${_zw.name}` : `${group.current_zone}`;
+                extraText = `Зона ${_zLbl}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu = String(group.postpone_until);
                 const reason = String(group.postpone_reason || '').toLowerCase();
@@ -565,7 +567,9 @@
             const statusText = getStatusText(group);
             let extraText2 = '—';
             if (group.status === 'watering' && group.current_zone) {
-                extraText2 = `Зона ${group.current_zone}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
+                const _zw2 = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
+                const _zLbl2 = (_zw2 && _zw2.name) ? `#${_zw2.id} ${_zw2.name}` : `${group.current_zone}`;
+                extraText2 = `Зона ${_zLbl2}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
             } else if (group.status === 'postponed' && group.postpone_until) {
                 const pu2 = String(group.postpone_until);
                 const reason2 = String(group.postpone_reason || '').toLowerCase();
