@@ -360,6 +360,9 @@ class TestZoneFieldsComplete:
         z = zones[0]
         for field in ['id', 'name', 'duration', 'group_id', 'state', 'icon',
                        'photo_path', 'last_watering_time']:
+            # last_watering_time is no longer a column — it's injected at
+            # read time from zone_runs by ZoneRepository.get_zones. The API
+            # contract still includes it (None for never-watered zones).
             assert field in z, f'Missing field: {field}'
 
     def test_group_has_required_fields(self, admin_client):

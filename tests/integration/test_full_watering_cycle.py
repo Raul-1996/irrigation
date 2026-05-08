@@ -42,13 +42,18 @@ class TestFullWateringCycle:
             z = test_db.get_zone(zone['id'])
             assert z['state'] == 'off'
             assert z['watering_start_time'] is None
-            # last_watering_time must be present and strictly later than start.
-            assert z['last_watering_time'] is not None
+            # last_watering_time is now derived from zone_runs.end_utc
+            # and injected by get_zone — must be present and strictly
+            # later than the start.
+            last_str = test_db.get_last_watering_time(int(zone['id']))
+            assert last_str is not None
+            assert z['last_watering_time'] == last_str, (
+                'get_zone should inject the same value get_last_watering_time returns'
+            )
             fmt = '%Y-%m-%d %H:%M:%S'
-            assert datetime.strptime(z['last_watering_time'], fmt) > \
+            assert datetime.strptime(last_str, fmt) > \
                    datetime.strptime(start_iso, fmt), (
-                'issue #2: last_watering_time must be the END of watering, '
-                'not the start'
+                'last_watering_time must be the END of watering, not the start'
             )
 
     def test_sequential_group_watering(self, test_db):
