@@ -52,8 +52,8 @@ class StateVerifier:
     # ------------------------------------------------------------------
     def verify_async(self, zone_id: int, expected: str) -> None:
         """Fire-and-forget: launch verification in a background thread."""
-        import os
-        if os.environ.get('TESTING'):
+        from config import TESTING
+        if TESTING:
             return  # Skip async verification in tests
         t = threading.Thread(
             target=self._safe_verify,
@@ -248,10 +248,26 @@ class StateVerifier:
         except (AttributeError, TypeError):
             pass
 
+        # Audit-critical: a fault transition flips state→'fault' which blocks
+        # all further irrigation on this zone until an operator clears it.
+        # Operators MUST be able to see 'who/when/why' from audit_log without
+        # crawling app.log.  We pass ``self.db`` explicitly so unit tests
+        # that inject a test_db via ``sv._db = test_db`` see the write on
+        # the same instance they later read from.
+        db_inst = self.db
         try:
-            db.update_zone(zone_id, fields)
-        except (sqlite3.Error, OSError):
-            logger.exception("StateVerifier: failed to persist fault state zone=%s", zone_id)
+            from services.zones_state import update_zone_state as _uzs
+            _uzs(zone_id, fields, audit_reason='fault_detected', db=db_inst)
+        except (sqlite3.Error, OSError, ImportError):
+            logger.exception(
+                "StateVerifier: audited fault persist failed zone=%s — falling back to raw update_zone",
+                zone_id,
+            )
+            try:
+                if db_inst is not None:
+                    db_inst.update_zone(zone_id, fields)
+            except (sqlite3.Error, OSError):
+                logger.exception("StateVerifier: failed to persist fault state zone=%s", zone_id)
 
         zone_name = zone.get('name') or f'#{zone_id}'
         alert_text = (

@@ -11,6 +11,7 @@ from typing import Optional
 
 from apscheduler.triggers.date import DateTrigger
 
+from config import TESTING
 from scheduler.jobs import job_stop_zone, job_close_master_valve
 
 logger = logging.getLogger(__name__)
@@ -30,11 +31,25 @@ class ZoneRunnerMixin:
                 _stop_zone_central(zone_id, reason='auto_stop')
             except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                 logger.debug("Exception in _stop_zone: %s", e)
-                self.db.update_zone(zone_id, {
-                    'state': 'off',
-                    'watering_start_time': None,
-                    'last_watering_time': last_time
-                })
+                # Fallback path: write through the audited helper so triage
+                # still sees zone_state_change=off when zone_control fails.
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zone_id, {
+                        'state': 'off',
+                        'watering_start_time': None,
+                        'last_watering_time': last_time,
+                    }, audit_reason='auto_stop_zone_runner', db=self.db)
+                except (sqlite3.Error, OSError, ImportError):
+                    logger.exception(
+                        "scheduler.zone_runner._stop_zone: audited fallback failed zone=%s",
+                        zone_id,
+                    )
+                    self.db.update_zone(zone_id, {
+                        'state': 'off',
+                        'watering_start_time': None,
+                        'last_watering_time': last_time
+                    })
             try:
                 logger.debug("auto-stop zone=%s", zone_id)
             except (ValueError, KeyError, RuntimeError) as e:
@@ -61,7 +76,7 @@ class ZoneRunnerMixin:
                 early = 0
             if early > 15:
                 early = 15
-            if os.getenv('TESTING') == '1':
+            if TESTING:
                 total_seconds = min(6, max(1, int(duration_minutes)))
                 early = 0
                 run_at = datetime.now() + timedelta(seconds=total_seconds)

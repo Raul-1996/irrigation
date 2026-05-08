@@ -277,7 +277,27 @@ def ensure_hub_started() -> None:
                                 logger.debug("Exception in line_252: %s", e)
                                 updates2 = dict(updates)
                             updates2['observed_state'] = new_state
-                            _db.update_zone(int(zid), updates2)
+                            # Externally-driven state change (MQTT observation
+                            # of the relay coming on/off) — CRITICAL audit
+                            # path because this can flip a zone to 'on' even
+                            # when the app didn't command it (manual valve
+                            # actuation, retained MQTT message, etc.).
+                            # Without zone_state_change here, post-incident
+                            # triage can't tell "did the system start the
+                            # zone or did the relay flip externally?"
+                            try:
+                                from services.zones_state import update_zone_state as _uzs
+                                # Pass _db explicitly so the audited write goes
+                                # to the same instance whose state we just observed.
+                                _uzs(int(zid), updates2,
+                                     audit_reason='mqtt_observed_change',
+                                     db=_db)
+                            except (sqlite3.Error, OSError, ImportError):
+                                logger.exception(
+                                    "sse_hub: audited mqtt_observed_change failed zone=%s — "
+                                    "doing raw update_zone", zid,
+                                )
+                                _db.update_zone(int(zid), updates2)
                         except (sqlite3.Error, OSError) as e:
                             logger.debug("Handled exception in line_257: %s", e)
 

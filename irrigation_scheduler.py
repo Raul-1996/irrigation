@@ -13,6 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from config import TESTING
 from database import IrrigationDB
 from utils import normalize_topic
 import json
@@ -73,34 +74,65 @@ except (ImportError, AttributeError) as e:  # catch-all: intentional
 
 
 # === Module-level job callables for APScheduler persistence ===
+def _audit_timer_fire(action: str, target: str, payload: dict) -> None:
+    """Best-effort debug emit for scheduler timer fire events.
+
+    Centralised so individual job callables stay readable. Only writes when
+    ``settings.logging.debug`` is true — debug_audit() guards that internally.
+    """
+    try:
+        from services.audit import debug_audit
+        debug_audit(
+            action_type=action,
+            source='scheduler',
+            target=target,
+            payload=payload,
+        )
+    except Exception:  # noqa: BLE001 — audit must never break job execution
+        logger.exception("scheduler timer fire audit failed (action=%s)", action)
+
+
 def job_run_program(program_id: int, zones: list, program_name: str):
+    _audit_timer_fire('scheduler_timer_fire',
+                      f'program:{int(program_id)}',
+                      {'job': 'run_program', 'zones': list(zones),
+                       'program_name': str(program_name)})
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
             s._run_program_threaded(int(program_id), [int(z) for z in zones], str(program_name))
-    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-        logger.debug("Handled exception in job_run_program: %s", e)
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        # Promoted to logger.exception — scheduled program runs that silently
+        # fail are catastrophic; we want a stack trace in app.log.
+        logger.exception("job_run_program failed (program_id=%s)", program_id)
 
 
 def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None):
+    _audit_timer_fire('scheduler_timer_fire',
+                      f'group:{int(group_id)}',
+                      {'job': 'run_group_sequence', 'zone_ids': list(zone_ids),
+                       'override_duration': override_duration})
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
             s._run_group_sequence(int(group_id), [int(z) for z in zone_ids], override_duration=override_duration)
-    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-        logger.debug("Handled exception in job_run_group_sequence: %s", e)
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        logger.exception("job_run_group_sequence failed (group_id=%s)", group_id)
 
 
 def job_stop_zone(zone_id: int):
+    _audit_timer_fire('scheduler_timer_fire',
+                      f'zone:{int(zone_id)}',
+                      {'job': 'stop_zone'})
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
             s._stop_zone(int(zone_id))
-    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-        logger.debug("Handled exception in job_stop_zone: %s", e)
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        logger.exception("job_stop_zone failed (zone_id=%s)", zone_id)
 
 
 def job_close_master_valve(group_id: int):
@@ -161,6 +193,30 @@ def job_dispatch_bot_subscriptions():
                 logger.debug("Handled exception in job_dispatch_bot_subscriptions: %s", e)
     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
         logger.debug("Handled exception in job_dispatch_bot_subscriptions: %s", e)
+
+
+def job_audit_cleanup():
+    """Daily APScheduler job: prune audit_log rows older than 7 days."""
+    try:
+        from database import db
+        deleted = db.cleanup_audit_logs(older_than_days=7)
+        logger.info("audit_cleanup job: removed %d audit_log rows older than 7 days",
+                    int(deleted or 0))
+        # Self-audit so the cleanup itself is observable.
+        try:
+            from services.audit import record_audit
+            record_audit(
+                action_type='audit_cleanup',
+                source='scheduler',
+                actor='system',
+                target='audit_log',
+                payload={'deleted': int(deleted or 0), 'older_than_days': 7},
+                result='success',
+            )
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError) as e:
+            logger.debug("audit_cleanup self-audit failed: %s", e)
+    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+        logger.error("job_audit_cleanup failed: %s", e)
 
 
 class IrrigationScheduler:
@@ -278,6 +334,11 @@ class IrrigationScheduler:
             self.schedule_postpone_sweeper()
         except (OSError, ValueError) as e:
             logger.error(f"Не удалось запланировать очистку отложек: {e}")
+        # Плановый джоб: ежедневная очистка audit_log (>7 дней)
+        try:
+            self.schedule_audit_cleanup()
+        except (OSError, ValueError) as e:
+            logger.error(f"Не удалось запланировать очистку audit_log: {e}")
 
     def stop(self):
         if not self.is_running:
@@ -356,6 +417,21 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Не удалось добавить джоб bot_sub_dispatcher: {e}")
 
+    def schedule_audit_cleanup(self) -> None:
+        """Plan daily audit_log cleanup at 03:30 (rows older than 7 days)."""
+        try:
+            self.scheduler.add_job(
+                job_audit_cleanup,
+                trigger=CronTrigger(hour=3, minute=30),
+                id='audit_cleanup',
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
+            logger.info("audit_cleanup job scheduled: daily at 03:30")
+        except (ValueError, TypeError, KeyError) as e:
+            logger.error(f"Не удалось добавить джоб audit_cleanup: {e}")
+
     def _stop_zone(self, zone_id: int):
         try:
             # Фиксируем время последнего полива текущей зоны (время начала, если было)
@@ -369,12 +445,26 @@ class IrrigationScheduler:
                 _stop_zone_central(zone_id, reason='auto_stop')
             except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                 logger.debug("Exception in _stop_zone: %s", e)
-                # Fallback на локальный апдейт, если контроллер недоступен
-                self.db.update_zone(zone_id, {
-                    'state': 'off',
-                    'watering_start_time': None,
-                    'last_watering_time': last_time
-                })
+                # Fallback на локальный апдейт, если контроллер недоступен.
+                # Идём через update_zone_state, чтобы fault-fallback тоже
+                # попадал в zone_state_change audit (reason=auto_stop_fallback).
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zone_id, {
+                        'state': 'off',
+                        'watering_start_time': None,
+                        'last_watering_time': last_time,
+                    }, audit_reason='auto_stop_fallback', db=self.db)
+                except (sqlite3.Error, OSError, ImportError) as e2:
+                    logger.exception(
+                        "irrigation_scheduler._stop_zone: audited fallback failed (%s) — "
+                        "doing raw update_zone", e2,
+                    )
+                    self.db.update_zone(zone_id, {
+                        'state': 'off',
+                        'watering_start_time': None,
+                        'last_watering_time': last_time
+                    })
             try:
                 pass  # dlog replaced by logger
                 logger.debug("auto-stop zone=%s", zone_id)
@@ -521,8 +611,11 @@ class IrrigationScheduler:
                         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                             logger.debug("Handled exception in line_383: %s", e)
                         try:
-                            self.db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
-                        except (sqlite3.Error, OSError) as e:
+                            from services.zones_state import update_zone_state as _uzs
+                            _uzs(int(gz['id']),
+                                 {'state': 'off', 'watering_start_time': None},
+                                 audit_reason='peer_off_scheduled', db=self.db)
+                        except (sqlite3.Error, OSError, ImportError) as e:
                             logger.debug("Handled exception in line_387: %s", e)
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("Handled exception in line_389: %s", e)
@@ -531,12 +624,46 @@ class IrrigationScheduler:
                     start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     okv = False
                     try:
-                        okv = self.db.update_zone_versioned(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
+                        # update_zone_versioned now returns (ok, prev_zone) —
+                        # legacy ``okv`` boolean is the first element only.
+                        okv, _prev = self.db.update_zone_versioned(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
+                        # Emit zone_state_change for the scheduled start so triage
+                        # can see the program-driven transition (analogous to
+                        # what services.zones_state.update_zone_state does, but
+                        # we keep the explicit versioned call here because the
+                        # caller checks `okv` to decide on the fallback).
+                        if okv and _prev is not None and str(_prev.get('state') or '').lower() != 'on':
+                            try:
+                                from services.audit import record_audit
+                                record_audit(
+                                    action_type='zone_state_change',
+                                    source='irrigation_scheduler',
+                                    target=f'zone:{int(zone_id)}',
+                                    payload={'from': _prev.get('state'), 'to': 'on',
+                                             'reason': 'scheduled_start',
+                                             'commanded_state': 'on'},
+                                    actor='system',
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.exception(
+                                    "irrigation_scheduler: audit emit (scheduled_start) failed zone=%s",
+                                    zone_id,
+                                )
                     except (sqlite3.Error, OSError) as e:
                         logger.debug("Exception in line_397: %s", e)
                         okv = False
                     if not okv:
-                        self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
+                        try:
+                            from services.zones_state import update_zone_state as _uzs
+                            _uzs(zone_id,
+                                 {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'},
+                                 audit_reason='scheduled_start_fallback', db=self.db)
+                        except (sqlite3.Error, OSError, ImportError):
+                            logger.exception(
+                                "irrigation_scheduler: scheduled_start fallback failed zone=%s",
+                                zone_id,
+                            )
+                            self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
                     # Centralized start to ensure MV logic
                     try:
                         from services.zone_control import exclusive_start_zone as _start_central
@@ -578,7 +705,7 @@ class IrrigationScheduler:
                     early = 3
                 early = 0 if early < 0 else (15 if early > 15 else early)
                 total_seconds = duration * 60
-                if os.getenv('TESTING') == '1':
+                if TESTING:
                     total_seconds = min(6, max(1, duration))
                     early = 0  # в тестовом режиме не усложняем тайминги
                 remaining = max(0, total_seconds - early)
@@ -787,12 +914,31 @@ class IrrigationScheduler:
             for job_id in job_ids:
                 try:
                     self.scheduler.remove_job(job_id)
+                    self._emit_timer_audit(
+                        'scheduler_timer_cancel',
+                        f'program:{int(program_id)}',
+                        {'job_id': job_id},
+                    )
                 except (ValueError, KeyError, RuntimeError) as e:
                     logger.debug("Handled exception in cancel_program: %s", e)
             self.program_jobs[program_id] = []
             logger.info(f"Программа {program_id} отменена")
         except (KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка отмены программы {program_id}: {e}")
+
+    @staticmethod
+    def _emit_timer_audit(action: str, target: str, payload: dict) -> None:
+        """Best-effort debug emit for scheduler timer plant/cancel events."""
+        try:
+            from services.audit import debug_audit
+            debug_audit(
+                action_type=action,
+                source='scheduler',
+                target=target,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("scheduler timer audit failed (action=%s)", action)
 
     def schedule_zone_stop(self, zone_id: int, duration_minutes: int, command_id: Optional[str] = None):
         """Запланировать автоматическую остановку зоны через duration_minutes минут (для ручных запусков)."""
@@ -811,7 +957,7 @@ class IrrigationScheduler:
             if early > 15:
                 early = 15
             # В тестовом режиме ускоряем автостоп до секунд, чтобы не было «хвостов» после тестов
-            if os.getenv('TESTING') == '1':
+            if TESTING:
                 total_seconds = min(6, max(1, int(duration_minutes)))
                 early = 0
                 run_at = datetime.now() + timedelta(seconds=total_seconds)
@@ -836,6 +982,13 @@ class IrrigationScheduler:
                 **_kwargs,
             )
             self.active_zones[zone_id] = run_at
+            self._emit_timer_audit(
+                'scheduler_timer_plant',
+                f'zone:{int(zone_id)}',
+                {'job': 'zone_stop', 'job_id': _kwargs.get('id'),
+                 'duration_minutes': int(duration_minutes),
+                 'run_at': run_at.isoformat(timespec='seconds')},
+            )
             logger.info(f"Автоостановка зоны {zone_id} запланирована на {run_at}")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования автоостановки зоны {zone_id}: {e}")
@@ -861,6 +1014,12 @@ class IrrigationScheduler:
                 DateTrigger(run_date=run_at),
                 **_kwargs,
             )
+            self._emit_timer_audit(
+                'scheduler_timer_plant',
+                f'zone:{int(zone_id)}',
+                {'job': 'zone_hard_stop', 'job_id': _kwargs.get('id'),
+                 'run_at': run_at.isoformat(timespec='seconds')},
+            )
             logger.info(f"Watchdog: zone {zone_id} hard-stop at {run_at}")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования watchdog-стопа зоны {zone_id}: {e}")
@@ -882,6 +1041,13 @@ class IrrigationScheduler:
             if getattr(self, 'has_volatile_jobstore', False):
                 _kwargs['jobstore'] = 'volatile'
             self.scheduler.add_job(job_stop_zone, DateTrigger(run_date=run_at), **_kwargs)
+            self._emit_timer_audit(
+                'scheduler_timer_plant',
+                f'zone:{int(zone_id)}',
+                {'job': 'zone_cap_stop', 'job_id': job_id,
+                 'cap_minutes': int(cap_minutes),
+                 'run_at': run_at.isoformat(timespec='seconds')},
+            )
             logger.info(f"Zone cap: zone {zone_id} hard-stop at {run_at} (cap {cap_minutes}m)")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования cap-стопа зоны {zone_id}: {e}")
@@ -891,6 +1057,11 @@ class IrrigationScheduler:
             job_id = f"zone_cap_stop:{int(zone_id)}"
             try:
                 self.scheduler.remove_job(job_id)
+                self._emit_timer_audit(
+                    'scheduler_timer_cancel',
+                    f'zone:{int(zone_id)}',
+                    {'job': 'zone_cap_stop', 'job_id': job_id},
+                )
             except (ValueError, KeyError, RuntimeError) as e:
                 logger.debug("Handled exception in cancel_zone_cap: %s", e)
         except (ValueError, TypeError, KeyError) as e:
@@ -914,6 +1085,13 @@ class IrrigationScheduler:
             if getattr(self, 'has_volatile_jobstore', False):
                 _kwargs['jobstore'] = 'volatile'
             self.scheduler.add_job(job_close_master_valve, DateTrigger(run_date=run_at), **_kwargs)
+            self._emit_timer_audit(
+                'scheduler_timer_plant',
+                f'group:{int(group_id)}',
+                {'job': 'master_cap_close', 'job_id': job_id,
+                 'cap_hours': int(hours),
+                 'run_at': run_at.isoformat(timespec='seconds')},
+            )
             logger.info(f"Master valve cap: group {group_id} close at {run_at} (cap {hours}h)")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования cap-закрытия мастер-клапана для группы {group_id}: {e}")
@@ -923,6 +1101,11 @@ class IrrigationScheduler:
             job_id = f"master_cap_close:{int(group_id)}"
             try:
                 self.scheduler.remove_job(job_id)
+                self._emit_timer_audit(
+                    'scheduler_timer_cancel',
+                    f'group:{int(group_id)}',
+                    {'job': 'master_cap_close', 'job_id': job_id},
+                )
             except (ValueError, KeyError, RuntimeError) as e:
                 logger.debug("Handled exception in cancel_master_valve_cap: %s", e)
         except (ValueError, TypeError, KeyError) as e:
@@ -940,7 +1123,17 @@ class IrrigationScheduler:
 
             # Останавливаем все зоны в группе перед запуском
             for z in group_zones:
-                self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(z['id'],
+                         {'state': 'off', 'watering_start_time': None},
+                         audit_reason='group_sequence_bulk_off', db=self.db)
+                except (sqlite3.Error, OSError, ImportError):
+                    logger.exception(
+                        "irrigation_scheduler.start_group_sequence: bulk_off audited path failed zone=%s",
+                        z.get('id'),
+                    )
+                    self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
 
             # Считаем и записываем плановые времена стартов для зон группы
             try:
@@ -986,7 +1179,7 @@ class IrrigationScheduler:
 
             zone_ids = [z['id'] for z in group_zones]
             # In TESTING mode, run synchronously to avoid APScheduler thread timing issues
-            if os.environ.get('TESTING') == '1':
+            if TESTING:
                 self._run_group_sequence(group_id, zone_ids, override_duration=override_duration)
             else:
                 # Запускаем последовательность в отдельном джобе прямо сейчас
@@ -1018,7 +1211,7 @@ class IrrigationScheduler:
 
     def _run_group_sequence(self, group_id: int, zone_ids: List[int], override_duration: int = None):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
-        if os.environ.get('TESTING') == '1':
+        if TESTING:
             logger.debug("TESTING mode: simplified _run_group_sequence for group %s", group_id)
             # In TESTING mode, set the first zone ON in the DB (skip MQTT/hardware)
             for zone_id in zone_ids:
@@ -1030,7 +1223,19 @@ class IrrigationScheduler:
                     continue
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 planned_end = (datetime.now() + timedelta(minutes=duration)).strftime('%Y-%m-%d %H:%M:%S')
-                self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
+                # TESTING-mode start — flagged via audit_reason so any audit
+                # log scrub on prod can filter these synthetic transitions out.
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zone_id,
+                         {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end},
+                         audit_reason='testing_mode_start', db=self.db)
+                except (sqlite3.Error, OSError, ImportError):
+                    logger.exception(
+                        "irrigation_scheduler: TESTING start audited path failed zone=%s",
+                        zone_id,
+                    )
+                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
                 break  # Only start the first zone in TESTING mode
             return
         try:
@@ -1066,10 +1271,23 @@ class IrrigationScheduler:
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 try:
                     planned_end = (datetime.now() + timedelta(minutes=duration)).strftime('%Y-%m-%d %H:%M:%S')
-                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
-                except (sqlite3.Error, OSError) as e:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zone_id,
+                         {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end},
+                         audit_reason='group_sequence_start', db=self.db)
+                except (sqlite3.Error, OSError, ImportError) as e:
                     logger.debug("Exception in _run_group_sequence: %s", e)
-                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+                    try:
+                        from services.zones_state import update_zone_state as _uzs2
+                        _uzs2(zone_id,
+                              {'state': 'on', 'watering_start_time': start_ts},
+                              audit_reason='group_sequence_retry', db=self.db)
+                    except (sqlite3.Error, OSError, ImportError):
+                        logger.exception(
+                            "irrigation_scheduler._run_group_sequence: start retry failed zone=%s",
+                            zone_id,
+                        )
+                        self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
                 try:
                     self.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=duration))
                 except (ValueError, TypeError, KeyError) as e:
@@ -1146,7 +1364,7 @@ class IrrigationScheduler:
                     early = 3
                 early = 0 if early < 0 else (15 if early > 15 else early)
                 total_seconds = duration * 60
-                if os.getenv('TESTING') == '1':
+                if TESTING:
                     total_seconds = min(6, max(1, duration))
                     early = 0
                 remaining = max(0, total_seconds - early)
@@ -1286,6 +1504,11 @@ class IrrigationScheduler:
             for job_id in job_ids_to_remove:
                 try:
                     self.scheduler.remove_job(job_id)
+                    self._emit_timer_audit(
+                        'scheduler_timer_cancel',
+                        f'zone:{int(zone_id)}',
+                        {'job_id': job_id},
+                    )
                 except (ValueError, KeyError, RuntimeError) as e:
                     logger.debug("Handled exception in cancel_zone_jobs: %s", e)
             self.active_zones.pop(int(zone_id), None)

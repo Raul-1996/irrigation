@@ -19,6 +19,60 @@ MAX_QUEUE_SIZE = 20
 DEFAULT_MAX_WAIT_MINUTES = 120
 
 
+def _audit_queue_transition(entry, new_state, prev_state=None, extra=None):
+    """Best-effort debug emit for QueueEntryState transitions.
+
+    Gated behind ``settings.logging.debug`` so audit_log doesn't blow up
+    under heavy program scheduling.
+    """
+    try:
+        from services.audit import debug_audit
+        payload = {
+            'entry_id': getattr(entry, 'entry_id', None),
+            'program_id': getattr(entry, 'program_id', None),
+            'program_name': getattr(entry, 'program_name', None),
+            'group_id': getattr(entry, 'group_id', None),
+            'zone_ids': list(getattr(entry, 'zone_ids', None) or []),
+            'from': prev_state.value if prev_state else None,
+            'to': new_state.value if new_state else None,
+        }
+        if extra:
+            payload.update(extra)
+        debug_audit(
+            action_type='program_queue_transition',
+            source='scheduler',
+            target=f'group:{getattr(entry, "group_id", "?")}',
+            payload=payload,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("program_queue_transition audit failed")
+
+
+def _audit_program_run(action, entry, extra=None):
+    """Always-on audit for program_run_started / program_run_completed."""
+    try:
+        from services.audit import record_audit
+        payload = {
+            'entry_id': getattr(entry, 'entry_id', None),
+            'program_id': getattr(entry, 'program_id', None),
+            'program_name': getattr(entry, 'program_name', None),
+            'group_id': getattr(entry, 'group_id', None),
+            'zone_ids': list(getattr(entry, 'zone_ids', None) or []),
+            'program_run_id': getattr(entry, 'program_run_id', None),
+        }
+        if extra:
+            payload.update(extra)
+        record_audit(
+            action_type=action,
+            source='scheduler',
+            target=f'group:{getattr(entry, "group_id", "?")}',
+            payload=payload,
+            actor='system',
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("program_run audit failed (action=%s)", action)
+
+
 class QueueEntryState(Enum):
     WAITING = "waiting"
     RUNNING = "running"
@@ -217,14 +271,22 @@ class ProgramQueueManager:
                 # Check waiting entries in queue
                 for entry in gq.queue:
                     if entry.entry_id == entry_id:
+                        prev_state = entry.state
                         entry.state = QueueEntryState.CANCELLED
                         entry.cancel_event.set()
+                        _audit_queue_transition(entry, QueueEntryState.CANCELLED,
+                                                prev_state=prev_state,
+                                                extra={'cancel_source': 'cancel_entry'})
                         return True
 
                 # Check current running entry
                 if gq.current is not None and gq.current.entry_id == entry_id:
+                    prev_state = gq.current.state
                     gq.current.state = QueueEntryState.CANCELLED
                     gq.current.cancel_event.set()
+                    _audit_queue_transition(gq.current, QueueEntryState.CANCELLED,
+                                            prev_state=prev_state,
+                                            extra={'cancel_source': 'cancel_entry_running'})
                     # Wake up worker if waiting on float resume
                     resume_ev = None
                     if self._float_monitor:
@@ -362,7 +424,11 @@ class ProgramQueueManager:
                 elapsed = (datetime.now() - entry.enqueued_at).total_seconds()
                 effective_wait = elapsed - entry.excluded_wait_seconds
                 if effective_wait > self._max_wait_minutes * 60:
+                    prev_state = entry.state
                     entry.state = QueueEntryState.EXPIRED
+                    _audit_queue_transition(entry, QueueEntryState.EXPIRED,
+                                            prev_state=prev_state,
+                                            extra={'effective_wait_sec': int(effective_wait)})
                     logger.info("Entry %s expired (waited %.0fs)", entry.entry_id, effective_wait)
                     continue
 
@@ -371,18 +437,38 @@ class ProgramQueueManager:
                 continue
 
             # Set as current and RUNNING
+            prev_state = entry.state
             entry.state = QueueEntryState.RUNNING
             with gq.lock:
                 gq.current = entry
+            _audit_queue_transition(entry, QueueEntryState.RUNNING, prev_state=prev_state)
+            # Always-on audit: a program run actually started.
+            _audit_program_run('program_run_started', entry)
 
             try:
                 self._run_entry(entry)
                 if entry.state == QueueEntryState.RUNNING:
                     entry.state = QueueEntryState.COMPLETED
+                    _audit_queue_transition(entry, QueueEntryState.COMPLETED,
+                                            prev_state=QueueEntryState.RUNNING)
+                    _audit_program_run('program_run_completed', entry,
+                                       extra={'final_state': 'completed'})
+                elif entry.state == QueueEntryState.CANCELLED:
+                    # Cancellation already audited by canceler — emit completion
+                    # so external observers see the run terminated.
+                    _audit_program_run('program_run_completed', entry,
+                                       extra={'final_state': 'cancelled'})
             except Exception as exc:
-                logger.error("Entry %s failed: %s", entry.entry_id, exc)
+                logger.exception("Entry %s failed", entry.entry_id)
                 if entry.state not in (QueueEntryState.CANCELLED, QueueEntryState.COMPLETED):
+                    prev_state_f = entry.state
                     entry.state = QueueEntryState.FAILED
+                    _audit_queue_transition(entry, QueueEntryState.FAILED,
+                                            prev_state=prev_state_f,
+                                            extra={'error': str(exc)[:256]})
+                    _audit_program_run('program_run_completed', entry,
+                                       extra={'final_state': 'failed',
+                                              'error': str(exc)[:256]})
             finally:
                 with gq.lock:
                     if gq.current is entry:

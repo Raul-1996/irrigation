@@ -166,7 +166,20 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
         try:
             zid = int(z.get('id', 0))
             if zid:
-                db.update_zone(zid, {'state': 'off'})
+                # Graceful shutdown of the whole app — all zones go OFF.
+                # Audit the transition so the next boot's operator can see
+                # exactly when the app was asked to wind down (vs. zones
+                # that turned off because of normal program completion).
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zid, {'state': 'off'},
+                         audit_reason='graceful_shutdown')
+                except (sqlite3.Error, OSError, ImportError):
+                    logger.exception(
+                        "Shutdown: audited graceful_shutdown failed zone=%s — "
+                        "falling back to raw update_zone", zid,
+                    )
+                    db.update_zone(zid, {'state': 'off'})
         except (sqlite3.Error, OSError, Exception) as exc:
             logger.debug('Shutdown: DB update error zone %s: %s', z.get('id'), exc)
 

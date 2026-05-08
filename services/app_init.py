@@ -328,7 +328,8 @@ def _register_shutdown_handlers(db=None):
     Must be called AFTER app init so that MQTT clients are already warm.
     Not registered in TESTING mode.
     """
-    if os.environ.get('TESTING') == '1':
+    from config import TESTING
+    if TESTING:
         return
 
     def _signal_handler(signum, frame):

@@ -19,6 +19,9 @@ except ImportError as e:
     logger.debug("Exception in line_15: %s", e)
     _db = None
 
+# Audit helpers — local import on use to avoid circular at module load. We
+# import lazily inside publish_mqtt_value to keep startup time clean.
+
 # Caches and locks
 _MQTT_CLIENTS: Dict[int, object] = {}
 _MQTT_CLIENTS_LOCK = threading.Lock()
@@ -75,10 +78,15 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
                     cl.connect(host, port, 10)
                     try:
                         cl.loop_start()
-                    except (ConnectionError, TimeoutError, OSError) as e:
-                        logger.debug("Handled exception in line_75: %s", e)
-                except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.debug("Exception in line_77: %s", e)
+                    except (ConnectionError, TimeoutError, OSError):
+                        # Promoted to logger.exception — silent debug masked
+                        # cases where loop_start fails to spawn the network
+                        # thread (very rare, but breaks all subsequent publishes).
+                        logger.exception("MQTT loop_start failed sid=%s host=%s:%s", sid, host, port)
+                except (ConnectionError, TimeoutError, OSError):
+                    # Promoted to logger.exception — connection failures here
+                    # silently dropped publishes during MASTER-C2 audit.
+                    logger.exception("MQTT connect failed sid=%s host=%s:%s", sid, host, port)
                     # не кэшируем неудачное подключение
                     return None
                 def _on_disconnect(c, u, rc, properties=None):
@@ -151,6 +159,31 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 time.sleep(0.1)
             if attempts >= 10 and rc != 0:
                 logger.error('MQTT publish failed after retries')
+                # OQ2: only audit publish-failure for QoS>=1.  At QoS=0
+                # there is no broker ack by design — what we'd be
+                # recording is a *local* connect-rc problem on a
+                # fire-and-forget message.  Logging it as
+                # `mqtt_publish_failure` mis-leads triage (filtering by
+                # this action_type then drowns in noise from healthy QoS=0
+                # firehoses during a transient broker hiccup).  Operators
+                # who want connect-rc visibility have logger.error above.
+                if effective_qos >= 1:
+                    try:
+                        from services.audit import record_audit
+                        record_audit(
+                            action_type='mqtt_publish_failure',
+                            source='mqtt',
+                            target=t,
+                            payload={'value': value, 'qos': effective_qos,
+                                     'retain': bool(retain), 'rc': int(rc),
+                                     'reason': 'connect_rc_retries_exhausted',
+                                     'attempts': attempts},
+                            actor='system',
+                            result='failure',
+                            error=f'rc={rc} after {attempts} attempts',
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("mqtt_publish_failure: record_audit failed")
                 return False
             # For QoS >= 1: wait for broker acknowledgement with retry + backoff
             if effective_qos >= 1:
@@ -167,14 +200,48 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                         # Re-publish on retry
                         try:
                             res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
-                        except (ConnectionError, TimeoutError, OSError) as e:
-                            logger.debug("Handled exception in line_167: %s", e)
+                        except (ConnectionError, TimeoutError, OSError):
+                            # Promoted to logger.exception — silent debug here
+                            # masked broker-down scenarios during MASTER-C2 audit.
+                            logger.exception("MQTT publish (QoS>=1 retry republish) failed topic=%s", t)
                 if not published:
                     logger.critical(f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={t} value={value}")
+                    # Always-on audit: QoS≥1 delivery failure is principal-critical.
+                    try:
+                        from services.audit import record_audit
+                        record_audit(
+                            action_type='mqtt_publish_failure',
+                            source='mqtt',
+                            target=t,
+                            payload={'value': value, 'qos': effective_qos,
+                                     'retain': bool(retain),
+                                     'reason': 'wait_for_publish_retries_exhausted'},
+                            actor='system',
+                            result='failure',
+                            error=f'QoS{effective_qos} delivery failed after 3 retries',
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("mqtt_publish_failure: record_audit failed")
                     return False
         except (ConnectionError, TimeoutError, OSError):
             logger.exception('MQTT publish failed')
             return False
+
+        # Debug-level audit: every successful publish. Volume is high
+        # (Wirenboard publishes can be hundreds per hour) — gated behind
+        # `settings.logging.debug` so audit_log doesn't blow up in normal use.
+        try:
+            from services.audit import debug_audit
+            debug_audit(
+                action_type='mqtt_publish',
+                source='mqtt',
+                target=t,
+                payload={'value': value, 'qos': effective_qos,
+                         'retain': bool(retain),
+                         'meta': meta if isinstance(meta, dict) else None},
+            )
+        except Exception:  # noqa: BLE001 — never break publish on audit failure
+            logger.debug("debug_audit(mqtt_publish) failed", exc_info=True)
 
         # Also publish to the control topic '/on' for Wirenboard compatibility
         try:
@@ -228,5 +295,6 @@ def _shutdown_mqtt_clients() -> None:
     _MQTT_CLIENTS.clear()
 
 
-if not os.environ.get('TESTING'):
+from config import TESTING as _TESTING
+if not _TESTING:
     atexit.register(_shutdown_mqtt_clients)

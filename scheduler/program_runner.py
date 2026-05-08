@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
+from config import TESTING
 from utils import normalize_topic
 
 try:
@@ -156,8 +157,11 @@ class ProgramRunnerMixin(WeatherMixin):
                         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                             logger.debug("Handled exception in line_383: %s", e)
                         try:
-                            self.db.update_zone(int(gz['id']), {'state': 'off', 'watering_start_time': None})
-                        except (sqlite3.Error, OSError) as e:
+                            from services.zones_state import update_zone_state as _uzs
+                            _uzs(int(gz['id']),
+                                 {'state': 'off', 'watering_start_time': None},
+                                 audit_reason='peer_off_runner', db=self.db)
+                        except (sqlite3.Error, OSError, ImportError) as e:
                             logger.debug("Handled exception in line_387: %s", e)
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("Handled exception in line_389: %s", e)
@@ -166,12 +170,42 @@ class ProgramRunnerMixin(WeatherMixin):
                     start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     okv = False
                     try:
-                        okv = self.db.update_zone_versioned(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
+                        # update_zone_versioned now returns (ok, prev_zone) —
+                        # legacy ``okv`` boolean is the first element only.
+                        okv, _prev = self.db.update_zone_versioned(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
+                        # Audit emit for the runner-driven start.
+                        if okv and _prev is not None and str(_prev.get('state') or '').lower() != 'on':
+                            try:
+                                from services.audit import record_audit
+                                record_audit(
+                                    action_type='zone_state_change',
+                                    source='program_runner',
+                                    target=f'zone:{int(zone_id)}',
+                                    payload={'from': _prev.get('state'), 'to': 'on',
+                                             'reason': 'runner_start',
+                                             'commanded_state': 'on'},
+                                    actor='system',
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.exception(
+                                    "program_runner: audit emit (runner_start) failed zone=%s",
+                                    zone_id,
+                                )
                     except (sqlite3.Error, OSError) as e:
                         logger.debug("Exception in line_397: %s", e)
                         okv = False
                     if not okv:
-                        self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
+                        try:
+                            from services.zones_state import update_zone_state as _uzs
+                            _uzs(zone_id,
+                                 {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'},
+                                 audit_reason='runner_start_fallback', db=self.db)
+                        except (sqlite3.Error, OSError, ImportError):
+                            logger.exception(
+                                "program_runner: runner_start fallback failed zone=%s",
+                                zone_id,
+                            )
+                            self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'watering_start_source': 'schedule', 'commanded_state': 'on'})
                     try:
                         from services.zone_control import exclusive_start_zone as _start_central
                         _start_central(int(zone_id))
@@ -209,7 +243,7 @@ class ProgramRunnerMixin(WeatherMixin):
                     early = 3
                 early = 0 if early < 0 else (15 if early > 15 else early)
                 total_seconds = duration * 60
-                if os.getenv('TESTING') == '1':
+                if TESTING:
                     total_seconds = min(6, max(1, duration))
                     early = 0
                 remaining = max(0, total_seconds - early)
@@ -316,7 +350,17 @@ class ProgramRunnerMixin(WeatherMixin):
                 return False
 
             for z in group_zones:
-                self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(z['id'],
+                         {'state': 'off', 'watering_start_time': None},
+                         audit_reason='runner_bulk_off', db=self.db)
+                except (sqlite3.Error, OSError, ImportError):
+                    logger.exception(
+                        "program_runner.start_group_sequence: runner_bulk_off audited path failed zone=%s",
+                        z.get('id'),
+                    )
+                    self.db.update_zone(z['id'], {'state': 'off', 'watering_start_time': None})
 
             try:
                 start_base = datetime.now()
@@ -357,7 +401,7 @@ class ProgramRunnerMixin(WeatherMixin):
                 logger.debug("Handled exception in line_747: %s", e)
 
             zone_ids = [z['id'] for z in group_zones]
-            if os.environ.get('TESTING') == '1':
+            if TESTING:
                 self._run_group_sequence(group_id, zone_ids, override_duration=override_duration)
             else:
                 _kwargs = dict(
@@ -388,7 +432,7 @@ class ProgramRunnerMixin(WeatherMixin):
 
     def _run_group_sequence(self, group_id: int, zone_ids: List[int], override_duration: int = None):
         """Выполняет последовательный полив зон группы."""
-        if os.environ.get('TESTING') == '1':
+        if TESTING:
             logger.debug("TESTING mode: simplified _run_group_sequence for group %s", group_id)
             for zone_id in zone_ids:
                 zone = self.db.get_zone(zone_id)
@@ -399,7 +443,19 @@ class ProgramRunnerMixin(WeatherMixin):
                     continue
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 planned_end = (datetime.now() + timedelta(minutes=duration)).strftime('%Y-%m-%d %H:%M:%S')
-                self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
+                # TESTING-mode start, audited so transitions are visible
+                # to whatever test asserts on audit_log.
+                try:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zone_id,
+                         {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end},
+                         audit_reason='runner_testing_start', db=self.db)
+                except (sqlite3.Error, OSError, ImportError):
+                    logger.exception(
+                        "program_runner: runner_testing_start audited path failed zone=%s",
+                        zone_id,
+                    )
+                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
                 break
             return
         try:
@@ -435,10 +491,23 @@ class ProgramRunnerMixin(WeatherMixin):
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 try:
                     planned_end = (datetime.now() + timedelta(minutes=duration)).strftime('%Y-%m-%d %H:%M:%S')
-                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
-                except (sqlite3.Error, OSError) as e:
+                    from services.zones_state import update_zone_state as _uzs
+                    _uzs(zone_id,
+                         {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end},
+                         audit_reason='runner_start', db=self.db)
+                except (sqlite3.Error, OSError, ImportError) as e:
                     logger.debug("Exception in _run_group_sequence: %s", e)
-                    self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
+                    try:
+                        from services.zones_state import update_zone_state as _uzs2
+                        _uzs2(zone_id,
+                              {'state': 'on', 'watering_start_time': start_ts},
+                              audit_reason='runner_retry', db=self.db)
+                    except (sqlite3.Error, OSError, ImportError):
+                        logger.exception(
+                            "program_runner._run_group_sequence: runner_retry failed zone=%s",
+                            zone_id,
+                        )
+                        self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts})
                 try:
                     self.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=duration))
                 except (ValueError, TypeError, KeyError) as e:
@@ -506,7 +575,7 @@ class ProgramRunnerMixin(WeatherMixin):
                     early = 3
                 early = 0 if early < 0 else (15 if early > 15 else early)
                 total_seconds = duration * 60
-                if os.getenv('TESTING') == '1':
+                if TESTING:
                     total_seconds = min(6, max(1, duration))
                     early = 0
                 remaining = max(0, total_seconds - early)

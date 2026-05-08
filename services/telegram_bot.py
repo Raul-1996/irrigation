@@ -130,8 +130,8 @@ class TelegramNotifier:
     def send_text(self, chat_id: int, text: str) -> bool:
         try:
             # Skip in TESTING mode
-            import os
-            if os.environ.get('TESTING') == '1':
+            from config import TESTING
+            if TESTING:
                 logger.debug(f"TESTING mode: skipping send_text to {chat_id}")
                 return True
                 
@@ -162,8 +162,8 @@ class TelegramNotifier:
     def send_message(self, chat_id: int, text: str, reply_markup=None) -> bool:
         try:
             # Skip in TESTING mode
-            import os
-            if os.environ.get('TESTING') == '1':
+            from config import TESTING
+            if TESTING:
                 logger.debug(f"TESTING mode: skipping send_message to {chat_id}")
                 return True
                 
@@ -554,8 +554,8 @@ def start_long_polling_if_needed():
     global _aiogram_runner, _http_poller
     try:
         # Skip in TESTING mode
-        import os
-        if os.environ.get('TESTING') == '1':
+        from config import TESTING
+        if TESTING:
             logger.debug("TESTING mode: skipping telegram long polling")
             return
             
