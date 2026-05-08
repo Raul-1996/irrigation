@@ -188,9 +188,10 @@ class ZoneRepository(BaseRepository):
                 if 'scheduled_start_time' in updated_data:
                     sql_fields.append('scheduled_start_time = ?')
                     params.append(updated_data['scheduled_start_time'])
-                if 'last_watering_time' in updated_data:
-                    sql_fields.append('last_watering_time = ?')
-                    params.append(updated_data['last_watering_time'])
+                # 'last_watering_time' is no longer a column on zones —
+                # it is derived from zone_runs.end_utc and injected at
+                # read time. Silently ignore the key in the update payload
+                # so legacy callers that still pass it don't crash.
                 if 'last_avg_flow_lpm' in updated_data:
                     sql_fields.append('last_avg_flow_lpm = ?')
                     params.append(updated_data['last_avg_flow_lpm'])
@@ -353,7 +354,7 @@ class ZoneRepository(BaseRepository):
                     if 'photo_path' in merged: add('photo_path', merged['photo_path'])
                     if 'watering_start_time' in merged: add('watering_start_time', merged['watering_start_time'])
                     if 'scheduled_start_time' in merged: add('scheduled_start_time', merged['scheduled_start_time'])
-                    if 'last_watering_time' in merged: add('last_watering_time', merged['last_watering_time'])
+                    # 'last_watering_time' was dropped — derived from zone_runs now.
                     if 'last_avg_flow_lpm' in merged: add('last_avg_flow_lpm', merged['last_avg_flow_lpm'])
                     if 'last_total_liters' in merged: add('last_total_liters', merged['last_total_liters'])
                     if 'mqtt_server_id' in merged: add('mqtt_server_id', merged.get('mqtt_server_id'))

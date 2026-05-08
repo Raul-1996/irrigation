@@ -262,12 +262,10 @@ def ensure_hub_started() -> None:
                                 except (ValueError, TypeError, KeyError) as e:
                                     logger.debug("Handled exception in line_238: %s", e)
                             else:
-                                # Issue #2: last_watering_time must be the END time
-                                # (when zone went off), not the start time. We still
-                                # gate on having had a start so we don't overwrite
-                                # on idempotent off->off transitions.
-                                if z.get('watering_start_time'):
-                                    updates['last_watering_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                # last_watering_time is no longer a column —
+                                # the open zone_run for this zone is closed
+                                # below (see step 5 edge case) so the value
+                                # appears via get_last_watering_time().
                                 updates['watering_start_time'] = None
                                 try:
                                     sched = _get_scheduler_fn()
