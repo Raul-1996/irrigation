@@ -46,9 +46,13 @@ class TestZoneMqttStartOverride:
         data = resp.get_json()
         assert data['success'] is True
 
-        # Check DB
+        # Check DB. After fix/mqtt-start-unify, state is set by
+        # exclusive_start_zone, which transitions 'starting' -> 'on' only
+        # after a successful MQTT publish. With no mqtt_server_id wired
+        # up in this test, the publish block is skipped and the zone
+        # stays in 'starting' — same contract as test_full_watering_cycle.
         zone = db.get_zone(zone_id)
-        assert zone['state'] == 'on'
+        assert zone['state'] in ('on', 'starting')
         assert zone['watering_start_time'] is not None
         assert zone['planned_end_time'] is not None
 
@@ -71,6 +75,14 @@ class TestZoneMqttStartOverride:
                     data=json.dumps({'duration': 24}),
                     content_type='application/json')
 
+        # After fix/mqtt-start-unify the delegate transitions to 'on'
+        # only on successful MQTT publish; with no mqtt_server_id the
+        # zone stays in 'starting'. Force the row to 'on' so we can
+        # exercise the watering-time math (the contract under test
+        # is total_duration == override, not the state machine).
+        if db.get_zone(zone_id)['state'] != 'on':
+            db.update_zone(zone_id, {'state': 'on'})
+
         # Check watering-time
         resp = client.get(f'/api/zones/{zone_id}/watering-time')
         data = resp.get_json()
@@ -87,7 +99,9 @@ class TestZoneMqttStartOverride:
         assert resp.status_code == 200
 
         zone = db.get_zone(zone_id)
-        assert zone['state'] == 'on'
+        # See test_start_with_override_sets_planned_end_time for the
+        # 'starting' vs 'on' rationale (delegate awaits MQTT publish).
+        assert zone['state'] in ('on', 'starting')
         assert zone['planned_end_time'] is not None
 
         start_dt = datetime.strptime(zone['watering_start_time'], '%Y-%m-%d %H:%M:%S')
