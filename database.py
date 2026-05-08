@@ -15,6 +15,7 @@ from db.mqtt import MqttRepository
 from db.settings import SettingsRepository
 from db.telegram import TelegramRepository
 from db.logs import LogRepository
+from db.audit import AuditRepository
 from db.migrations import MigrationRunner
 
 # Логирование: не вызываем logging.basicConfig() на import-time (CQ-012 / MASTER-C2).
@@ -46,6 +47,7 @@ class IrrigationDB:
         self.settings = SettingsRepository(db_path)
         self.telegram = TelegramRepository(db_path)
         self.logs = LogRepository(db_path, self.backup_dir)
+        self.audit = AuditRepository(db_path)
 
         # Init schema + migrations
         self._migrations = MigrationRunner(db_path)
@@ -72,7 +74,13 @@ class IrrigationDB:
     def update_zone(self, zone_id: int, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return self.zones.update_zone(zone_id, zone_data)
 
-    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> bool:
+    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> tuple:
+        """Versioned zone update — see db.zones.update_zone_versioned for contract.
+
+        Returns ``(ok: bool, prev_zone: dict | None)`` since the audit-logging
+        rework: callers that need atomic prev-state snapshots use this directly,
+        scheduler legacy paths use the bool ``ok`` portion.
+        """
         return self.zones.update_zone_versioned(zone_id, updates)
 
     def bulk_update_zones(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -302,6 +310,28 @@ class IrrigationDB:
 
     def create_backup(self):
         return self.logs.create_backup()
+
+    # --- Audit log ---
+    def add_audit(self, action_type, source='api', target=None, payload=None,
+                  result='success', error=None, ip=None, duration_ms=None,
+                  actor=None):
+        return self.audit.add_audit(
+            action_type=action_type, source=source, target=target,
+            payload=payload, result=result, error=error, ip=ip,
+            duration_ms=duration_ms, actor=actor
+        )
+
+    def get_audit_logs(self, **kwargs):
+        return self.audit.get_audit_logs(**kwargs)
+
+    def count_audit_logs(self, **kwargs):
+        return self.audit.count_audit_logs(**kwargs)
+
+    def cleanup_audit_logs(self, older_than_days=7):
+        return self.audit.cleanup_audit_logs(older_than_days)
+
+    def get_distinct_audit_action_types(self):
+        return self.audit.get_distinct_action_types()
 
 
 # Глобальный экземпляр базы данных

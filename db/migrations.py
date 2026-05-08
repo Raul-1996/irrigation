@@ -159,6 +159,8 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'queue_and_float_support', self._migrate_queue_and_float_support)
                 # Programs v2: new fields (type, schedule_type, interval_days, even_odd, color, enabled, extra_times)
                 self._apply_named_migration(conn, 'programs_v2_fields', self._migrate_programs_v2_fields)
+                # Audit log (two-tier logging spec)
+                self._apply_named_migration(conn, 'create_audit_log', self._migrate_create_audit_log)
 
                 logger.info("База данных инициализирована успешно")
 
@@ -964,6 +966,37 @@ class MigrationRunner:
         conn.commit()
         logger.info('Downgrade: queue_and_float_support откачена')
 
+    def _migrate_create_audit_log(self, conn):
+        """Create the audit_log table for principal-critical mutation tracking.
+
+        Separate from the existing ``logs`` table, which keeps low-fidelity
+        operational events.  ``audit_log`` stores who/what/when/how for every
+        mutating UI/API action.  Idempotent (IF NOT EXISTS guards everywhere).
+        """
+        try:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    actor TEXT,
+                    source TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    target TEXT,
+                    payload_json TEXT,
+                    result TEXT,
+                    error_msg TEXT,
+                    ip TEXT,
+                    duration_ms INTEGER
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action_type)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target)')
+            conn.commit()
+            logger.info('Создана таблица audit_log с индексами (ts/action/target)')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции create_audit_log: %s", e)
+
     def _migrate_programs_v2_fields(self, conn):
         """Add v2 fields to programs table: type, schedule_type, interval_days, even_odd, color, enabled, extra_times."""
         try:
@@ -1010,7 +1043,13 @@ class MigrationRunner:
         'weather_add_extended_settings': '_down_add_extended_weather_settings',
         'weather_wind_kmh_to_ms': '_down_wind_kmh_to_ms',
         'queue_and_float_support': '_down_queue_and_float_support',
+        'create_audit_log': '_down_create_audit_log',
     }
+
+    def _down_create_audit_log(self, conn):
+        conn.execute('DROP TABLE IF EXISTS audit_log')
+        conn.commit()
+        logger.info('Downgrade: удалена таблица audit_log')
 
     def _down_create_bot_users(self, conn):
         conn.execute('DROP TABLE IF EXISTS bot_users')

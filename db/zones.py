@@ -225,16 +225,48 @@ class ZoneRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> bool:
-        """Обновить зону с инкрементом version (optimistic lock)."""
+    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> tuple:
+        """Обновить зону с инкрементом version (optimistic lock).
+
+        Returns tuple ``(ok: bool, prev_zone: dict | None)`` where ``prev_zone``
+        is the row snapshot **before** the update was applied (None if the row
+        didn't exist).  The pre-read and the UPDATE happen in a single
+        ``BEGIN IMMEDIATE`` transaction so callers (services.zones_state.
+        update_zone_state) can compare prev/new state atomically without a
+        TOCTOU race against concurrent writers — important for emitting
+        ``zone_state_change`` audit rows that always reflect the actual
+        transition.
+
+        Backwards-compat: legacy callers that did ``ok = update_zone_versioned(...)``
+        relied on the bool return value.  Tuples are truthy when ok=True, so
+        a plain ``if update_zone_versioned(...):`` still works, but
+        ``ok = update_zone_versioned(...)`` will now bind ``ok`` to the tuple
+        — those few sites have been updated alongside this change.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT version FROM zones WHERE id = ?', (zone_id,))
+                # BEGIN IMMEDIATE → take a write lock right away so the
+                # pre-read snapshot is consistent with the row we then UPDATE.
+                # Without this, two concurrent versioned updates can both
+                # observe the same prev_state and emit duplicate / wrong
+                # zone_state_change audit rows.
+                try:
+                    conn.execute('BEGIN IMMEDIATE')
+                except sqlite3.Error:
+                    # Already in a transaction (e.g. nested) — fall through
+                    # and rely on the implicit one.
+                    pass
+                cur = conn.execute('SELECT * FROM zones WHERE id = ?', (zone_id,))
                 row = cur.fetchone()
                 if not row:
-                    return False
-                old_version = int(row['version'] or 0)
+                    try:
+                        conn.commit()
+                    except sqlite3.Error:
+                        pass
+                    return (False, None)
+                prev_zone = dict(row)
+                old_version = int(prev_zone.get('version') or 0)
                 fields = []
                 params = []
                 for k, v in updates.items():
@@ -245,10 +277,10 @@ class ZoneRepository(BaseRepository):
                 sql = f"UPDATE zones SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?"
                 cur2 = conn.execute(sql, params)
                 conn.commit()
-                return cur2.rowcount == 1
+                return (cur2.rowcount == 1, prev_zone)
         except sqlite3.Error as e:
             logger.error("Ошибка versioned-обновления зоны %s: %s", zone_id, e)
-            return False
+            return (False, None)
 
     @retry_on_busy()
     def bulk_update_zones(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:

@@ -8,11 +8,12 @@ from db.settings import SettingsRepository
 from db.telegram import TelegramRepository
 from db.logs import LogRepository
 from db.float import FloatRepository
+from db.audit import AuditRepository
 from db.migrations import MigrationRunner
 
 __all__ = [
     'BaseRepository', 'retry_on_busy',
     'ZoneRepository', 'ProgramRepository', 'GroupRepository',
     'MqttRepository', 'SettingsRepository', 'TelegramRepository',
-    'LogRepository', 'FloatRepository', 'MigrationRunner',
+    'LogRepository', 'FloatRepository', 'AuditRepository', 'MigrationRunner',
 ]

@@ -38,6 +38,16 @@ def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
     return key
 
 
+# Module-level TESTING flag — read ONCE at import time so every site that
+# does ``from config import TESTING`` sees the same boolean.  Centralised so
+# we don't have 19+ different ``os.environ.get('TESTING') == '1'`` snippets
+# spread across the codebase (each one is one inconsistency away from a
+# subtle behavioural drift between modules).  Tests that need to flip
+# TESTING after import time should use ``monkeypatch.setattr('config.TESTING',
+# True)`` — that is what tests/conftest.py does.
+TESTING: bool = os.environ.get('TESTING') == '1'
+
+
 class Config:
     SECRET_KEY = _load_or_generate_secret()
     WTF_CSRF_ENABLED = True
@@ -45,7 +55,7 @@ class Config:
     WTF_CSRF_TIME_LIMIT = None
     # Прочие настройки
     EMERGENCY_STOP = False
-    TESTING = os.environ.get('TESTING') == '1'
+    TESTING = TESTING
 
 
 class TestConfig(Config):
