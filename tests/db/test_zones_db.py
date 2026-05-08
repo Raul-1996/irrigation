@@ -59,13 +59,16 @@ class TestZoneCRUD:
 class TestVersionedUpdate:
     def test_versioned_update(self, test_db):
         zone = test_db.create_zone({'name': 'V', 'duration': 5, 'group_id': 1})
-        result = test_db.update_zone_versioned(zone['id'], {'state': 'on'})
-        # Should succeed (returns True or False)
-        assert isinstance(result, bool)
+        # Returns (ok: bool, prev_zone: dict | None) since AUDIT-LOGGING-EXPANSION.
+        ok, prev = test_db.update_zone_versioned(zone['id'], {'state': 'on'})
+        assert isinstance(ok, bool)
+        assert isinstance(prev, dict)
+        assert prev['state'] != 'on'  # snapshot was taken BEFORE the update
 
     def test_versioned_update_not_found(self, test_db):
-        result = test_db.update_zone_versioned(9999, {'state': 'on'})
-        assert result is False
+        ok, prev = test_db.update_zone_versioned(9999, {'state': 'on'})
+        assert ok is False
+        assert prev is None
 
 
 class TestBulkOperations:

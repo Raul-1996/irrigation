@@ -17,8 +17,10 @@ class TestZonesDBDeep:
         test_db.create_zone({'name': 'Z1', 'duration': 10, 'group_id': 1})
         zones = test_db.get_zones()
         zid = zones[0]['id']
-        result = test_db.update_zone_versioned(zid, {'state': 'on'})
-        assert result is True
+        # Returns (ok: bool, prev_zone: dict | None) since AUDIT-LOGGING-EXPANSION.
+        ok, prev = test_db.update_zone_versioned(zid, {'state': 'on'})
+        assert ok is True
+        assert isinstance(prev, dict)
         zone = test_db.get_zone(zid)
         assert zone['state'] == 'on'
 

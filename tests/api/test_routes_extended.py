@@ -152,7 +152,14 @@ class TestSystemAPIExtended:
         g = app.db.create_group('HC')
         resp = admin_client.post(f'/api/health/group/{g["id"]}/cancel',
             content_type='application/json')
-        assert resp.status_code in (200, 400, 500)
+        # 503 is the legitimate response in TESTING mode when the APScheduler
+        # singleton is not initialised (see routes.system_status_api,
+        # api_health_cancel_group: returns 'scheduler_unavailable'/503).
+        # Adding 503 to the accepted set rather than starting a real scheduler
+        # in tests because (a) the production endpoint correctly distinguishes
+        # available vs. unavailable, (b) starting APScheduler per-test would
+        # introduce APScheduler singleton leakage into other tests.
+        assert resp.status_code in (200, 400, 500, 503)
 
     def test_postpone_zone(self, admin_client, app):
         z = app.db.create_zone({'name': 'PP', 'duration': 10, 'group_id': 1})
