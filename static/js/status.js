@@ -1698,12 +1698,21 @@
         var groups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
         var totalWater = 0;
         all.forEach(function(z) { if (z.last_total_liters > 0) totalWater += z.last_total_liters; });
+        var _flag = function(v){ try { if (v===true||v===1) return true; var s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
+        var hasFlowMeter = groups.some(function(g){ return _flag(g.use_water_meter); });
 
         var el;
         el = document.getElementById('statZonesTotal'); if (el) el.textContent = all.length;
         el = document.getElementById('statZonesActive'); if (el) el.textContent = running;
         el = document.getElementById('statZonesGroups'); if (el) el.textContent = groups.length;
-        el = document.getElementById('statZonesWater'); if (el) el.textContent = totalWater > 0 ? Math.round(totalWater) : '—';
+        el = document.getElementById('statZonesWater');
+        if (el) {
+            el.textContent = totalWater > 0 ? Math.round(totalWater) : '—';
+            // Hide the whole tile (.zstat-item) when no flow meter is configured (issue #3).
+            // flex:1 on remaining tiles makes them fill the bar automatically.
+            var tile = el.closest('.zstat-item');
+            if (tile) tile.style.display = hasFlowMeter ? '' : 'none';
+        }
         // Also update old zones-count for backward compat
         el = document.getElementById('zones-count'); if (el) el.textContent = all.length;
     }
