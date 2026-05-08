@@ -1746,10 +1746,21 @@
         } catch(e) {}
     }
 
-    // Accordion toggle
+    // Accordion toggle — only one zone card may be open at a time (issue #5).
+    // Scoped to #zoneList so cards in other lists are unaffected.
     function toggleZoneCard(id) {
         var card = document.getElementById('zcard-' + id);
-        if (card) card.classList.toggle('open');
+        if (!card) return;
+        var willOpen = !card.classList.contains('open');
+        if (willOpen) {
+            var list = document.getElementById('zoneList');
+            if (list) {
+                list.querySelectorAll('.zone-card.open').forEach(function(other) {
+                    if (other !== card) other.classList.remove('open');
+                });
+            }
+        }
+        card.classList.toggle('open');
     }
     // Make accessible globally
     window.toggleZoneCard = toggleZoneCard;
