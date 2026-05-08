@@ -184,7 +184,10 @@
                 promises.push(fetch('/api/groups').then(function(r){return r.json();}).catch(function(){return [];}));
             }
             var results = await Promise.all(promises);
+            var prevNW = {};
+            (zonesData || []).forEach(function(z) { if (z && z._nextWatering) prevNW[z.id] = z._nextWatering; });
             zonesData = Array.isArray(results[0]) ? results[0] : [];
+            zonesData.forEach(function(z) { if (prevNW[z.id]) z._nextWatering = prevNW[z.id]; });
             if (needGroups && results[1]) zoneGroupsCache = results[1];
 
             // Render V2 zones IMMEDIATELY
