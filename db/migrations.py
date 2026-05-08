@@ -161,6 +161,13 @@ class MigrationRunner:
                 self._apply_named_migration(conn, 'programs_v2_fields', self._migrate_programs_v2_fields)
                 # Audit log (two-tier logging spec)
                 self._apply_named_migration(conn, 'create_audit_log', self._migrate_create_audit_log)
+                # Issue #2: backfill last_watering_time from zone_runs.end_utc
+                # for zones whose value is NULL after the bug-fix release.
+                self._apply_named_migration(
+                    conn,
+                    'backfill_last_watering_from_zone_runs',
+                    self._migrate_backfill_last_watering_from_zone_runs,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -965,6 +972,75 @@ class MigrationRunner:
         conn.execute("DELETE FROM settings WHERE key IN ('max_queue_wait_minutes', 'max_weather_coefficient')")
         conn.commit()
         logger.info('Downgrade: queue_and_float_support откачена')
+
+    def _migrate_backfill_last_watering_from_zone_runs(self, conn):
+        """Issue #2: backfill ``zones.last_watering_time`` from zone_runs.
+
+        Prior to the issue-#2 fix the codebase wrote the watering START time
+        into ``last_watering_time`` (instead of end-time) at eight different
+        callsites.  After the fix is deployed, zones whose state changed via
+        the buggy paths still hold start-time values; zones that never ran
+        since the bug was introduced may have NULL.  We can't rewrite the
+        wrong-but-non-NULL values safely (we no longer know which timestamps
+        came from start vs end), but we CAN repair NULL rows from the
+        authoritative ``zone_runs.end_utc`` history.
+
+        The migration is idempotent: rows with non-NULL last_watering_time
+        are left alone, and re-running the SQL is a no-op once the NULLs
+        are filled.
+        """
+        try:
+            # Guard: zone_runs may not exist on extremely old DBs that
+            # somehow skipped create_zone_runs_v1 (shouldn't happen — it's
+            # in the same init flow — but be defensive).
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='zone_runs'"
+            )
+            if cur.fetchone() is None:
+                logger.info(
+                    'backfill_last_watering: zone_runs table missing, skip'
+                )
+                return
+            # For each zone whose last_watering_time is currently NULL,
+            # set it to the most recent zone_runs.end_utc for that zone
+            # (if any exists). Correlated subquery keeps it portable
+            # across SQLite versions without requiring CTE recursion.
+            conn.execute(
+                """
+                UPDATE zones
+                   SET last_watering_time = (
+                       SELECT zr.end_utc
+                         FROM zone_runs zr
+                        WHERE zr.zone_id = zones.id
+                          AND zr.end_utc IS NOT NULL
+                        ORDER BY zr.id DESC
+                        LIMIT 1
+                   )
+                 WHERE last_watering_time IS NULL
+                   AND EXISTS (
+                       SELECT 1 FROM zone_runs zr2
+                        WHERE zr2.zone_id = zones.id
+                          AND zr2.end_utc IS NOT NULL
+                   )
+                """
+            )
+            conn.commit()
+            # Report how many rows we touched (best-effort, just for ops).
+            try:
+                cur2 = conn.execute(
+                    'SELECT COUNT(*) FROM zones WHERE last_watering_time IS NOT NULL'
+                )
+                filled = cur2.fetchone()[0]
+                logger.info(
+                    'backfill_last_watering: zones with last_watering_time '
+                    'after backfill = %s', filled,
+                )
+            except sqlite3.Error:
+                pass
+        except sqlite3.Error as e:
+            logger.error(
+                "Ошибка миграции backfill_last_watering_from_zone_runs: %s", e
+            )
 
     def _migrate_create_audit_log(self, conn):
         """Create the audit_log table for principal-critical mutation tracking.

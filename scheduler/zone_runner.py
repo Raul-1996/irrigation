@@ -22,10 +22,13 @@ class ZoneRunnerMixin:
 
     def _stop_zone(self, zone_id: int):
         try:
+            # Issue #2: last_watering_time = END time (now), not start time.
+            # If the zone never actually started, we leave last_watering_time
+            # untouched so we don't overwrite a previous valid value with a
+            # stop-without-start timestamp.
             zone = self.db.get_zone(zone_id)
-            last_time = None
-            if zone and zone.get('watering_start_time'):
-                last_time = zone['watering_start_time']
+            had_start = bool(zone and zone.get('watering_start_time'))
+            last_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if had_start else None
             try:
                 from services.zone_control import stop_zone as _stop_zone_central
                 _stop_zone_central(zone_id, reason='auto_stop')
@@ -35,21 +38,25 @@ class ZoneRunnerMixin:
                 # still sees zone_state_change=off when zone_control fails.
                 try:
                     from services.zones_state import update_zone_state as _uzs
-                    _uzs(zone_id, {
+                    _updates = {
                         'state': 'off',
                         'watering_start_time': None,
-                        'last_watering_time': last_time,
-                    }, audit_reason='auto_stop_zone_runner', db=self.db)
+                    }
+                    if last_time is not None:
+                        _updates['last_watering_time'] = last_time
+                    _uzs(zone_id, _updates, audit_reason='auto_stop_zone_runner', db=self.db)
                 except (sqlite3.Error, OSError, ImportError):
                     logger.exception(
                         "scheduler.zone_runner._stop_zone: audited fallback failed zone=%s",
                         zone_id,
                     )
-                    self.db.update_zone(zone_id, {
+                    _raw_updates = {
                         'state': 'off',
                         'watering_start_time': None,
-                        'last_watering_time': last_time
-                    })
+                    }
+                    if last_time is not None:
+                        _raw_updates['last_watering_time'] = last_time
+                    self.db.update_zone(zone_id, _raw_updates)
             try:
                 logger.debug("auto-stop zone=%s", zone_id)
             except (ValueError, KeyError, RuntimeError) as e:

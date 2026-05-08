@@ -305,7 +305,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
-                                last_time = other.get('watering_start_time')
+                                # Issue #2: last_watering_time must reflect when watering ENDED, not when it started.
+                                last_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time}, audit_reason='peer_off')
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed")
@@ -329,7 +330,8 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             server_o = db.get_mqtt_server(int(osid))
                             if server_o:
                                 publish_mqtt_value(server_o, normalize_topic(otopic), '0', min_interval_sec=0.0, qos=2, retain=True, meta={'cmd': 'peer_off', 'ver': str((other.get('version') or 0) + 1)})
-                                last_time = other.get('watering_start_time')
+                                # Issue #2: last_watering_time must reflect when watering ENDED, not when it started.
+                                last_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                                 _versioned_update(oid, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time}, audit_reason='peer_off')
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("exclusive_start_zone: mqtt off peer failed (sequential)")
@@ -441,7 +443,13 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
             except (ValueError, TypeError, KeyError) as _e:
                 logger.debug("stop_zone (already off): master close scheduling skipped: %s", _e)
             return True
-        last_time = z.get('watering_start_time')
+        # Issue #2: separate start/end timestamps.
+        # `start_iso` is the original watering start — used as the lower bound
+        # for summarize_run() water-stats fallback below (must NOT be touched).
+        # `end_iso` is the moment the zone is actually being stopped — that's
+        # what UI/users mean by "last watering time".
+        start_iso = z.get('watering_start_time')
+        end_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # Стейт: on/starting -> stopping
         with zone_lock(zone_id):
             _versioned_update(zone_id, {'state': 'stopping', 'commanded_state': 'off'}, audit_reason=f'stop_{reason}')
@@ -471,7 +479,7 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
             logger.exception('stop_zone: mqtt off failed')
         # Завершаем переход: stopping -> off
         with zone_lock(zone_id):
-            _versioned_update(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': last_time, 'planned_end_time': None}, audit_reason=f'stop_{reason}_complete')
+            _versioned_update(zone_id, {'state': 'off', 'watering_start_time': None, 'last_watering_time': end_iso, 'planned_end_time': None}, audit_reason=f'stop_{reason}_complete')
         # Обновим статистику воды для зоны, если группа использует счётчик
         try:
             gid = int(z.get('group_id') or 0)
@@ -503,9 +511,12 @@ def stop_zone(zone_id: int, reason: str = 'manual', force: bool = False,
                         db.finish_zone_run(int(run['id']), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), end_mono, end_raw, total_liters, avg_lpm, status='ok')
                     except (sqlite3.Error, OSError):
                         logger.exception('finish snapshot failed')
-                # Если снапшоты не дали результата — fallback к summarize_run
+                # Если снапшоты не дали результата — fallback к summarize_run.
+                # NOTE: summarize_run needs the ORIGINAL start time (start_iso)
+                # as its lower bound — it integrates pulse counts since then.
+                # Do NOT pass end_iso here.
                 if (total_liters is None) and (avg_lpm is None):
-                    t_l, a_lpm = water_monitor.summarize_run(gid, last_time)
+                    t_l, a_lpm = water_monitor.summarize_run(gid, start_iso)
                     total_liters = t_l if t_l is not None else total_liters
                     avg_lpm = a_lpm if a_lpm is not None else avg_lpm
             if total_liters is not None or avg_lpm is not None:
