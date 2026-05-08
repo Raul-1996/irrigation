@@ -434,11 +434,14 @@ class IrrigationScheduler:
 
     def _stop_zone(self, zone_id: int):
         try:
-            # Фиксируем время последнего полива текущей зоны (время начала, если было)
+            # Issue #2: last_watering_time = END time (now), not start time.
+            # We still inspect the zone primarily so the fallback paths know
+            # whether the zone had actually started (else the audited update
+            # is essentially a no-op cleanup and we keep prior last_watering_time
+            # by not overwriting it).
             zone = self.db.get_zone(zone_id)
-            last_time = None
-            if zone and zone.get('watering_start_time'):
-                last_time = zone['watering_start_time']
+            had_start = bool(zone and zone.get('watering_start_time'))
+            last_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if had_start else None
             # Централизованный OFF для автостопа
             try:
                 from services.zone_control import stop_zone as _stop_zone_central
@@ -450,21 +453,25 @@ class IrrigationScheduler:
                 # попадал в zone_state_change audit (reason=auto_stop_fallback).
                 try:
                     from services.zones_state import update_zone_state as _uzs
-                    _uzs(zone_id, {
+                    _updates = {
                         'state': 'off',
                         'watering_start_time': None,
-                        'last_watering_time': last_time,
-                    }, audit_reason='auto_stop_fallback', db=self.db)
+                    }
+                    if last_time is not None:
+                        _updates['last_watering_time'] = last_time
+                    _uzs(zone_id, _updates, audit_reason='auto_stop_fallback', db=self.db)
                 except (sqlite3.Error, OSError, ImportError) as e2:
                     logger.exception(
                         "irrigation_scheduler._stop_zone: audited fallback failed (%s) — "
                         "doing raw update_zone", e2,
                     )
-                    self.db.update_zone(zone_id, {
+                    _raw_updates = {
                         'state': 'off',
                         'watering_start_time': None,
-                        'last_watering_time': last_time
-                    })
+                    }
+                    if last_time is not None:
+                        _raw_updates['last_watering_time'] = last_time
+                    self.db.update_zone(zone_id, _raw_updates)
             try:
                 pass  # dlog replaced by logger
                 logger.debug("auto-stop zone=%s", zone_id)
