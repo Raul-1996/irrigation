@@ -95,6 +95,14 @@ def test_returns_formatted_version_from_count_and_sha(monkeypatch):
         assert kwargs.get('timeout') == 3
         assert kwargs.get('capture_output') is True
 
+    # Both invocations must pass ``-c safe.directory=<repo>`` so git does not
+    # refuse the read when uid(working tree) ≠ uid(running process)
+    # (the systemd-on-WB scenario). Regression guard.
+    for argv in (rev_list_argv, describe_argv):
+        assert '-c' in argv
+        c_idx = argv.index('-c')
+        assert argv[c_idx + 1].startswith('safe.directory=')
+
 
 def test_dirty_marker_passes_through_inside_parentheses(monkeypatch):
     """``+dirty`` from describe ends up inside the parentheses."""
