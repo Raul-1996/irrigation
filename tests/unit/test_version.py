@@ -1,7 +1,7 @@
 """Unit tests for services.version.get_app_version.
 
-Covers the resolution chain: ``git describe`` → ``VERSION`` file → ``'unknown'``,
-the module-level cache, and ``reset_cache`` semantics.
+Format under test: ``2.<N> (<short_sha>[+dirty])``.
+Resolution chain: git (rev-list count + describe sha) → ``VERSION`` file → ``'unknown'``.
 
 The function is exercised in isolation via ``monkeypatch`` — we never spawn
 a real ``git`` subprocess and never touch the on-disk ``VERSION`` file.
@@ -30,43 +30,95 @@ def _make_completed(stdout: str = '', returncode: int = 0, stderr: str = ''):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
-# ── git describe success ──────────────────────────────────────────────────
+def _scripted_run(scripts):
+    """Build a fake subprocess.run that responds to argv pattern matches.
 
-def test_get_app_version_returns_git_describe_output(monkeypatch):
-    """When git describe succeeds, its trimmed output wins."""
-    captured = {}
+    ``scripts`` is a list of ``(predicate, completed)`` pairs. The fake
+    iterates the list and returns the first ``completed`` whose predicate
+    matches the argv list. ``predicate`` may be a callable taking argv,
+    or a substring tuple — every element must appear in argv.
+    """
+    def _matches(predicate, argv):
+        if callable(predicate):
+            return predicate(argv)
+        return all(token in argv for token in predicate)
 
-    def fake_run(args, **kwargs):
-        captured['args'] = args
-        captured['kwargs'] = kwargs
-        return _make_completed(stdout='v1.2.3-4-gabc1234\n', returncode=0)
+    def fake_run(argv, **kwargs):
+        for predicate, completed in scripts:
+            if _matches(predicate, argv):
+                return completed
+        raise AssertionError(f'unexpected git invocation: {argv}')
+
+    return fake_run
+
+
+# ── git success: 2.<N> (<sha>) ─────────────────────────────────────────────
+
+def test_returns_formatted_version_from_count_and_sha(monkeypatch):
+    """Two successful git calls compose ``2.113 (f75c54c)``."""
+    captured = []
+
+    def fake_run(argv, **kwargs):
+        captured.append((argv, kwargs))
+        if 'rev-list' in argv:
+            return _make_completed(stdout='113\n', returncode=0)
+        if 'describe' in argv:
+            return _make_completed(stdout='f75c54c\n', returncode=0)
+        raise AssertionError(f'unexpected: {argv}')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
 
-    assert get_app_version() == 'v1.2.3-4-gabc1234'
+    assert get_app_version() == '2.113 (f75c54c)'
 
-    # Sanity-check security-relevant invocation parameters.
-    assert captured['args'][0] == 'git'
-    assert 'describe' in captured['args']
-    assert '--tags' in captured['args']
-    assert '--always' in captured['args']
-    assert '--dirty' in captured['args']
-    assert captured['kwargs'].get('shell', False) is False
-    assert captured['kwargs'].get('check') is False
-    assert captured['kwargs'].get('timeout') == 3
-    assert captured['kwargs'].get('capture_output') is True
+    assert len(captured) == 2
+    rev_list_argv = captured[0][0]
+    describe_argv = captured[1][0]
+
+    # rev-list call: counts commits since the v2-base anchor tag.
+    assert rev_list_argv[0] == 'git'
+    assert 'rev-list' in rev_list_argv
+    assert '--count' in rev_list_argv
+    assert 'v2-base..HEAD' in rev_list_argv
+
+    # describe call: short SHA + optional +dirty marker.
+    assert describe_argv[0] == 'git'
+    assert 'describe' in describe_argv
+    assert '--always' in describe_argv
+    assert '--dirty=+dirty' in describe_argv
+    # We deliberately do NOT pass --tags so v2-base never appears in output.
+    assert '--tags' not in describe_argv
+
+    # Security-relevant kwargs on each call.
+    for _argv, kwargs in captured:
+        assert kwargs.get('shell', False) is False
+        assert kwargs.get('check') is False
+        assert kwargs.get('timeout') == 3
+        assert kwargs.get('capture_output') is True
 
 
-def test_get_app_version_strips_trailing_dirty_marker(monkeypatch):
-    """``--dirty`` suffix is part of the describe output and must pass through."""
-    monkeypatch.setattr(
-        subprocess, 'run',
-        lambda *a, **kw: _make_completed(stdout='v2.0.186-dirty\n', returncode=0),
-    )
-    assert get_app_version() == 'v2.0.186-dirty'
+def test_dirty_marker_passes_through_inside_parentheses(monkeypatch):
+    """``+dirty`` from describe ends up inside the parentheses."""
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='113\n', returncode=0)
+        return _make_completed(stdout='f75c54c+dirty\n', returncode=0)
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    assert get_app_version() == '2.113 (f75c54c+dirty)'
 
 
-# ── git describe failure modes → VERSION file fallback ───────────────────
+def test_zero_count_at_anchor_commit(monkeypatch):
+    """Sitting exactly on the v2-base tag yields ``2.0 (<sha>)``."""
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='0\n', returncode=0)
+        return _make_completed(stdout='bd6213e\n', returncode=0)
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    assert get_app_version() == '2.0 (bd6213e)'
+
+
+# ── git failure modes → VERSION file fallback ─────────────────────────────
 
 def test_falls_back_to_version_file_when_git_missing(monkeypatch, tmp_path):
     """No ``git`` binary → FileNotFoundError → VERSION file used."""
@@ -82,7 +134,7 @@ def test_falls_back_to_version_file_when_git_missing(monkeypatch, tmp_path):
 
 
 def test_falls_back_to_version_file_on_timeout(monkeypatch, tmp_path):
-    """git describe times out → VERSION file used."""
+    """git times out → VERSION file used."""
     def slow(*a, **kw):
         raise subprocess.TimeoutExpired(cmd=a[0] if a else 'git', timeout=3)
     monkeypatch.setattr(subprocess, 'run', slow)
@@ -105,28 +157,64 @@ def test_falls_back_to_version_file_on_oserror(monkeypatch, tmp_path):
     assert get_app_version() == '4.2.0'
 
 
-def test_falls_back_to_version_file_when_git_returns_nonzero(monkeypatch, tmp_path):
-    """git ran but returned non-zero (no tags / not a repo) → VERSION file."""
-    monkeypatch.setattr(
-        subprocess, 'run',
-        lambda *a, **kw: _make_completed(stdout='', returncode=128, stderr='fatal: not a git repository'),
-    )
+def test_falls_back_when_rev_list_returns_nonzero(monkeypatch, tmp_path):
+    """rev-list non-zero (e.g. tag missing) → VERSION file used."""
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(
+                stdout='', returncode=128,
+                stderr="fatal: ambiguous argument 'v2-base..HEAD'",
+            )
+        # describe is never reached on the failure path
+        raise AssertionError('describe should not run after rev-list failure')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
     (tmp_path / 'VERSION').write_text('3.1.4\n', encoding='utf-8')
     monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
 
     assert get_app_version() == '3.1.4'
 
 
-def test_falls_back_to_version_file_when_git_stdout_empty(monkeypatch, tmp_path):
-    """rc=0 but empty stdout is still treated as a miss."""
-    monkeypatch.setattr(
-        subprocess, 'run',
-        lambda *a, **kw: _make_completed(stdout='   \n', returncode=0),
-    )
+def test_falls_back_when_describe_returns_nonzero(monkeypatch, tmp_path):
+    """rev-list ok but describe non-zero → VERSION file used."""
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='113\n', returncode=0)
+        return _make_completed(stdout='', returncode=128, stderr='fatal: not a git repository')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
     (tmp_path / 'VERSION').write_text('7.0.0\n', encoding='utf-8')
     monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
 
     assert get_app_version() == '7.0.0'
+
+
+def test_falls_back_when_rev_list_stdout_empty(monkeypatch, tmp_path):
+    """rc=0 but empty count is still treated as a miss."""
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='   \n', returncode=0)
+        raise AssertionError('describe should not run when count is empty')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    (tmp_path / 'VERSION').write_text('6.0.0\n', encoding='utf-8')
+    monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
+
+    assert get_app_version() == '6.0.0'
+
+
+def test_falls_back_when_describe_stdout_empty(monkeypatch, tmp_path):
+    """rc=0 on describe but empty SHA → fallback."""
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='113\n', returncode=0)
+        return _make_completed(stdout='\n', returncode=0)
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    (tmp_path / 'VERSION').write_text('8.0.0\n', encoding='utf-8')
+    monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
+
+    assert get_app_version() == '8.0.0'
 
 
 # ── No git AND no VERSION file → 'unknown' ───────────────────────────────
@@ -137,9 +225,7 @@ def test_returns_unknown_when_both_sources_fail(monkeypatch, tmp_path):
         raise FileNotFoundError('no git')
     monkeypatch.setattr(subprocess, 'run', boom)
 
-    # tmp_path is empty — VERSION file does not exist.
     monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
-
     assert get_app_version() == 'unknown'
 
 
@@ -157,32 +243,38 @@ def test_returns_unknown_when_version_file_is_empty(monkeypatch, tmp_path):
 # ── Caching behaviour ─────────────────────────────────────────────────────
 
 def test_result_is_cached_across_calls(monkeypatch):
-    """Second call must NOT invoke subprocess.run again."""
+    """Subsequent calls must NOT invoke subprocess.run again."""
     calls = {'n': 0}
 
-    def fake_run(*a, **kw):
+    def fake_run(argv, **kwargs):
         calls['n'] += 1
-        return _make_completed(stdout='v1.0.0\n', returncode=0)
+        if 'rev-list' in argv:
+            return _make_completed(stdout='113\n', returncode=0)
+        return _make_completed(stdout='f75c54c\n', returncode=0)
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
 
-    assert get_app_version() == 'v1.0.0'
-    assert get_app_version() == 'v1.0.0'
-    assert get_app_version() == 'v1.0.0'
-    assert calls['n'] == 1
+    assert get_app_version() == '2.113 (f75c54c)'
+    assert get_app_version() == '2.113 (f75c54c)'
+    assert get_app_version() == '2.113 (f75c54c)'
+    # Two calls (rev-list + describe) on first invocation, zero after.
+    assert calls['n'] == 2
 
 
 def test_reset_cache_forces_recompute(monkeypatch):
-    """reset_cache() makes the next call recompute via subprocess.run."""
-    answers = iter(['v1.0.0\n', 'v2.0.0\n'])
+    """reset_cache() makes the next call recompute."""
+    counts = iter(['100\n', '200\n'])
+    shas = iter(['aaaaaaa\n', 'bbbbbbb\n'])
 
-    def fake_run(*a, **kw):
-        return _make_completed(stdout=next(answers), returncode=0)
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout=next(counts), returncode=0)
+        return _make_completed(stdout=next(shas), returncode=0)
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
 
-    assert get_app_version() == 'v1.0.0'
+    assert get_app_version() == '2.100 (aaaaaaa)'
     # Without reset, cached value is returned.
-    assert get_app_version() == 'v1.0.0'
+    assert get_app_version() == '2.100 (aaaaaaa)'
     reset_cache()
-    assert get_app_version() == 'v2.0.0'
+    assert get_app_version() == '2.200 (bbbbbbb)'

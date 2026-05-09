@@ -1,5 +1,5 @@
 // Service Worker for WB-Irrigation (network-first for HTML to avoid stale auth state)
-const CACHE_NAME = 'wb-irrigation-v4';
+const CACHE_NAME = 'wb-irrigation-v5';
 const urlsToCache = [
     // cache only static assets here if needed; do NOT pre-cache '/'
 ];

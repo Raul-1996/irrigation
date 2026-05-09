@@ -1,11 +1,21 @@
 """Application version resolution.
 
-Single source of truth for the running app version. Resolution order:
+Single source of truth for the running app version.
 
-1. ``git describe --tags --always --dirty`` executed at the repo root.
-   Works in source checkouts, including detached HEAD (``--always`` falls
-   back to the abbreviated commit SHA) and dirty trees (``--dirty`` adds
-   a ``-dirty`` suffix).
+Format: ``2.<N> (<short_sha>[+dirty])`` where:
+- ``2`` is the major (v2 line, anchored at the ``v2-base`` git tag).
+- ``<N>`` is the count of commits between ``v2-base`` and ``HEAD``.
+- ``<short_sha>`` is the abbreviated commit SHA of ``HEAD``.
+- ``+dirty`` is appended when the working tree has uncommitted changes.
+
+Resolution order:
+
+1. Two ``git`` invocations executed at the repo root:
+   - ``git rev-list --count v2-base..HEAD`` — the commit counter.
+   - ``git describe --always --dirty=+dirty`` — the short SHA (with
+     optional ``+dirty`` suffix). Run without ``--tags`` so that
+     lightweight tags like ``v2-base`` do NOT inject themselves into
+     the output; we only want the SHA here.
 2. Contents of the ``VERSION`` file at the repo root. Used in shipped
    artifacts (Docker images, .deb/.rpm packages) where ``.git`` is not
    present.
@@ -37,37 +47,61 @@ REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 # Module-level cache. ``None`` means "not yet resolved".
 _CACHED: Optional[str] = None
 
-# Hard timeout (seconds) for the ``git describe`` invocation.
+# Hard timeout (seconds) for each git invocation.
 _GIT_TIMEOUT_SEC: int = 3
 
+# Anchor tag marking the start of the v2 line. Commits since this tag
+# form the second component of the version string.
+V2_BASE_TAG: str = 'v2-base'
 
-def _try_git_describe() -> Optional[str]:
-    """Return ``git describe --tags --always --dirty`` output or ``None``.
 
-    Returns ``None`` on any failure mode: missing ``git`` binary, non-zero
-    exit (e.g. no ``.git`` directory), timeout, OS error, empty output.
-    Never raises.
+def _run_git(args: list[str]):
+    """Execute ``git -C REPO_ROOT <args>`` with safe defaults.
+
+    Returns the ``CompletedProcess`` on success, ``None`` on any failure
+    mode (missing binary, timeout, OS error). Never raises.
     """
     try:
-        result = subprocess.run(
-            ['git', '-C', str(REPO_ROOT), 'describe', '--tags', '--always', '--dirty'],
+        return subprocess.run(
+            ['git', '-C', str(REPO_ROOT), *args],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_SEC,
             check=False,
-            shell=False,  # explicit for safety review even though it's the default
+            shell=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
-        logger.debug("git describe failed: %s", e)
+        logger.debug("git %s failed: %s", args, e)
         return None
 
-    if result.returncode != 0:
-        logger.debug("git describe non-zero exit: rc=%s stderr=%r",
-                     result.returncode, (result.stderr or '').strip())
+
+def _try_git_describe() -> Optional[str]:
+    """Compose ``2.<N> (<sha>[+dirty])`` via two git invocations.
+
+    Returns ``None`` if either invocation fails or yields empty output.
+    Never raises.
+    """
+    count_proc = _run_git(['rev-list', '--count', f'{V2_BASE_TAG}..HEAD'])
+    if count_proc is None or count_proc.returncode != 0:
+        if count_proc is not None:
+            logger.debug("rev-list non-zero exit: rc=%s stderr=%r",
+                         count_proc.returncode, (count_proc.stderr or '').strip())
+        return None
+    count = (count_proc.stdout or '').strip()
+    if not count:
         return None
 
-    out = (result.stdout or '').strip()
-    return out or None
+    sha_proc = _run_git(['describe', '--always', '--dirty=+dirty'])
+    if sha_proc is None or sha_proc.returncode != 0:
+        if sha_proc is not None:
+            logger.debug("describe non-zero exit: rc=%s stderr=%r",
+                         sha_proc.returncode, (sha_proc.stderr or '').strip())
+        return None
+    sha = (sha_proc.stdout or '').strip()
+    if not sha:
+        return None
+
+    return f'2.{count} ({sha})'
 
 
 def _try_version_file() -> Optional[str]:
@@ -83,7 +117,7 @@ def _try_version_file() -> Optional[str]:
 def get_app_version() -> str:
     """Return the running application version, with caching.
 
-    Resolution order: ``git describe`` → ``VERSION`` file → ``'unknown'``.
+    Resolution order: git (count + describe) → ``VERSION`` file → ``'unknown'``.
     The result is cached for the lifetime of the process. Call
     :func:`reset_cache` to force a re-evaluation (used in tests).
     """
