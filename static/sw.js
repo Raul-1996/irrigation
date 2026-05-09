@@ -1,7 +1,12 @@
 // Service Worker for WB-Irrigation (network-first for HTML to avoid stale auth state)
-const CACHE_NAME = 'wb-irrigation-v6';
+const CACHE_NAME = 'wb-irrigation-v7';
 const urlsToCache = [
-    // cache only static assets here if needed; do NOT pre-cache '/'
+    // PWA assets: tiny, constant, required for install + offline boot.
+    // Do NOT pre-cache '/' — navigations stay network-first.
+    '/static/manifest.json',
+    '/static/icons/icon-192.png',
+    '/static/icons/icon-512.png',
+    '/static/icons/icon-512-maskable.png',
 ];
 
 // Install event
