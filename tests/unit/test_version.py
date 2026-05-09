@@ -95,6 +95,21 @@ def test_returns_formatted_version_from_count_and_sha(monkeypatch):
         assert kwargs.get('timeout') == 3
         assert kwargs.get('capture_output') is True
 
+    # Both calls must pass --git-dir and --work-tree explicitly. This skips
+    # repository discovery, which avoids git's 'dubious ownership' check
+    # firing when the working tree is owned by a uid not in /etc/passwd
+    # (the prod failure mode that caused this guard to be added).
+    for argv in (rev_list_argv, describe_argv):
+        assert '--git-dir' in argv
+        assert '--work-tree' in argv
+        # And the values must point at the actual repo root, not just any
+        # plausible-looking path — guards against a refactor that wires the
+        # flag to e.g. cwd or a constant.
+        gd_idx = argv.index('--git-dir')
+        wt_idx = argv.index('--work-tree')
+        assert argv[gd_idx + 1] == str(version_mod.REPO_ROOT / '.git')
+        assert argv[wt_idx + 1] == str(version_mod.REPO_ROOT)
+
 
 def test_dirty_marker_passes_through_inside_parentheses(monkeypatch):
     """``+dirty`` from describe ends up inside the parentheses."""
@@ -187,6 +202,84 @@ def test_falls_back_when_describe_returns_nonzero(monkeypatch, tmp_path):
     monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
 
     assert get_app_version() == '7.0.0'
+
+
+# ── Observability: rc!=0 from git is unexpected, must be logged WARNING ──
+
+def test_rev_list_nonzero_emits_warning_with_stderr(monkeypatch, tmp_path, caplog):
+    """git is present and refused — must surface, not silently fall back.
+
+    Reproduces the 'dubious ownership' prod incident: git was on PATH and
+    returned rc=128 with a clear stderr, but the previous logger.debug
+    swallowed it, leading to an hour of confusion. Asserts WARNING.
+    """
+    stderr = ("fatal: detected dubious ownership in repository at "
+              "'/mnt/data/wb-irrigation'")
+
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='', returncode=128, stderr=stderr)
+        raise AssertionError('describe should not run after rev-list failure')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    (tmp_path / 'VERSION').write_text('1.2.3\n', encoding='utf-8')
+    monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
+
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger='services.version'):
+        assert get_app_version() == '1.2.3'
+
+    warnings = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert warnings, 'expected a WARNING log when rev-list returned rc=128'
+    msg = warnings[0].getMessage()
+    assert 'rev-list' in msg
+    assert '128' in msg
+    assert 'dubious ownership' in msg
+
+
+def test_describe_nonzero_emits_warning_with_stderr(monkeypatch, tmp_path, caplog):
+    """rev-list ok but describe rc=128 → also a WARNING."""
+    stderr = "fatal: bad revision 'HEAD'"
+
+    def fake_run(argv, **kwargs):
+        if 'rev-list' in argv:
+            return _make_completed(stdout='113\n', returncode=0)
+        return _make_completed(stdout='', returncode=128, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    (tmp_path / 'VERSION').write_text('1.2.3\n', encoding='utf-8')
+    monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
+
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger='services.version'):
+        assert get_app_version() == '1.2.3'
+
+    warnings = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert warnings, 'expected a WARNING log when describe returned rc=128'
+    msg = warnings[0].getMessage()
+    assert 'describe' in msg
+    assert '128' in msg
+    assert 'bad revision' in msg
+
+
+def test_no_warning_when_git_binary_missing(monkeypatch, tmp_path, caplog):
+    """FileNotFoundError is the documented 'no git' case → debug, not warning.
+
+    Distinguishes the legitimate VERSION-file-fallback path from real failures.
+    """
+    def boom(*a, **kw):
+        raise FileNotFoundError('git binary not on PATH')
+    monkeypatch.setattr(subprocess, 'run', boom)
+
+    (tmp_path / 'VERSION').write_text('1.2.3\n', encoding='utf-8')
+    monkeypatch.setattr(version_mod, 'REPO_ROOT', tmp_path)
+
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger='services.version'):
+        assert get_app_version() == '1.2.3'
+
+    warnings = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert not warnings, f'no WARNING expected for missing git, got: {warnings}'
 
 
 def test_falls_back_when_rev_list_stdout_empty(monkeypatch, tmp_path):

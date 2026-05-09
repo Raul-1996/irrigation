@@ -56,14 +56,30 @@ V2_BASE_TAG: str = 'v2-base'
 
 
 def _run_git(args: list[str]):
-    """Execute ``git -C REPO_ROOT <args>`` with safe defaults.
+    """Execute git against REPO_ROOT with safe defaults.
+
+    Uses ``--git-dir`` + ``--work-tree`` instead of ``-C`` to skip
+    directory *discovery*. Discovery triggers git's "dubious ownership"
+    check, which rejects repos whose working tree is owned by a uid that
+    does not appear in ``/etc/passwd``. That happens on embedded
+    controllers whose data volume was initialised on another host
+    (e.g. WB-Irrigation: ``/mnt/data/wb-irrigation`` is uid 1001, no
+    such user on the controller). Passing the dirs explicitly bypasses
+    discovery and the associated check. ``REPO_ROOT`` is derived from
+    ``__file__`` at import — never user input — so passing it directly
+    is safe.
 
     Returns the ``CompletedProcess`` on success, ``None`` on any failure
     mode (missing binary, timeout, OS error). Never raises.
     """
     try:
         return subprocess.run(
-            ['git', '-C', str(REPO_ROOT), *args],
+            [
+                'git',
+                '--git-dir', str(REPO_ROOT / '.git'),
+                '--work-tree', str(REPO_ROOT),
+                *args,
+            ],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_SEC,
@@ -84,8 +100,11 @@ def _try_git_describe() -> Optional[str]:
     count_proc = _run_git(['rev-list', '--count', f'{V2_BASE_TAG}..HEAD'])
     if count_proc is None or count_proc.returncode != 0:
         if count_proc is not None:
-            logger.debug("rev-list non-zero exit: rc=%s stderr=%r",
-                         count_proc.returncode, (count_proc.stderr or '').strip())
+            # Git is present and refused — unexpected, surface it. The legitimate
+            # "no git" cases (missing binary, timeout) stay at debug via _run_git's
+            # except clause.
+            logger.warning("rev-list non-zero exit: rc=%s stderr=%r",
+                           count_proc.returncode, (count_proc.stderr or '').strip())
         return None
     count = (count_proc.stdout or '').strip()
     if not count:
@@ -94,8 +113,8 @@ def _try_git_describe() -> Optional[str]:
     sha_proc = _run_git(['describe', '--always', '--dirty=+dirty'])
     if sha_proc is None or sha_proc.returncode != 0:
         if sha_proc is not None:
-            logger.debug("describe non-zero exit: rc=%s stderr=%r",
-                         sha_proc.returncode, (sha_proc.stderr or '').strip())
+            logger.warning("describe non-zero exit: rc=%s stderr=%r",
+                           sha_proc.returncode, (sha_proc.stderr or '').strip())
         return None
     sha = (sha_proc.stdout or '').strip()
     if not sha:

@@ -7,14 +7,16 @@ const urlsToCache = [
 // Install event
 self.addEventListener('install', event => {
     event.waitUntil((async () => {
-        // Activate the new worker immediately, without waiting for old clients to close.
-        await self.skipWaiting();
         const cache = await caches.open(CACHE_NAME);
         console.log('Opened cache');
         await Promise.all(urlsToCache.map(u => fetch(u, {cache: 'no-store'}).then(r=>{
             if(!r.ok) throw new Error('bad response');
             return cache.put(u, r.clone());
         }).catch(()=>{})));
+        // skipWaiting AFTER precache: otherwise the new SW could start serving
+        // fetches with an empty cache and miss entries that should have been
+        // primed. Harmless today (urlsToCache is empty) but avoids the trap.
+        await self.skipWaiting();
     })());
 });
 
@@ -41,10 +43,12 @@ self.addEventListener('fetch', event => {
         return;
     }
     if (isNavigation) {
+        // Network-first: live request always reaches the server, so auth/role
+        // is always re-evaluated. The cache.put below is an OFFLINE-ONLY
+        // fallback — only consulted in .catch() when the network fails.
         event.respondWith(
             fetch(req)
                 .then(resp => {
-                    // Optionally update cache in background
                     const copy = resp.clone();
                     caches.open(CACHE_NAME).then(cache => cache.put(req, copy)).catch(()=>{});
                     return resp;
