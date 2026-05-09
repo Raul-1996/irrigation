@@ -63,10 +63,7 @@ def _run_git(args: list[str]):
     """
     try:
         return subprocess.run(
-            # ``-c safe.directory=<root>`` keeps git from refusing to read the
-            # repo when run as a different uid than the working tree owner
-            # (e.g. systemd-launched root vs. data-volume owner uid).
-            ['git', '-c', f'safe.directory={REPO_ROOT}', '-C', str(REPO_ROOT), *args],
+            ['git', '-C', str(REPO_ROOT), *args],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_SEC,
