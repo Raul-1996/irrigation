@@ -20,7 +20,7 @@ self.addEventListener('install', event => {
         }).catch(()=>{})));
         // skipWaiting AFTER precache: otherwise the new SW could start serving
         // fetches with an empty cache and miss entries that should have been
-        // primed. Harmless today (urlsToCache is empty) but avoids the trap.
+        // primed (manifest.json + PWA icons).
         await self.skipWaiting();
     })());
 });
