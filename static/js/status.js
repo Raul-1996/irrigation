@@ -505,25 +505,35 @@
     }
 
     function tickCountdowns() {
-        // Tick zone card timers
+        // Tick zone card timers.
+        // Source of truth: planned_end_time (wall-clock derivative). Avoids drift
+        // between local 1Hz decrement and the 5-second status refresh, which
+        // previously caused the timer to jump backward by ~1s every refresh.
         document.querySelectorAll('.zc-running-timer').forEach(function(el) {
             var val = el.dataset.remainingSeconds;
             if (!val) return;
-            var sec = Number(val);
-            if (isNaN(sec) || sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
-            sec--;
+            var zid = el.id.replace('ztimer-', '');
+            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
+            var sec;
+            if (zone && zone.planned_end_time) {
+                var endMs = new Date(zone.planned_end_time).getTime();
+                sec = Math.max(0, Math.floor((endMs - Date.now()) / 1000));
+            } else {
+                sec = Number(val);
+                if (isNaN(sec)) sec = 0;
+                else sec = Math.max(0, sec - 1);
+            }
+            if (sec <= 0) { el.textContent = '00:00'; el.dataset.remainingSeconds = ''; return; }
             el.dataset.remainingSeconds = String(sec);
             el.textContent = formatSeconds(sec);
             // Update progress bar
-            var zid = el.id.replace('ztimer-', '');
             var progEl = document.getElementById('zprog-' + zid);
-            var zone = (zonesData || []).find(function(z) { return String(z.id) === zid; });
             if (progEl && zone) {
                 var total;
                 if (zone.planned_end_time && zone.watering_start_time) {
-                    var endMs = new Date(zone.planned_end_time).getTime();
+                    var endMs2 = new Date(zone.planned_end_time).getTime();
                     var startMs = new Date(zone.watering_start_time).getTime();
-                    total = Math.max(60, Math.floor((endMs - startMs) / 1000));
+                    total = Math.max(60, Math.floor((endMs2 - startMs) / 1000));
                 } else {
                     total = (zone.duration || 10) * 60;
                 }
