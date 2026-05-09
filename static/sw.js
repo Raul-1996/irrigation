@@ -1,21 +1,21 @@
 // Service Worker for WB-Irrigation (network-first for HTML to avoid stale auth state)
-const CACHE_NAME = 'wb-irrigation-v5';
+const CACHE_NAME = 'wb-irrigation-v6';
 const urlsToCache = [
     // cache only static assets here if needed; do NOT pre-cache '/'
 ];
 
 // Install event
 self.addEventListener('install', event => {
-    event.waitUntil(
-        caches.open(CACHE_NAME)
-            .then(cache => {
-                console.log('Opened cache');
-                return Promise.all(urlsToCache.map(u => fetch(u, {cache: 'no-store'}).then(r=>{
-                    if(!r.ok) throw new Error('bad response');
-                    return cache.put(u, r.clone());
-                }).catch(()=>{})));
-            })
-    );
+    event.waitUntil((async () => {
+        // Activate the new worker immediately, without waiting for old clients to close.
+        await self.skipWaiting();
+        const cache = await caches.open(CACHE_NAME);
+        console.log('Opened cache');
+        await Promise.all(urlsToCache.map(u => fetch(u, {cache: 'no-store'}).then(r=>{
+            if(!r.ok) throw new Error('bad response');
+            return cache.put(u, r.clone());
+        }).catch(()=>{})));
+    })());
 });
 
 // Fetch event: network-first for navigations/HTML, cache-first for others
@@ -67,16 +67,15 @@ self.addEventListener('fetch', event => {
 
 // Activate event
 self.addEventListener('activate', event => {
-    event.waitUntil(
-        caches.keys().then(cacheNames => {
-            return Promise.all(
-                cacheNames.map(cacheName => {
-                    if (cacheName !== CACHE_NAME) {
-                        console.log('Deleting old cache:', cacheName);
-                        return caches.delete(cacheName);
-                    }
-                })
-            );
-        })
-    );
+    event.waitUntil((async () => {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map(name => {
+            if (name !== CACHE_NAME) {
+                console.log('Deleting old cache:', name);
+                return caches.delete(name);
+            }
+        }));
+        // Take control of already-open pages so the next fetch goes through this SW.
+        await self.clients.claim();
+    })());
 });
