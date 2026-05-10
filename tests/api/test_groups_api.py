@@ -70,3 +70,24 @@ class TestMasterValveAPI:
             }),
             content_type='application/json')
         assert resp.status_code == 200
+
+
+class TestGroupStopAuditIssue16:
+    """Spec §4.2 #8: /api/groups/<gid>/stop must emit session_aborted_by_user
+    so a single audit query catches user-driven aborts regardless of which
+    button was pressed."""
+
+    def test_group_stop_emits_audit_session_aborted(self, admin_client, app):
+        from irrigation_scheduler import init_scheduler
+        init_scheduler(app.db)  # wire the scheduler into the app
+        group = app.db.create_group('#16 GroupStop Audit')
+
+        resp = admin_client.post(f'/api/groups/{group["id"]}/stop',
+            content_type='application/json')
+        assert resp.status_code == 200
+
+        rows = app.db.get_audit_logs(action_type='session_aborted_by_user')
+        matched = [r for r in rows if r.get('target') == f'group:{group["id"]}']
+        assert matched, f'no session_aborted_by_user audit row for group:{group["id"]}'
+        pj = str(matched[0].get('payload_json') or '')
+        assert 'api_stop_group' in pj

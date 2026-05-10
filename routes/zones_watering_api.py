@@ -106,6 +106,35 @@ def stop_zone(zone_id):
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
+
+        # Issue #16: if this zone is part of an active group session, the
+        # user-visible "stop" must abort the whole session — same as
+        # api_zone_mqtt_stop above. See specs/issue-16-architecture.md §3.4.
+        gid = int(zone.get('group_id') or 0)
+        sched = get_scheduler()
+        session_active = bool(sched and gid and sched.is_group_session_active(gid))
+        if session_active:
+            try:
+                from services.audit import record_audit
+                record_audit(
+                    action_type='session_aborted_by_user',
+                    source='zone_stop',
+                    target=f'group:{gid}',
+                    payload={'triggered_by_zone': int(zone_id),
+                             'endpoint': 'api_zone_stop'},
+                    actor='user',
+                )
+            except Exception:  # noqa: BLE001 — audit never breaks the stop path
+                logger.exception('session_aborted_by_user audit failed')
+            try:
+                sched.cancel_group_jobs(int(gid))
+                return jsonify({'success': True,
+                                'message': 'Сессия группы остановлена',
+                                'session_aborted': True,
+                                'zone_id': zone_id, 'state': 'off'})
+            except (ValueError, TypeError, KeyError, RuntimeError):
+                logger.exception('stop_zone: cancel_group_jobs failed, falling back to solo stop')
+
         try:
             from services.zone_control import stop_zone as _stop_central
             if not _stop_central(int(zone_id), reason='manual', force=False):
@@ -442,6 +471,43 @@ def api_zone_mqtt_stop(zone_id: int):
     z = db.get_zone(zone_id)
     if not z:
         return jsonify({'success': False}), 404
+
+    # Issue #16: if this zone belongs to a group with an active session
+    # (manual group sequence or scheduled program currently running), the
+    # user pressing "stop" on the zone card must abort the WHOLE session,
+    # not just close one valve and let the sequencer advance to the next
+    # zone. Detection is via is_group_session_active(); the abort itself
+    # reuses cancel_group_jobs (the same primitive /api/groups/<id>/stop
+    # already calls). See specs/issue-16-architecture.md §3.3.
+    gid = int(z.get('group_id') or 0)
+    sched = get_scheduler()
+    session_active = bool(sched and gid and sched.is_group_session_active(gid))
+    if session_active:
+        try:
+            from services.audit import record_audit
+            record_audit(
+                action_type='session_aborted_by_user',
+                source='zone_stop',
+                target=f'group:{gid}',
+                payload={'triggered_by_zone': int(zone_id),
+                         'endpoint': 'api_zone_mqtt_stop'},
+                actor='user',
+            )
+        except Exception:  # noqa: BLE001 — audit never breaks the stop path
+            logger.exception('session_aborted_by_user audit failed')
+        try:
+            sched.cancel_group_jobs(int(gid))
+            # cancel_group_jobs already invokes stop_all_in_group(force=True)
+            # which stops THIS zone too, so we don't need an extra stop_zone.
+            return jsonify({'success': True,
+                            'message': 'Сессия группы остановлена',
+                            'session_aborted': True})
+        except (ValueError, TypeError, KeyError, RuntimeError):
+            # Best-effort safety net: fall through to the legacy single-zone
+            # stop path so the valve definitely goes off even if the abort
+            # plumbing fails.
+            logger.exception('api_zone_mqtt_stop: cancel_group_jobs failed, falling back to solo stop')
+
     try:
         from services.zone_control import stop_zone as _stop_central
         if _stop_central(int(zone_id), reason='manual', force=False):

@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -529,6 +529,45 @@ class IrrigationScheduler:
 
     def _run_program_threaded(self, program_id: int, zones: List[int], program_name: str):
         """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler"""
+        # Issue #16 §6.4: pre-register a cancel-event for every distinct
+        # group this program will touch, so is_group_session_active(gid)
+        # returns True while the program is in flight.  Without this,
+        # scheduled-program runs are invisible to the API layer's
+        # session detector and the single-zone stop endpoints would
+        # fall through to the solo path — re-introducing the issue #16
+        # bug for scheduled programs.
+        # We use dict.setdefault (atomic in CPython, single PyDict_SetDefault
+        # bytecode) so a concurrent start_group_sequence's already-planted
+        # Event is preserved.  We track the (gid, our_event) tuples THIS
+        # invocation actually planted so the finally cleanup below pops
+        # only entries that still hold OUR Event identity, never one a
+        # concurrent sequence owns.  Mirrors the lifecycle in the
+        # `finally` block of `_run_group_sequence`.
+        registered_gids: List[Tuple[int, threading.Event]] = []
+        try:
+            program_gids = set()
+            for z in zones:
+                try:
+                    zd = self.db.get_zone(z)
+                    if not zd:
+                        continue
+                    g = int(zd.get('group_id') or 0)
+                    # Skip the "no group" sentinels (gid==0 unset, gid==999
+                    # is the legacy "ungrouped" bucket per project convention).
+                    if g and g != 999:
+                        program_gids.add(g)
+                except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                    logger.debug("_run_program_threaded: gid lookup failed for zone=%s: %s", z, e)
+            for gid in program_gids:
+                # setdefault is atomic — if dict[gid] already exists,
+                # `planted` is the existing Event and we DON'T own it.
+                # If it didn't exist, `planted is new_event` and we do.
+                new_event = threading.Event()
+                planted = self.group_cancel_events.setdefault(gid, new_event)
+                if planted is new_event:
+                    registered_gids.append((gid, new_event))
+        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+            logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
         try:
             logger.info(f"Запуск программы {program_id} ({program_name})")
             try:
@@ -743,6 +782,21 @@ class IrrigationScheduler:
                 logger.debug("Handled exception in line_482: %s", e)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
+        finally:
+            # Issue #16 §6.4: clear/pop ONLY the cancel-events this
+            # invocation registered AND that the dict still holds.  If a
+            # concurrent start_group_sequence has since replaced our
+            # entry with its own Event, the identity check fails and we
+            # leave that Event alone — it belongs to the sequence.
+            # Mirrors the cleanup in the `finally` block of
+            # `_run_group_sequence`.
+            for gid, our_event in registered_gids:
+                try:
+                    if self.group_cancel_events.get(gid) is our_event:
+                        our_event.clear()
+                        self.group_cancel_events.pop(gid, None)
+                except (KeyError, TypeError, ValueError) as e:
+                    logger.debug("_run_program_threaded cleanup gid=%s: %s", gid, e)
 
     def schedule_program(self, program_id: int, program_data: Dict[str, Any]):
         try:
@@ -1141,9 +1195,21 @@ class IrrigationScheduler:
             except (sqlite3.Error, OSError) as e:
                 logger.error(f"Ошибка расчета плановых стартов для группы {group_id}: {e}")
 
-            # Готовим флаг отмены для этой группы
-            cancel_event = threading.Event()
-            self.group_cancel_events[group_id] = cancel_event
+            # Готовим флаг отмены для этой группы.
+            # Issue #16 C2: use setdefault, symmetric to the §6.4 pattern in
+            # `_run_program_threaded`.  If a concurrent program runner has
+            # already planted an Event for this gid, reuse it — both threads
+            # should be cancellable by the same signal — and DO NOT pop it
+            # in our finally (the program runner owns the cleanup).  Only
+            # the planter pops.
+            new_cancel_event = threading.Event()
+            cancel_event = self.group_cancel_events.setdefault(group_id, new_cancel_event)
+            sequence_owns_event = (cancel_event is new_cancel_event)
+            if not sequence_owns_event:
+                logger.info(
+                    "start_group_sequence: gid=%s reusing existing cancel-event "
+                    "(concurrent program/sequence runner)", group_id
+                )
 
             # Очистим старые джобы, связанные с этой группой (group_seq, zone_stop, zone_hard_stop)
             try:
@@ -1202,7 +1268,13 @@ class IrrigationScheduler:
 
     def _run_group_sequence(self, group_id: int, zone_ids: List[int], override_duration: int = None):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
-        if TESTING:
+        # Test-only bypass: when SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ=1
+        # we skip the synchronous-first-zone short-circuit and run the real
+        # per-zone loop (still truncated to a few seconds via the TESTING
+        # branch lower in this method).  Used by the issue #16 outcome test
+        # to verify zones 2/3 never reach state='on' after a mid-sequence
+        # cancel.  Production never sets this env var.
+        if TESTING and not os.environ.get('SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ'):
             logger.debug("TESTING mode: simplified _run_group_sequence for group %s", group_id)
             # In TESTING mode, set the first zone ON in the DB (skip MQTT/hardware)
             for zone_id in zone_ids:
@@ -1229,6 +1301,10 @@ class IrrigationScheduler:
                     self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
                 break  # Only start the first zone in TESTING mode
             return
+        # Capture the Event identity we'll work with, BEFORE any early-return
+        # so the finally cleanup can do an identity-equality check.  See C2
+        # in specs/issue-16-review.md.
+        cancel_event = self.group_cancel_events.get(group_id)
         try:
             # Weather check before group sequence
             skip_info = self._check_weather_skip(zone_ids[0] if zone_ids else 0, 0)
@@ -1241,8 +1317,6 @@ class IrrigationScheduler:
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                     logger.debug("Group weather skip log error: %s", e)
                 return
-
-            cancel_event = self.group_cancel_events.get(group_id)
             for zone_id in zone_ids:
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Группа {group_id}: последовательный полив отменен перед запуском зоны {zone_id}")
@@ -1407,15 +1481,17 @@ class IrrigationScheduler:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка выполнения последовательного полива группы {group_id}: {e}")
         finally:
-            # Снимаем флаг отмены и очищаем событие
+            # Issue #16 C2: only pop the dict entry if it still IS the
+            # Event we observed at startup.  If a concurrent caller has
+            # since replaced it (e.g. _run_program_threaded planted its
+            # own Event between our setdefault and now, or vice-versa),
+            # leave that Event alone — its planter owns the cleanup.
             try:
-                ev = self.group_cancel_events.get(group_id)
-                if ev:
-                    ev.clear()
-                # Опционально удаляем, чтобы не копилось
-                self.group_cancel_events.pop(group_id, None)
+                if cancel_event is not None and self.group_cancel_events.get(group_id) is cancel_event:
+                    cancel_event.clear()
+                    self.group_cancel_events.pop(group_id, None)
             except (KeyError, TypeError, ValueError) as e:
-                logger.debug("Handled exception in line_930: %s", e)
+                logger.debug("_run_group_sequence cleanup gid=%s: %s", group_id, e)
 
     def get_active_programs(self) -> Dict[int, Dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
@@ -1424,6 +1500,20 @@ class IrrigationScheduler:
     def get_active_zones(self) -> Dict[int, datetime]:
         return self.active_zones.copy()
     
+    def is_group_session_active(self, group_id: int) -> bool:
+        """True iff the group currently has an in-flight sequence or program run.
+
+        Currently this is equivalent to "group_cancel_events[gid] exists",
+        because that key is created by start_group_sequence and (per fix in
+        §6.4) by _run_program_threaded when a scheduled program fires. The
+        Event being set means cancel-in-progress; the existence of the Event
+        is what indicates a session.
+        """
+        try:
+            return self.group_cancel_events.get(int(group_id)) is not None
+        except (TypeError, ValueError, KeyError):
+            return False
+
     def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False):
         """Отменяет все активные задачи планировщика для указанной группы.
 

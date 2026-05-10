@@ -157,6 +157,22 @@ def api_stop_group(group_id):
         scheduler = get_scheduler()
         if scheduler:
             scheduler.cancel_group_jobs(int(group_id))
+            # Issue #16 §3.5: emit a session_aborted_by_user audit row so
+            # a single query on action_type='session_aborted_by_user'
+            # lists all user-driven aborts regardless of which button
+            # was pressed (zone-card stop, group-card stop). Behaviour
+            # unchanged — only the audit signal is added.
+            try:
+                from services.audit import record_audit
+                record_audit(
+                    action_type='session_aborted_by_user',
+                    source='group_stop',
+                    target=f'group:{int(group_id)}',
+                    payload={'endpoint': 'api_stop_group'},
+                    actor='user',
+                )
+            except Exception:  # noqa: BLE001 — audit never breaks the stop path
+                logger.exception('session_aborted_by_user audit failed')
             try:
                 db.clear_group_scheduled_starts(group_id)
             except (sqlite3.Error, OSError) as e:
