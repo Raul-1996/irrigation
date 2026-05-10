@@ -54,8 +54,11 @@
         }
         const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
         const _m = window.innerWidth < 1024;
+        const skipBtnHtml = (anyZoneOnThisGroup && Number(group.queue_remaining || 0) > 0)
+            ? `<button class="group-action-btn group-action-skip" onclick="skipCurrentZone(${group.id})">${_m ? '⏭ Пропустить' : 'Пропустить зону'}</button>`
+            : '';
         const groupActionHtml = anyZoneOnThisGroup
-            ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">${_m ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
+            ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">${_m ? '⏹ Стоп' : 'Остановить полив группы'}</button>${skipBtnHtml}`
             : `<button class="group-action-btn group-action-start" onclick="startGroupFromFirst(${group.id})">${_m ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
         const _mob = window.innerWidth < 1024;
         const groupButtons = `

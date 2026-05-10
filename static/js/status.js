@@ -444,8 +444,11 @@
             }
             const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
             const _m = window.innerWidth < 1024;
+            const skipBtnHtml = (anyZoneOnThisGroup && Number(group.queue_remaining || 0) > 0)
+                ? `<button class="group-action-btn group-action-skip" onclick="skipCurrentZone(${group.id})">${_m ? '⏭ Пропустить' : 'Пропустить зону'}</button>`
+                : '';
             const groupActionHtml = anyZoneOnThisGroup
-                ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">${_m ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
+                ? `<button class="group-action-btn group-action-stop" onclick="stopGroup(${group.id})">${_m ? '⏹ Стоп' : 'Остановить полив группы'}</button>${skipBtnHtml}`
                 : `<button class="group-action-btn group-action-start" onclick="startGroupFromFirst(${group.id})">${_m ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
             const _mob = window.innerWidth < 1024;
             const groupButtons = `
@@ -599,8 +602,11 @@
             const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
             const anyZoneOnThisGroup2 = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
             const _m3 = window.innerWidth < 1024;
+            const skipBtnHtml2 = (anyZoneOnThisGroup2 && Number(group.queue_remaining || 0) > 0)
+                ? `<button class=\"group-action-btn group-action-skip\" onclick=\"skipCurrentZone(${group.id})\">${_m3 ? '⏭ Пропустить' : 'Пропустить зону'}</button>`
+                : '';
             const groupActionHtml2 = anyZoneOnThisGroup2
-                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">${_m3 ? '⏹ Стоп' : 'Остановить полив группы'}</button>`
+                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">${_m3 ? '⏹ Стоп' : 'Остановить полив группы'}</button>${skipBtnHtml2}`
                 : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">${_m3 ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
             const _mob2 = window.innerWidth < 1024;
             const groupButtons = `
@@ -843,6 +849,33 @@
         }
     }
     
+    // Module-scoped debounce for skip-zone — one in-flight per group.
+    // Absorbs double-clicks during the server's ~1-2s zone transition window.
+    const _skipInFlight = new Set();
+    async function skipCurrentZone(groupId) {
+        const key = String(groupId);
+        if (_skipInFlight.has(key)) return;
+        _skipInFlight.add(key);
+        try {
+            const res = await fetch(`/api/groups/${groupId}/skip-current`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: '{}'
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok && data && data.success) {
+                showNotification('Зона пропущена', 'success');
+                await Promise.all([loadStatusData(), loadZonesData()]);
+            } else {
+                showNotification((data && data.message) || 'Не удалось пропустить зону', 'warning');
+            }
+        } catch (e) {
+            showNotification('Ошибка при пропуске зоны', 'error');
+        } finally {
+            setTimeout(() => _skipInFlight.delete(key), 1500);
+        }
+    }
+
     async function stopGroup(groupId) {
         try {
             const grp = (statusData && statusData.groups ? statusData.groups : []).find(g => String(g.id) === String(groupId));

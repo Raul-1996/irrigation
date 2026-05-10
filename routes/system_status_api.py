@@ -458,6 +458,27 @@ def api_status():
                 meter_value_m3 = None
                 flow_value = None
 
+        # Queue remaining: how many zones in this group still queued AFTER the
+        # currently active zone. Drives the Skip button visibility (issue #14).
+        queue_remaining = 0
+        try:
+            if status == 'watering' and current_zone:
+                cur_start = None
+                for z in group_zones:
+                    if int(z['id']) == int(current_zone):
+                        cur_start = z.get('scheduled_start_time')
+                        break
+                if cur_start:
+                    queue_remaining = sum(
+                        1 for z in group_zones
+                        if z.get('scheduled_start_time')
+                        and z['scheduled_start_time'] > cur_start
+                        and int(z['id']) != int(current_zone)
+                    )
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
+            logger.debug("queue_remaining calc failed for group %s: %s", group_id, e)
+            queue_remaining = 0
+
         groups_status.append({
             'id': group_id, 'name': group['name'], 'status': status,
             'current_zone': current_zone, 'postpone_until': postpone_until,
@@ -466,7 +487,8 @@ def api_status():
             'use_master_valve': use_master_valve, 'master_valve_state': master_valve_state,
             'use_pressure_sensor': use_pressure_sensor, 'pressure_value': pressure_value,
             'pressure_unit': pressure_unit, 'use_water_meter': use_water_meter,
-            'flow_value': flow_value, 'meter_value_m3': meter_value_m3
+            'flow_value': flow_value, 'meter_value_m3': meter_value_m3,
+            'queue_remaining': queue_remaining,
         })
 
     if not rain_cfg.get('enabled'):
