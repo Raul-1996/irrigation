@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -536,13 +536,14 @@ class IrrigationScheduler:
         # session detector and the single-zone stop endpoints would
         # fall through to the solo path — re-introducing the issue #16
         # bug for scheduled programs.
-        # We use setdefault so a concurrent start_group_sequence's
-        # already-planted Event is preserved.  We track ONLY the gids
-        # THIS invocation actually inserted (registered_gids) so the
-        # finally cleanup below pops only those, never one a concurrent
-        # sequence owns.  Mirrors the lifecycle in _run_group_sequence
-        # (lines 1409-1418).
-        registered_gids: List[int] = []
+        # We use dict.setdefault (atomic in CPython, single PyDict_SetDefault
+        # bytecode) so a concurrent start_group_sequence's already-planted
+        # Event is preserved.  We track the (gid, our_event) tuples THIS
+        # invocation actually planted so the finally cleanup below pops
+        # only entries that still hold OUR Event identity, never one a
+        # concurrent sequence owns.  Mirrors the lifecycle in the
+        # `finally` block of `_run_group_sequence`.
+        registered_gids: List[Tuple[int, threading.Event]] = []
         try:
             program_gids = set()
             for z in zones:
@@ -558,12 +559,13 @@ class IrrigationScheduler:
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("_run_program_threaded: gid lookup failed for zone=%s: %s", z, e)
             for gid in program_gids:
-                # Track BEFORE setdefault so we know which gids we own.
-                # If gid wasn't already in the dict, this iteration owns
-                # the new Event and cleanup may safely pop it.
-                if gid not in self.group_cancel_events:
-                    self.group_cancel_events[gid] = threading.Event()
-                    registered_gids.append(gid)
+                # setdefault is atomic — if dict[gid] already exists,
+                # `planted` is the existing Event and we DON'T own it.
+                # If it didn't exist, `planted is new_event` and we do.
+                new_event = threading.Event()
+                planted = self.group_cancel_events.setdefault(gid, new_event)
+                if planted is new_event:
+                    registered_gids.append((gid, new_event))
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
             logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
         try:
@@ -782,16 +784,17 @@ class IrrigationScheduler:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
         finally:
             # Issue #16 §6.4: clear/pop ONLY the cancel-events this
-            # invocation registered.  If a concurrent
-            # start_group_sequence is still running on one of these
-            # gids, it owns the Event — leave it alone.  Mirrors the
-            # cleanup in _run_group_sequence (lines 1409-1418).
-            for gid in registered_gids:
+            # invocation registered AND that the dict still holds.  If a
+            # concurrent start_group_sequence has since replaced our
+            # entry with its own Event, the identity check fails and we
+            # leave that Event alone — it belongs to the sequence.
+            # Mirrors the cleanup in the `finally` block of
+            # `_run_group_sequence`.
+            for gid, our_event in registered_gids:
                 try:
-                    ev = self.group_cancel_events.get(gid)
-                    if ev is not None:
-                        ev.clear()
-                    self.group_cancel_events.pop(gid, None)
+                    if self.group_cancel_events.get(gid) is our_event:
+                        our_event.clear()
+                        self.group_cancel_events.pop(gid, None)
                 except (KeyError, TypeError, ValueError) as e:
                     logger.debug("_run_program_threaded cleanup gid=%s: %s", gid, e)
 
