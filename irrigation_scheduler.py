@@ -529,6 +529,43 @@ class IrrigationScheduler:
 
     def _run_program_threaded(self, program_id: int, zones: List[int], program_name: str):
         """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler"""
+        # Issue #16 §6.4: pre-register a cancel-event for every distinct
+        # group this program will touch, so is_group_session_active(gid)
+        # returns True while the program is in flight.  Without this,
+        # scheduled-program runs are invisible to the API layer's
+        # session detector and the single-zone stop endpoints would
+        # fall through to the solo path — re-introducing the issue #16
+        # bug for scheduled programs.
+        # We use setdefault so a concurrent start_group_sequence's
+        # already-planted Event is preserved.  We track ONLY the gids
+        # THIS invocation actually inserted (registered_gids) so the
+        # finally cleanup below pops only those, never one a concurrent
+        # sequence owns.  Mirrors the lifecycle in _run_group_sequence
+        # (lines 1409-1418).
+        registered_gids: List[int] = []
+        try:
+            program_gids = set()
+            for z in zones:
+                try:
+                    zd = self.db.get_zone(z)
+                    if not zd:
+                        continue
+                    g = int(zd.get('group_id') or 0)
+                    # Skip the "no group" sentinels (gid==0 unset, gid==999
+                    # is the legacy "ungrouped" bucket per project convention).
+                    if g and g != 999:
+                        program_gids.add(g)
+                except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                    logger.debug("_run_program_threaded: gid lookup failed for zone=%s: %s", z, e)
+            for gid in program_gids:
+                # Track BEFORE setdefault so we know which gids we own.
+                # If gid wasn't already in the dict, this iteration owns
+                # the new Event and cleanup may safely pop it.
+                if gid not in self.group_cancel_events:
+                    self.group_cancel_events[gid] = threading.Event()
+                    registered_gids.append(gid)
+        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+            logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
         try:
             logger.info(f"Запуск программы {program_id} ({program_name})")
             try:
@@ -743,6 +780,20 @@ class IrrigationScheduler:
                 logger.debug("Handled exception in line_482: %s", e)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
+        finally:
+            # Issue #16 §6.4: clear/pop ONLY the cancel-events this
+            # invocation registered.  If a concurrent
+            # start_group_sequence is still running on one of these
+            # gids, it owns the Event — leave it alone.  Mirrors the
+            # cleanup in _run_group_sequence (lines 1409-1418).
+            for gid in registered_gids:
+                try:
+                    ev = self.group_cancel_events.get(gid)
+                    if ev is not None:
+                        ev.clear()
+                    self.group_cancel_events.pop(gid, None)
+                except (KeyError, TypeError, ValueError) as e:
+                    logger.debug("_run_program_threaded cleanup gid=%s: %s", gid, e)
 
     def schedule_program(self, program_id: int, program_data: Dict[str, Any]):
         try:
