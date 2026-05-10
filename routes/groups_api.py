@@ -12,6 +12,7 @@ from irrigation_scheduler import init_scheduler, get_scheduler
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from services import sse_hub as _sse_hub
 from services.audit import audit_log
+from services.api_rate_limiter import rate_limit
 from constants import GROUP_DEBOUNCE_SEC, ZONE_CAP_DEFAULT_MIN
 import sqlite3
 
@@ -523,3 +524,156 @@ def api_master_valve_toggle(group_id, action):
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"api_master_valve_toggle failed: {e}")
         return jsonify({"success": False, "message": "Ошибка"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Issue #15 — POST /api/groups/<gid>/run-selected
+#
+# Ad-hoc multi-zone run inside a single group. Goes through the same
+# IrrigationScheduler.start_group_sequence path as ``start-from-first`` —
+# the only thing that's "ad-hoc-specific" is the negative ``program_id``
+# sentinel and the explicit ``zone_ids`` subset.
+#
+# Body:
+#   {
+#     "zones": [int, int, ...],         # required, non-empty
+#     "duration": 1..120,                # optional, minutes mode
+#     "duration_percent": 10..200,       # optional, percent mode (minutes wins)
+#   }
+#
+# NOTE: zones table currently has no ``enabled`` column on this branch
+# (db/migrations.py — id/state/name/icon/duration/group_id/topic/...).
+# Spec §6.1 → drop the "is enabled" check; only validate exists + group.
+# ---------------------------------------------------------------------------
+def _parse_run_overrides(body: dict):
+    """Return ``(override_duration, override_percent, error_message_or_None)``.
+
+    Contract (mirrors PR #21 / issue #12):
+      - ``duration`` int in [1, 120] — "minutes mode"; if BOTH given, minutes win.
+      - ``duration_percent`` int in [10, 200] — "percent mode".
+      - Invalid values → 400-style error message; do NOT silently fall back.
+    """
+    raw_dur = body.get('duration')
+    raw_pct = body.get('duration_percent')
+
+    parsed_dur = None
+    if raw_dur is not None:
+        try:
+            d = int(raw_dur)
+        except (ValueError, TypeError):
+            return None, None, 'duration должна быть целым числом 1..120'
+        if not (1 <= d <= 120):
+            return None, None, 'duration вне диапазона 1..120'
+        parsed_dur = d
+
+    parsed_pct = None
+    if raw_pct is not None:
+        try:
+            p = int(raw_pct)
+        except (ValueError, TypeError):
+            return None, None, 'duration_percent должна быть целым числом 10..200'
+        if not (10 <= p <= 200):
+            return None, None, 'duration_percent вне диапазона 10..200'
+        parsed_pct = p
+
+    # "Minutes wins" — if both given, drop percent.
+    if parsed_dur is not None and parsed_pct is not None:
+        parsed_pct = None
+    return parsed_dur, parsed_pct, None
+
+
+def _build_ad_hoc_name(zone_ids, override_dur, override_pct) -> str:
+    """Compact human label for audit / history."""
+    z_part = ', '.join(f'Z{int(z)}' for z in zone_ids[:6])
+    if len(zone_ids) > 6:
+        z_part += f', …+{len(zone_ids) - 6}'
+    if override_dur is not None:
+        suffix = f'{int(override_dur)} мин'
+    elif override_pct is not None:
+        suffix = f'{int(override_pct)}% от нормы'
+    else:
+        suffix = 'нормы'
+    return f'Ad-hoc: {z_part} ({suffix})'
+
+
+@groups_api_bp.route('/api/groups/<int:gid>/run-selected', methods=['POST'])
+@rate_limit('programs', max_requests=10, window_sec=60)
+@audit_log('prog_manual_run_selected',
+           target_extractor=lambda *a, **kw: f"group:{kw.get('gid', a[0] if a else '?')}")
+def api_run_selected(gid):
+    """Ad-hoc run of a selected subset of zones in one group (issue #15)."""
+    try:
+        group = next((g for g in (db.get_groups() or []) if int(g['id']) == int(gid)), None)
+        if not group:
+            return jsonify({'success': False, 'message': 'Группа не найдена'}), 404
+
+        body = request.get_json(silent=True) or {}
+        raw_zones = body.get('zones')
+        if not isinstance(raw_zones, list) or not raw_zones:
+            return jsonify({'success': False, 'message': 'zones обязательны'}), 400
+        try:
+            zone_ids = [int(z) for z in raw_zones]
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'message': 'zones должны быть int[]'}), 400
+
+        # Per-zone validation: exists + belongs to gid.
+        # NB: spec §6.1 — no `enabled` column in zones schema, skip that check.
+        all_zones = {int(z['id']): z for z in (db.get_zones() or [])}
+        for zid in zone_ids:
+            z = all_zones.get(int(zid))
+            if z is None:
+                return jsonify({'success': False, 'message': f'Зона {zid} не найдена'}), 400
+            if int(z.get('group_id') or 0) != int(gid):
+                return jsonify({'success': False,
+                                'message': f'Зона {zid} не принадлежит группе {gid}'}), 400
+
+        override_dur, override_pct, parse_err = _parse_run_overrides(body)
+        if parse_err is not None:
+            return jsonify({'success': False, 'message': parse_err}), 400
+
+        scheduler = get_scheduler()
+        if not scheduler:
+            try:
+                scheduler = init_scheduler(db)
+            except (ValueError, KeyError, RuntimeError) as e:
+                logger.debug("api_run_selected: init_scheduler failed: %s", e)
+                scheduler = None
+        if not scheduler:
+            return jsonify({'success': False, 'message': 'Планировщик недоступен'}), 500
+
+        # Negative sentinel — distinguishes ad-hoc runs in audit/history.
+        # See spec §1.4. timestamp() is second-resolution; collisions are
+        # benign (audit row PK still distinguishes them).
+        ad_hoc_id = -int(time.time())
+        ad_hoc_name = _build_ad_hoc_name(zone_ids, override_dur, override_pct)
+
+        ok = scheduler.start_group_sequence(
+            int(gid),
+            override_duration=override_dur,
+            override_percent=override_pct,
+            zone_ids=zone_ids,
+            ad_hoc_program_id=ad_hoc_id,
+            ad_hoc_program_name=ad_hoc_name,
+        )
+        if not ok:
+            return jsonify({'success': False, 'message': 'Не удалось запустить'}), 400
+
+        try:
+            db.add_log('prog_manual_run_selected', json.dumps({
+                'group_id': int(gid),
+                'zones': zone_ids,
+                'ad_hoc_program_id': ad_hoc_id,
+                'override_duration': override_dur,
+                'override_percent': override_pct,
+            }))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            logger.debug("api_run_selected: add_log failed: %s", e)
+
+        return jsonify({
+            'success': True,
+            'message': f"Группа {group.get('name')}: запущены {len(zone_ids)} зон(ы)",
+            'ad_hoc_program_id': ad_hoc_id,
+        })
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.error(f"api_run_selected failed for group {gid}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка запуска выбранных зон'}), 500

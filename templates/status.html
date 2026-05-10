@@ -143,9 +143,19 @@
 </div>
 
 <!-- Quick Actions -->
-<div class="zone-quick-actions">
-  <button class="zq-btn zq-filled" id="zoneRunGroupBtn" onclick="runSelectedGroup()"
-          data-audit-action="group_run_click">▶ Запустить</button>
+<div class="zone-quick-actions" id="zoneQuickActions">
+  <!-- Default mode: two halves -->
+  <button class="zq-btn zq-filled zq-half" id="zoneRunGroupBtn" onclick="runSelectedGroup()"
+          data-audit-action="group_run_click">▶ Запустить все</button>
+  <button class="zq-btn zq-outlined zq-half" id="zoneRunSelectedBtn" onclick="enterRunSelectedMode()"
+          data-audit-action="group_run_selected_click">☑ Запустить выбранные</button>
+  <!-- Select mode: replaces the two halves (toggled via .mode-select-zones on body) -->
+  <button class="zq-btn zq-filled zq-half hidden-default" id="zoneSelectNextBtn"
+          onclick="confirmRunSelectedNext()" disabled
+          data-audit-action="group_run_selected_next">Далее (0)</button>
+  <button class="zq-btn zq-outlined zq-half hidden-default" id="zoneSelectCancelBtn"
+          onclick="exitRunSelectedMode()"
+          data-audit-action="group_run_selected_cancel">Отмена</button>
   <button class="zq-btn zq-search" onclick="toggleZoneSearch()" style="display:none">🔍</button>
 </div>
 
