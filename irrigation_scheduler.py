@@ -305,6 +305,11 @@ class IrrigationScheduler:
         self.program_jobs: Dict[int, List[str]] = {}  # program_id -> list(job_id)
         self.is_running = False
         self.group_cancel_events: Dict[int, threading.Event] = {}
+        # Per-group "skip current zone" events. Lifetime mirrors group_cancel_events:
+        # populated lazily by request_skip_current_zone, cleared in the same finally
+        # block as the cancel event. The in-thread sequencer loop polls .is_set()
+        # alongside cancel/shutdown checks.
+        self.group_skip_current_events: Dict[int, threading.Event] = {}
         # Shutdown event: set to interrupt all sleeping threads for graceful stop
         self._shutdown_event = threading.Event()
 
@@ -609,6 +614,11 @@ class IrrigationScheduler:
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Программа {program_id}: группа {group_id} отменена, зона {zone_id} пропущена")
                     continue
+                # Drop a stale skip event from a previous zone — see _run_group_sequence comment.
+                _stale_skip = self.group_skip_current_events.get(group_id)
+                if _stale_skip and _stale_skip.is_set():
+                    _stale_skip.clear()
+                skipped_this_zone = False
 
                 # Проверяем отложенный полив
                 postpone_until = zone.get('postpone_until')
@@ -744,6 +754,12 @@ class IrrigationScheduler:
                     if cancel_event and cancel_event.is_set():
                         logger.info(f"Программа {program_id}: отмена группы {group_id}, досрочно останавливаем зону {zone_id}")
                         break
+                    skip_event = self.group_skip_current_events.get(group_id)
+                    if skip_event and skip_event.is_set():
+                        skip_event.clear()
+                        skipped_this_zone = True
+                        logger.info(f"Программа {program_id}: skip current zone {zone_id} (group {group_id})")
+                        break
                     if self._shutdown_event.wait(timeout=1):
                         logger.info(f"Программа {program_id}: shutdown, досрочно останавливаем зону {zone_id}")
                         break
@@ -757,6 +773,17 @@ class IrrigationScheduler:
                     logger.debug("Exception in line_458: %s", e)
                     self._stop_zone(zone_id)
                 self.active_zones.pop(zone_id, None)
+
+                if skipped_this_zone:
+                    try:
+                        self.db.add_log('zone_skip', json.dumps({
+                            'program_id': program_id, 'group_id': group_id,
+                            'zone_id': zone_id, 'zone_name': zone.get('name'),
+                            'reason': 'manual_skip',
+                        }))
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                        logger.debug("zone_skip log error: %s", e)
+                    continue
 
                 # Дождёмся оставшиеся ранние секунды до «номинального» конца зоны, чтобы старт следующей был вовремя
                 if early > 0:
@@ -1321,6 +1348,13 @@ class IrrigationScheduler:
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Группа {group_id}: последовательный полив отменен перед запуском зоны {zone_id}")
                     break
+                # Drop a stale skip event that arrived during the inter-zone gap —
+                # the user wanted to skip the previous zone, which already ended.
+                # Without this, the next zone we haven't yet started would be
+                # immediately skipped on its first sleep tick.
+                _stale_skip = self.group_skip_current_events.get(group_id)
+                if _stale_skip and _stale_skip.is_set():
+                    _stale_skip.clear()
                 zone = self.db.get_zone(zone_id)
                 if not zone:
                     logger.warning(f"Группа {group_id}: зона {zone_id} не найдена, пропуск")
@@ -1331,6 +1365,7 @@ class IrrigationScheduler:
                 if duration <= 0:
                     logger.info(f"Группа {group_id}: зона {zone_id} имеет нулевую длительность, пропуск")
                     continue
+                skipped_this_zone = False
 
                 # Старт текущей зоны
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1442,6 +1477,12 @@ class IrrigationScheduler:
                             logger.debug("Handled exception in line_882: %s", e)
                         logger.info(f"Группа {group_id}: получена отмена, досрочно останавливаем зону {zone_id}")
                         break
+                    skip_event = self.group_skip_current_events.get(group_id)
+                    if skip_event and skip_event.is_set():
+                        skip_event.clear()  # one-shot per zone
+                        skipped_this_zone = True
+                        logger.info(f"Группа {group_id}: skip current zone {zone_id}")
+                        break
                     if self._shutdown_event.wait(timeout=1):
                         logger.info(f"Группа {group_id}: shutdown, досрочно останавливаем зону {zone_id}")
                         break
@@ -1459,6 +1500,17 @@ class IrrigationScheduler:
                     self.db.update_zone(zone_id, {'planned_end_time': None})
                 except (sqlite3.Error, OSError) as e:
                     logger.debug("Handled exception in line_899: %s", e)
+                if skipped_this_zone:
+                    try:
+                        self.db.add_log('zone_skip', json.dumps({
+                            'group_id': group_id, 'zone_id': zone_id,
+                            'zone_name': zone.get('name'),
+                            'reason': 'manual_skip',
+                        }))
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                        logger.debug("zone_skip log error: %s", e)
+                    # Skip the post-zone make-up wait — user wants the next zone NOW.
+                    continue
                 # Добираем ранние секунды, чтобы следующий старт был вовремя
                 if early > 0 and not (cancel_event and cancel_event.is_set()):
                     self._shutdown_event.wait(timeout=early)
@@ -1492,6 +1544,13 @@ class IrrigationScheduler:
                     self.group_cancel_events.pop(group_id, None)
             except (KeyError, TypeError, ValueError) as e:
                 logger.debug("_run_group_sequence cleanup gid=%s: %s", group_id, e)
+            try:
+                sk = self.group_skip_current_events.get(group_id)
+                if sk:
+                    sk.clear()
+                self.group_skip_current_events.pop(group_id, None)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug("group_skip_current_events cleanup: %s", e)
 
     def get_active_programs(self) -> Dict[int, Dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
@@ -1499,20 +1558,40 @@ class IrrigationScheduler:
 
     def get_active_zones(self) -> Dict[int, datetime]:
         return self.active_zones.copy()
-    
+
     def is_group_session_active(self, group_id: int) -> bool:
         """True iff the group currently has an in-flight sequence or program run.
 
-        Currently this is equivalent to "group_cancel_events[gid] exists",
-        because that key is created by start_group_sequence and (per fix in
-        §6.4) by _run_program_threaded when a scheduled program fires. The
-        Event being set means cancel-in-progress; the existence of the Event
-        is what indicates a session.
+        Equivalent to "group_cancel_events[gid] exists", because that key is
+        created by start_group_sequence at sequence kickoff and by
+        _run_program_threaded when a scheduled program fires. The Event being
+        set means cancel-in-progress; the existence of the Event indicates
+        a session.
         """
         try:
             return self.group_cancel_events.get(int(group_id)) is not None
         except (TypeError, ValueError, KeyError):
             return False
+
+    def request_skip_current_zone(self, group_id: int) -> bool:
+        """Mark the currently running zone in this group's sequencer as 'skip me'.
+
+        The in-thread loop polls the event each second; on detection it stops
+        the current zone and continues to the next iteration. Idempotent —
+        repeated calls within the same zone produce a single skip.
+
+        Returns True if a skip was scheduled, False if no session is active.
+        """
+        gid = int(group_id)
+        if not self.is_group_session_active(gid):
+            return False
+        ev = self.group_skip_current_events.get(gid)
+        if ev is None:
+            ev = threading.Event()
+            self.group_skip_current_events[gid] = ev
+        ev.set()
+        return True
+
 
     def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False):
         """Отменяет все активные задачи планировщика для указанной группы.

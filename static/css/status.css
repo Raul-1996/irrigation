@@ -240,6 +240,7 @@
     }
     .group-action-start { background: #4caf50; color: #fff; }
     .group-action-stop { background: #b71c1c; color: #fff; }
+    .group-action-skip { background: #1976d2; color: #fff; margin-left: 0.5rem; }
     .emergency { 
         background: #d32f2f; 
         color: #fff; 

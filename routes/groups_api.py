@@ -207,6 +207,74 @@ def api_stop_group(group_id):
         return jsonify({"success": False, "message": "Ошибка остановки группы"}), 500
 
 
+def _compute_next_zone_id(group_id: int, current_zone_id: int):
+    """Best-effort: read zones.scheduled_start_time for this group, return the
+    next zone after current_zone_id by plan order. None if current is last or
+    no plan exists."""
+    try:
+        zones = db.get_zones() or []
+        gz = [z for z in zones
+              if int(z.get('group_id') or 0) == int(group_id)
+              and z.get('scheduled_start_time')]
+        if not gz:
+            return None
+        gz.sort(key=lambda z: str(z.get('scheduled_start_time') or ''))
+        zids = [int(z['id']) for z in gz]
+        if int(current_zone_id) not in zids:
+            return None
+        idx = zids.index(int(current_zone_id))
+        if idx + 1 < len(zids):
+            return zids[idx + 1]
+        return None
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
+        logger.debug("compute_next_zone_id error: %s", e)
+        return None
+
+
+@groups_api_bp.route('/api/groups/<int:group_id>/skip-current', methods=['POST'])
+@audit_log('zone_skip', target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
+def api_skip_current_zone(group_id):
+    """Skip the currently running zone in the group's sequence; next zone starts now."""
+    try:
+        group = next((g for g in (db.get_groups() or []) if int(g['id']) == int(group_id)), None)
+        if not group:
+            return jsonify({'success': False, 'message': 'Группа не найдена'}), 404
+
+        scheduler = get_scheduler()
+        if not scheduler:
+            return jsonify({'success': False, 'message': 'Планировщик недоступен'}), 500
+        if not scheduler.is_group_session_active(int(group_id)):
+            return jsonify({'success': False, 'message': 'Нет активного полива в группе'}), 400
+
+        # Capture "current" + "next" from authoritative state BEFORE setting the event.
+        zones = db.get_zones() or []
+        active = [z for z in zones if int(z.get('group_id') or 0) == int(group_id) and z.get('state') == 'on']
+        if not active:
+            return jsonify({'success': False, 'message': 'Нет активной зоны для пропуска'}), 400
+        current_zone_id = int(active[0]['id'])
+        next_zone_id = _compute_next_zone_id(int(group_id), current_zone_id)
+
+        scheduled = scheduler.request_skip_current_zone(int(group_id))
+        if not scheduled:
+            return jsonify({'success': False, 'message': 'Нет активного полива в группе'}), 400
+
+        try:
+            db.add_log('zone_skip', json.dumps({
+                'group_id': int(group_id), 'zone_id': current_zone_id,
+                'next_zone_id': next_zone_id, 'source': 'manual',
+            }))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            logger.debug("zone_skip api log: %s", e)
+        return jsonify({
+            'success': True,
+            'skipped_zone_id': current_zone_id,
+            'next_zone_id': next_zone_id,
+        })
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.error(f"Ошибка пропуска зоны в группе {group_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка пропуска зоны'}), 500
+
+
 @groups_api_bp.route('/api/groups/<int:group_id>/start-from-first', methods=['POST'])
 @audit_log('group_start_from_first', target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
 def api_start_group_from_first(group_id):
