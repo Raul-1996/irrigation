@@ -565,8 +565,11 @@ class IrrigationScheduler:
         # concurrent sequence owns.  Mirrors the lifecycle in the
         # `finally` block of `_run_group_sequence`.
         registered_gids: List[Tuple[int, threading.Event]] = []
+        # Compute program_gids ONCE up front: needed by both the manual-vs-
+        # scheduled guard (must run BEFORE pre-register so it doesn't see
+        # our own planted events) and by the pre-register block.
+        program_gids: set = set()
         try:
-            program_gids = set()
             for z in zones:
                 try:
                     zd = self.db.get_zone(z)
@@ -579,17 +582,63 @@ class IrrigationScheduler:
                         program_gids.add(g)
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("_run_program_threaded: gid lookup failed for zone=%s: %s", z, e)
-            for gid in program_gids:
-                # setdefault is atomic — if dict[gid] already exists,
-                # `planted` is the existing Event and we DON'T own it.
-                # If it didn't exist, `planted is new_event` and we do.
-                new_event = threading.Event()
-                planted = self.group_cancel_events.setdefault(gid, new_event)
-                if planted is new_event:
-                    registered_gids.append((gid, new_event))
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-            logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
+            logger.debug("_run_program_threaded: program_gids collection failed: %s", e)
         try:
+            # ----- Issue #15 manual-vs-scheduled guard -----
+            # If a manual / ad-hoc run owns ANY group this program touches,
+            # skip this scheduled fire entirely. APScheduler's normal cron tick
+            # will fire the next slot AFTER manual ends.
+            # MUST run BEFORE the pre-register block below — otherwise the
+            # guard would see our own planted cancel events and self-block.
+            # NOTE: APScheduler misfire_grace_time caps how long a missed fire
+            # stays valid. Older fires (>grace) are dropped silently and we
+            # don't see them — see specs/issue-15-architecture.md §1.6 + §6.2
+            # for the misfire-window logging gap (deferred to a follow-up).
+            try:
+                blocking_gids = [g for g in program_gids if self.is_group_session_active(g)]
+                if blocking_gids:
+                    try:
+                        self.db.add_log('prog_skipped_manual_running', json.dumps({
+                            'program_id': program_id,
+                            'program_name': program_name,
+                            'blocking_gids': blocking_gids,
+                            'scheduled_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        }))
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as _e:
+                        logger.debug("prog_skipped_manual_running log failed: %s", _e)
+                    try:
+                        from services.audit import record_audit
+                        record_audit(
+                            action_type='prog_skipped_manual_running',
+                            source='scheduler',
+                            target=f'program:{program_id}',
+                            payload={
+                                'program_id': program_id,
+                                'program_name': program_name,
+                                'blocking_gids': blocking_gids,
+                            },
+                            actor='system',
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("prog_skipped_manual_running audit failed")
+                    logger.info(
+                        "Программа %s (%s) пропущена: ручной запуск активен в группах %s",
+                        program_id, program_name, blocking_gids,
+                    )
+                    return
+            except (sqlite3.Error, OSError, ValueError, TypeError) as _e:
+                logger.debug("manual-vs-scheduled guard error: %s", _e)
+            # ----- end issue #15 guard -----
+            # Now safe to pre-register cancel events (issue #14 C1 + #16 §6.4).
+            try:
+                for gid in program_gids:
+                    new_event = threading.Event()
+                    planted = self.group_cancel_events.setdefault(gid, new_event)
+                    if planted is new_event:
+                        registered_gids.append((gid, new_event))
+            except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
             logger.info(f"Запуск программы {program_id} ({program_name})")
             try:
                 self.db.add_log('program_start', json.dumps({'program_id': program_id, 'program_name': program_name}))
@@ -1208,18 +1257,32 @@ class IrrigationScheduler:
             logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
 
     # ===== Ручной последовательный запуск всех зон в группе =====
-    def start_group_sequence(self, group_id: int, override_duration: int = None,
-                             override_percent: int = None):
+    def start_group_sequence(self, group_id: int,
+                             override_duration: int = None,
+                             override_percent: Optional[int] = None,
+                             zone_ids: Optional[List[int]] = None,
+                             ad_hoc_program_id: Optional[int] = None,
+                             ad_hoc_program_name: Optional[str] = None):
         """Остановить все зоны группы и запустить последовательный полив всех зон по порядку.
 
         Issue #12: ``override_percent`` (one of PERCENT_PRESETS) — when set,
         each zone runs for ``round_up(zone.duration * pct/100)`` clipped to
         [1, MAX_MANUAL_WATERING_MIN]. ``override_duration`` (minutes mode)
         wins if both are passed.
+
+        Issue #15: ``zone_ids`` (subset of group), ``ad_hoc_program_id``
+        (negative sentinel), ``ad_hoc_program_name`` for audit-only ad-hoc
+        manual runs.
         """
         try:
             zones = self.db.get_zones()
             group_zones = sorted([z for z in zones if z['group_id'] == group_id], key=lambda x: x['id'])
+            if zone_ids is not None:
+                wanted = set(int(z) for z in zone_ids)
+                group_zones = [z for z in group_zones if int(z['id']) in wanted]
+                # Preserve user-requested order if it differs from id-asc.
+                order = {int(z): i for i, z in enumerate(zone_ids)}
+                group_zones.sort(key=lambda z: order.get(int(z['id']), 9999))
             if not group_zones:
                 logger.info(f"Группа {group_id}: нет зон для последовательного запуска")
                 return False
@@ -1256,7 +1319,7 @@ class IrrigationScheduler:
                 # Очистим предыдущие плановые старты и запишем новые
                 self.db.clear_group_scheduled_starts(group_id)
                 self.db.set_group_scheduled_starts(group_id, schedule_map)
-            except (sqlite3.Error, OSError) as e:
+            except (sqlite3.Error, OSError, ImportError) as e:
                 logger.error(f"Ошибка расчета плановых стартов для группы {group_id}: {e}")
 
             # Готовим флаг отмены для этой группы.
@@ -1301,13 +1364,22 @@ class IrrigationScheduler:
             zone_ids = [z['id'] for z in group_zones]
             # In TESTING mode, run synchronously to avoid APScheduler thread timing issues
             if TESTING:
-                self._run_group_sequence(group_id, zone_ids,
-                                         override_duration=override_duration,
-                                         override_percent=override_percent)
+                self._run_group_sequence(
+                    group_id, zone_ids,
+                    override_duration=override_duration,
+                    override_percent=override_percent,
+                    ad_hoc_program_id=ad_hoc_program_id,
+                    ad_hoc_program_name=ad_hoc_program_name,
+                )
             else:
                 # Запускаем последовательность в отдельном джобе прямо сейчас
                 _kwargs = dict(
-                    args=[group_id, zone_ids, override_duration, override_percent],
+                    args=[group_id, zone_ids, override_duration],
+                    kwargs={
+                        'override_percent': override_percent,
+                        'ad_hoc_program_id': ad_hoc_program_id,
+                        'ad_hoc_program_name': ad_hoc_program_name,
+                    },
                     id=f"group_seq:{group_id}:{int(datetime.now().timestamp())}",
                     replace_existing=False,
                     misfire_grace_time=120,
@@ -1333,11 +1405,16 @@ class IrrigationScheduler:
             return False
 
     def _run_group_sequence(self, group_id: int, zone_ids: List[int],
-                            override_duration: int = None, override_percent: int = None):
+                            override_duration: int = None,
+                            override_percent: Optional[int] = None,
+                            ad_hoc_program_id: Optional[int] = None,
+                            ad_hoc_program_name: Optional[str] = None):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler.
 
         Issue #12: ``override_percent`` plumbed through; per-zone duration is
         computed via :func:`services.zone_control.per_zone_dur`.
+        Issue #15: ``ad_hoc_program_*`` arrive as kwargs for ad-hoc audit only.
+        Legacy callers (cron-driven group_seq jobs from before #15) keep working.
         """
         from services.zone_control import per_zone_dur as _per_zone_dur
         # Test-only bypass: when SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ=1
@@ -1349,6 +1426,10 @@ class IrrigationScheduler:
         if TESTING and not os.environ.get('SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ'):
             logger.debug("TESTING mode: simplified _run_group_sequence for group %s", group_id)
             # In TESTING mode, set the first zone ON in the DB (skip MQTT/hardware)
+            try:
+                from services.zone_control import per_zone_dur as _per_zone_dur
+            except ImportError:
+                _per_zone_dur = None
             for zone_id in zone_ids:
                 zone = self.db.get_zone(zone_id)
                 if not zone:
@@ -1494,12 +1575,17 @@ class IrrigationScheduler:
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("Handled exception in line_851: %s", e)
                 try:
-                    self.db.add_log('group_seq_zone_start', json.dumps({
+                    _zs_payload = {
                         'group_id': group_id,
                         'zone_id': zone_id,
                         'zone_name': zone.get('name'),
-                        'duration': duration
-                    }))
+                        'duration': duration,
+                    }
+                    if ad_hoc_program_id is not None:
+                        _zs_payload['program_id'] = int(ad_hoc_program_id)
+                        _zs_payload['program_name'] = ad_hoc_program_name
+                        _zs_payload['is_ad_hoc'] = True
+                    self.db.add_log('group_seq_zone_start', json.dumps(_zs_payload))
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                     logger.debug("Handled exception in line_860: %s", e)
 
@@ -1575,7 +1661,12 @@ class IrrigationScheduler:
                 logger.debug("Handled exception in line_912: %s", e)
 
             try:
-                self.db.add_log('group_seq_complete', json.dumps({'group_id': group_id, 'zones': zone_ids}))
+                _gc_payload = {'group_id': group_id, 'zones': zone_ids}
+                if ad_hoc_program_id is not None:
+                    _gc_payload['program_id'] = int(ad_hoc_program_id)
+                    _gc_payload['program_name'] = ad_hoc_program_name
+                    _gc_payload['is_ad_hoc'] = True
+                self.db.add_log('group_seq_complete', json.dumps(_gc_payload))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in line_917: %s", e)
             logger.info(f"Группа {group_id}: последовательный полив завершен")

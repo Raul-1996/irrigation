@@ -1761,6 +1761,9 @@
                 btn.textContent = '▶ Запустить все';
             }
         }
+        // Issue #15 — "Запустить выбранные" requires a single group context.
+        var btnSel = document.getElementById('zoneRunSelectedBtn');
+        if (btnSel) btnSel.disabled = (currentGroupFilter === null);
     }
 
     function renderZoneCards() {
@@ -1896,6 +1899,13 @@
             var el = document.getElementById('zcard-' + zid);
             if (el) el.classList.add('open');
         });
+        // Issue #15 — restore .selected class on re-render in select mode.
+        if (groupSelectMode && groupSelectMode.selected.size > 0) {
+            groupSelectMode.selected.forEach(function(zid) {
+                var card = document.querySelector('[data-zone-id="' + zid + '"]');
+                if (card) card.classList.add('selected');
+            });
+        }
         updateZoneStats(zones);
 
         // Init running timers
@@ -1970,6 +1980,9 @@
     // Accordion toggle — only one zone card may be open at a time (issue #5).
     // Scoped to #zoneList so cards in other lists are unaffected.
     function toggleZoneCard(id) {
+        // Issue #15 — in select mode, tap on card body toggles selection,
+        // not accordion expansion.
+        if (groupSelectMode && toggleZoneSelected(id)) return;
         var card = document.getElementById('zcard-' + id);
         if (!card) return;
         var willOpen = !card.classList.contains('open');
@@ -1988,6 +2001,10 @@
 
     // Group selection
     function selectZoneGroup(groupId) {
+        // Issue #15 — switching away from the active select-mode group exits it.
+        if (groupSelectMode && groupSelectMode.gid !== groupId) {
+            exitRunSelectedMode();
+        }
         currentGroupFilter = groupId;
         renderGroupTabs();
         renderZoneCards();
@@ -2080,6 +2097,7 @@
         runPopupGroupId = gid;
         runPopupZoneId = null;
         _runPopupAllGroups = !gid;
+        _runPopupSelectedZones = null;
         var title = gid ? '▶ ' + gName : '▶ Все группы';
         document.getElementById('runPopupTitle').textContent = title;
         runPopupDur = 15;
@@ -2196,6 +2214,78 @@
     }
     window.saveZoneEdit = saveZoneEdit;
 
+    // Issue #15 — "Запустить выбранные" mode state.
+    // null = off; { gid: int, selected: Set<int> } when on.
+    var groupSelectMode = null;
+    var _runPopupSelectedZones = null;  // populated when popup confirms run-selected
+    function enterRunSelectedMode() {
+        var gid = currentGroupFilter;
+        if (!gid) {
+            // "Все группы" — select-mode is per-group only.
+            showZoneToast('Выберите группу для выбора зон', 'info');
+            return;
+        }
+        groupSelectMode = { gid: gid, selected: new Set() };
+        document.body.classList.add('mode-select-zones');
+        _updateSelectedCounter();
+    }
+    function exitRunSelectedMode() {
+        if (!groupSelectMode) return;
+        // Clear visual selected class on cards before leaving the mode.
+        var cards = document.querySelectorAll('.zone-card.selected');
+        for (var i = 0; i < cards.length; i++) cards[i].classList.remove('selected');
+        groupSelectMode = null;
+        document.body.classList.remove('mode-select-zones');
+        _updateSelectedCounter();
+    }
+    function toggleZoneSelected(zoneId) {
+        if (!groupSelectMode) return false;
+        var z = (zonesData || []).find(function(zz) { return zz.id === zoneId; });
+        if (!z || z.group_id !== groupSelectMode.gid) return false;
+        if (groupSelectMode.selected.has(zoneId)) {
+            groupSelectMode.selected.delete(zoneId);
+        } else {
+            groupSelectMode.selected.add(zoneId);
+        }
+        var card = document.querySelector('[data-zone-id="' + zoneId + '"]');
+        if (card) card.classList.toggle('selected', groupSelectMode.selected.has(zoneId));
+        _updateSelectedCounter();
+        return true;
+    }
+    function _updateSelectedCounter() {
+        var n = groupSelectMode ? groupSelectMode.selected.size : 0;
+        var btn = document.getElementById('zoneSelectNextBtn');
+        if (btn) {
+            btn.textContent = 'Далее (' + n + ')';
+            btn.disabled = n === 0;
+        }
+    }
+    function confirmRunSelectedNext() {
+        if (!groupSelectMode || groupSelectMode.selected.size === 0) return;
+        var gid = groupSelectMode.gid;
+        var selectedZones = Array.from(groupSelectMode.selected);
+        // Open the existing run popup, but mark it as "selected-zones" via _runPopupSelectedZones.
+        runPopupGroupId = gid;
+        runPopupZoneId = null;
+        _runPopupAllGroups = false;
+        _runPopupSelectedZones = selectedZones;
+        runPopupDur = 15;
+        document.getElementById('runPopupTitle').textContent =
+            '▶ Выбранные зоны (' + selectedZones.length + ')';
+        // Hide "📋 С настройками зон" — defaults path is group-wide, ambiguous for subset.
+        var defBtn = document.getElementById('runPopupDefaults');
+        if (defBtn) defBtn.style.display = 'none';
+        if (typeof initDialTicks === 'function') initDialTicks();
+        if (typeof updateDial === 'function') updateDial();
+        document.getElementById('runPopupOverlay').classList.add('show');
+        document.getElementById('runPopup').classList.add('show');
+        if (typeof initDialDrag === 'function') setTimeout(initDialDrag, 100);
+    }
+    window.enterRunSelectedMode = enterRunSelectedMode;
+    window.exitRunSelectedMode = exitRunSelectedMode;
+    window.toggleZoneSelected = toggleZoneSelected;
+    window.confirmRunSelectedNext = confirmRunSelectedNext;
+
     // Run Duration Popup with Circular Dial
     var runPopupZoneId = null;
     var runPopupGroupId = null;
@@ -2293,6 +2383,7 @@
         runPopupZoneId = zoneId;
         runPopupGroupId = null;
         _runPopupAllGroups = false;
+        _runPopupSelectedZones = null;
         runPopupDur = defaultDur || 10;
         // Issue #12: reset mode each time popup opens — pct state must not
         // persist across separate runs.
@@ -2316,6 +2407,7 @@
         document.getElementById('runPopup').classList.remove('show');
         runPopupZoneId = null;
         _runPopupAllGroups = false;
+        _runPopupSelectedZones = null;
     }
     function setRunDur(val) {
         runPopupDur = val;
@@ -2333,7 +2425,7 @@
     }
     function confirmRun() {
         // _runPopupAllGroups flag: true when "all groups" was selected (gid=null)
-        if (!runPopupZoneId && !runPopupGroupId && !_runPopupAllGroups) return;
+        if (!runPopupZoneId && !runPopupGroupId && !_runPopupAllGroups && !_runPopupSelectedZones) return;
         var dur = runPopupDur;
         // Issue #12: capture mode at confirm time (popup is closed below).
         var modePct = (runPopupMode === 'pct' && runPopupPct);
@@ -2341,6 +2433,7 @@
         var savedZoneId = runPopupZoneId;
         var savedGroupId = runPopupGroupId;
         var savedAllGroups = _runPopupAllGroups;
+        var savedSelectedZones = _runPopupSelectedZones;
         closeRunPopup();
 
         // Pick request-body shape once. Group + single-zone use different
@@ -2349,6 +2442,32 @@
         var groupBody = modePct ? {duration_percent: pct} : {override_duration: dur};
         var zoneBody = modePct ? {duration_percent: pct} : {duration: dur};
         var label = modePct ? (pct + '%') : (dur + ' мин');
+
+        // Issue #15 — ad-hoc selected zones path (subset of group).
+        if (savedSelectedZones && savedSelectedZones.length > 0 && savedGroupId) {
+            var n = savedSelectedZones.length;
+            showLoading('Запуск ' + n + ' зон(ы)...');
+            var selBody = modePct
+                ? { zones: savedSelectedZones, duration_percent: pct }
+                : { zones: savedSelectedZones, duration: dur };
+            fetch('/api/groups/' + savedGroupId + '/run-selected', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(selBody)
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                hideLoading();
+                if (data && data.success) {
+                    showZoneToast('▶ Запущены ' + n + ' зон(ы) на ' + label, 'success');
+                    if (typeof exitRunSelectedMode === 'function') exitRunSelectedMode();
+                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                } else {
+                    showZoneToast((data && data.message) || 'Ошибка', 'error');
+                }
+            }).catch(function() { hideLoading(); showZoneToast('Ошибка сети', 'error'); });
+            return;
+        }
 
         if (savedGroupId || savedAllGroups) {
             // Group run: pass override_duration to API (does NOT change base durations in DB)
