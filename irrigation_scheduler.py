@@ -523,7 +523,11 @@ class IrrigationScheduler:
                     logger.debug("Weather skip telegram: %s", e)
                 # Log to weather_log
                 try:
-                    adj.log_adjustment(zone_id, 0, 0, 0, True, reason)
+                    zone_data = self.db.get_zone(zone_id)
+                    original = int(zone_data['duration']) if zone_data else 0
+                    _w = adj._get_weather()
+                    _snap = _w.to_dict() if _w is not None else None
+                    adj.log_adjustment(zone_id, original, 0, 0, True, reason, weather_snapshot=_snap)
                 except (sqlite3.Error, OSError) as e:
                     logger.debug("Weather log error: %s", e)
             return skip_info
@@ -543,10 +547,12 @@ class IrrigationScheduler:
             adjusted = 0 if coeff == 0 else max(1, adjusted)
             if adjusted != base_duration:
                 logger.info(f"Weather adjustment: zone={zone_id} base={base_duration}min adjusted={adjusted}min (coeff={coeff}%)")
-                try:
-                    adj.log_adjustment(zone_id, base_duration, adjusted, coeff, False)
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Weather log error: %s", e)
+            try:
+                _w = adj._get_weather()
+                _snap = _w.to_dict() if _w is not None else None
+                adj.log_adjustment(zone_id, base_duration, adjusted, coeff, False, '', weather_snapshot=_snap)
+            except (sqlite3.Error, OSError) as e:
+                logger.debug("Weather log error: %s", e)
             return adjusted
         except (ImportError, OSError, ValueError, TypeError) as e:
             logger.debug("Weather adjustment error: %s", e)
@@ -653,6 +659,15 @@ class IrrigationScheduler:
 
             # Weather check before program: skip entire program if conditions are bad
             skip_info = self._check_weather_skip(zones[0] if zones else 0, program_id)
+            try:
+                from services.weather_adjustment import get_weather_adjustment
+                _adj = get_weather_adjustment(self.db.db_path)
+                if _adj.is_enabled():
+                    _w = _adj._get_weather()
+                    _coeff = _adj.get_coefficient()
+                    _adj.log_decision(_w, _coeff, bool(skip_info.get('skip')), skip_info.get('reason', ''))
+            except Exception as e:
+                logger.debug("log_decision error: %s", e)
             if skip_info.get('skip'):
                 logger.info(f"Программа {program_id} ({program_name}) пропущена из-за погоды: {skip_info.get('reason')}")
                 try:
@@ -1470,6 +1485,15 @@ class IrrigationScheduler:
         try:
             # Weather check before group sequence
             skip_info = self._check_weather_skip(zone_ids[0] if zone_ids else 0, 0)
+            try:
+                from services.weather_adjustment import get_weather_adjustment
+                _adj = get_weather_adjustment(self.db.db_path)
+                if _adj.is_enabled():
+                    _w = _adj._get_weather()
+                    _coeff = _adj.get_coefficient()
+                    _adj.log_decision(_w, _coeff, bool(skip_info.get('skip')), skip_info.get('reason', ''))
+            except Exception as e:
+                logger.debug("log_decision error: %s", e)
             if skip_info.get('skip'):
                 logger.info(f"Группа {group_id}: последовательный полив пропущен из-за погоды: {skip_info.get('reason')}")
                 try:

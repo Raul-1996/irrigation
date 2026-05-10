@@ -13,8 +13,10 @@ preserved from the pre-split implementation. Migrating to
 ``db.SettingsRepository`` is tracked as follow-up (see
 ``irrigation-audit/findings/code-quality.md`` CQ-015).
 """
+import json
 import logging
 import sqlite3
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from services.weather.singletons import get_weather_service
@@ -100,7 +102,19 @@ class WeatherAdjustment:
         """Get current weather data."""
         try:
             svc = get_weather_service(self.db_path)
-            return svc.get_weather()
+            weather = svc.get_weather()
+            if weather is None:
+                self._maybe_alert_api_down('weather=None')
+                return None
+            try:
+                ts = getattr(weather, 'timestamp', None)
+                if ts:
+                    age = time.time() - float(ts)
+                    if age > 7200:
+                        self._maybe_alert_api_down(f'cache stale {int(age/60)}min')
+            except (TypeError, ValueError):
+                pass
+            return weather
         except (ImportError, OSError) as e:
             logger.debug("Weather data unavailable: %s", e)
             return None
@@ -484,8 +498,12 @@ class WeatherAdjustment:
         coefficient: int,
         skip: bool,
         reason: str = '',
+        weather_snapshot: Optional[Dict] = None,
     ) -> None:
         """Log weather adjustment to weather_log table."""
+        if weather_snapshot is None:
+            w = self._get_weather()
+            weather_snapshot = w.to_dict() if w is not None else {}
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.execute(
@@ -494,8 +512,103 @@ class WeatherAdjustment:
                     'skipped, skip_reason, weather_data, created_at) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, datetime("now"))',
                     (zone_id, original_duration, adjusted_duration, coefficient,
-                     1 if skip else 0, reason, '{}'),
+                     1 if skip else 0, reason, json.dumps(weather_snapshot or {})),
                 )
                 conn.commit()
         except (sqlite3.Error, OSError) as e:
             logger.debug("Weather log write error: %s", e)
+
+    def log_decision(self, weather, coefficient, skip, reason, mode='auto') -> None:
+        """Записать decision в weather_decisions для UI history."""
+        if skip:
+            decision = 'skip'
+        elif coefficient == 100:
+            decision = 'water'
+        else:
+            decision = 'adjust'
+
+        now = time.localtime()
+        date_str = time.strftime('%Y-%m-%d', now)
+        time_str = time.strftime('%H:%M:%S', now)
+
+        def _safe(attr):
+            try:
+                v = getattr(weather, attr, None)
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.execute(
+                    'INSERT INTO weather_decisions '
+                    '(date, time, temperature, humidity, precipitation_24h, wind_speed, '
+                    'coefficient, decision, reason, mode, data_sources, user_override) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (date_str, time_str,
+                     _safe('temperature'), _safe('humidity'),
+                     _safe('precipitation_24h'), _safe('wind_speed'),
+                     int(coefficient), decision, reason or '', mode,
+                     json.dumps({'source': 'open-meteo'}), 0),
+                )
+                conn.commit()
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("Weather decision log error: %s", e)
+
+    def _get_admin_chat_id(self) -> Optional[str]:
+        """Read telegram_admin_chat_id from settings (no self.db here)."""
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cur = conn.execute(
+                    'SELECT value FROM settings WHERE key = ?',
+                    ('telegram_admin_chat_id',),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    return str(row[0])
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("admin chat_id read error: %s", e)
+        return None
+
+    def _should_alert_now(self) -> bool:
+        """Throttle: 1 alert / 30 min via weather.last_alert_at setting."""
+        try:
+            now = time.time()
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cur = conn.execute(
+                    "SELECT value FROM settings WHERE key = 'weather.last_alert_at'"
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    try:
+                        last = float(row[0])
+                        if now - last < 1800:
+                            return False
+                    except (TypeError, ValueError):
+                        pass
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings(key, value) "
+                    "VALUES ('weather.last_alert_at', ?)",
+                    (str(now),),
+                )
+                conn.commit()
+            return True
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("alert throttle error: %s", e)
+            return False
+
+    def _send_telegram_alert(self, text: str) -> None:
+        """Send Telegram alert to admin chat (best-effort)."""
+        try:
+            from services.telegram_bot import notifier
+            chat_id = self._get_admin_chat_id()
+            if chat_id:
+                notifier.send_text(int(chat_id), text)
+        except (ImportError, OSError, ValueError, TypeError) as e:
+            logger.debug("Weather alert telegram: %s", e)
+
+    def _maybe_alert_api_down(self, reason: str) -> None:
+        """Send API-down alert if throttle allows."""
+        if not self._should_alert_now():
+            return
+        self._send_telegram_alert(f"⚠️ Weather API недоступно: {reason}")

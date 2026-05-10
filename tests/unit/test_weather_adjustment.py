@@ -26,6 +26,15 @@ def adj_db(tmp_path):
         coefficient INTEGER, skipped INTEGER DEFAULT 0, skip_reason TEXT,
         weather_data TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS weather_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL, time TEXT NOT NULL,
+        temperature REAL, humidity REAL, precipitation_24h REAL, wind_speed REAL,
+        coefficient INTEGER NOT NULL, decision TEXT NOT NULL, reason TEXT,
+        mode TEXT NOT NULL DEFAULT 'auto', data_sources TEXT DEFAULT '{}',
+        user_override INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
     conn.execute("INSERT INTO settings(key, value) VALUES('weather.enabled', '1')")
     conn.execute("INSERT INTO settings(key, value) VALUES('weather.latitude', '55.7558')")
     conn.execute("INSERT INTO settings(key, value) VALUES('weather.longitude', '37.6176')")
@@ -332,3 +341,136 @@ class TestWeatherLog:
         rows = cur.fetchall()
         assert len(rows) == 1
         conn.close()
+
+
+class TestLogAdjustmentSnapshot:
+    """Issue M5: log_adjustment must persist weather_data JSON snapshot."""
+
+    @patch('services.weather_adjustment.WeatherAdjustment._get_weather')
+    def test_log_adjustment_with_snapshot(self, mock_get, adj_db):
+        """Explicit snapshot dict → stored as JSON in weather_data."""
+        mock_get.return_value = None  # don't auto-fetch
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        snap = {'temperature': 22.5, 'humidity': 60, 'precipitation_24h': 1.2}
+        adj.log_adjustment(1, 10, 8, 80, False, '', weather_snapshot=snap)
+        conn = sqlite3.connect(adj_db)
+        cur = conn.execute('SELECT weather_data FROM weather_log ORDER BY id DESC LIMIT 1')
+        (data,) = cur.fetchone()
+        conn.close()
+        decoded = json.loads(data)
+        assert decoded['temperature'] == 22.5
+        assert decoded['humidity'] == 60
+
+    @patch('services.weather_adjustment.WeatherAdjustment._get_weather')
+    def test_log_adjustment_auto_snapshot(self, mock_get, adj_db):
+        """No snapshot passed → auto-fetched via _get_weather().to_dict()."""
+        mock_get.return_value = _mock_weather(temperature=18.0, humidity=70.0)
+        # Force MagicMock.to_dict() to produce a real dict.
+        mock_get.return_value.to_dict.return_value = {'temperature': 18.0, 'humidity': 70.0}
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        adj.log_adjustment(1, 10, 9, 90, False)
+        conn = sqlite3.connect(adj_db)
+        cur = conn.execute('SELECT weather_data FROM weather_log ORDER BY id DESC LIMIT 1')
+        (data,) = cur.fetchone()
+        conn.close()
+        decoded = json.loads(data)
+        assert decoded.get('temperature') == 18.0
+
+
+class TestLogDecision:
+    """Issue #5: log_decision writes to weather_decisions for UI history."""
+
+    @pytest.mark.parametrize('coef,skip,expected', [
+        (50, False, 'adjust'),
+        (100, False, 'water'),
+        (150, False, 'adjust'),
+        (0, True, 'skip'),
+    ])
+    def test_log_decision_skip_adjust_water(self, adj_db, coef, skip, expected):
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        weather = _mock_weather(temperature=20.0, humidity=55.0,
+                                precipitation_24h=0.5, wind_speed=3.0)
+        adj.log_decision(weather, coef, skip, 'test reason')
+        conn = sqlite3.connect(adj_db)
+        cur = conn.execute(
+            'SELECT decision, coefficient, temperature, mode, user_override '
+            'FROM weather_decisions ORDER BY id DESC LIMIT 1'
+        )
+        row = cur.fetchone()
+        conn.close()
+        assert row is not None
+        decision, coefficient, temperature, mode, user_override = row
+        assert decision == expected
+        assert coefficient == coef
+        assert temperature == 20.0
+        assert mode == 'auto'
+        assert user_override == 0
+
+    def test_log_decision_none_safe(self, adj_db):
+        """None weather attrs → NULLs in DB, no crash."""
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        weather = _mock_weather(temperature=None, humidity=None,
+                                precipitation_24h=None, wind_speed=None)
+        adj.log_decision(weather, 100, False, '')
+        conn = sqlite3.connect(adj_db)
+        cur = conn.execute('SELECT temperature, humidity FROM weather_decisions ORDER BY id DESC LIMIT 1')
+        temp, hum = cur.fetchone()
+        conn.close()
+        assert temp is None and hum is None
+
+
+class TestApiDownAlert:
+    """Issue M4: throttled Telegram alert when weather API returns None / stale."""
+
+    def _set_admin_chat(self, db_path, chat_id='12345'):
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES('telegram_admin_chat_id', ?)",
+            (chat_id,),
+        )
+        conn.commit()
+        conn.close()
+
+    @patch('services.weather.adjustment.get_weather_service')
+    def test_alert_throttle_30min(self, mock_svc, adj_db):
+        """Two _maybe_alert_api_down within 30min → notifier.send_text called once."""
+        self._set_admin_chat(adj_db)
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        with patch('services.telegram_bot.notifier') as mock_notifier:
+            adj._maybe_alert_api_down('weather=None')
+            adj._maybe_alert_api_down('weather=None')
+            assert mock_notifier.send_text.call_count == 1
+
+    @patch('services.weather.adjustment.get_weather_service')
+    def test_alert_after_30min(self, mock_svc, adj_db):
+        """After 30min throttle window → second alert allowed."""
+        self._set_admin_chat(adj_db)
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        with patch('services.telegram_bot.notifier') as mock_notifier:
+            with patch('services.weather.adjustment.time.time', return_value=1000.0):
+                adj._maybe_alert_api_down('weather=None')
+            with patch('services.weather.adjustment.time.time', return_value=1000.0 + 1801):
+                adj._maybe_alert_api_down('weather=None')
+            assert mock_notifier.send_text.call_count == 2
+
+    def test_no_alert_when_disabled(self, adj_db):
+        """weather.enabled=0 + weather=None → still no alert (disabled = no need)."""
+        # Disable weather adjustment.
+        conn = sqlite3.connect(adj_db)
+        conn.execute("UPDATE settings SET value='0' WHERE key='weather.enabled'")
+        conn.commit()
+        conn.close()
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        # Public path: should_skip() short-circuits when disabled and never
+        # reaches _get_weather → no alert is fired.
+        with patch('services.telegram_bot.notifier') as mock_notifier:
+            result = adj.should_skip()
+            assert result['skip'] is False
+            assert mock_notifier.send_text.call_count == 0
