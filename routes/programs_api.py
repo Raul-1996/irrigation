@@ -198,6 +198,40 @@ def api_toggle_program_enabled(prog_id):
         return jsonify({'success': False, 'message': 'Ошибка обновления программы'}), 500
 
 
+@programs_api_bp.route('/api/programs/<int:prog_id>/run', methods=['POST'])
+@rate_limit('programs', max_requests=10, window_sec=60)
+@audit_log('program_manual_run',
+           target_extractor=lambda *a, **kw: f"program:{kw.get('prog_id', a[0] if a else '?')}")
+def api_run_program(prog_id):
+    """Manual ad-hoc run of a program — start all its zones sequentially."""
+    program = db.get_program(prog_id)
+    if not program:
+        return jsonify({'success': False, 'message': 'Program not found'}), 404
+
+    zones = program.get('zones') or []
+    if not zones:
+        return jsonify({'success': False, 'message': 'Program has no zones'}), 400
+
+    name = program.get('name') or f'Program {prog_id}'
+    try:
+        import threading
+        from scheduler.jobs import job_run_program
+        threading.Thread(
+            target=job_run_program,
+            args=(int(prog_id), [int(z) for z in zones], str(name)),
+            daemon=True,
+        ).start()
+    except (ImportError, RuntimeError, ValueError, TypeError) as e:
+        logger.error(f"Ошибка ручного запуска программы {prog_id}: {e}")
+        return jsonify({'success': False, 'message': 'Ошибка запуска программы'}), 500
+
+    try:
+        db.add_log('prog_manual_run', json.dumps({'prog': prog_id, 'name': name, 'zones': list(zones)}))
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.debug("Handled exception logging manual program run: %s", e)
+    return jsonify({'success': True, 'message': f'Программа {name}: запущена'}), 200
+
+
 @programs_api_bp.route('/api/programs/<int:prog_id>/log', methods=['GET'])
 def api_program_log(prog_id):
     """Get watering log for specific program."""

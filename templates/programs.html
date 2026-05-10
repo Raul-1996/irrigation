@@ -273,17 +273,22 @@ async function duplicateProgram(id) {
 
 async function runProgram(id) {
   try {
-    const prog = programs.find(p => p.id === id);
-    const resp = await fetch('/api/run', {
+    const resp = await fetch(`/api/programs/${id}/run`, {
       method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({zones: prog.zones, name: prog.name})
+      headers: apiHeaders(false)
     });
-    
+
     if (resp.ok) {
       showToast('▶️ Полив запущен', 'success');
       switchTab('execution');
+      return;
     }
+    let msg = 'Ошибка запуска';
+    try {
+      const data = await resp.json();
+      if (data && data.message) msg = data.message;
+    } catch (_) { /* ignore parse errors */ }
+    showToast(msg);
   } catch (err) {
     console.error('Run program error:', err);
     showToast('Ошибка запуска');

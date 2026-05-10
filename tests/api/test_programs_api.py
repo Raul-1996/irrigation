@@ -84,3 +84,28 @@ class TestCheckConflicts:
             data=json.dumps({'time': '06:00'}),
             content_type='application/json')
         assert resp.status_code == 400
+
+
+class TestRunProgram:
+    """Issue #10: manual run button must hit a real backend endpoint."""
+
+    def test_run_program_success(self, admin_client, app):
+        app.db.create_zone({'name': 'Z1', 'duration': 1, 'group_id': 1})
+        prog = app.db.create_program({
+            'name': 'Manual Run', 'time': '06:00', 'days': [0], 'zones': [1],
+        })
+        resp = admin_client.post(f'/api/programs/{prog["id"]}/run')
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['success'] is True
+
+    def test_run_program_not_found(self, admin_client):
+        resp = admin_client.post('/api/programs/99999/run')
+        assert resp.status_code == 404
+
+    def test_run_program_with_no_zones(self, admin_client, app):
+        prog = app.db.create_program({
+            'name': 'Empty', 'time': '06:00', 'days': [0], 'zones': [],
+        })
+        resp = admin_client.post(f'/api/programs/{prog["id"]}/run')
+        assert resp.status_code == 400
