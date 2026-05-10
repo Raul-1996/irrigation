@@ -1666,3 +1666,65 @@
     .sheet-photo-btn-rotate:hover { background:#ffe082; }
     .sheet-photo-btn-delete { background:#ffebee; color:#b71c1c; border-color:#ffcdd2; }
     .sheet-photo-btn-delete:hover { background:#ffcdd2; }
+
+    /* Issues #24/#25: continuous progress + next-up queue */
+    .group-switching {
+        display: inline-block;
+        color: #2196f3;
+        font-weight: 500;
+        animation: switchingPulse 1.2s ease-in-out infinite;
+    }
+    @keyframes switchingPulse {
+        0%, 100% { opacity: 0.6; }
+        50% { opacity: 1; }
+    }
+    .next-queue-strip {
+        margin-top: 8px;
+        padding: 8px 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .next-queue-strip .next-label {
+        font-size: 13px;
+        color: #666;
+        flex-shrink: 0;
+        padding-left: 2px;
+    }
+    .chips-row {
+        display: flex;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        gap: 6px;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        align-items: center;
+        padding-right: 12px;
+    }
+    .chips-row::-webkit-scrollbar { display: none; }
+    .zone-chip {
+        scroll-snap-align: start;
+        white-space: nowrap;
+        padding: 6px 10px;
+        border: 1px solid #cce5ff;
+        background: #f0f7ff;
+        border-radius: 16px;
+        font-size: 12px;
+        color: #333;
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+    .zone-chip:hover { background: #e0efff; }
+    .chip-arrow {
+        color: #999;
+        font-size: 12px;
+        flex-shrink: 0;
+    }
+    .zone-card.highlight {
+        animation: cardHighlight 2s ease-out;
+    }
+    @keyframes cardHighlight {
+        0% { background: #fff9c4; }
+        100% { background: transparent; }
+    }
