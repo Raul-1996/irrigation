@@ -565,8 +565,11 @@ class IrrigationScheduler:
         # concurrent sequence owns.  Mirrors the lifecycle in the
         # `finally` block of `_run_group_sequence`.
         registered_gids: List[Tuple[int, threading.Event]] = []
+        # Compute program_gids ONCE up front: needed by both the manual-vs-
+        # scheduled guard (must run BEFORE pre-register so it doesn't see
+        # our own planted events) and by the pre-register block.
+        program_gids: set = set()
         try:
-            program_gids = set()
             for z in zones:
                 try:
                     zd = self.db.get_zone(z)
@@ -579,33 +582,20 @@ class IrrigationScheduler:
                         program_gids.add(g)
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("_run_program_threaded: gid lookup failed for zone=%s: %s", z, e)
-            for gid in program_gids:
-                # setdefault is atomic — if dict[gid] already exists,
-                # `planted` is the existing Event and we DON'T own it.
-                # If it didn't exist, `planted is new_event` and we do.
-                new_event = threading.Event()
-                planted = self.group_cancel_events.setdefault(gid, new_event)
-                if planted is new_event:
-                    registered_gids.append((gid, new_event))
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-            logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
+            logger.debug("_run_program_threaded: program_gids collection failed: %s", e)
         try:
             # ----- Issue #15 manual-vs-scheduled guard -----
             # If a manual / ad-hoc run owns ANY group this program touches,
             # skip this scheduled fire entirely. APScheduler's normal cron tick
             # will fire the next slot AFTER manual ends.
+            # MUST run BEFORE the pre-register block below — otherwise the
+            # guard would see our own planted cancel events and self-block.
             # NOTE: APScheduler misfire_grace_time caps how long a missed fire
             # stays valid. Older fires (>grace) are dropped silently and we
             # don't see them — see specs/issue-15-architecture.md §1.6 + §6.2
             # for the misfire-window logging gap (deferred to a follow-up).
             try:
-                program_gids = set()
-                for _zid in zones:
-                    _zd = self.db.get_zone(_zid)
-                    if _zd:
-                        _g = int(_zd.get('group_id') or 0)
-                        if _g and _g != 999:
-                            program_gids.add(_g)
                 blocking_gids = [g for g in program_gids if self.is_group_session_active(g)]
                 if blocking_gids:
                     try:
@@ -640,6 +630,15 @@ class IrrigationScheduler:
             except (sqlite3.Error, OSError, ValueError, TypeError) as _e:
                 logger.debug("manual-vs-scheduled guard error: %s", _e)
             # ----- end issue #15 guard -----
+            # Now safe to pre-register cancel events (issue #14 C1 + #16 §6.4).
+            try:
+                for gid in program_gids:
+                    new_event = threading.Event()
+                    planted = self.group_cancel_events.setdefault(gid, new_event)
+                    if planted is new_event:
+                        registered_gids.append((gid, new_event))
+            except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                logger.debug("_run_program_threaded: pre-register cancel events failed: %s", e)
             logger.info(f"Запуск программы {program_id} ({program_name})")
             try:
                 self.db.add_log('program_start', json.dumps({'program_id': program_id, 'program_name': program_name}))
@@ -1256,21 +1255,6 @@ class IrrigationScheduler:
                 logger.debug("Handled exception in cancel_master_valve_cap: %s", e)
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
-
-    # ===== Issue #15 helper — manual session detection =====
-    # Vendored from PR #22 (issue #14). Keep one copy on merge.
-    def is_group_session_active(self, group_id: int) -> bool:
-        """True iff a manual / ad-hoc group sequence has planted a cancel event.
-
-        A cancel-event entry in ``group_cancel_events`` is set by
-        ``start_group_sequence`` and cleared in the ``finally`` block of
-        ``_run_group_sequence``. Its presence signals that the group is
-        owned by a live manual run.
-        """
-        try:
-            return int(group_id) in self.group_cancel_events
-        except (TypeError, ValueError):
-            return False
 
     # ===== Ручной последовательный запуск всех зон в группе =====
     def start_group_sequence(self, group_id: int,
