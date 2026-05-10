@@ -217,3 +217,66 @@ class TestZoneMqttStartPercent:
         end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
         expected = before + timedelta(minutes=240)
         assert abs((end_dt - expected).total_seconds()) < 5
+
+
+# ── Issue #12 iter2 C2: "minutes wins if both sent" — strict rejection ─────
+# Spec §4 invariant: duration present in body == user intent. Either
+# accept (1..120) or 400. NEVER silent fallback to percent.
+class TestZoneMqttStartMinutesWinsStrict:
+    def test_minutes_out_of_range_rejected_no_percent_fallback(self, admin_client, app):
+        """duration=200 + duration_percent=100 -> 400, NOT silent fall to %."""
+        z = app.db.create_zone({
+            'name': 'C2Reject', 'duration': 20, 'group_id': 1,
+            'topic': '/test/c2reject',
+        })
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration': 200, 'duration_percent': 100}),
+            content_type='application/json')
+        # Must reject — never fall through to percent path.
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert body.get('success') is False
+        # Zone must remain off (no side effects from the rejected request).
+        zone = app.db.get_zone(z['id'])
+        assert (zone.get('state') or 'off') != 'on'
+
+    def test_minutes_null_percent_honored(self, admin_client, app):
+        """duration=null + duration_percent=100 -> percent path runs (norm × 1.0)."""
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            'name': 'C2NullDur', 'duration': 12, 'group_id': 1,
+            'topic': '/test/c2nulldur',
+        })
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration': None, 'duration_percent': 100}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        # 12 × 1.0 = 12 min — percent honoured because minutes was null.
+        zone = app.db.get_zone(z['id'])
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        expected = before + timedelta(minutes=12)
+        assert abs((end_dt - expected).total_seconds()) < 5
+
+    def test_minutes_wins_over_percent_when_both_valid(self, admin_client, app):
+        """duration=30 + duration_percent=100 -> 30 min, NOT norm × 1.0."""
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            # Choose norm != 30 so we can distinguish minutes-mode from %-mode.
+            'name': 'C2Wins', 'duration': 12, 'group_id': 1,
+            'topic': '/test/c2wins',
+        })
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration': 30, 'duration_percent': 100}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        # Minutes wins -> 30 min, not 12 (norm × 100%).
+        zone = app.db.get_zone(z['id'])
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        expected = before + timedelta(minutes=30)
+        assert abs((end_dt - expected).total_seconds()) < 5

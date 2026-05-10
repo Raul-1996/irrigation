@@ -2394,6 +2394,19 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 showZoneToast(data && data.success ? '▶ Группа запущена' : 'Ошибка', data && data.success ? 'success' : 'error');
+                // Issue #12 C1: surface server-side warnings on the group
+                // path (mirrors single-zone handler below). norm_not_set =>
+                // some zone in the group had duration<=0, server fell back
+                // to 15 min. clipped_max => some zone × pct exceeded 240.
+                if (data && data.success && data.warnings && data.warnings.length) {
+                    var msgs = data.warnings.map(function(w) {
+                        if (w === 'norm_not_set') return 'норма зоны не задана — использую 15 мин';
+                        if (w === 'clipped_max') return 'обрезано до 240 мин';
+                        if (w === 'clipped_min') return 'округлено до 1 мин';
+                        return w;
+                    });
+                    setTimeout(function() { showZoneToast('⚠ ' + msgs.join('; '), 'error'); }, 600);
+                }
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             });
             return;

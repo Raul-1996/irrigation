@@ -142,3 +142,27 @@ class TestGroupSequencePercent:
         end_dt = datetime.strptime(z1f['planned_end_time'], '%Y-%m-%d %H:%M:%S')
         expected = before + timedelta(minutes=7)
         assert abs((end_dt - expected).total_seconds()) < 5
+
+    def test_start_group_percent_warnings_propagated(self, admin_client, app):
+        """Issue #12 C1: group endpoint must surface warnings[] (norm_not_set
+        when any zone has duration<=0 + percent mode), matching the
+        single-zone endpoint contract.
+        """
+        g = app.db.create_group('PctWarn')
+        # Two zones; one with broken norm (forces 'norm_not_set' from helper).
+        z1 = app.db.create_zone({'name': 'WZ1', 'duration': 10, 'group_id': g['id'], 'topic': '/t/wz1'})
+        z2 = app.db.create_zone({'name': 'WZ2', 'duration': 10, 'group_id': g['id'], 'topic': '/t/wz2'})
+        # Direct DB write to bypass route validation — simulate corrupt data.
+        app.db.update_zone(z2['id'], {'duration': 0})
+        resp = admin_client.post(f'/api/groups/{g["id"]}/start-from-first',
+            data=json.dumps({'duration_percent': 50}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        # Response must carry warnings[] (deduped across zones).
+        warns = body.get('warnings')
+        assert isinstance(warns, list), \
+            f"group endpoint must return warnings[] (Issue #12 C1), got: {body!r}"
+        assert 'norm_not_set' in warns, \
+            f"zone with duration<=0 must produce 'norm_not_set' warning, got: {warns!r}"

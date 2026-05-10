@@ -315,37 +315,48 @@ def api_zone_mqtt_start(zone_id: int):
         override_dur = None
         warnings: list = []  # Issue #12 — populated by % branch when applicable
         body = request.get_json(silent=True) or {}
-        try:
-            req_d = body.get('duration')
-            if req_d is not None:
-                req_d = int(req_d)
-                if 1 <= req_d <= 120:
-                    override_dur = req_d
-                    logger.info(
-                        "mqtt_start: zone %s using override duration %s min (base unchanged)",
-                        zone_id, req_d,
-                    )
-        except (ValueError, TypeError) as e:
-            logger.debug("mqtt_start duration parse: %s", e)
+        # Issue #12 C2: "minutes wins if both sent" must be strict.
+        # If `duration` is present in the body AT ALL, that is the user's
+        # intent — accept it (1..120) or reject the whole request (400).
+        # Never silently fall through to percent. See specs/issue-12-review.md.
+        req_d_raw = body.get('duration')
+        minutes_sent = req_d_raw is not None
+        if minutes_sent:
+            try:
+                req_d = int(req_d_raw)
+            except (ValueError, TypeError):
+                return jsonify({'success': False,
+                                'message': 'duration должен быть целым числом 1..120'}), 400
+            if not (1 <= req_d <= 120):
+                return jsonify({'success': False,
+                                'message': 'duration должен быть в диапазоне 1..120 мин'}), 400
+            override_dur = req_d
+            logger.info(
+                "mqtt_start: zone %s using override duration %s min (base unchanged)",
+                zone_id, req_d,
+            )
 
         # ---- Issue #12: %-of-norm override (alternative to `duration`) ----
-        # Minutes mode (duration) wins if both are sent. We don't relax the
-        # 120-min cap on minutes mode — only percent mode may produce 121..240.
-        try:
-            req_pct = body.get('duration_percent')
-            if override_dur is None and req_pct is not None:
-                from services.zone_control import PERCENT_PRESETS, per_zone_dur as _per_zone_dur
-                p = int(req_pct)
-                if p in PERCENT_PRESETS:
-                    computed, warns = _per_zone_dur(z, None, p)
-                    override_dur = computed
-                    warnings = warns
-                    logger.info(
-                        "mqtt_start: zone %s using override percent %s%% -> %s min (warnings=%s)",
-                        zone_id, p, override_dur, warnings,
-                    )
-        except (ValueError, TypeError) as e:
-            logger.debug("mqtt_start percent parse: %s", e)
+        # Minutes mode (duration) wins if SENT (validated above). Percent is
+        # only honoured when `duration` is absent/null in the body. We don't
+        # relax the 120-min cap on minutes mode — only percent mode may
+        # produce 121..240.
+        if not minutes_sent:
+            try:
+                req_pct = body.get('duration_percent')
+                if req_pct is not None:
+                    from services.zone_control import PERCENT_PRESETS, per_zone_dur as _per_zone_dur
+                    p = int(req_pct)
+                    if p in PERCENT_PRESETS:
+                        computed, warns = _per_zone_dur(z, None, p)
+                        override_dur = computed
+                        warnings = warns
+                        logger.info(
+                            "mqtt_start: zone %s using override percent %s%% -> %s min (warnings=%s)",
+                            zone_id, p, override_dur, warnings,
+                        )
+            except (ValueError, TypeError) as e:
+                logger.debug("mqtt_start percent parse: %s", e)
 
         # ---- Already-ON branch — reschedule stop, do NOT delegate ----
         # Delegating would peer-off siblings (none changed) and re-publish
