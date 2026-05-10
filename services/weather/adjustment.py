@@ -105,6 +105,40 @@ class WeatherAdjustment:
             logger.debug("Weather data unavailable: %s", e)
             return None
 
+    def _check_safety_skip(self, weather, settings):
+        # type: (Any, Dict[str, Any]) -> bool
+        """Threshold-only safety check (ignores factor_* flags).
+
+        Mirrors should_skip() conditions but without the user-facing
+        ``factor_rain``/``factor_freeze``/``factor_wind`` toggles. Used by
+        ``get_coefficient`` to force coef=0 on dangerous conditions even when
+        the corresponding factor is disabled (e.g. 50mm rain + factor_rain=off
+        must still skip — flags are UX, thresholds are hard safety).
+        """
+        if weather is None:
+            return False
+
+        rain_threshold = settings.get('rain_threshold_mm', self.DEFAULT_RAIN_THRESHOLD_MM)
+        rain_24h = weather.precipitation_24h or 0.0
+        rain_forecast = weather.precipitation_forecast_6h or 0.0
+        if rain_24h > rain_threshold or rain_forecast > rain_threshold:
+            return True
+
+        freeze_threshold = settings.get('freeze_threshold_c', self.DEFAULT_FREEZE_THRESHOLD_C)
+        temp = weather.temperature
+        if temp is not None and temp < freeze_threshold:
+            return True
+        min_temp_6h = getattr(weather, 'min_temp_forecast_6h', None)
+        if isinstance(min_temp_6h, (int, float)) and min_temp_6h < freeze_threshold:
+            return True
+
+        wind = weather.wind_speed
+        exceeds, _ = self._get_wind_check(settings, wind)
+        if exceeds:
+            return True
+
+        return False
+
     def _has_ms_threshold(self):
         # type: () -> bool
         """Check if weather.wind_threshold_ms is explicitly set in DB."""
@@ -220,6 +254,10 @@ class WeatherAdjustment:
         if not weather:
             return 100
 
+        # Hard safety: thresholds always force skip even if factor_* flags are off
+        if self._check_safety_skip(weather, settings):
+            return 0
+
         base = 100
 
         # Temperature factor (Zimmerman-style)
@@ -267,7 +305,7 @@ class WeatherAdjustment:
         rain_24h = weather.precipitation_24h or 0.0
         rain_factor = 1.0
         rain_threshold = settings.get('rain_threshold_mm', self.DEFAULT_RAIN_THRESHOLD_MM)
-        if rain_24h > 0 and settings.get('factor_rain', True):
+        if rain_24h > 0 and rain_threshold > 0 and settings.get('factor_rain', True):
             ratio = rain_24h / rain_threshold
             if ratio >= 1.0:
                 rain_factor = 0.0

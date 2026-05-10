@@ -122,6 +122,85 @@ class TestWeatherData:
         wd = WeatherData(raw)
         assert wd.precipitation_forecast_6h >= 0
 
+    def test_current_hour_uses_utc_offset(self):
+        """Issue #27: idx must reflect location-local hour (utc_offset_seconds)."""
+        from services.weather import WeatherData
+        from datetime import datetime, timedelta
+
+        # Build response in Cholpon-Ata local time (UTC+6 = 21600 seconds).
+        # Server time can be anything; what matters is that the raw['hourly']['time']
+        # is interpreted via utc_offset_seconds, not server-local clock.
+        utc_offset = 21600  # +6h
+        local_now = datetime.utcfromtimestamp(time.time() + utc_offset)
+        local_now = local_now.replace(minute=0, second=0, microsecond=0)
+
+        times = []
+        precips = []
+        for i in range(-23, 25):
+            dt = local_now + timedelta(hours=i)
+            times.append(dt.strftime('%Y-%m-%dT%H:00'))
+            # 1mm at every hour up to and including current; 0 in future
+            precips.append(1.0 if i <= 0 else 0.0)
+
+        raw = {
+            'utc_offset_seconds': utc_offset,
+            'hourly': {
+                'time': times,
+                'temperature_2m': [20.0] * 48,
+                'relative_humidity_2m': [50.0] * 48,
+                'precipitation': precips,
+                'wind_speed_10m': [3.0] * 48,
+                'et0_fao_evapotranspiration': [0.2] * 48,
+            },
+            'daily': {
+                'time': [local_now.strftime('%Y-%m-%d')],
+                'precipitation_sum': [0.0],
+                'et0_fao_evapotranspiration': [4.5],
+            },
+        }
+        wd = WeatherData(raw)
+        # idx should point at current local hour (i=0 → index 23 in our list)
+        # so precipitation_24h sums 24 entries of 1mm.
+        assert abs(wd.precipitation_24h - 24.0) < 0.01
+
+    def test_precipitation_24h_sums_full_window(self):
+        """24 hourly precipitation values of 1mm → precipitation_24h ≈ 24.0."""
+        from services.weather import WeatherData
+        from datetime import datetime, timedelta
+
+        utc_offset = 0
+        local_now = datetime.utcfromtimestamp(time.time()).replace(minute=0, second=0, microsecond=0)
+        times = []
+        for i in range(-23, 25):
+            dt = local_now + timedelta(hours=i)
+            times.append(dt.strftime('%Y-%m-%dT%H:00'))
+        # idx is 23 (current hour). precipitation[0..23] = 1mm each.
+        precips = [1.0] * 24 + [0.0] * 24
+        raw = {
+            'utc_offset_seconds': utc_offset,
+            'hourly': {
+                'time': times,
+                'precipitation': precips,
+                'temperature_2m': [20.0] * 48,
+                'relative_humidity_2m': [50.0] * 48,
+                'wind_speed_10m': [3.0] * 48,
+            },
+            'daily': {'time': [], 'precipitation_sum': [], 'et0_fao_evapotranspiration': []},
+        }
+        wd = WeatherData(raw)
+        assert abs(wd.precipitation_24h - 24.0) < 0.01
+
+    def test_fallback_when_no_utc_offset(self):
+        """Old cache without utc_offset_seconds → fallback to datetime.now(), no crash."""
+        from services.weather import WeatherData
+        raw = _make_sample_api_response()
+        # _make_sample_api_response uses datetime.now() so fallback path matches it
+        assert 'utc_offset_seconds' not in raw
+        wd = WeatherData(raw)
+        # Just verify it doesn't crash and produces sensible values
+        assert wd.temperature is not None
+        assert wd.precipitation_24h >= 0
+
 
 class TestWeatherService:
     def test_get_location(self, weather_db):

@@ -69,7 +69,7 @@ class WeatherMixin:
                 return base_duration
             coeff = adj.get_coefficient()
             adjusted = int(round(base_duration * coeff / 100.0))
-            adjusted = max(1, adjusted) if adjusted > 0 else base_duration
+            adjusted = 0 if coeff == 0 else max(1, adjusted)
             if adjusted != base_duration:
                 logger.info(f"Weather adjustment: zone={zone_id} base={base_duration}min adjusted={adjusted}min (coeff={coeff}%)")
                 try:
@@ -138,6 +138,9 @@ class ProgramRunnerMixin(WeatherMixin):
                         continue
 
                 duration = self._get_weather_adjusted_duration(zone_id, int(zone['duration']))
+                if duration <= 0:
+                    logger.info(f"Программа {program_id}: зона {zone_id} имеет нулевую длительность (weather coef=0), пропуск")
+                    continue
 
                 # БЕЗУСЛОВНО выключаем все зоны этой группы перед стартом текущей
                 try:

@@ -38,7 +38,8 @@ def adj_db(tmp_path):
 
 
 def _mock_weather(temperature=25.0, humidity=50.0, precipitation_24h=0.0,
-                  precipitation_forecast_6h=0.0, wind_speed=10.0, daily_et0=4.5):
+                  precipitation_forecast_6h=0.0, wind_speed=10.0, daily_et0=4.5,
+                  min_temp_forecast_6h=None):
     """Create a mock WeatherData object."""
     mock = MagicMock()
     mock.temperature = temperature
@@ -49,6 +50,7 @@ def _mock_weather(temperature=25.0, humidity=50.0, precipitation_24h=0.0,
     mock.daily_et0 = daily_et0
     mock.precipitation = 0.0
     mock.et0_hourly = 0.2
+    mock.min_temp_forecast_6h = min_temp_forecast_6h if min_temp_forecast_6h is not None else temperature
     return mock
 
 
@@ -263,6 +265,49 @@ class TestAdjustDuration:
         from services.weather_adjustment import WeatherAdjustment
         adj = WeatherAdjustment(adj_db)
         assert adj.adjust_duration(10) == 0
+
+
+class TestWeatherSafetyChecks:
+    """Issue #27: safety thresholds must apply even when factor_* flags are off."""
+
+    @patch('services.weather_adjustment.WeatherAdjustment._get_weather')
+    def test_coef_zero_on_heavy_rain_with_factor_disabled(self, mock_get, adj_db):
+        """factor_rain=False but rain >> threshold → coef=0 (hard safety)."""
+        conn = sqlite3.connect(adj_db)
+        conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('weather.factor.rain','0')")
+        conn.commit()
+        conn.close()
+        mock_get.return_value = _mock_weather(precipitation_24h=50.0)
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        assert adj.get_coefficient() == 0
+
+    @patch('services.weather_adjustment.WeatherAdjustment._get_weather')
+    def test_coef_no_zerodiv_when_threshold_zero(self, mock_get, adj_db):
+        """rain_threshold_mm=0 + rain_24h>0 must NOT divide by zero."""
+        conn = sqlite3.connect(adj_db)
+        conn.execute("UPDATE settings SET value='0' WHERE key='weather.rain_threshold_mm'")
+        conn.commit()
+        conn.close()
+        mock_get.return_value = _mock_weather(precipitation_24h=2.0)
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        # threshold=0 ⇒ safety check trips on any rain > 0 → coef=0.
+        # The point of this test is "no ZeroDivisionError".
+        coeff = adj.get_coefficient()
+        assert isinstance(coeff, int)
+        assert 0 <= coeff <= 200
+
+    @patch('services.weather_adjustment.WeatherAdjustment._get_weather')
+    def test_safety_check_freeze(self, mock_get, adj_db):
+        """temp << freeze_threshold → _check_safety_skip True → coef=0."""
+        mock_get.return_value = _mock_weather(temperature=-10.0)
+        from services.weather_adjustment import WeatherAdjustment
+        adj = WeatherAdjustment(adj_db)
+        settings = adj._get_settings()
+        weather = adj._get_weather()
+        assert adj._check_safety_skip(weather, settings) is True
+        assert adj.get_coefficient() == 0
 
 
 class TestWeatherLog:

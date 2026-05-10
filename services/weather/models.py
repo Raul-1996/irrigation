@@ -8,9 +8,12 @@ Constants live here (rather than in a separate ``constants.py``) because the
 parser and every other submodule consume the same values, and splitting a
 ten-line constants module would add import churn without clarity.
 """
+import logging
 from datetime import datetime
 import time
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +49,15 @@ class WeatherData:
         """Extract current-hour values from hourly forecast data."""
         hourly = self.raw.get('hourly', {})
         daily = self.raw.get('daily', {})
-        now = datetime.now()
+        # Open-Meteo hourly.time is in the location's local timezone.
+        # We must compute "now" in that same timezone, otherwise idx points to
+        # the wrong hour and precipitation_24h sums the wrong window.
+        utc_offset = self.raw.get('utc_offset_seconds')
+        if utc_offset is not None:
+            now = datetime.utcfromtimestamp(time.time() + int(utc_offset))
+        else:
+            logger.warning("WeatherData: utc_offset_seconds missing, falling back to server-local time")
+            now = datetime.now()
         current_hour = now.strftime('%Y-%m-%dT%H:00')
 
         # Find current hour index
