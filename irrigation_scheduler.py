@@ -1268,7 +1268,13 @@ class IrrigationScheduler:
 
     def _run_group_sequence(self, group_id: int, zone_ids: List[int], override_duration: int = None):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
-        if TESTING:
+        # Test-only bypass: when SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ=1
+        # we skip the synchronous-first-zone short-circuit and run the real
+        # per-zone loop (still truncated to a few seconds via the TESTING
+        # branch lower in this method).  Used by the issue #16 outcome test
+        # to verify zones 2/3 never reach state='on' after a mid-sequence
+        # cancel.  Production never sets this env var.
+        if TESTING and not os.environ.get('SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ'):
             logger.debug("TESTING mode: simplified _run_group_sequence for group %s", group_id)
             # In TESTING mode, set the first zone ON in the DB (skip MQTT/hardware)
             for zone_id in zone_ids:
