@@ -749,8 +749,8 @@
                  ${showWaterCols ? `<td class=\"admin-only\">${totalLiters}</td>` : ''}
                  <td class="col-photo" data-label="Фото">
                      <div class="zone-photo">
-                         ${zone.photo_path ? 
-                             `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
+                         ${zone.photo_path ?
+                             `<img src="/api/zones/${zone.id}/photo?variant=thumb" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
                              `<div class="no-photo" title="Нет фото">📷</div>`
                          }
                      </div>
@@ -1054,6 +1054,21 @@
         document.getElementById('photoModal').style.display = 'none';
     }
 
+    // Issue #11: outside-click + Esc handlers for the lightbox.
+    // Wired once at IIFE setup time (module is included once per page load).
+    (function () {
+        var modal = document.getElementById('photoModal');
+        if (!modal) return;
+        modal.addEventListener('click', function (e) {
+            if (e.target === modal) closePhotoModal();
+        });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && modal.style.display === 'flex') {
+                closePhotoModal();
+            }
+        });
+    })();
+
     // ===== Photo upload/delete/rotate (issue #6) =====
     // Parallel implementation to zones.js (separate IIFE scope).
     // Backend: POST/DELETE /api/zones/{id}/photo, POST /api/zones/{id}/photo/rotate
@@ -1098,8 +1113,8 @@
             showZoneToast('Выберите изображение', 'error');
             return;
         }
-        if (file.size > 5 * 1024 * 1024) {
-            showZoneToast('Файл больше 5 МБ', 'error');
+        if (file.size > 20 * 1024 * 1024) {
+            showZoneToast('Файл больше 20 МБ', 'error');
             return;
         }
 
@@ -1826,14 +1841,16 @@
 
             html += '<div class="zone-card ' + statusCls + '" id="zcard-' + z.id + '" data-zone-id="' + z.id + '">';
             html += '<div class="zone-card-main" onclick="toggleZoneCard(' + z.id + ')">';
-            // Photo thumbnail if exists, otherwise icon (issue #6)
+            // Photo thumbnail if exists, otherwise icon (issue #6 + #11)
             if (z.photo_path) {
                 var _ts = z._photoTs || '';
-                var _photoUrl = '/api/zones/' + z.id + '/photo' + (_ts ? '?ts=' + _ts : '');
-                html += '<div class="zc-photo" onclick="event.stopPropagation();showPhotoModal(\'' + _photoUrl + '\')" title="Открыть фото">';
+                // Issue #11: list shows the small thumb (?variant=thumb), lightbox opens the full main file.
+                var _thumbUrl = '/api/zones/' + z.id + '/photo?variant=thumb' + (_ts ? '&ts=' + _ts : '');
+                var _fullUrl = '/api/zones/' + z.id + '/photo' + (_ts ? '?ts=' + _ts : '');
+                html += '<div class="zc-photo" onclick="event.stopPropagation();showPhotoModal(\'' + _fullUrl + '\')" title="Открыть фото">';
                 // alt is escaped (XSS); src is server-controlled URL (no user input).
                 // onerror falls back to hiding the img (parent gets default grey background).
-                html += '<img src="' + _photoUrl + '" alt="Фото зоны ' + escapeHtml(z.name || '') + '" onerror="this.style.display=\'none\'">';
+                html += '<img src="' + _thumbUrl + '" alt="Фото зоны ' + escapeHtml(z.name || '') + '" onerror="this.style.display=\'none\'">';
                 html += '</div>';
             } else {
                 html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';

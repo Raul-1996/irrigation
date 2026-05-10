@@ -296,8 +296,8 @@
                  ${showWaterCols ? `<td class="admin-only">${totalLiters}</td>` : ''}
                  <td class="col-photo" data-label="Фото">
                      <div class="zone-photo">
-                         ${zone.photo_path ? 
-                             `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
+                         ${zone.photo_path ?
+                             `<img src="/api/zones/${zone.id}/photo?variant=thumb" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
                              `<div class="no-photo" title="Нет фото">📷</div>`
                          }
                      </div>

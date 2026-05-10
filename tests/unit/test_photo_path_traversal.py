@@ -111,6 +111,22 @@ class TestSafeZonePhotoPath:
         with pytest.raises(UnsafePathError):
             safe_zone_photo_path('/etc/ZONE_1.webp')
 
+    # Issue #11: filename regex extended with optional `_thumb` suffix.
+    def test_thumb_filename_accepted(self):
+        result = safe_zone_photo_path('media/zones/ZONE_5_thumb.webp')
+        assert result.endswith(os.path.join('static', 'media', 'zones', 'ZONE_5_thumb.webp'))
+
+    def test_evil_thumb_suffix_rejected(self):
+        # Typo + extra-suffix variants must not pass.
+        for bad in (
+            'media/zones/ZONE_5_thumbb.webp',
+            'media/zones/ZONE_5_thumb_evil.webp',
+            'media/zones/ZONE_5_thumb.php',
+            'media/zones/ZONE_5thumb.webp',
+        ):
+            with pytest.raises(UnsafePathError):
+                safe_zone_photo_path(bad)
+
 
 # ── SEC-014: rotate_zone_photo angle handling ──────────────────────────────
 

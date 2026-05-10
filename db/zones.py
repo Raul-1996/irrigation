@@ -596,15 +596,31 @@ class ZoneRepository(BaseRepository):
             return False
 
     @retry_on_busy()
-    def update_zone_photo(self, zone_id: int, photo_path: Optional[str]) -> bool:
-        """Обновить фотографию зоны."""
+    def update_zone_photo(self, zone_id: int, photo_path: Optional[str],
+                          photo_thumb: Optional[str] = None,
+                          update_thumb: bool = False) -> bool:
+        """Обновить фотографию зоны.
+
+        Issue #11: optional ``photo_thumb`` (relative path to 400x400 file).
+        Pass ``update_thumb=True`` to update both columns in one statement
+        (used by upload + delete). When ``update_thumb=False`` (default),
+        only ``photo_path`` is touched — preserves backwards compatibility
+        with callers that don't know about thumbs (e.g. legacy CRUD paths).
+        """
         try:
             with self._connect() as conn:
-                conn.execute('''
-                    UPDATE zones 
-                    SET photo_path = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                ''', (photo_path, zone_id))
+                if update_thumb:
+                    conn.execute('''
+                        UPDATE zones
+                        SET photo_path = ?, photo_thumb = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (photo_path, photo_thumb, zone_id))
+                else:
+                    conn.execute('''
+                        UPDATE zones
+                        SET photo_path = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (photo_path, zone_id))
                 conn.commit()
                 return True
         except sqlite3.Error as e:

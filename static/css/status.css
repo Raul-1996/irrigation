@@ -1100,20 +1100,41 @@
         flex-direction: column;
         align-items: center;
         gap: 12px;
-        max-width: min(92vw, 720px);
-        max-height: 85vh;
-        overflow:auto;
+        /* Issue #11: target ~3/4 of screen */
+        max-width: 75vw;
+        max-height: 75vh;
+        overflow: auto;
         box-sizing: border-box;
         margin: 0;
+        position: relative;
     }
     /* Гарантия вписывания фото в экран смартфона */
     .photo-modal img {
         display: block;
-        max-width: 95vw;
-        max-height: 85vh;
+        max-width: 75vw;
+        max-height: 75vh;
         width: auto;
         height: auto;
         object-fit: contain;
+    }
+    /* Issue #11: ✕ close button */
+    .photo-modal-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        font-size: 20px;
+        line-height: 1;
+        border: none;
+        cursor: pointer;
+        z-index: 1;
+    }
+    .photo-modal-close:hover {
+        background: rgba(0, 0, 0, 0.75);
     }
 
     .photo-modal-actions {

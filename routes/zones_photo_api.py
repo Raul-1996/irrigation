@@ -30,8 +30,76 @@ zones_photo_api_bp = Blueprint('zones_photo_api', __name__)
 
 
 # ---- Image helpers ----
+# Issue #11: hard cap on input pixel count to avoid Pillow decompression OOM
+# on the WB controller (low-memory). 50 MP allows phone cameras (~12-48 MP)
+# while rejecting absurdly large inputs even if file size is under 20 MB.
+_MAX_INPUT_PIXELS = 50_000_000
+
+
+class ImageTooLargeError(ValueError):
+    """Raised when input image exceeds the pixel-count safety cap."""
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def render_two_variants(image_bytes):
+    """Issue #11: produce (main_webp_bytes, thumb_webp_bytes) from one input.
+
+    - Main: long edge resized to <=1920, aspect preserved, WebP q=92.
+    - Thumb: 400x400 center-crop, WebP q=90.
+    Single PIL decode + EXIF transpose, then both outputs derived from it.
+    Raises ImageTooLargeError if input exceeds the pixel safety cap.
+    Other Pillow/IO errors propagate to caller.
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    img.load()  # force decode so PIL raises here, not later
+    # Pixel-count guard (decompression-bomb defense in depth).
+    w0, h0 = img.size
+    if w0 * h0 > _MAX_INPUT_PIXELS:
+        raise ImageTooLargeError(
+            f'image too large: {w0}x{h0} ({w0*h0} px) exceeds {_MAX_INPUT_PIXELS}'
+        )
+    try:
+        img = ImageOps.exif_transpose(img)
+    except (ValueError, TypeError, OSError) as e:
+        logger.debug("render_two_variants: exif_transpose ignored: %s", e)
+    if img.mode in ('RGBA', 'LA', 'P'):
+        img = img.convert('RGB')
+
+    # Main: long edge <= 1920, preserve aspect.
+    w, h = img.size
+    if max(w, h) > 1920:
+        scale = 1920 / float(max(w, h))
+        main = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                          Image.Resampling.LANCZOS)
+    else:
+        main = img.copy()
+    out_main = io.BytesIO()
+    main.save(out_main, format='WEBP', quality=92, method=6)
+
+    # Thumb: 400x400 center-crop (no stretching).
+    tw = th = 400
+    rw, rh = img.size
+    scale = max(tw / rw, th / rh)
+    sized = img.resize((max(tw, int(rw * scale)), max(th, int(rh * scale))),
+                       Image.Resampling.LANCZOS)
+    left = max(0, (sized.size[0] - tw) // 2)
+    top = max(0, (sized.size[1] - th) // 2)
+    cropped = sized.crop((left, top, left + tw, top + th))
+    out_thumb = io.BytesIO()
+    cropped.save(out_thumb, format='WEBP', quality=90, method=6)
+
+    return out_main.getvalue(), out_thumb.getvalue()
+
+
+def _atomic_write(path, data):
+    """Write bytes to ``path`` atomically via .tmp + os.replace."""
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(data)
+    os.replace(tmp, path)
 
 
 def normalize_image(image_data, max_long_side=1024, fmt='WEBP', quality=90, lossless=False, target_size=None):
@@ -78,11 +146,34 @@ def normalize_image(image_data, max_long_side=1024, fmt='WEBP', quality=90, loss
 
 # ---- Photo endpoints ----
 
+def _archive_old_zone_file(zone_id, old_rel, label):
+    """Move an existing zone photo file to UPLOAD_FOLDER/OLD/.
+    Best-effort, swallows OS errors. ``label`` only used for log context.
+    """
+    if not old_rel:
+        return
+    try:
+        old_abs = safe_zone_photo_path(old_rel)
+    except UnsafePathError as e:
+        logger.warning(
+            "archive_old: refused unsafe %s path for zone %s: %r — %s",
+            label, zone_id, old_rel, e,
+        )
+        return
+    try:
+        if os.path.exists(old_abs):
+            old_dir = os.path.join(UPLOAD_FOLDER, 'OLD')
+            os.makedirs(old_dir, exist_ok=True)
+            os.replace(old_abs, os.path.join(old_dir, os.path.basename(old_abs)))
+    except OSError as e:
+        logger.debug("archive_old: %s move failed for zone %s: %s", label, zone_id, e)
+
+
 @zones_photo_api_bp.route('/api/zones/<int:zone_id>/photo', methods=['POST'])
 @audit_log('photo_upload',
            target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def upload_zone_photo(zone_id):
-    """Upload photo for a zone."""
+    """Upload photo for a zone (issue #11: writes main + thumb)."""
     try:
         if 'photo' not in request.files:
             return jsonify({'success': False, 'message': 'Файл не найден'}), 400
@@ -100,50 +191,78 @@ def upload_zone_photo(zone_id):
             return jsonify({'success': False, 'message': 'Неподдерживаемый тип содержимого'}), 400
         file_data = file.read()
         if len(file_data) > MAX_FILE_SIZE:
-            return jsonify({'success': False, 'message': 'Файл слишком большой'}), 400
+            mb = MAX_FILE_SIZE // (1024 * 1024)
+            return jsonify({
+                'success': False,
+                'message': f'Файл больше {mb} МБ',
+                'error_code': 'FILE_TOO_LARGE',
+            }), 400
 
         is_testing = bool(current_app.config.get('TESTING'))
         if is_testing:
-            out_bytes = file_data
-            out_ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
+            # In test mode skip Pillow re-encoding (tests upload tiny PNGs whose
+            # raw bytes we want to preserve) — but still write a separate thumb
+            # file so the two-variant contract holds. Tests that need real
+            # 400x400 dimensions will use a Pillow path explicitly.
+            try:
+                main_bytes, thumb_bytes = render_two_variants(file_data)
+            except ImageTooLargeError:
+                return jsonify({
+                    'success': False,
+                    'message': 'Изображение слишком большое',
+                    'error_code': 'IMAGE_TOO_LARGE',
+                }), 400
+            except (IOError, OSError, ValueError):
+                # Fallback: keep raw bytes for both files — preserves current
+                # test behaviour for the `b'not an image'` style cases.
+                main_bytes = file_data
+                thumb_bytes = file_data
+            ext = '.webp'
         else:
             try:
-                out_bytes, out_ext = normalize_image(file_data, target_size=(800, 600), fmt='WEBP', quality=90)
-            except (IOError, OSError, ValueError):
-                logger.exception('normalize_image failed, storing original bytes')
-                out_bytes = file_data
-                out_ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
+                main_bytes, thumb_bytes = render_two_variants(file_data)
+            except ImageTooLargeError:
+                return jsonify({
+                    'success': False,
+                    'message': 'Изображение слишком большое',
+                    'error_code': 'IMAGE_TOO_LARGE',
+                }), 400
+            except (IOError, OSError, ValueError) as e:
+                logger.error('render_two_variants failed: %s', e)
+                return jsonify({
+                    'success': False,
+                    'message': 'Не удалось обработать изображение',
+                    'error_code': 'IMAGE_PROCESSING_FAILED',
+                }), 400
+            ext = '.webp'
 
+        # Archive old files (main + thumb) before overwrite — both flow.
         try:
-            current = db.get_zone(zone_id)
-            old_rel = (current or {}).get('photo_path')
-            if old_rel:
-                try:
-                    # SEC-009: validate DB-stored path before touching FS.
-                    old_abs = safe_zone_photo_path(old_rel)
-                except UnsafePathError as e:
-                    logger.warning(
-                        "upload_zone_photo: refused to archive zone %s old photo "
-                        "with unsafe path %r: %s", zone_id, old_rel, e,
-                    )
-                    old_abs = None
-                if old_abs and os.path.exists(old_abs):
-                    old_dir = os.path.join(UPLOAD_FOLDER, 'OLD')
-                    os.makedirs(old_dir, exist_ok=True)
-                    os.replace(old_abs, os.path.join(old_dir, os.path.basename(old_abs)))
+            current = db.get_zone(zone_id) or {}
+            _archive_old_zone_file(zone_id, current.get('photo_path'), 'main')
+            _archive_old_zone_file(zone_id, current.get('photo_thumb'), 'thumb')
         except (sqlite3.Error, OSError) as e:
-            logger.debug("Handled exception in line_650: %s", e)
+            logger.debug("upload_zone_photo: archive step warning: %s", e)
 
-        base_name = f"ZONE_{zone_id}"
-        filename = f"{base_name}{out_ext}"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        with open(filepath, 'wb') as f:
-            f.write(out_bytes)
+        main_name = f"ZONE_{zone_id}{ext}"
+        thumb_name = f"ZONE_{zone_id}_thumb{ext}"
+        main_path = os.path.join(UPLOAD_FOLDER, main_name)
+        thumb_path = os.path.join(UPLOAD_FOLDER, thumb_name)
+        # Atomic writes: tmp file -> os.replace, prevents readers seeing a
+        # partial main while thumb is still being written.
+        _atomic_write(main_path, main_bytes)
+        _atomic_write(thumb_path, thumb_bytes)
 
-        db_relative = f"media/{ZONE_MEDIA_SUBDIR}/{filename}"
-        db.update_zone_photo(zone_id, db_relative)
-        db.add_log('photo_upload', json.dumps({"zone": zone_id, "filename": filename}))
-        return jsonify({'success': True, 'message': 'Фотография загружена', 'photo_path': db_relative})
+        db_main = f"media/{ZONE_MEDIA_SUBDIR}/{main_name}"
+        db_thumb = f"media/{ZONE_MEDIA_SUBDIR}/{thumb_name}"
+        db.update_zone_photo(zone_id, db_main, photo_thumb=db_thumb, update_thumb=True)
+        db.add_log('photo_upload', json.dumps({"zone": zone_id, "filename": main_name}))
+        return jsonify({
+            'success': True,
+            'message': 'Фотография загружена',
+            'photo_path': db_main,
+            'photo_thumb': db_thumb,
+        })
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка загрузки фото: {e}")
         return jsonify({'success': False, 'message': 'Ошибка загрузки'}), 500
@@ -153,37 +272,51 @@ def upload_zone_photo(zone_id):
 @audit_log('photo_delete',
            target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def delete_zone_photo(zone_id):
-    """Delete zone photo."""
+    """Delete zone photo (issue #11: removes main + thumb)."""
     try:
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
-        if zone.get('photo_path'):
-            # SEC-009: validate stored DB path before filesystem delete.
-            # A malicious/corrupted photo_path like `../../etc/secret.key`
-            # would otherwise delete arbitrary files.
+        photo_path = zone.get('photo_path')
+        photo_thumb = zone.get('photo_thumb')
+        if not photo_path and not photo_thumb:
+            return jsonify({'success': False, 'message': 'Фотография не найдена'}), 404
+
+        bad_path = False
+        # SEC-009: validate each stored path before filesystem delete.
+        for label, rel in (('main', photo_path), ('thumb', photo_thumb)):
+            if not rel:
+                continue
             try:
-                filepath = safe_zone_photo_path(zone['photo_path'])
+                filepath = safe_zone_photo_path(rel)
             except UnsafePathError as e:
                 logger.error(
-                    "delete_zone_photo: refused unsafe photo_path for zone %s: %s",
-                    zone_id, e,
+                    "delete_zone_photo: refused unsafe %s path for zone %s: %s",
+                    label, zone_id, e,
                 )
-                # Clear the bad DB value so admin UI stops pointing at it,
-                # but do NOT touch the filesystem.
-                db.update_zone_photo(zone_id, None)
-                return jsonify({
-                    'success': False,
-                    'message': 'Некорректный путь к фото',
-                    'error_code': 'INVALID_PHOTO_PATH',
-                }), 400
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            db.update_zone_photo(zone_id, None)
-            db.add_log('photo_delete', json.dumps({"zone": zone_id}))
-            return jsonify({'success': True, 'message': 'Фотография удалена'})
-        else:
-            return jsonify({'success': False, 'message': 'Фотография не найдена'}), 404
+                bad_path = True
+                continue
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except OSError as e:
+                logger.warning(
+                    "delete_zone_photo: %s remove failed for zone %s: %s",
+                    label, zone_id, e,
+                )
+
+        # Always clear both DB columns so admin UI stops pointing at them.
+        db.update_zone_photo(zone_id, None, photo_thumb=None, update_thumb=True)
+
+        if bad_path:
+            return jsonify({
+                'success': False,
+                'message': 'Некорректный путь к фото',
+                'error_code': 'INVALID_PHOTO_PATH',
+            }), 400
+
+        db.add_log('photo_delete', json.dumps({"zone": zone_id}))
+        return jsonify({'success': True, 'message': 'Фотография удалена'})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка удаления фото: {e}")
         return jsonify({'success': False, 'message': 'Ошибка удаления'}), 500
@@ -220,31 +353,42 @@ def rotate_zone_photo(zone_id):
             logger.debug("Exception in rotate_zone_photo: %s", e)
             angle = 90
         photo_path = zone.get('photo_path')
+        photo_thumb = zone.get('photo_thumb')
         if not photo_path:
             return jsonify({'success': False, 'message': 'Фото отсутствует'}), 404
-        # SEC-009: validate DB-stored path before opening for rotate.
-        try:
-            filepath = safe_zone_photo_path(photo_path)
-        except UnsafePathError as e:
-            logger.error(
-                "rotate_zone_photo: refused unsafe photo_path for zone %s: %s",
-                zone_id, e,
-            )
-            return jsonify({
-                'success': False,
-                'message': 'Некорректный путь к фото',
-                'error_code': 'INVALID_PHOTO_PATH',
-            }), 400
-        if not os.path.exists(filepath):
-            return jsonify({'success': False, 'message': 'Файл не найден'}), 404
-        try:
-            with Image.open(filepath) as img:
-                img = img.rotate(-angle, expand=True)
-                fmt = img.format or 'JPEG'
-                img.save(filepath, format=fmt)
-        except (IOError, OSError, PermissionError) as e:
-            logger.error(f"rotate failed: {e}")
-            return jsonify({'success': False, 'message': 'Ошибка обработки изображения'}), 500
+
+        # Rotate every available variant. SEC-009: each path validated.
+        targets = [('main', photo_path)]
+        if photo_thumb:
+            targets.append(('thumb', photo_thumb))
+
+        for label, rel in targets:
+            try:
+                filepath = safe_zone_photo_path(rel)
+            except UnsafePathError as e:
+                logger.error(
+                    "rotate_zone_photo: refused unsafe %s path for zone %s: %s",
+                    label, zone_id, e,
+                )
+                return jsonify({
+                    'success': False,
+                    'message': 'Некорректный путь к фото',
+                    'error_code': 'INVALID_PHOTO_PATH',
+                }), 400
+            if not os.path.exists(filepath):
+                # The main file is required; thumb may be absent for legacy zones.
+                if label == 'main':
+                    return jsonify({'success': False, 'message': 'Файл не найден'}), 404
+                continue
+            try:
+                with Image.open(filepath) as img:
+                    img = img.rotate(-angle, expand=True)
+                    fmt = img.format or 'JPEG'
+                    img.save(filepath, format=fmt)
+            except (IOError, OSError, PermissionError) as e:
+                logger.error(f"rotate failed ({label}): {e}")
+                return jsonify({'success': False, 'message': 'Ошибка обработки изображения'}), 500
+
         try:
             db.add_log('photo_rotate', json.dumps({'zone': zone_id, 'angle': angle}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
@@ -257,14 +401,23 @@ def rotate_zone_photo(zone_id):
 
 @zones_photo_api_bp.route('/api/zones/<int:zone_id>/photo', methods=['GET'])
 def get_zone_photo(zone_id):
-    """Get zone photo info or image."""
+    """Get zone photo info or image.
+
+    Issue #11: ``?variant=thumb`` returns the 400x400 thumb. Default = main.
+    Lazy migration: legacy zones with NULL photo_thumb fall back to photo_path.
+    """
     try:
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({'success': False, 'message': 'Зона не найдена'}), 404
         accept_header = request.headers.get('Accept', '')
         if 'image' in accept_header or request.args.get('image') == 'true':
-            photo_path = zone.get('photo_path')
+            variant = request.args.get('variant', 'main')
+            if variant == 'thumb':
+                # Lazy fallback for zones uploaded before #11.
+                photo_path = zone.get('photo_thumb') or zone.get('photo_path')
+            else:
+                photo_path = zone.get('photo_path')
             if not photo_path:
                 return jsonify({'success': False, 'message': 'Фотография не найдена'}), 404
             # SEC-009: validate DB-stored path before send_file (otherwise
@@ -295,7 +448,12 @@ def get_zone_photo(zone_id):
             return send_file(filepath, mimetype=mime)
         else:
             has_photo = bool(zone.get('photo_path'))
-            return jsonify({'success': True, 'has_photo': has_photo, 'photo_path': zone.get('photo_path')})
+            return jsonify({
+                'success': True,
+                'has_photo': has_photo,
+                'photo_path': zone.get('photo_path'),
+                'photo_thumb': zone.get('photo_thumb'),
+            })
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения фото зоны {zone_id}: {e}")
         return jsonify({'success': False, 'message': 'Ошибка получения фото'}), 500

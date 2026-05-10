@@ -177,6 +177,12 @@ class MigrationRunner:
                     'zones_drop_last_watering_time',
                     self._migrate_drop_last_watering_time,
                 )
+                # Issue #11: add photo_thumb column for separate 400x400 thumb file.
+                self._apply_named_migration(
+                    conn,
+                    'zones_add_photo_thumb',
+                    self._migrate_add_photo_thumb,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1097,6 +1103,18 @@ class MigrationRunner:
             )
         except sqlite3.Error as e:
             logger.error("drop_last_watering_time: %s", e)
+
+    def _migrate_add_photo_thumb(self, conn):
+        """Issue #11: add photo_thumb column to zones for the 400x400 thumb."""
+        try:
+            cursor = conn.execute("PRAGMA table_info(zones)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'photo_thumb' not in columns:
+                conn.execute('ALTER TABLE zones ADD COLUMN photo_thumb TEXT')
+                conn.commit()
+                logger.info('Добавлено поле photo_thumb в таблицу zones')
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции zones_add_photo_thumb: %s", e)
 
     def _migrate_create_audit_log(self, conn):
         """Create the audit_log table for principal-critical mutation tracking.
