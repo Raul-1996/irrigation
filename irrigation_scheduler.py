@@ -109,11 +109,15 @@ def job_run_program(program_id: int, zones: list, program_name: str):
 
 
 def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None,
-                           override_percent: int = None):
+                           override_percent: int = None,
+                           ad_hoc_program_id: Optional[int] = None,
+                           ad_hoc_program_name: Optional[str] = None):
     # Issue #12: override_percent kwarg added with default=None — APScheduler
     # binds args positionally, but our scheduler.add_job(args=[...]) call passes
     # only positional args we control, so adding a trailing optional kwarg is
     # safe for in-flight jobs from prior deploys (they won't include it).
+    # Issue #15: ad_hoc_program_id/name pass through to _run_group_sequence
+    # for ad-hoc audit metadata (negative sentinel id).
     _audit_timer_fire('scheduler_timer_fire',
                       f'group:{int(group_id)}',
                       {'job': 'run_group_sequence', 'zone_ids': list(zone_ids),
@@ -125,7 +129,9 @@ def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int
         if s is not None:
             s._run_group_sequence(int(group_id), [int(z) for z in zone_ids],
                                   override_duration=override_duration,
-                                  override_percent=override_percent)
+                                  override_percent=override_percent,
+                                  ad_hoc_program_id=ad_hoc_program_id,
+                                  ad_hoc_program_name=ad_hoc_program_name)
     except (sqlite3.Error, OSError, ValueError, TypeError):
         logger.exception("job_run_group_sequence failed (group_id=%s)", group_id)
 
