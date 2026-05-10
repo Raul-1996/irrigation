@@ -350,6 +350,7 @@ _ALLOWED_PUBLIC_PATTERNS = [
     _re.compile(r'^/api/groups/\d+/stop$'),
     _re.compile(r'^/api/groups/\d+/master-valve/\w+$'),
     _re.compile(r'^/api/groups/\d+/start-zone/\d+$'),
+    _re.compile(r'^/api/groups/\d+/run-selected$'),
 ]
 
 def _is_status_action(path):
