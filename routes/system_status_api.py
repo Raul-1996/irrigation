@@ -334,6 +334,15 @@ def _compute_sequence_view(scheduler, group_id, group_zones, current_zone):
     if not sequence_active:
         return False, False, []
 
+    has_past_evidence = any(not _is_future for _dt, _z, _is_future in future_zones)
+    started = current_zone is not None or has_past_evidence
+    if not started:
+        # Pre-start: sequence is scheduled but no zone has started yet.
+        # Per UX requirement, the "Дальше" strip is only shown once the
+        # program is actually running (or zones are queued mid-sequence /
+        # via run-selected). Suppress the queue here.
+        return sequence_active, False, []
+
     queue = sorted(
         [(dt, z) for dt, z, is_future in future_zones if is_future],
         key=lambda t: t[0],
@@ -347,14 +356,10 @@ def _compute_sequence_view(scheduler, group_id, group_zones, current_zone):
         }
         for _dt, z in queue
     ]
-    # `switching` only when we're truly between zones: a prior zone in the same
-    # sequence has past evidence (past-SST or currently still on), AND there is
-    # something queued. Pre-start (all SSTs future) and post-stop cleanup window
-    # (queue empty) must NOT pulse "Переключение".
-    has_past_evidence = any(not _is_future for _dt, _z, _is_future in future_zones)
+    # `switching` only when we're truly between zones: no zone is on now
+    # AND a prior zone has already run AND there is something queued.
     switching = (
-        sequence_active
-        and current_zone is None
+        current_zone is None
         and has_past_evidence
         and bool(remaining_queue)
     )

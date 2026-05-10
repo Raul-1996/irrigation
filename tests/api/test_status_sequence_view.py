@@ -69,8 +69,13 @@ class TestSequenceView:
         assert g['remaining_queue'][0]['duration_min'] == 15
         assert g['remaining_queue'][0]['name']
 
-    def test_pre_start_not_switching(self, admin_client, app):
-        """Sequence scheduled but first zone hasn't started yet → no pulse."""
+    def test_pre_start_no_strip(self, admin_client, app):
+        """Sequence scheduled but no zone has started yet → strip suppressed.
+
+        UX rule: "Дальше" must NOT be shown while the program is merely waiting
+        to start. sequence_active stays True (other UI may use it), but
+        remaining_queue is empty so the strip doesn't render.
+        """
         gid, zids = _setup_group_with_zones(app, 2)
         now = datetime.now()
         # Neither zone is on; both have future starts (pre-start state).
@@ -84,7 +89,7 @@ class TestSequenceView:
         assert g is not None
         assert g['sequence_active'] is True
         assert g['switching'] is False
-        assert len(g['remaining_queue']) >= 1
+        assert g['remaining_queue'] == []
 
     def test_mid_sequence_switching(self, admin_client, app):
         """Past SST (zone already ran) + future SST + no zone on → switching=true."""

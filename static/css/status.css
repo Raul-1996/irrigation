@@ -1684,6 +1684,8 @@
         display: flex;
         align-items: center;
         gap: 8px;
+        min-width: 0;
+        max-width: 100%;
     }
     .next-queue-strip .next-label {
         font-size: 13px;
@@ -1701,6 +1703,8 @@
         scrollbar-width: none;
         align-items: center;
         padding-right: 12px;
+        min-width: 0;
+        flex: 1 1 0;
     }
     .chips-row::-webkit-scrollbar { display: none; }
     .zone-chip {
