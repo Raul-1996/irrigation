@@ -107,8 +107,12 @@ class IrrigationDB:
     def update_zone_postpone(self, zone_id: int, postpone_until: str = None, reason: str = None) -> bool:
         return self.zones.update_zone_postpone(zone_id, postpone_until, reason)
 
-    def update_zone_photo(self, zone_id: int, photo_path: Optional[str]) -> bool:
-        return self.zones.update_zone_photo(zone_id, photo_path)
+    def update_zone_photo(self, zone_id: int, photo_path: Optional[str],
+                          photo_thumb: Optional[str] = None,
+                          update_thumb: bool = False) -> bool:
+        return self.zones.update_zone_photo(
+            zone_id, photo_path, photo_thumb=photo_thumb, update_thumb=update_thumb,
+        )
 
     def get_zone_duration(self, zone_id: int) -> int:
         return self.zones.get_zone_duration(zone_id)

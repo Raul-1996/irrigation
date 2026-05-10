@@ -72,8 +72,8 @@ function renderZonesTable() {
             </td>
             <td>
                 <div class="zone-photo">
-                    ${zone.photo_path ? 
-                        `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')">` :
+                    ${zone.photo_path ?
+                        `<img src="/api/zones/${zone.id}/photo?variant=thumb" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')">` :
                         `<div class="no-photo" onclick="uploadPhoto(${zone.id})">📷</div>`
                     }
                     ${zone.photo_path ? 

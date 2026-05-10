@@ -105,8 +105,8 @@
                 </td>
                 <td>
                     <div class="zone-photo">
-                        ${zone.photo_path ? 
-                            `<img src="/api/zones/${zone.id}/photo" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')">` :
+                        ${zone.photo_path ?
+                            `<img src="/api/zones/${zone.id}/photo?variant=thumb" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')">` :
                             `<div class="no-photo" onclick="uploadPhoto(${zone.id})">📷</div>`
                         }
                         ${zone.photo_path ? 
@@ -1608,8 +1608,8 @@
             return;
         }
         
-        if (file.size > 5 * 1024 * 1024) { // 5MB limit
-            showNotification('Размер файла не должен превышать 5MB', 'error');
+        if (file.size > 20 * 1024 * 1024) { // 20MB limit (issue #11)
+            showNotification('Размер файла не должен превышать 20 МБ', 'error');
             return;
         }
         
@@ -1692,6 +1692,15 @@
     // Закрытие модального окна фотографии при клике вне его
     document.getElementById('photoModal').addEventListener('click', function(event) {
         if (event.target === this) {
+            closePhotoModal();
+        }
+    });
+
+    // Issue #11: Esc closes the lightbox.
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        var modal = document.getElementById('photoModal');
+        if (modal && modal.style.display === 'flex') {
             closePhotoModal();
         }
     });

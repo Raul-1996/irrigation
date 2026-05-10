@@ -108,7 +108,7 @@ if _TESTING_FLAG:
     app.config.from_object(TestConfig)
 else:
     app.config.from_object(Config)
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB (route-level MAX_FILE_SIZE enforces 5MB)
+app.config['MAX_CONTENT_LENGTH'] = 22 * 1024 * 1024  # 22MB (issue #11: route-level MAX_FILE_SIZE enforces 20MB; +2MB for multipart envelope)
 app.db = db
 csrf = CSRFProtect(app)
 

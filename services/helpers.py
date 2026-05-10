@@ -22,8 +22,14 @@ class UnsafePathError(ValueError):
 
 
 # Whitelist: legal zone photo filename pattern.
-# Matches what upload_zone_photo writes: "ZONE_<id>.<ext>".
-_ZONE_PHOTO_FILENAME_RE = re.compile(r'^ZONE_\d+\.(png|jpg|jpeg|gif|webp)$', re.IGNORECASE)
+# Matches what upload_zone_photo writes: "ZONE_<id>.<ext>" or "ZONE_<id>_thumb.<ext>".
+# Issue #11 added the optional `_thumb` suffix; the parenthesised group is the
+# only widening — anything else (e.g. ZONE_5_thumbb.webp, ZONE_5_thumb_evil.webp)
+# still fails the anchored match.
+_ZONE_PHOTO_FILENAME_RE = re.compile(
+    r'^ZONE_\d+(_thumb)?\.(png|jpg|jpeg|gif|webp)$',
+    re.IGNORECASE,
+)
 
 
 def safe_media_subpath(base_dir: str, relative_path: str) -> str:
@@ -116,7 +122,7 @@ UPLOAD_FOLDER = os.path.join(MEDIA_ROOT, ZONE_MEDIA_SUBDIR)
 MAP_DIR = os.path.join(MEDIA_ROOT, MAP_MEDIA_SUBDIR)
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_MIME_TYPES = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB (issue #11)
 
 # Ensure directories exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
