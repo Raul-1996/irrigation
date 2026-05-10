@@ -1761,9 +1761,6 @@
                 btn.textContent = '▶ Запустить все';
             }
         }
-        // Issue #15 — "Запустить выбранные" requires a single group context.
-        var btnSel = document.getElementById('zoneRunSelectedBtn');
-        if (btnSel) btnSel.disabled = (currentGroupFilter === null);
     }
 
     function renderZoneCards() {
@@ -2001,10 +1998,6 @@
 
     // Group selection
     function selectZoneGroup(groupId) {
-        // Issue #15 — switching away from the active select-mode group exits it.
-        if (groupSelectMode && groupSelectMode.gid !== groupId) {
-            exitRunSelectedMode();
-        }
         currentGroupFilter = groupId;
         renderGroupTabs();
         renderZoneCards();
@@ -2215,17 +2208,12 @@
     window.saveZoneEdit = saveZoneEdit;
 
     // Issue #15 — "Запустить выбранные" mode state.
-    // null = off; { gid: int, selected: Set<int> } when on.
+    // null = off; { selected: Set<int> } when on. Selection spans groups —
+    // confirmRun groups by zone.group_id and fires one parallel request per gid.
     var groupSelectMode = null;
     var _runPopupSelectedZones = null;  // populated when popup confirms run-selected
     function enterRunSelectedMode() {
-        var gid = currentGroupFilter;
-        if (!gid) {
-            // "Все группы" — select-mode is per-group only.
-            showZoneToast('Выберите группу для выбора зон', 'info');
-            return;
-        }
-        groupSelectMode = { gid: gid, selected: new Set() };
+        groupSelectMode = { selected: new Set() };
         document.body.classList.add('mode-select-zones');
         _updateSelectedCounter();
     }
@@ -2241,7 +2229,7 @@
     function toggleZoneSelected(zoneId) {
         if (!groupSelectMode) return false;
         var z = (zonesData || []).find(function(zz) { return zz.id === zoneId; });
-        if (!z || z.group_id !== groupSelectMode.gid) return false;
+        if (!z || !z.group_id || z.group_id === 999) return false;
         if (groupSelectMode.selected.has(zoneId)) {
             groupSelectMode.selected.delete(zoneId);
         } else {
@@ -2262,10 +2250,10 @@
     }
     function confirmRunSelectedNext() {
         if (!groupSelectMode || groupSelectMode.selected.size === 0) return;
-        var gid = groupSelectMode.gid;
         var selectedZones = Array.from(groupSelectMode.selected);
         // Open the existing run popup, but mark it as "selected-zones" via _runPopupSelectedZones.
-        runPopupGroupId = gid;
+        // confirmRun groups by zone.group_id and fires one parallel request per gid.
+        runPopupGroupId = null;
         runPopupZoneId = null;
         _runPopupAllGroups = false;
         _runPopupSelectedZones = selectedZones;
@@ -2443,29 +2431,51 @@
         var zoneBody = modePct ? {duration_percent: pct} : {duration: dur};
         var label = modePct ? (pct + '%') : (dur + ' мин');
 
-        // Issue #15 — ad-hoc selected zones path (subset of group).
-        if (savedSelectedZones && savedSelectedZones.length > 0 && savedGroupId) {
+        // Issue #15 — ad-hoc selected zones path. Selection may span groups;
+        // group by zone.group_id and fire one /run-selected per gid in parallel.
+        // Each group runs its own sequential queue server-side.
+        if (savedSelectedZones && savedSelectedZones.length > 0) {
             var n = savedSelectedZones.length;
-            showLoading('Запуск ' + n + ' зон(ы)...');
-            var selBody = modePct
-                ? { zones: savedSelectedZones, duration_percent: pct }
-                : { zones: savedSelectedZones, duration: dur };
-            fetch('/api/groups/' + savedGroupId + '/run-selected', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(selBody)
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
+            var byGroup = {};
+            savedSelectedZones.forEach(function(zid) {
+                var z = (zonesData || []).find(function(zz) { return zz.id === zid; });
+                if (!z || !z.group_id || z.group_id === 999) return;
+                if (!byGroup[z.group_id]) byGroup[z.group_id] = [];
+                byGroup[z.group_id].push(zid);
+            });
+            var gids = Object.keys(byGroup);
+            if (gids.length === 0) {
+                showZoneToast('Нет валидных зон для запуска', 'error');
+                return;
+            }
+            showLoading('Запуск ' + n + ' зон(ы) в ' + gids.length + ' групп(ах)...');
+            Promise.all(gids.map(function(gid) {
+                var zonesForGroup = byGroup[gid];
+                var selBody = modePct
+                    ? { zones: zonesForGroup, duration_percent: pct }
+                    : { zones: zonesForGroup, duration: dur };
+                return fetch('/api/groups/' + gid + '/run-selected', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(selBody)
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) { return { gid: gid, ok: !!(data && data.success), msg: data && data.message }; })
+                .catch(function() { return { gid: gid, ok: false, msg: 'сеть' }; });
+            })).then(function(results) {
                 hideLoading();
-                if (data && data.success) {
-                    showZoneToast('▶ Запущены ' + n + ' зон(ы) на ' + label, 'success');
-                    if (typeof exitRunSelectedMode === 'function') exitRunSelectedMode();
-                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                var okCount = results.filter(function(r) { return r.ok; }).length;
+                if (okCount === results.length) {
+                    showZoneToast('▶ Запущены ' + n + ' зон(ы) в ' + okCount + ' групп(ах) на ' + label, 'success');
+                } else if (okCount > 0) {
+                    showZoneToast('▶ Запущены ' + okCount + ' из ' + results.length + ' групп', 'warning');
                 } else {
-                    showZoneToast((data && data.message) || 'Ошибка', 'error');
+                    var firstMsg = results[0] && results[0].msg;
+                    showZoneToast(firstMsg || 'Ошибка запуска', 'error');
                 }
-            }).catch(function() { hideLoading(); showZoneToast('Ошибка сети', 'error'); });
+                if (typeof exitRunSelectedMode === 'function') exitRunSelectedMode();
+                setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            });
             return;
         }
 
