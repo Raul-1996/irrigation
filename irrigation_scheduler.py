@@ -108,16 +108,24 @@ def job_run_program(program_id: int, zones: list, program_name: str):
         logger.exception("job_run_program failed (program_id=%s)", program_id)
 
 
-def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None):
+def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None,
+                           override_percent: int = None):
+    # Issue #12: override_percent kwarg added with default=None — APScheduler
+    # binds args positionally, but our scheduler.add_job(args=[...]) call passes
+    # only positional args we control, so adding a trailing optional kwarg is
+    # safe for in-flight jobs from prior deploys (they won't include it).
     _audit_timer_fire('scheduler_timer_fire',
                       f'group:{int(group_id)}',
                       {'job': 'run_group_sequence', 'zone_ids': list(zone_ids),
-                       'override_duration': override_duration})
+                       'override_duration': override_duration,
+                       'override_percent': override_percent})
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
-            s._run_group_sequence(int(group_id), [int(z) for z in zone_ids], override_duration=override_duration)
+            s._run_group_sequence(int(group_id), [int(z) for z in zone_ids],
+                                  override_duration=override_duration,
+                                  override_percent=override_percent)
     except (sqlite3.Error, OSError, ValueError, TypeError):
         logger.exception("job_run_group_sequence failed (group_id=%s)", group_id)
 
@@ -1200,8 +1208,15 @@ class IrrigationScheduler:
             logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
 
     # ===== Ручной последовательный запуск всех зон в группе =====
-    def start_group_sequence(self, group_id: int, override_duration: int = None):
-        """Остановить все зоны группы и запустить последовательный полив всех зон по порядку."""
+    def start_group_sequence(self, group_id: int, override_duration: int = None,
+                             override_percent: int = None):
+        """Остановить все зоны группы и запустить последовательный полив всех зон по порядку.
+
+        Issue #12: ``override_percent`` (one of PERCENT_PRESETS) — when set,
+        each zone runs for ``round_up(zone.duration * pct/100)`` clipped to
+        [1, MAX_MANUAL_WATERING_MIN]. ``override_duration`` (minutes mode)
+        wins if both are passed.
+        """
         try:
             zones = self.db.get_zones()
             group_zones = sorted([z for z in zones if z['group_id'] == group_id], key=lambda x: x['id'])
@@ -1225,13 +1240,19 @@ class IrrigationScheduler:
 
             # Считаем и записываем плановые времена стартов для зон группы
             try:
+                from services.zone_control import per_zone_dur as _per_zone_dur
                 start_base = datetime.now()
                 cumulative = 0
                 schedule_map: Dict[int, str] = {}
                 for z in group_zones:
                     start_dt = start_base + timedelta(minutes=cumulative)
                     schedule_map[z['id']] = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                    cumulative += override_duration if override_duration else int(z.get('duration') or 0)
+                    # Issue #12: per-zone math via the shared helper. With
+                    # override_duration set this returns the scalar (legacy
+                    # behaviour); with override_percent it computes
+                    # ceil(zone.duration * pct/100), clipped.
+                    _d, _w = _per_zone_dur(z, override_duration, override_percent)
+                    cumulative += _d
                 # Очистим предыдущие плановые старты и запишем новые
                 self.db.clear_group_scheduled_starts(group_id)
                 self.db.set_group_scheduled_starts(group_id, schedule_map)
@@ -1280,11 +1301,13 @@ class IrrigationScheduler:
             zone_ids = [z['id'] for z in group_zones]
             # In TESTING mode, run synchronously to avoid APScheduler thread timing issues
             if TESTING:
-                self._run_group_sequence(group_id, zone_ids, override_duration=override_duration)
+                self._run_group_sequence(group_id, zone_ids,
+                                         override_duration=override_duration,
+                                         override_percent=override_percent)
             else:
                 # Запускаем последовательность в отдельном джобе прямо сейчас
                 _kwargs = dict(
-                    args=[group_id, zone_ids, override_duration],
+                    args=[group_id, zone_ids, override_duration, override_percent],
                     id=f"group_seq:{group_id}:{int(datetime.now().timestamp())}",
                     replace_existing=False,
                     misfire_grace_time=120,
@@ -1309,8 +1332,14 @@ class IrrigationScheduler:
             logger.error(f"Ошибка старта последовательного полива для группы {group_id}: {e}")
             return False
 
-    def _run_group_sequence(self, group_id: int, zone_ids: List[int], override_duration: int = None):
-        """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler."""
+    def _run_group_sequence(self, group_id: int, zone_ids: List[int],
+                            override_duration: int = None, override_percent: int = None):
+        """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler.
+
+        Issue #12: ``override_percent`` plumbed through; per-zone duration is
+        computed via :func:`services.zone_control.per_zone_dur`.
+        """
+        from services.zone_control import per_zone_dur as _per_zone_dur
         # Test-only bypass: when SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ=1
         # we skip the synchronous-first-zone short-circuit and run the real
         # per-zone loop (still truncated to a few seconds via the TESTING
@@ -1324,7 +1353,7 @@ class IrrigationScheduler:
                 zone = self.db.get_zone(zone_id)
                 if not zone:
                     continue
-                duration = override_duration if override_duration else int(zone.get('duration') or 0)
+                duration, _ = _per_zone_dur(zone, override_duration, override_percent)
                 if duration <= 0:
                     continue
                 start_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1376,7 +1405,11 @@ class IrrigationScheduler:
                     logger.warning(f"Группа {group_id}: зона {zone_id} не найдена, пропуск")
                     continue
 
-                base_dur = override_duration if override_duration else int(zone.get('duration') or 0)
+                # Issue #12: % unfolds per-zone via the helper. Without
+                # override_percent the helper returns the scalar override or
+                # the zone's own duration — preserving prior behaviour byte-
+                # for-byte.
+                base_dur, _ = _per_zone_dur(zone, override_duration, override_percent)
                 duration = self._get_weather_adjusted_duration(zone_id, base_dur)
                 if duration <= 0:
                     logger.info(f"Группа {group_id}: зона {zone_id} имеет нулевую длительность, пропуск")

@@ -138,3 +138,145 @@ class TestViewerAccess:
             content_type='application/json')
         # Accept any response — viewer may be allowed or forbidden
         assert resp.status_code in (200, 201, 403, 401, 302)
+
+
+# ── Issue #12: %-of-norm override on /api/zones/<id>/mqtt/start ────────────
+# Each test exercises one branch of services.zone_control.per_zone_dur via
+# the public endpoint, asserting both the resulting planned_end_time and
+# the surfaced `warnings[]` payload.
+class TestZoneMqttStartPercent:
+    def test_mqtt_start_with_percent(self, admin_client, app):
+        """150% × 20-min norm -> 30-min planned run."""
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            'name': 'Pct150', 'duration': 20, 'group_id': 1,
+            'topic': '/test/pct150',
+        })
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration_percent': 150}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        assert body.get('warnings') == []
+        zone = app.db.get_zone(z['id'])
+        assert zone.get('planned_end_time')
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        # 20 × 1.5 = 30 min. Tolerance ±5 sec for clock skew between the two
+        # `datetime.now()` reads (request handler vs. assertion).
+        expected = before + timedelta(minutes=30)
+        assert abs((end_dt - expected).total_seconds()) < 5
+
+    def test_mqtt_start_percent_norm_zero_fallback(self, admin_client, app):
+        """duration<=0 + percent -> use 15-min fallback + 'norm_not_set' warning."""
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            'name': 'PctZero', 'duration': 10, 'group_id': 1,
+            'topic': '/test/pctzero',
+        })
+        # Force the corruption case the helper guards against.
+        app.db.update_zone(z['id'], {'duration': 0})
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration_percent': 100}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        assert 'norm_not_set' in (body.get('warnings') or [])
+        zone = app.db.get_zone(z['id'])
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        expected = before + timedelta(minutes=15)
+        assert abs((end_dt - expected).total_seconds()) < 5
+
+    def test_mqtt_start_percent_clipped_max(self, admin_client, app):
+        """200% × 200 = 400 -> clipped at MAX_MANUAL_WATERING_MIN (240) + warning.
+
+        We bypass the route-level 1..120 validator by writing the duration
+        straight into the DB — the helper must still produce a sane,
+        clipped run length even when fed garbage (defence in depth).
+        """
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            'name': 'PctClip', 'duration': 100, 'group_id': 1,
+            'topic': '/test/pctclip',
+        })
+        # Update path doesn't enforce 1..120 — direct write to exercise clip.
+        app.db.update_zone(z['id'], {'duration': 200})
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration_percent': 200}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        # 200 × 2.0 = 400 -> clipped at 240, warning emitted.
+        assert 'clipped_max' in (body.get('warnings') or [])
+        zone = app.db.get_zone(z['id'])
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        expected = before + timedelta(minutes=240)
+        assert abs((end_dt - expected).total_seconds()) < 5
+
+
+# ── Issue #12 iter2 C2: "minutes wins if both sent" — strict rejection ─────
+# Spec §4 invariant: duration present in body == user intent. Either
+# accept (1..120) or 400. NEVER silent fallback to percent.
+class TestZoneMqttStartMinutesWinsStrict:
+    def test_minutes_out_of_range_rejected_no_percent_fallback(self, admin_client, app):
+        """duration=200 + duration_percent=100 -> 400, NOT silent fall to %."""
+        z = app.db.create_zone({
+            'name': 'C2Reject', 'duration': 20, 'group_id': 1,
+            'topic': '/test/c2reject',
+        })
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration': 200, 'duration_percent': 100}),
+            content_type='application/json')
+        # Must reject — never fall through to percent path.
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert body.get('success') is False
+        # Zone must remain off (no side effects from the rejected request).
+        zone = app.db.get_zone(z['id'])
+        assert (zone.get('state') or 'off') != 'on'
+
+    def test_minutes_null_percent_honored(self, admin_client, app):
+        """duration=null + duration_percent=100 -> percent path runs (norm × 1.0)."""
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            'name': 'C2NullDur', 'duration': 12, 'group_id': 1,
+            'topic': '/test/c2nulldur',
+        })
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration': None, 'duration_percent': 100}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        # 12 × 1.0 = 12 min — percent honoured because minutes was null.
+        zone = app.db.get_zone(z['id'])
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        expected = before + timedelta(minutes=12)
+        assert abs((end_dt - expected).total_seconds()) < 5
+
+    def test_minutes_wins_over_percent_when_both_valid(self, admin_client, app):
+        """duration=30 + duration_percent=100 -> 30 min, NOT norm × 1.0."""
+        from datetime import datetime, timedelta
+        z = app.db.create_zone({
+            # Choose norm != 30 so we can distinguish minutes-mode from %-mode.
+            'name': 'C2Wins', 'duration': 12, 'group_id': 1,
+            'topic': '/test/c2wins',
+        })
+        before = datetime.now()
+        resp = admin_client.post(f'/api/zones/{z["id"]}/mqtt/start',
+            data=json.dumps({'duration': 30, 'duration_percent': 100}),
+            content_type='application/json')
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body.get('success') is True
+        # Minutes wins -> 30 min, not 12 (norm × 100%).
+        zone = app.db.get_zone(z['id'])
+        end_dt = datetime.strptime(zone['planned_end_time'], '%Y-%m-%d %H:%M:%S')
+        expected = before + timedelta(minutes=30)
+        assert abs((end_dt - expected).total_seconds()) < 5

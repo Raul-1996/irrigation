@@ -1553,6 +1553,27 @@
         min-width:40px;
     }
     .run-popup-presets button:active { background:#e0f7fa; border-color:#00838f; }
+    /* Issue #12: % presets — second row, distinct accent. */
+    .run-popup-presets-pct {
+        display:flex; gap:6px; justify-content:center; margin-bottom:4px;
+    }
+    .run-popup-presets-pct button {
+        padding:7px 10px; border:2px solid #e8eaed; background:white;
+        border-radius:8px; font-size:13px; font-weight:600; color:#333; cursor:pointer;
+        min-width:44px;
+    }
+    .run-popup-presets-pct button:active { background:#fff3e0; border-color:#ef6c00; }
+    .run-popup-presets-pct button.active {
+        background:#ef6c00; border-color:#ef6c00; color:#fff;
+    }
+    .run-popup-pct-caption {
+        text-align:center; font-size:11px; color:#999; margin-bottom:14px;
+    }
+    /* Mode toggle: when % active, dim minute row + dial; when min active,
+       dim percent row. JS toggles `.mode-pct` on #runPopup. */
+    #runPopup.mode-pct .run-popup-presets,
+    #runPopup.mode-pct .dial-container { opacity:0.45; }
+    #runPopup:not(.mode-pct) .run-popup-presets-pct { opacity:0.7; }
     .run-popup-actions { display:flex; gap:8px; }
     .run-popup-actions button { flex:1; min-height:48px; font-size:15px; }
 

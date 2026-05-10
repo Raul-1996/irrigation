@@ -299,22 +299,68 @@ def api_start_group_from_first(group_id):
         if not scheduler:
             return jsonify({"success": False, "message": "Планировщик недоступен"}), 500
         body = request.get_json(silent=True) or {}
-        override_dur = body.get('override_duration')
-        if override_dur is not None:
+        # Issue #12 C2: "minutes wins if both sent" — strict. If
+        # override_duration is present in the body AT ALL, that is the
+        # user's intent. Accept (1..120) or reject the whole request (400).
+        # Never silently fall through to percent.
+        override_dur_raw = body.get('override_duration')
+        minutes_sent = override_dur_raw is not None
+        override_dur = None
+        if minutes_sent:
             try:
-                override_dur = int(override_dur)
-                if not (1 <= override_dur <= 120):
-                    override_dur = None
+                override_dur = int(override_dur_raw)
             except (ValueError, TypeError):
-                override_dur = None
-        ok = scheduler.start_group_sequence(group_id, override_duration=override_dur)
+                return jsonify({"success": False,
+                                "message": "override_duration должен быть целым числом 1..120"}), 400
+            if not (1 <= override_dur <= 120):
+                return jsonify({"success": False,
+                                "message": "override_duration должен быть в диапазоне 1..120 мин"}), 400
+        # Issue #12: optional duration_percent (one of PERCENT_PRESETS).
+        # Only honoured when minutes mode is absent. Anything outside the
+        # whitelist is silently ignored — defensive, mirrors 1..120 minutes
+        # validation behaviour for non-whitelist values.
+        override_pct = None
+        if not minutes_sent:
+            req_pct = body.get('duration_percent')
+            if req_pct is not None:
+                try:
+                    from services.zone_control import PERCENT_PRESETS
+                    p = int(req_pct)
+                    if p in PERCENT_PRESETS:
+                        override_pct = p
+                except (ValueError, TypeError):
+                    override_pct = None
+        # Issue #12 C1: pre-compute warnings (deduped) so the response
+        # mirrors the single-zone endpoint contract. Cheap: same helper
+        # the scheduler uses, just called once per group zone here for
+        # surface-able tags. Order is sorted for deterministic output.
+        warnings: list = []
+        if override_pct is not None:
+            try:
+                from services.zone_control import per_zone_dur as _per_zone_dur
+                zones = db.get_zones() or []
+                group_zones = [z for z in zones if z.get('group_id') == group_id]
+                wset: set = set()
+                for z in group_zones:
+                    _d, _w = _per_zone_dur(z, override_dur, override_pct)
+                    for tag in _w:
+                        wset.add(tag)
+                warnings = sorted(wset)
+            except (ValueError, TypeError, KeyError, AttributeError) as e:
+                logger.debug("group warnings preflight failed: %s", e)
+                warnings = []
+        ok = scheduler.start_group_sequence(group_id,
+                                            override_duration=override_dur,
+                                            override_percent=override_pct)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
         try:
             db.add_log('group_start_from_first', json.dumps({"group": group_id}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("Handled exception in api_start_group_from_first: %s", e)
-        return jsonify({"success": True, "message": f"Группа {group_id}: запущен последовательный полив"})
+        return jsonify({"success": True,
+                        "message": f"Группа {group_id}: запущен последовательный полив",
+                        "warnings": warnings})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка запуска группы {group_id} с первой зоны: {e}")
         return jsonify({"success": False, "message": "Ошибка запуска группы"}), 500

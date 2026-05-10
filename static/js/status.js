@@ -2083,11 +2083,15 @@
         var title = gid ? '▶ ' + gName : '▶ Все группы';
         document.getElementById('runPopupTitle').textContent = title;
         runPopupDur = 15;
+        // Issue #12: reset mode on each open.
+        runPopupMode = 'min';
+        runPopupPct = null;
         // Show "with defaults" button for group
         var defBtn = document.getElementById('runPopupDefaults');
         if (defBtn) defBtn.style.display = 'block';
         initDialTicks();
         updateDial();
+        _refreshRunPopupModeUI();
         document.getElementById('runPopupOverlay').classList.add('show');
         document.getElementById('runPopup').classList.add('show');
         setTimeout(initDialDrag, 100);
@@ -2197,9 +2201,27 @@
     var runPopupGroupId = null;
     var _runPopupAllGroups = false;
     var runPopupDur = 10;
+    // Issue #12: percent-of-norm mode. null/min = legacy minutes, 'pct' with
+    // a runPopupPct value = % mode. confirmRun() picks request body shape.
+    var runPopupMode = 'min';
+    var runPopupPct = null;
     var MAX_DUR = 120;
     var DIAL_R = 85;
     var DIAL_CIRC = 2 * Math.PI * DIAL_R;
+
+    function _refreshRunPopupModeUI() {
+        var pop = document.getElementById('runPopup');
+        if (!pop) return;
+        if (runPopupMode === 'pct') pop.classList.add('mode-pct');
+        else pop.classList.remove('mode-pct');
+        // Active state on the matching pct button (or none in min mode).
+        var btns = document.querySelectorAll('#runPopupPctPresets button');
+        for (var i = 0; i < btns.length; i++) {
+            var p = parseInt(btns[i].getAttribute('data-pct'), 10);
+            if (runPopupMode === 'pct' && p === runPopupPct) btns[i].classList.add('active');
+            else btns[i].classList.remove('active');
+        }
+    }
 
     function updateDial() {
         var frac = runPopupDur / MAX_DUR;
@@ -2253,6 +2275,10 @@
             var angle = angleFromEvent(e);
             var dur = Math.round((angle / 360) * MAX_DUR);
             runPopupDur = Math.max(1, Math.min(MAX_DUR, dur));
+            // Issue #12: dragging the dial = explicit minutes mode.
+            runPopupMode = 'min';
+            runPopupPct = null;
+            _refreshRunPopupModeUI();
             updateDial();
         }
         svg.addEventListener('mousedown', function(e) { dragging = true; onMove(e); });
@@ -2268,6 +2294,10 @@
         runPopupGroupId = null;
         _runPopupAllGroups = false;
         runPopupDur = defaultDur || 10;
+        // Issue #12: reset mode each time popup opens — pct state must not
+        // persist across separate runs.
+        runPopupMode = 'min';
+        runPopupPct = null;
         var z = (zonesData || []).find(function(z){ return z.id === zoneId; });
         var title = z ? '▶ #' + z.id + ' ' + z.name : '▶ Запустить';
         document.getElementById('runPopupTitle').textContent = title;
@@ -2276,6 +2306,7 @@
         if (defBtn) defBtn.style.display = 'none';
         initDialTicks();
         updateDial();
+        _refreshRunPopupModeUI();
         document.getElementById('runPopupOverlay').classList.add('show');
         document.getElementById('runPopup').classList.add('show');
         setTimeout(initDialDrag, 100);
@@ -2288,17 +2319,37 @@
     }
     function setRunDur(val) {
         runPopupDur = val;
+        // Issue #12: minute preset click = explicit minutes mode.
+        runPopupMode = 'min';
+        runPopupPct = null;
+        _refreshRunPopupModeUI();
         updateDial();
+    }
+    function setRunPct(p) {
+        // Issue #12: pick percent mode; backend unfolds per-zone server-side.
+        runPopupMode = 'pct';
+        runPopupPct = p;
+        _refreshRunPopupModeUI();
     }
     function confirmRun() {
         // _runPopupAllGroups flag: true when "all groups" was selected (gid=null)
         if (!runPopupZoneId && !runPopupGroupId && !_runPopupAllGroups) return;
         var dur = runPopupDur;
+        // Issue #12: capture mode at confirm time (popup is closed below).
+        var modePct = (runPopupMode === 'pct' && runPopupPct);
+        var pct = runPopupPct;
         var savedZoneId = runPopupZoneId;
         var savedGroupId = runPopupGroupId;
         var savedAllGroups = _runPopupAllGroups;
         closeRunPopup();
-        
+
+        // Pick request-body shape once. Group + single-zone use different
+        // field names for minutes mode (override_duration vs duration), but
+        // share `duration_percent` for percent mode.
+        var groupBody = modePct ? {duration_percent: pct} : {override_duration: dur};
+        var zoneBody = modePct ? {duration_percent: pct} : {duration: dur};
+        var label = modePct ? (pct + '%') : (dur + ' мин');
+
         if (savedGroupId || savedAllGroups) {
             // Group run: pass override_duration to API (does NOT change base durations in DB)
             if (savedAllGroups && !savedGroupId) {
@@ -2309,61 +2360,97 @@
                     return fetch('/api/groups/' + g.id + '/start-from-first', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({override_duration: dur})
+                        body: JSON.stringify(groupBody)
                     }).catch(function() {});
                 })).then(function() {
                     hideLoading();
-                    showZoneToast('▶ Все группы запущены на ' + dur + ' мин', 'success');
+                    showZoneToast('▶ Все группы запущены: ' + label, 'success');
                     setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
                 });
                 return;
             }
             var gid = savedGroupId;
             var groupZones = (zonesData || []).filter(function(z) { return z.group_id === gid && z.group_id !== 999; });
-            // Optimistic: set local times for instant timer display
+            // Optimistic: set local times for instant timer display.
+            // For percent mode, use per-zone duration*pct (best-effort UX preview;
+            // server is the authority and may emit warnings if base norm == 0).
             groupZones.forEach(function(z) {
+                var pdur = dur;
+                if (modePct) {
+                    var base = parseInt(z.duration, 10) || 15;
+                    pdur = Math.max(1, Math.min(240, Math.ceil(base * pct / 100)));
+                }
                 z.state = 'on';
                 z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-                z.planned_end_time = new Date(Date.now() + dur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                z.planned_end_time = new Date(Date.now() + pdur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
             });
             renderZoneCards();
             renderGroupTabs();
             fetch('/api/groups/' + gid + '/start-from-first', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({override_duration: dur})
+                body: JSON.stringify(groupBody)
             })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 showZoneToast(data && data.success ? '▶ Группа запущена' : 'Ошибка', data && data.success ? 'success' : 'error');
+                // Issue #12 C1: surface server-side warnings on the group
+                // path (mirrors single-zone handler below). norm_not_set =>
+                // some zone in the group had duration<=0, server fell back
+                // to 15 min. clipped_max => some zone × pct exceeded 240.
+                if (data && data.success && data.warnings && data.warnings.length) {
+                    var msgs = data.warnings.map(function(w) {
+                        if (w === 'norm_not_set') return 'норма зоны не задана — использую 15 мин';
+                        if (w === 'clipped_max') return 'обрезано до 240 мин';
+                        if (w === 'clipped_min') return 'округлено до 1 мин';
+                        return w;
+                    });
+                    setTimeout(function() { showZoneToast('⚠ ' + msgs.join('; '), 'error'); }, 600);
+                }
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             });
             return;
         }
-        
+
         // Single zone run — duration override (one-time, doesn't change base)
         var id = savedZoneId;
         var z = (zonesData || []).find(function(z){ return z.id === id; });
         var wasRunning = z && z.state === 'on';
-        
+
         // If already running — stop first, then restart
         var zName = (z && z.name) ? ' ' + z.name : '';
         showLoading('Запуск зоны #' + id + zName + '...');
         var startFn = function() {
-            // Optimistic: set state + times BEFORE fetch for instant timer
+            // Optimistic: set state + times BEFORE fetch for instant timer.
+            // % mode: pre-compute the same way the server will (best-effort).
+            var optDur = dur;
+            if (modePct && z) {
+                var base = parseInt(z.duration, 10) || 15;
+                optDur = Math.max(1, Math.min(240, Math.ceil(base * pct / 100)));
+            }
             if (z) {
                 z.state = 'on';
                 z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-                z.planned_end_time = new Date(Date.now() + dur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                z.planned_end_time = new Date(Date.now() + optDur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
             }
             renderZoneCards();
             renderGroupTabs();
-            fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({duration: dur}) })
+            fetch('/api/zones/' + id + '/mqtt/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(zoneBody) })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data && data.success) {
                     hideLoading();
-                    showZoneToast('▶ #' + id + zName + ' запущена на ' + dur + ' мин', 'success');
+                    showZoneToast('▶ #' + id + zName + ' запущена: ' + label, 'success');
+                    // Issue #12: surface server-side warnings as toast text.
+                    if (data.warnings && data.warnings.length) {
+                        var msgs = data.warnings.map(function(w) {
+                            if (w === 'norm_not_set') return 'норма зоны не задана — использую 15 мин';
+                            if (w === 'clipped_max') return 'обрезано до 240 мин';
+                            if (w === 'clipped_min') return 'округлено до 1 мин';
+                            return w;
+                        });
+                        setTimeout(function() { showZoneToast('⚠ ' + msgs.join('; '), 'error'); }, 600);
+                    }
                     // Refresh timer (server times may differ slightly)
                     initZoneTimer(z);
                     setTimeout(function() { loadStatusData(); }, 2000);
@@ -2409,6 +2496,7 @@
     window.showRunPopup = showRunPopup;
     window.closeRunPopup = closeRunPopup;
     window.setRunDur = setRunDur;
+    window.setRunPct = setRunPct;
     window.confirmRun = confirmRun;
 
     // Loading overlay

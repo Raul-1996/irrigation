@@ -1,11 +1,12 @@
 import logging
+import math
 import os
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple, List
 import time
 
-from constants import MASTER_VALVE_CLOSE_DELAY_SEC
+from constants import MASTER_VALVE_CLOSE_DELAY_SEC, MAX_MANUAL_WATERING_MIN
 from config import TESTING
 from database import db
 from services.locks import group_lock, zone_lock
@@ -16,6 +17,58 @@ from services.observed_state import state_verifier
 import sqlite3
 
 logger = logging.getLogger(__name__)
+
+
+# Allowed presets for the % selector (Issue #12).
+PERCENT_PRESETS = (50, 75, 100, 125, 150, 200)
+# Fallback base when zone.duration is missing/corrupt (NULL/0/negative) and we
+# need to multiply by a percent. Per spec section 4 / TL;DR.
+PERCENT_FALLBACK_BASE_MIN = 15
+
+
+def per_zone_dur(zone: dict,
+                 override_duration: Optional[int] = None,
+                 override_percent: Optional[int] = None
+                 ) -> Tuple[int, List[str]]:
+    """Compute the effective per-zone duration for manual run.
+
+    Issue #12 — single source of truth for the %-of-norm calculation.
+    Mirrors decisions in specs/issue-12-architecture.md sections 3.3 and 4.
+
+    Precedence:
+      1. ``override_duration`` (minutes mode) wins if set — returned verbatim.
+      2. ``override_percent`` (percent mode) — multiply zone['duration']
+         (the norm) by pct/100, round UP, clip to [1, MAX_MANUAL_WATERING_MIN].
+         If norm <= 0, fall back to PERCENT_FALLBACK_BASE_MIN and emit
+         'norm_not_set' warning.
+      3. Neither: zone's own ``duration`` (existing default behaviour).
+
+    Returns ``(duration_min, warnings)`` where warnings is a list of tags
+    callers may surface to the client. Empty list when nothing notable.
+    """
+    warnings: List[str] = []
+    if override_duration is not None:
+        return int(override_duration), warnings
+    if override_percent is not None:
+        try:
+            base = int(zone.get('duration') or 0)
+        except (ValueError, TypeError):
+            base = 0
+        if base <= 0:
+            base = PERCENT_FALLBACK_BASE_MIN
+            warnings.append('norm_not_set')
+        computed = math.ceil(base * int(override_percent) / 100.0)
+        if computed < 1:
+            computed = 1
+            warnings.append('clipped_min')
+        elif computed > MAX_MANUAL_WATERING_MIN:
+            computed = MAX_MANUAL_WATERING_MIN
+            warnings.append('clipped_max')
+        return int(computed), warnings
+    try:
+        return int(zone.get('duration') or 0), warnings
+    except (ValueError, TypeError):
+        return 0, warnings
 
 
 # Pending master-valve close timers keyed by normalized master MQTT topic.

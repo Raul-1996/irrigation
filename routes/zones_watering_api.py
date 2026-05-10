@@ -313,19 +313,50 @@ def api_zone_mqtt_start(zone_id: int):
         # invisible. We use override_dur explicitly for schedule_zone_stop /
         # planned_end_time below; base duration in DB stays untouched.
         override_dur = None
-        try:
-            body = request.get_json(silent=True) or {}
-            req_d = body.get('duration')
-            if req_d is not None:
-                req_d = int(req_d)
-                if 1 <= req_d <= 120:
-                    override_dur = req_d
-                    logger.info(
-                        "mqtt_start: zone %s using override duration %s min (base unchanged)",
-                        zone_id, req_d,
-                    )
-        except (ValueError, TypeError) as e:
-            logger.debug("mqtt_start duration parse: %s", e)
+        warnings: list = []  # Issue #12 — populated by % branch when applicable
+        body = request.get_json(silent=True) or {}
+        # Issue #12 C2: "minutes wins if both sent" must be strict.
+        # If `duration` is present in the body AT ALL, that is the user's
+        # intent — accept it (1..120) or reject the whole request (400).
+        # Never silently fall through to percent. See specs/issue-12-review.md.
+        req_d_raw = body.get('duration')
+        minutes_sent = req_d_raw is not None
+        if minutes_sent:
+            try:
+                req_d = int(req_d_raw)
+            except (ValueError, TypeError):
+                return jsonify({'success': False,
+                                'message': 'duration должен быть целым числом 1..120'}), 400
+            if not (1 <= req_d <= 120):
+                return jsonify({'success': False,
+                                'message': 'duration должен быть в диапазоне 1..120 мин'}), 400
+            override_dur = req_d
+            logger.info(
+                "mqtt_start: zone %s using override duration %s min (base unchanged)",
+                zone_id, req_d,
+            )
+
+        # ---- Issue #12: %-of-norm override (alternative to `duration`) ----
+        # Minutes mode (duration) wins if SENT (validated above). Percent is
+        # only honoured when `duration` is absent/null in the body. We don't
+        # relax the 120-min cap on minutes mode — only percent mode may
+        # produce 121..240.
+        if not minutes_sent:
+            try:
+                req_pct = body.get('duration_percent')
+                if req_pct is not None:
+                    from services.zone_control import PERCENT_PRESETS, per_zone_dur as _per_zone_dur
+                    p = int(req_pct)
+                    if p in PERCENT_PRESETS:
+                        computed, warns = _per_zone_dur(z, None, p)
+                        override_dur = computed
+                        warnings = warns
+                        logger.info(
+                            "mqtt_start: zone %s using override percent %s%% -> %s min (warnings=%s)",
+                            zone_id, p, override_dur, warnings,
+                        )
+            except (ValueError, TypeError) as e:
+                logger.debug("mqtt_start percent parse: %s", e)
 
         # ---- Already-ON branch — reschedule stop, do NOT delegate ----
         # Delegating would peer-off siblings (none changed) and re-publish
@@ -361,8 +392,10 @@ def api_zone_mqtt_start(zone_id: int):
                     "mqtt_start: zone %s already ON, rescheduled to %s min (end=%s)",
                     zone_id, override_dur, new_end,
                 )
-                return jsonify({'success': True, 'message': f'Зона {zone_id} перезапущена на {override_dur} мин'})
-            return jsonify({'success': True, 'message': 'Зона уже запущена'})
+                return jsonify({'success': True,
+                                'message': f'Зона {zone_id} перезапущена на {override_dur} мин',
+                                'warnings': warnings})
+            return jsonify({'success': True, 'message': 'Зона уже запущена', 'warnings': warnings})
 
         # ---- Pre-delegate housekeeping: cancel scheduled program/stop jobs ----
         # cancel_group_jobs sets the cancel-event flag and removes APScheduler
@@ -458,7 +491,7 @@ def api_zone_mqtt_start(zone_id: int):
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("mqtt_start add_log failed: %s", e)
 
-        return jsonify({'success': True, 'message': f'Зона {int(zone_id)} запущена'})
+        return jsonify({'success': True, 'message': f'Зона {int(zone_id)} запущена', 'warnings': warnings})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         logger.exception('api_zone_mqtt_start failed')
         return jsonify({'success': False, 'message': 'Ошибка запуска зоны'}), 500
