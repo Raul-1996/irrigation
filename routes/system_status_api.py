@@ -286,86 +286,6 @@ def api_server_time():
 
 # ===== Status (big endpoint) =====
 
-
-def _compute_sequence_view(scheduler, group_id, group_zones, current_zone):
-    """Issues #24/#25: derive sequence_active / switching / remaining_queue.
-
-    Returns (sequence_active, switching, remaining_queue).
-    Uses both APScheduler jobs (group_seq:<gid>:*) and zone.scheduled_start_time
-    as evidence of an active sequence; they may be set independently in
-    different code paths (TESTING mode skips real jobs but writes start times).
-    """
-    now = datetime.now()
-    stale_cutoff = now - timedelta(minutes=5)
-
-    has_seq_job = False
-    try:
-        if scheduler is not None and getattr(scheduler, 'scheduler', None) is not None:
-            prefix = f"group_seq:{int(group_id)}:"
-            for j in scheduler.scheduler.get_jobs():
-                try:
-                    if str(j.id).startswith(prefix):
-                        has_seq_job = True
-                        break
-                except (AttributeError, TypeError):
-                    continue
-    except (AttributeError, TypeError, RuntimeError) as e:
-        logger.debug("seq_view get_jobs failed for group %s: %s", group_id, e)
-
-    future_zones = []
-    for z in group_zones:
-        sst = z.get('scheduled_start_time')
-        if not sst:
-            continue
-        sst_dt = parse_dt(sst)
-        if sst_dt is None or sst_dt < stale_cutoff:
-            continue
-        if sst_dt <= now:
-            # Past start (within 5min) but not yet running — keep as evidence of
-            # active sequence but do NOT show in remaining queue.
-            future_zones.append((sst_dt, z, False))
-            continue
-        if str(z.get('state') or '') == 'on':
-            continue
-        future_zones.append((sst_dt, z, True))
-
-    sequence_active = bool(has_seq_job) or any(_is_future for _dt, _z, _is_future in future_zones)
-
-    if not sequence_active:
-        return False, False, []
-
-    has_past_evidence = any(not _is_future for _dt, _z, _is_future in future_zones)
-    started = current_zone is not None or has_past_evidence
-    if not started:
-        # Pre-start: sequence is scheduled but no zone has started yet.
-        # Per UX requirement, the "Дальше" strip is only shown once the
-        # program is actually running (or zones are queued mid-sequence /
-        # via run-selected). Suppress the queue here.
-        return sequence_active, False, []
-
-    queue = sorted(
-        [(dt, z) for dt, z, is_future in future_zones if is_future],
-        key=lambda t: t[0],
-    )
-    remaining_queue = [
-        {
-            'zone_id': int(z['id']),
-            'name': z.get('name') or '',
-            'duration_min': int(z.get('duration') or 15),
-            'scheduled_start_time': str(z.get('scheduled_start_time')),
-        }
-        for _dt, z in queue
-    ]
-    # `switching` only when we're truly between zones: no zone is on now
-    # AND a prior zone has already run AND there is something queued.
-    switching = (
-        current_zone is None
-        and has_past_evidence
-        and bool(remaining_queue)
-    )
-    return sequence_active, switching, remaining_queue
-
-
 @system_status_api_bp.route('/api/status')
 def api_status():
     rain_cfg = db.get_rain_config()
@@ -559,23 +479,6 @@ def api_status():
             logger.debug("queue_remaining calc failed for group %s: %s", group_id, e)
             queue_remaining = 0
 
-        # Issues #24/#25: sequence view (continuous progress + next-up queue).
-        # Suppressed under emergency stop / postponed group (UI shows reason).
-        if status == 'postponed':
-            sequence_active = False
-            switching = False
-            remaining_queue = []
-        else:
-            try:
-                sequence_active, switching, remaining_queue = _compute_sequence_view(
-                    get_scheduler(), group_id, group_zones, current_zone,
-                )
-            except (ValueError, TypeError, KeyError, AttributeError) as e:
-                logger.debug("sequence_view calc failed for group %s: %s", group_id, e)
-                sequence_active = False
-                switching = False
-                remaining_queue = []
-
         groups_status.append({
             'id': group_id, 'name': group['name'], 'status': status,
             'current_zone': current_zone, 'postpone_until': postpone_until,
@@ -586,9 +489,6 @@ def api_status():
             'pressure_unit': pressure_unit, 'use_water_meter': use_water_meter,
             'flow_value': flow_value, 'meter_value_m3': meter_value_m3,
             'queue_remaining': queue_remaining,
-            'sequence_active': sequence_active,
-            'switching': switching,
-            'remaining_queue': remaining_queue,
         })
 
     if not rain_cfg.get('enabled'):

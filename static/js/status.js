@@ -49,30 +49,6 @@
     let mqttNoConnection = false;
     let envProbeTimer = null;
     let envProbeAttempts = 0;
-
-    // Issues #24/#25: render strip with upcoming zones in active sequence.
-    function nextQueueStrip(group) {
-        if (!group || !group.remaining_queue || group.remaining_queue.length === 0) return '';
-        const chips = group.remaining_queue.map(function(item, idx) {
-            const zid = Number(item.zone_id);
-            const name = escapeHtml(String(item.name || ''));
-            const dur = Number(item.duration_min || 0);
-            const chip = `<button class="zone-chip" data-zone-id="${zid}" onclick="scrollToZoneCard(${zid})">#${zid} ${name} · ${dur} мин</button>`;
-            const arrow = (idx < group.remaining_queue.length - 1) ? '<span class="chip-arrow">→</span>' : '';
-            return chip + arrow;
-        }).join('');
-        return `<div class="next-queue-strip"><span class="next-label">Дальше:</span><div class="chips-row">${chips}</div></div>`;
-    }
-
-    // Issues #24/#25: scroll the matching zone-card into view + flash highlight.
-    function scrollToZoneCard(zid) {
-        const card = document.querySelector(`.zone-card[data-zone-id="${zid}"]`);
-        if (!card) return;
-        try { card.scrollIntoView({behavior: 'smooth', block: 'center'}); } catch (e) { card.scrollIntoView(); }
-        card.classList.add('highlight');
-        setTimeout(function() { card.classList.remove('highlight'); }, 2000);
-    }
-    window.scrollToZoneCard = scrollToZoneCard;
     
     // Функция обновления времени (локальное, без fetch)
     var _serverTimeOffset = 0;
@@ -451,10 +427,7 @@
             const statusText = getStatusText(group);
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
             let extraText = '—';
-            if (group.switching && group.remaining_queue && group.remaining_queue.length > 0) {
-                const _next = group.remaining_queue[0];
-                extraText = `<span class="group-switching">▶ Переключение → #${_next.zone_id} ${escapeHtml(String(_next.name || ''))}</span>`;
-            } else if (group.status === 'watering' && group.current_zone) {
+            if (group.status === 'watering' && group.current_zone) {
                 const _zw = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
                 const _zLbl = (_zw && _zw.name) ? `#${_zw.id} ${escapeHtml(_zw.name)}` : `#${group.current_zone}`;
                 extraText = `Зона ${_zLbl}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
@@ -524,7 +497,6 @@
                 <div id="group-status-${group.id}">${statusText}</div>
                 <div class="postpone-until">${extraText}</div>
                 ${groupButtons}
-                ${nextQueueStrip(group)}
                 ${mvBlock}
             `;
             card.id = `group-card-${group.id}`;
@@ -610,10 +582,7 @@
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             let extraText2 = '—';
-            if (group.switching && group.remaining_queue && group.remaining_queue.length > 0) {
-                const _next2 = group.remaining_queue[0];
-                extraText2 = `<span class="group-switching">▶ Переключение → #${_next2.zone_id} ${escapeHtml(String(_next2.name || ''))}</span>`;
-            } else if (group.status === 'watering' && group.current_zone) {
+            if (group.status === 'watering' && group.current_zone) {
                 const _zw2 = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
                 const _zLbl2 = (_zw2 && _zw2.name) ? `#${_zw2.id} ${escapeHtml(_zw2.name)}` : `#${group.current_zone}`;
                 extraText2 = `Зона ${_zLbl2}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
@@ -653,7 +622,6 @@
                 <div id="group-status-${group.id}">${statusText}</div>
                 <div class="postpone-until">${extraText2}</div>
                 ${groupButtons}
-                ${nextQueueStrip(group)}
             `;
             // Append the same grid as in updateStatusDisplay
             (function(){
