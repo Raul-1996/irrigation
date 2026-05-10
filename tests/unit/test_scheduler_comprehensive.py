@@ -226,6 +226,20 @@ class TestStartGroupSequence:
         z = test_db.get_zone(z1['id'])
         assert z['state'] == 'on'
 
+    def test_start_group_sequence_percent_signature_back_compat(self, started_scheduler, test_db):
+        """Issue #12 — adding `override_percent` kwarg must not break legacy callers.
+
+        Calling `start_group_sequence(gid)` with no kwargs uses the zones'
+        own durations (helper's third branch). Result must match what the
+        method returned before #12 — True, with the first zone marked ON.
+        """
+        z1 = test_db.create_zone({'name': 'BC1', 'duration': 4, 'group_id': 7, 'topic': '/t/bc1'})
+        test_db.create_zone({'name': 'BC2', 'duration': 6, 'group_id': 7, 'topic': '/t/bc2'})
+        result = started_scheduler.start_group_sequence(7)
+        assert result is True
+        # First zone goes ON in TESTING mode (legacy assertion still holds).
+        assert test_db.get_zone(z1['id'])['state'] == 'on'
+
 
 class TestCancelGroupJobs:
     def test_cancel_group_jobs(self, started_scheduler, test_db):

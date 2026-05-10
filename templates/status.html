@@ -260,6 +260,16 @@
     <button onclick="setRunDur(30)">30м</button>
     <button onclick="setRunDur(60)">60м</button>
   </div>
+  <!-- Issue #12: % of zone norm. Active row dims the dial + minute presets. -->
+  <div class="run-popup-presets-pct" id="runPopupPctPresets">
+    <button onclick="setRunPct(50)" data-pct="50">50%</button>
+    <button onclick="setRunPct(75)" data-pct="75">75%</button>
+    <button onclick="setRunPct(100)" data-pct="100">100%</button>
+    <button onclick="setRunPct(125)" data-pct="125">125%</button>
+    <button onclick="setRunPct(150)" data-pct="150">150%</button>
+    <button onclick="setRunPct(200)" data-pct="200">200%</button>
+  </div>
+  <div class="run-popup-pct-caption">% от нормы зоны</div>
   <div class="run-popup-actions" id="runPopupActions">
     <button class="sheet-btn-cancel" onclick="closeRunPopup()">Отмена</button>
     <button class="sheet-btn-save" onclick="confirmRun()" style="background:#4caf50"

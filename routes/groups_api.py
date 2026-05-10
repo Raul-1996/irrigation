@@ -307,7 +307,23 @@ def api_start_group_from_first(group_id):
                     override_dur = None
             except (ValueError, TypeError):
                 override_dur = None
-        ok = scheduler.start_group_sequence(group_id, override_duration=override_dur)
+        # Issue #12: optional duration_percent (one of PERCENT_PRESETS).
+        # Minutes mode wins if both are sent. Anything outside the whitelist
+        # is silently ignored — defensive, mirrors the 1..120 clamp above.
+        override_pct = None
+        if override_dur is None:
+            req_pct = body.get('duration_percent')
+            if req_pct is not None:
+                try:
+                    from services.zone_control import PERCENT_PRESETS
+                    p = int(req_pct)
+                    if p in PERCENT_PRESETS:
+                        override_pct = p
+                except (ValueError, TypeError):
+                    override_pct = None
+        ok = scheduler.start_group_sequence(group_id,
+                                            override_duration=override_dur,
+                                            override_percent=override_pct)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
         try:
