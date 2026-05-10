@@ -1195,9 +1195,21 @@ class IrrigationScheduler:
             except (sqlite3.Error, OSError) as e:
                 logger.error(f"Ошибка расчета плановых стартов для группы {group_id}: {e}")
 
-            # Готовим флаг отмены для этой группы
-            cancel_event = threading.Event()
-            self.group_cancel_events[group_id] = cancel_event
+            # Готовим флаг отмены для этой группы.
+            # Issue #16 C2: use setdefault, symmetric to the §6.4 pattern in
+            # `_run_program_threaded`.  If a concurrent program runner has
+            # already planted an Event for this gid, reuse it — both threads
+            # should be cancellable by the same signal — and DO NOT pop it
+            # in our finally (the program runner owns the cleanup).  Only
+            # the planter pops.
+            new_cancel_event = threading.Event()
+            cancel_event = self.group_cancel_events.setdefault(group_id, new_cancel_event)
+            sequence_owns_event = (cancel_event is new_cancel_event)
+            if not sequence_owns_event:
+                logger.info(
+                    "start_group_sequence: gid=%s reusing existing cancel-event "
+                    "(concurrent program/sequence runner)", group_id
+                )
 
             # Очистим старые джобы, связанные с этой группой (group_seq, zone_stop, zone_hard_stop)
             try:
@@ -1283,6 +1295,10 @@ class IrrigationScheduler:
                     self.db.update_zone(zone_id, {'state': 'on', 'watering_start_time': start_ts, 'planned_end_time': planned_end})
                 break  # Only start the first zone in TESTING mode
             return
+        # Capture the Event identity we'll work with, BEFORE any early-return
+        # so the finally cleanup can do an identity-equality check.  See C2
+        # in specs/issue-16-review.md.
+        cancel_event = self.group_cancel_events.get(group_id)
         try:
             # Weather check before group sequence
             skip_info = self._check_weather_skip(zone_ids[0] if zone_ids else 0, 0)
@@ -1295,8 +1311,6 @@ class IrrigationScheduler:
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                     logger.debug("Group weather skip log error: %s", e)
                 return
-
-            cancel_event = self.group_cancel_events.get(group_id)
             for zone_id in zone_ids:
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Группа {group_id}: последовательный полив отменен перед запуском зоны {zone_id}")
@@ -1461,15 +1475,17 @@ class IrrigationScheduler:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка выполнения последовательного полива группы {group_id}: {e}")
         finally:
-            # Снимаем флаг отмены и очищаем событие
+            # Issue #16 C2: only pop the dict entry if it still IS the
+            # Event we observed at startup.  If a concurrent caller has
+            # since replaced it (e.g. _run_program_threaded planted its
+            # own Event between our setdefault and now, or vice-versa),
+            # leave that Event alone — its planter owns the cleanup.
             try:
-                ev = self.group_cancel_events.get(group_id)
-                if ev:
-                    ev.clear()
-                # Опционально удаляем, чтобы не копилось
-                self.group_cancel_events.pop(group_id, None)
+                if cancel_event is not None and self.group_cancel_events.get(group_id) is cancel_event:
+                    cancel_event.clear()
+                    self.group_cancel_events.pop(group_id, None)
             except (KeyError, TypeError, ValueError) as e:
-                logger.debug("Handled exception in line_930: %s", e)
+                logger.debug("_run_group_sequence cleanup gid=%s: %s", group_id, e)
 
     def get_active_programs(self) -> Dict[int, Dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
