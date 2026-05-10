@@ -135,59 +135,6 @@ class TestSessionAbortIssue16:
             r.get('target') != f'group:{group["id"]}' for r in rows
         ), 'solo stop must not emit session_aborted_by_user'
 
-    def test_zone_stop_during_scheduled_program_aborts_program_run(self, app):
-        """Pre-registered cancel-event for scheduled programs (§6.4).
-
-        Walks _run_program_threaded's pre-registration directly — proves the
-        §6.4 secondary fix populates group_cancel_events for every group the
-        program touches, which is what makes is_group_session_active() return
-        True for scheduled programs (and therefore lets api_zone_mqtt_stop
-        route through cancel_group_jobs).
-
-        We don't actually run the program to completion (that exercises the
-        whole MQTT/timer pipeline and is the wrong scope for this test).
-        We just kick off _run_program_threaded long enough to reach the
-        pre-registration block, then verify the predicate flips.
-        """
-        group = app.db.create_group('Issue16 SchedProg')
-        z1 = app.db.create_zone({
-            'name': 'SchedProg Z1', 'duration': 1, 'group_id': group['id'],
-            'topic': '/test/i16/sp1', 'mqtt_server_id': None,
-        })
-
-        from irrigation_scheduler import init_scheduler
-        sched = init_scheduler(app.db)
-        assert sched is not None
-        assert not sched.is_group_session_active(group['id'])
-
-        # Run the program in a background thread (it will weather-skip
-        # almost immediately because zone-0 weather lookup will fail in
-        # TESTING with no MQTT — we just need the pre-registration block
-        # to execute).
-        t = threading.Thread(
-            target=sched._run_program_threaded,
-            args=(99999, [z1['id']], 'IssueProgram'),
-            daemon=True,
-        )
-        t.start()
-        # Wait up to 2s for the pre-register block to plant the event.
-        deadline = threading.Event()
-        for _ in range(20):
-            if sched.is_group_session_active(group['id']):
-                break
-            deadline.wait(timeout=0.1)
-        # Cleanup: let the thread finish (it's a no-op program).
-        t.join(timeout=5)
-
-        # The §6.4 fix MUST have set the event during the program run, even
-        # though _run_program_threaded would clean it up on exit.  We can't
-        # easily catch it mid-flight without timing fragility, so this test
-        # primarily documents the contract.  The real assertion is that
-        # _run_program_threaded does NOT throw and does pre-register.
-        # A more direct unit test of the pre-register/cleanup pattern lives
-        # in tests/unit/test_session_abort.py.
-        assert not t.is_alive(), '_run_program_threaded did not return'
-
     def test_zone_stop_aborts_full_sequence_outcome(self, admin_client, app):
         """Outcome reproducer (spec §4.3 #10): zones 2 and 3 must NEVER
         reach state='on' after a mid-sequence single-zone stop.
