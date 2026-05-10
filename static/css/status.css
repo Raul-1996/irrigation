@@ -1685,11 +1685,12 @@
         align-items: center;
         gap: 8px;
         min-width: 0;
-        max-width: 100%;
+        width: 100%;
+        box-sizing: border-box;
     }
     .next-queue-strip .next-label {
         font-size: 13px;
-        color: #666;
+        color: #fff;
         flex-shrink: 0;
         padding-left: 2px;
     }
@@ -1704,7 +1705,7 @@
         align-items: center;
         padding-right: 12px;
         min-width: 0;
-        flex: 1 1 0;
+        flex: 1 1 auto;
     }
     .chips-row::-webkit-scrollbar { display: none; }
     .zone-chip {
