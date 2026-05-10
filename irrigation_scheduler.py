@@ -1424,6 +1424,20 @@ class IrrigationScheduler:
     def get_active_zones(self) -> Dict[int, datetime]:
         return self.active_zones.copy()
     
+    def is_group_session_active(self, group_id: int) -> bool:
+        """True iff the group currently has an in-flight sequence or program run.
+
+        Currently this is equivalent to "group_cancel_events[gid] exists",
+        because that key is created by start_group_sequence and (per fix in
+        §6.4) by _run_program_threaded when a scheduled program fires. The
+        Event being set means cancel-in-progress; the existence of the Event
+        is what indicates a session.
+        """
+        try:
+            return self.group_cancel_events.get(int(group_id)) is not None
+        except (TypeError, ValueError, KeyError):
+            return False
+
     def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False):
         """Отменяет все активные задачи планировщика для указанной группы.
 
