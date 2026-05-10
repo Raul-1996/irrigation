@@ -310,6 +310,12 @@ class IrrigationScheduler:
         # block as the cancel event. The in-thread sequencer loop polls .is_set()
         # alongside cancel/shutdown checks.
         self.group_skip_current_events: Dict[int, threading.Event] = {}
+        # Issue #14 C2: per-group monotonic-clock timestamp of the last
+        # *successful* skip request, for server-side debounce. The frontend
+        # 1500ms guard is bypassable (multi-tab, mobile+desktop, scripted
+        # callers); this is the authoritative second layer.
+        self._last_skip_ts: Dict[int, float] = {}
+        self._skip_debounce_seconds: float = 1.0
         # Shutdown event: set to interrupt all sleeping threads for graceful stop
         self._shutdown_event = threading.Event()
 
@@ -534,13 +540,15 @@ class IrrigationScheduler:
 
     def _run_program_threaded(self, program_id: int, zones: List[int], program_name: str):
         """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler"""
-        # Issue #16 §6.4: pre-register a cancel-event for every distinct
-        # group this program will touch, so is_group_session_active(gid)
-        # returns True while the program is in flight.  Without this,
-        # scheduled-program runs are invisible to the API layer's
-        # session detector and the single-zone stop endpoints would
-        # fall through to the solo path — re-introducing the issue #16
-        # bug for scheduled programs.
+        # Issue #16 §6.4 + Issue #14 C1: pre-register a cancel-event for
+        # every distinct group this program will touch, so
+        # is_group_session_active(gid) returns True while the program is in
+        # flight.  Without this:
+        # - scheduled-program runs would be invisible to the API layer's
+        #   session detector → single-zone stop endpoints would fall through
+        #   to the solo path (issue #16 bug), and the skip-current endpoint
+        #   would 400 for all scheduled programs (issue #14 C1).
+        #
         # We use dict.setdefault (atomic in CPython, single PyDict_SetDefault
         # bytecode) so a concurrent start_group_sequence's already-planted
         # Event is preserved.  We track the (gid, our_event) tuples THIS
@@ -810,13 +818,14 @@ class IrrigationScheduler:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
         finally:
-            # Issue #16 §6.4: clear/pop ONLY the cancel-events this
-            # invocation registered AND that the dict still holds.  If a
-            # concurrent start_group_sequence has since replaced our
-            # entry with its own Event, the identity check fails and we
-            # leave that Event alone — it belongs to the sequence.
-            # Mirrors the cleanup in the `finally` block of
-            # `_run_group_sequence`.
+            # Issue #16 §6.4 + Issue #14: identity-aware cleanup. Clear/pop
+            # ONLY the cancel-events this invocation registered AND that the
+            # dict still holds. If a concurrent start_group_sequence has
+            # since replaced our entry with its own Event, the identity
+            # check fails and we leave that Event alone — it belongs to the
+            # sequence. Mirrors the cleanup in the `finally` block of
+            # `_run_group_sequence`. Also drop any accumulated skip events
+            # so the dict doesn't grow forever.
             for gid, our_event in registered_gids:
                 try:
                     if self.group_cancel_events.get(gid) is our_event:
@@ -824,6 +833,13 @@ class IrrigationScheduler:
                         self.group_cancel_events.pop(gid, None)
                 except (KeyError, TypeError, ValueError) as e:
                     logger.debug("_run_program_threaded cleanup gid=%s: %s", gid, e)
+                try:
+                    sk = self.group_skip_current_events.get(gid)
+                    if sk is not None:
+                        sk.clear()
+                    self.group_skip_current_events.pop(gid, None)
+                except (KeyError, TypeError, ValueError) as e:
+                    logger.debug("_run_program_threaded skip-cleanup gid=%s: %s", gid, e)
 
     def schedule_program(self, program_id: int, program_data: Dict[str, Any]):
         try:
@@ -1573,24 +1589,38 @@ class IrrigationScheduler:
         except (TypeError, ValueError, KeyError):
             return False
 
-    def request_skip_current_zone(self, group_id: int) -> bool:
+    def request_skip_current_zone(self, group_id: int) -> str:
         """Mark the currently running zone in this group's sequencer as 'skip me'.
 
         The in-thread loop polls the event each second; on detection it stops
-        the current zone and continues to the next iteration. Idempotent —
-        repeated calls within the same zone produce a single skip.
+        the current zone and continues to the next iteration. Idempotent
+        within a single zone — repeated calls within the same zone produce a
+        single skip.
 
-        Returns True if a skip was scheduled, False if no session is active.
+        Returns:
+          'ok'         — skip scheduled (event set).
+          'no_session' — no active group session; nothing to skip.
+          'debounced'  — a successful skip for this group landed <1.0s ago;
+                         caller should treat as 429 Too Many Requests. Server
+                         enforces this regardless of the frontend 1500ms
+                         debounce, since that guard is bypassable
+                         (multi-tab, mobile+desktop, scripted callers).
         """
         gid = int(group_id)
         if not self.is_group_session_active(gid):
-            return False
+            return 'no_session'
+        # Issue #14 C2: server-side per-group debounce.
+        now = time.monotonic()
+        last = self._last_skip_ts.get(gid, 0.0)
+        if (now - last) < self._skip_debounce_seconds:
+            return 'debounced'
+        self._last_skip_ts[gid] = now
         ev = self.group_skip_current_events.get(gid)
         if ev is None:
             ev = threading.Event()
             self.group_skip_current_events[gid] = ev
         ev.set()
-        return True
+        return 'ok'
 
 
     def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False):

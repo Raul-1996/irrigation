@@ -255,7 +255,16 @@ def api_skip_current_zone(group_id):
         next_zone_id = _compute_next_zone_id(int(group_id), current_zone_id)
 
         scheduled = scheduler.request_skip_current_zone(int(group_id))
-        if not scheduled:
+        if scheduled == 'debounced':
+            # Issue #14 C2: server-side debounce — second skip request for
+            # the same group arrived within 1.0s of the previous successful
+            # one. Frontend 1500ms guard is bypassable (multi-tab, scripted
+            # callers); this is the authoritative throttle.
+            return jsonify({
+                'success': False,
+                'message': 'Слишком частые запросы — подождите секунду',
+            }), 429
+        if scheduled != 'ok':
             return jsonify({'success': False, 'message': 'Нет активного полива в группе'}), 400
 
         try:

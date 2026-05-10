@@ -162,7 +162,7 @@ class TestSkipSequencerLoop:
                               timeout=3.0), "zone1 never started"
 
             # Fire skip
-            assert sch.request_skip_current_zone(1) is True
+            assert sch.request_skip_current_zone(1) == 'ok'
 
             # Outcome: zone1 stops AND zone2 starts within ~2s of skip
             assert poll_until(lambda: test_db.get_zone(z1['id'])['state'] == 'off',
@@ -194,8 +194,15 @@ class TestSkipSequencerLoop:
                 except Exception:
                     pass
 
-    def test_skip_double_click_advances_only_once(self, app):
-        """Outcome: two skip presses ~50ms apart → only one zone advances."""
+    def test_skip_double_click_advances_only_once(self, admin_client, app):
+        """Issue #14 C2: two HTTP POSTs to /skip-current within 100ms →
+        second is rejected (429), and only one zone advance actually happens.
+
+        This test exercises the SERVER-SIDE debounce path
+        (request_skip_current_zone returning 'debounced'), not just the
+        idempotent-event behavior of a back-to-back ev.set() — that's a
+        weaker guarantee.
+        """
         test_db = app.db
         z1 = test_db.create_zone({'name': 'Z1', 'duration': 1, 'group_id': 1, 'topic': '/t/z1'})
         z2 = test_db.create_zone({'name': 'Z2', 'duration': 1, 'group_id': 1, 'topic': '/t/z2'})
@@ -221,16 +228,28 @@ class TestSkipSequencerLoop:
             assert poll_until(lambda: test_db.get_zone(z1['id'])['state'] == 'on',
                               timeout=3.0), "zone1 never started"
 
-            # Two skips back-to-back
-            sch.request_skip_current_zone(1)
-            sch.request_skip_current_zone(1)  # idempotent — same event already set
+            # Two HTTP requests within 100ms via the test client. Same
+            # process, but the route handler IS the server-side path —
+            # request_skip_current_zone enforces the monotonic-clock
+            # debounce regardless of where the call originates.
+            with patch('routes.groups_api.get_scheduler', return_value=sch):
+                t0 = time.monotonic()
+                resp1 = admin_client.post('/api/groups/1/skip-current',
+                                          content_type='application/json', data='{}')
+                resp2 = admin_client.post('/api/groups/1/skip-current',
+                                          content_type='application/json', data='{}')
+                elapsed = time.monotonic() - t0
+            assert elapsed < 0.5, f"two POSTs took {elapsed:.3f}s — slow CI?"
+            assert resp1.status_code == 200, resp1.get_data(as_text=True)
+            assert resp2.status_code == 429, resp2.get_data(as_text=True)
+            body2 = resp2.get_json() or {}
+            assert body2.get('success') is False
 
-            # Outcome: zone2 starts, zone3 does NOT start before we cancel.
+            # Outcome: zone2 starts (one skip consumed), zone3 stays off
+            # (second skip was REJECTED at the API, never set the event a
+            # second time).
             assert poll_until(lambda: test_db.get_zone(z2['id'])['state'] == 'on',
                               timeout=3.0), "zone2 did not start"
-
-            # Window: confirm zone3 is still off — i.e. we didn't double-skip.
-            # Wait briefly to let the loop "settle" on zone2's tick.
             time.sleep(0.5)
             assert test_db.get_zone(z3['id'])['state'] == 'off', \
                 "double-skip incorrectly advanced past zone2 to zone3"
@@ -244,6 +263,117 @@ class TestSkipSequencerLoop:
                     p.stop()
                 except Exception:
                     pass
+
+    def test_skip_current_program_watering_works(self, admin_client, app):
+        """Issue #14 C1: scheduled-program runs (driven by _run_program_threaded,
+        not the manual start_group_sequence) must also be skip-able. Pre-iter2
+        the skip endpoint returned 400 because group_cancel_events wasn't
+        registered for program runs — so is_group_session_active returned
+        False and the route gave up before even calling request_skip_current_zone.
+
+        Flow: create a 3-zone group. Drive _run_program_threaded directly
+        (background thread). Wait until zone1 is on. POST skip. Assert:
+          - HTTP 200
+          - zone1 stops within 5s
+          - zone2 starts within 5s
+        """
+        test_db = app.db
+        z1 = test_db.create_zone({'name': 'PZ1', 'duration': 1, 'group_id': 1, 'topic': '/t/pz1'})
+        z2 = test_db.create_zone({'name': 'PZ2', 'duration': 1, 'group_id': 1, 'topic': '/t/pz2'})
+        z3 = test_db.create_zone({'name': 'PZ3', 'duration': 1, 'group_id': 1, 'topic': '/t/pz3'})
+
+        sch = _make_scheduler(test_db)
+
+        started = []
+        stopped = []
+        # Reuse the sequencer-loop patches, plus extras for the program path.
+        patches = self._patches(test_db, sch, started, stopped)
+        # _run_program_threaded uses exclusive_start_zone (not in
+        # _run_group_sequence), which would try to publish MQTT — short it.
+        patches.append(
+            patch('services.zone_control.exclusive_start_zone', return_value=True)
+        )
+        for p in patches:
+            p.start()
+        try:
+            t = threading.Thread(
+                target=sch._run_program_threaded,
+                args=(42, [z1['id'], z2['id'], z3['id']], 'TestProgram'),
+                daemon=True,
+            )
+            t.start()
+
+            # zone1 should turn on (via update_zone_versioned in the program path).
+            assert poll_until(lambda: test_db.get_zone(z1['id'])['state'] == 'on',
+                              timeout=5.0), "zone1 never started in program run"
+
+            # The C1 fix: is_group_session_active(1) must now be True
+            # because _run_program_threaded pre-registered the cancel event.
+            assert sch.is_group_session_active(1), \
+                "C1 regression: program run did not register group_cancel_events"
+
+            # POST to the skip endpoint — this is the exact path the user
+            # would hit from the UI. Must return 200, NOT 400.
+            with patch('routes.groups_api.get_scheduler', return_value=sch):
+                resp = admin_client.post('/api/groups/1/skip-current',
+                                         content_type='application/json', data='{}')
+            assert resp.status_code == 200, \
+                f"C1 regression: skip during program returned {resp.status_code} {resp.get_data(as_text=True)}"
+            body = resp.get_json()
+            assert body['success'] is True
+            assert body['skipped_zone_id'] == z1['id']
+
+            # Outcome: zone1 stops, zone2 starts within 5s.
+            assert poll_until(lambda: test_db.get_zone(z1['id'])['state'] == 'off',
+                              timeout=5.0), "zone1 did not stop after skip in program run"
+            assert poll_until(lambda: test_db.get_zone(z2['id'])['state'] == 'on',
+                              timeout=5.0), "zone2 did not start after skip in program run"
+
+            # Cleanup: cancel session so loop exits.
+            ev = sch.group_cancel_events.get(1)
+            if ev is not None:
+                ev.set()
+            t.join(timeout=10.0)
+            assert not t.is_alive(), "program thread did not exit"
+        finally:
+            for p in patches:
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+
+    def test_skip_debounce_unit_returns_status_strings(self, app):
+        """Issue #14 C2: unit-level coverage of the server-side debounce
+        contract. request_skip_current_zone must return:
+          'no_session' when group has no active session,
+          'ok' on first successful skip,
+          'debounced' on a second call within 1.0s of the first.
+        After the debounce window elapses, returns 'ok' again.
+
+        This is the contract the API handler depends on; locking it down
+        prevents an accidental refactor from regressing 429 to 200.
+        """
+        test_db = app.db
+        z1 = test_db.create_zone({'name': 'Z1', 'duration': 1, 'group_id': 7, 'topic': '/t/zd1'})
+        sch = _make_scheduler(test_db)
+
+        # No session: returns 'no_session' regardless of timing.
+        assert sch.request_skip_current_zone(7) == 'no_session'
+
+        # Activate a session.
+        sch.group_cancel_events[7] = threading.Event()
+
+        # First call inside the active window: 'ok'.
+        assert sch.request_skip_current_zone(7) == 'ok'
+        # Second call <1.0s later: 'debounced'.
+        assert sch.request_skip_current_zone(7) == 'debounced'
+
+        # Lower the debounce, sleep just past it, retry: 'ok' again.
+        sch._skip_debounce_seconds = 0.05
+        time.sleep(0.06)
+        assert sch.request_skip_current_zone(7) == 'ok'
+        # And immediately again is 'debounced'.
+        assert sch.request_skip_current_zone(7) == 'debounced'
 
     def test_skip_event_cleared_in_finally(self, app):
         """Outcome: after sequencer exits, group_skip_current_events[gid] is gone."""
