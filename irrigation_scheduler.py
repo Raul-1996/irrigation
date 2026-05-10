@@ -364,6 +364,11 @@ class IrrigationScheduler:
             self.schedule_audit_cleanup()
         except (OSError, ValueError) as e:
             logger.error(f"Не удалось запланировать очистку audit_log: {e}")
+        # Плановый джоб: ежедневный бэкап БД (03:15)
+        try:
+            self.schedule_daily_backup()
+        except (OSError, ValueError) as e:
+            logger.error(f"Не удалось запланировать ежедневный бэкап: {e}")
 
     def stop(self):
         if not self.is_running:
@@ -456,6 +461,32 @@ class IrrigationScheduler:
             logger.info("audit_cleanup job scheduled: daily at 03:30")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Не удалось добавить джоб audit_cleanup: {e}")
+
+    def schedule_daily_backup(self) -> None:
+        """Plan daily DB backup at 03:15 (sanity-checked, see LogRepository.create_backup)."""
+        try:
+            self.scheduler.add_job(
+                self._daily_backup,
+                trigger=CronTrigger(hour=3, minute=15),
+                id='daily_backup',
+                name='daily DB backup',
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
+            logger.info("daily_backup job scheduled: daily at 03:15")
+        except (ValueError, TypeError, KeyError) as e:
+            logger.error(f"Не удалось добавить джоб daily_backup: {e}")
+
+    def _daily_backup(self) -> None:
+        try:
+            path = self.db.create_backup()
+            if path:
+                logger.info("Daily backup: %s", path)
+            else:
+                logger.error("Daily backup failed (sanity check rejected)")
+        except (OSError, sqlite3.Error) as e:
+            logger.error("Daily backup error: %s", e)
 
     def _stop_zone(self, zone_id: int):
         try:

@@ -177,6 +177,23 @@ class LogRepository(BaseRepository):
                 logger.debug("VACUUM backup failed, using copy: %s", e)
                 shutil.copy2(self.db_path, backup_path)
 
+            try:
+                prod_size = os.path.getsize(self.db_path)
+                bak_size = os.path.getsize(backup_path)
+            except OSError as e:
+                logger.error("Не удалось проверить размер бэкапа: %s", e)
+                return None
+            if bak_size < prod_size * 0.5:
+                logger.error(
+                    "Backup too small: %d bytes < 50%% of %d — removing",
+                    bak_size, prod_size,
+                )
+                try:
+                    os.remove(backup_path)
+                except OSError as e:
+                    logger.error("Не удалось удалить подозрительный бэкап %s: %s", backup_path, e)
+                return None
+
             self._cleanup_old_backups()
             logger.info("Резервная копия создана: %s", backup_path)
             return backup_path

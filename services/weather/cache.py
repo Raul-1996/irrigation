@@ -126,8 +126,11 @@ def read_stale(db_path: str, lat: float, lon: float) -> Optional[WeatherData]:
 def save(db_path: str, lat: float, lon: float, data: Dict[str, Any]) -> None:
     """Upsert the raw API payload into ``weather_cache`` and prune old rows.
 
-    Old rows are defined as those with ``fetched_at`` older than
-    ``4 * _CACHE_TTL_SEC`` (i.e. two hours at the current TTL).
+    Old rows are defined as those with ``fetched_at`` older than 24 hours.
+    The TTL for "fresh" reads is ``_CACHE_TTL_SEC`` (30 min), but stale-mode
+    fallback (``read_stale``) accepts entries of any age, so we keep a 24h
+    buffer to support degraded operation across longer outages without
+    flooding the table.
 
     Args:
         db_path: SQLite path.
@@ -145,7 +148,7 @@ def save(db_path: str, lat: float, lon: float, data: Dict[str, Any]) -> None:
             )
             conn.execute(
                 'DELETE FROM weather_cache WHERE fetched_at < ?',
-                (now - _CACHE_TTL_SEC * 4,),
+                (now - 24 * 3600,),
             )
             conn.commit()
     except (sqlite3.Error, json.JSONDecodeError) as e:

@@ -1,6 +1,7 @@
 """Tests for logs DB: log entries, water usage."""
 import pytest
 import os
+from unittest.mock import patch
 
 os.environ['TESTING'] = '1'
 
@@ -45,3 +46,29 @@ class TestBackup:
         result = test_db.create_backup()
         # May return path or None depending on implementation
         assert isinstance(result, (str, type(None)))
+
+    def test_create_backup_rejects_small_file(self, test_db, tmp_path):
+        """Sanity check: backups smaller than 50% of prod must be rejected
+        and removed (Phase 3, issue #29)."""
+        backup_dir = tmp_path / "bak"
+        test_db.logs.backup_dir = str(backup_dir)
+
+        real_getsize = os.path.getsize
+
+        def fake_getsize(path):
+            # Prod DB looks 1000 bytes, every other (= the new backup) 100 bytes.
+            if path == test_db.db_path:
+                return 1000
+            return 100
+
+        with patch('os.path.getsize', side_effect=fake_getsize):
+            result = test_db.create_backup()
+
+        assert result is None
+        # Backup file must have been removed by sanity check.
+        if backup_dir.exists():
+            stragglers = [
+                p for p in backup_dir.iterdir()
+                if p.name.startswith('irrigation_backup_')
+            ]
+            assert stragglers == [], f"sanity check did not remove backup: {stragglers}"
