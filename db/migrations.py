@@ -183,6 +183,19 @@ class MigrationRunner:
                     'zones_add_photo_thumb',
                     self._migrate_add_photo_thumb,
                 )
+                # Issue #35: add zone_runs.source ('program' / 'manual') + composite
+                # index, then backfill historical rows by matching start_utc to
+                # the active programs' schedules (±120s) — manual otherwise.
+                self._apply_named_migration(
+                    conn,
+                    'zone_runs_add_source',
+                    self._migrate_add_zone_runs_source,
+                )
+                self._apply_named_migration(
+                    conn,
+                    'zone_runs_backfill_source',
+                    self._backfill_zone_runs_source,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1116,6 +1129,197 @@ class MigrationRunner:
         except sqlite3.Error as e:
             logger.error("Ошибка миграции zones_add_photo_thumb: %s", e)
 
+    def _migrate_add_zone_runs_source(self, conn):
+        """Issue #35: add zone_runs.source TEXT + composite index (zone_id, start_utc).
+
+        ``source`` distinguishes programmatic vs manual runs in the history UI:
+          - 'program' — opened by the scheduler (irrigation_scheduler)
+          - 'manual'  — opened via the UI/API (services.zone_control)
+
+        NULL is allowed for rows written before this migration; the follow-up
+        backfill migration ``zone_runs_backfill_source`` fills them in by
+        matching start_utc against the active programs' schedules.
+        """
+        try:
+            cursor = conn.execute("PRAGMA table_info(zone_runs)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'source' not in columns:
+                conn.execute('ALTER TABLE zone_runs ADD COLUMN source TEXT')
+                logger.info('Добавлено поле source в таблицу zone_runs')
+            # Composite index for fast per-zone date-range scans used by the
+            # /api/zones/<id>/history endpoint (filter zone_id + sort start_utc).
+            conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_zone_runs_zone_start '
+                'ON zone_runs(zone_id, start_utc)'
+            )
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции zone_runs_add_source: %s", e)
+
+    def _backfill_zone_runs_source(self, conn):
+        """Issue #35: backfill source on pre-existing zone_runs.
+
+        Algorithm (decisions Q3=a):
+          For each row with source IS NULL:
+            - parse start_utc (ISO 8601, possibly with trailing 'Z')
+            - convert to local time-of-day (HH:MM:SS) and weekday/day-of-month
+            - look up active programs that include the run's zone
+            - if any program's scheduled time on that calendar day is within
+              ±120 seconds of start_utc, mark as 'program', else 'manual'
+
+        Only enabled programs that contain the zone are considered. Programs
+        that were deleted/disabled after the run will produce a false-positive
+        'manual' — accepted per decisions Q3.
+        """
+        try:
+            # Guard: zone_runs may be absent on very old/odd DBs.
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='zone_runs'"
+            )
+            if cur.fetchone() is None:
+                logger.info('zone_runs_backfill_source: zone_runs absent, skip')
+                return
+            # Pull NULL rows.
+            cur = conn.execute(
+                "SELECT id, zone_id, start_utc FROM zone_runs WHERE source IS NULL"
+            )
+            null_rows = cur.fetchall()
+            if not null_rows:
+                logger.info('zone_runs_backfill_source: nothing to backfill')
+                return
+            # Load programs (raw, since we run inside migration before
+            # repositories are guaranteed wired). Treat 'enabled' missing as 1.
+            cur = conn.execute("PRAGMA table_info(programs)")
+            prog_cols = {row[1] for row in cur.fetchall()}
+            has_enabled = 'enabled' in prog_cols
+            has_extra = 'extra_times' in prog_cols
+            has_sched_type = 'schedule_type' in prog_cols
+            has_iv_days = 'interval_days' in prog_cols
+            has_eo = 'even_odd' in prog_cols
+            select_cols = ['id', 'time', 'days', 'zones']
+            if has_enabled:
+                select_cols.append('enabled')
+            if has_extra:
+                select_cols.append('extra_times')
+            if has_sched_type:
+                select_cols.append('schedule_type')
+            if has_iv_days:
+                select_cols.append('interval_days')
+            if has_eo:
+                select_cols.append('even_odd')
+            cur = conn.execute(
+                f"SELECT {', '.join(select_cols)} FROM programs"
+            )
+            programs = []
+            for row in cur.fetchall():
+                rec = dict(zip(select_cols, row))
+                if has_enabled and int(rec.get('enabled') or 0) == 0:
+                    continue
+                try:
+                    rec_zones = set(int(z) for z in json.loads(rec.get('zones') or '[]'))
+                except (ValueError, TypeError):
+                    rec_zones = set()
+                if not rec_zones:
+                    continue
+                try:
+                    rec_days = [int(d) for d in json.loads(rec.get('days') or '[]')]
+                except (ValueError, TypeError):
+                    rec_days = []
+                times = [rec.get('time')] if rec.get('time') else []
+                if has_extra:
+                    try:
+                        extra = json.loads(rec.get('extra_times') or '[]')
+                        times.extend([t for t in extra if t])
+                    except (ValueError, TypeError):
+                        pass
+                programs.append({
+                    'id': int(rec.get('id') or 0),
+                    'zones': rec_zones,
+                    'days': rec_days,
+                    'times': times,
+                    'schedule_type': rec.get('schedule_type') or 'weekdays',
+                    'interval_days': rec.get('interval_days'),
+                    'even_odd': rec.get('even_odd'),
+                })
+
+            from datetime import datetime, timezone
+            updated_program = 0
+            updated_manual = 0
+            for run_id, zone_id, start_utc in null_rows:
+                if not start_utc:
+                    # No timestamp — default to 'manual' (nothing to match against).
+                    conn.execute(
+                        "UPDATE zone_runs SET source = ? WHERE id = ?",
+                        ('manual', run_id),
+                    )
+                    updated_manual += 1
+                    continue
+                # Parse start_utc — be tolerant: accept '...Z' or '+00:00'.
+                ts_str = start_utc.replace('Z', '+00:00') if isinstance(start_utc, str) else None
+                try:
+                    dt_utc = datetime.fromisoformat(ts_str)
+                except (ValueError, TypeError):
+                    conn.execute(
+                        "UPDATE zone_runs SET source = ? WHERE id = ?",
+                        ('manual', run_id),
+                    )
+                    updated_manual += 1
+                    continue
+                # Use the server's local time for comparison: scheduler uses
+                # local time for triggers. astimezone() returns local TZ when
+                # passed no argument (Python 3.6+).
+                if dt_utc.tzinfo is None:
+                    dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+                dt_local = dt_utc.astimezone()
+                weekday = dt_local.weekday()  # 0=Mon..6=Sun (matches programs.days)
+                day_of_month = dt_local.day
+                run_seconds = (dt_local.hour * 3600 + dt_local.minute * 60
+                               + dt_local.second)
+
+                matched = False
+                for prog in programs:
+                    if int(zone_id) not in prog['zones']:
+                        continue
+                    # Day-of-schedule check.
+                    if prog['schedule_type'] == 'weekdays':
+                        if weekday not in prog['days']:
+                            continue
+                    elif prog['schedule_type'] == 'even-odd':
+                        is_even = (day_of_month % 2 == 0)
+                        if prog['even_odd'] == 'even' and not is_even:
+                            continue
+                        if prog['even_odd'] == 'odd' and is_even:
+                            continue
+                    # 'interval' — no reliable anchor for the past, treat as
+                    # matching by time only (best-effort).
+                    for t_str in prog['times']:
+                        try:
+                            hh, mm = t_str.split(':')[:2]
+                            prog_sec = int(hh) * 3600 + int(mm) * 60
+                        except (ValueError, AttributeError):
+                            continue
+                        if abs(run_seconds - prog_sec) <= 120:
+                            matched = True
+                            break
+                    if matched:
+                        break
+                src = 'program' if matched else 'manual'
+                conn.execute(
+                    "UPDATE zone_runs SET source = ? WHERE id = ?",
+                    (src, run_id),
+                )
+                if matched:
+                    updated_program += 1
+                else:
+                    updated_manual += 1
+            conn.commit()
+            logger.info(
+                'zone_runs_backfill_source: marked %d program, %d manual',
+                updated_program, updated_manual,
+            )
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции zone_runs_backfill_source: %s", e)
+
     def _migrate_create_audit_log(self, conn):
         """Create the audit_log table for principal-critical mutation tracking.
 
@@ -1194,7 +1398,30 @@ class MigrationRunner:
         'weather_wind_kmh_to_ms': '_down_wind_kmh_to_ms',
         'queue_and_float_support': '_down_queue_and_float_support',
         'create_audit_log': '_down_create_audit_log',
+        'zone_runs_add_source': '_down_add_zone_runs_source',
+        'zone_runs_backfill_source': '_down_backfill_zone_runs_source',
     }
+
+    def _down_add_zone_runs_source(self, conn):
+        """Downgrade: drop idx_zone_runs_zone_start + remove source column."""
+        conn.execute('DROP INDEX IF EXISTS idx_zone_runs_zone_start')
+        self._recreate_table_without_columns(conn, 'zone_runs', ['source'])
+        # Reissue base zone_runs indexes wiped by table recreation.
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_zone_runs_zone ON zone_runs(zone_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_zone_runs_group ON zone_runs(group_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_zone_runs_active ON zone_runs(zone_id, end_utc)')
+        conn.commit()
+        logger.info('Downgrade: удалена колонка source и индекс idx_zone_runs_zone_start из zone_runs')
+
+    def _down_backfill_zone_runs_source(self, conn):
+        """Downgrade backfill: blank out source values (column drop handled by sibling)."""
+        try:
+            conn.execute("UPDATE zone_runs SET source = NULL")
+            conn.commit()
+        except sqlite3.Error:
+            # Column may already be gone if _down_add_zone_runs_source ran first.
+            pass
+        logger.info('Downgrade: zone_runs.source значения очищены')
 
     def _down_create_audit_log(self, conn):
         conn.execute('DROP TABLE IF EXISTS audit_log')
