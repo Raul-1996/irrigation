@@ -404,7 +404,7 @@
   var SOURCE_LABELS = { program: 'Программа', manual: 'Вручную', api: 'API' };
 
   function renderRunRow(r) {
-    var interrupted = (r.status && r.status !== 'ok');
+    var interrupted = (r.status && r.status !== 'ok') || (r.duration_min === 0);
     var cls = 'history-run' + (interrupted ? ' is-interrupted' : '');
     var icon = interrupted ? '⏹' : '✓';
     var tStart = utcIsoToLocalTime(r.start_utc);
