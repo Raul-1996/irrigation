@@ -642,15 +642,23 @@ class ZoneRepository(BaseRepository):
     @retry_on_busy()
     def create_zone_run(self, zone_id: int, group_id: int, start_utc: str, start_monotonic: float,
                         start_raw_pulses: Optional[int], pulse_liters_at_start: int,
-                        base_m3_at_start: Optional[float] = None) -> Optional[int]:
+                        base_m3_at_start: Optional[float] = None,
+                        *, source: Optional[str] = None) -> Optional[int]:
+        """Open a new zone_runs row.
+
+        ``source`` (issue #35) is a keyword-only argument so existing positional
+        call-sites stay valid. Accepted values: ``'program'``, ``'manual'``,
+        or ``None`` (NULL — unknown, treated as manual by the history backfill).
+        """
         try:
             with self._connect() as conn:
                 cur = conn.execute('''
-                    INSERT INTO zone_runs(zone_id, group_id, start_utc, start_monotonic, start_raw_pulses, pulse_liters_at_start, base_m3_at_start)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO zone_runs(zone_id, group_id, start_utc, start_monotonic, start_raw_pulses, pulse_liters_at_start, base_m3_at_start, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (int(zone_id), int(group_id), str(start_utc), float(start_monotonic),
                       None if start_raw_pulses is None else int(start_raw_pulses), int(pulse_liters_at_start),
-                      None if base_m3_at_start is None else float(base_m3_at_start)))
+                      None if base_m3_at_start is None else float(base_m3_at_start),
+                      None if source is None else str(source)))
                 run_id = cur.lastrowid
                 conn.commit()
                 return int(run_id)

@@ -1704,6 +1704,7 @@ class IrrigationScheduler:
                         self.db.create_zone_run(
                             int(zone_id), gid_for_run, start_ts, time.monotonic(),
                             raw_pulses, liters_per_pulse, base_m3,
+                            source='program',
                         )
                 except (sqlite3.Error, OSError, ValueError, TypeError):
                     logger.exception(

@@ -304,7 +304,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
                         except (sqlite3.Error, OSError):
                             logger.exception('start meter snapshot failed (continuing without)')
                     try:
-                        db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3)
+                        db.create_zone_run(int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3, source='manual')
                     except (sqlite3.Error, OSError):
                         logger.exception('start: create_zone_run failed (zone=%s gid=%s)', zone_id, gid)
             except (sqlite3.Error, OSError) as e:

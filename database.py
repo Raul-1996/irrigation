@@ -118,9 +118,11 @@ class IrrigationDB:
         return self.zones.get_zone_duration(zone_id)
 
     def create_zone_run(self, zone_id, group_id, start_utc, start_monotonic,
-                        start_raw_pulses, pulse_liters_at_start, base_m3_at_start=None):
+                        start_raw_pulses, pulse_liters_at_start, base_m3_at_start=None,
+                        *, source=None):
         return self.zones.create_zone_run(zone_id, group_id, start_utc, start_monotonic,
-                                          start_raw_pulses, pulse_liters_at_start, base_m3_at_start)
+                                          start_raw_pulses, pulse_liters_at_start, base_m3_at_start,
+                                          source=source)
 
     def get_open_zone_run(self, zone_id: int):
         return self.zones.get_open_zone_run(zone_id)
