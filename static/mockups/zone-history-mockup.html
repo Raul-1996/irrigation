@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mockup v2 — История полива</title>
+<style>
+:root {
+    --primary-color: #2196f3;
+    --danger-color: #f44336;
+    --warning-color: #ff9800;
+    --success-color: #4caf50;
+    --background-color: #f5f5f5;
+    --card-background: #ffffff;
+    --text-color: #333333;
+    --text-muted: #777777;
+    --border-color: #e0e0e0;
+    --purple: #9c27b0;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --background-color: #1a1a1a;
+        --card-background: #2d2d2d;
+        --text-color: #ffffff;
+        --text-muted: #aaaaaa;
+        --border-color: #404040;
+    }
+}
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--background-color);
+    color: var(--text-color);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    gap: 24px;
+}
+.mockup-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+.mockup-section {
+    width: 100%;
+    max-width: 600px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+/* === Toolbar near "Аварийная остановка" === */
+.toolbar-preview {
+    width: 100%;
+    max-width: 500px;
+    background: var(--card-background);
+    border-radius: 12px;
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+.btn-emergency {
+    flex: 1;
+    background: var(--danger-color);
+    color: #fff;
+    border: none;
+    padding: 12px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.btn-global-history {
+    background: var(--card-background);
+    color: var(--primary-color);
+    border: 1.5px solid var(--primary-color);
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* === Zone card previews === */
+.zone-card-preview {
+    width: 100%;
+    max-width: 360px;
+    background: var(--card-background);
+    border-radius: 12px;
+    padding: 14px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    border: 1px solid var(--border-color);
+}
+.zone-card-preview h3 { margin: 0 0 4px; font-size: 16px; }
+.zone-card-preview .meta { color: var(--text-muted); font-size: 13px; margin-bottom: 10px; }
+.btn-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.btn-row:last-child { margin-bottom: 0; }
+.btn-row > button { flex: 1; }
+.zc-btn {
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-color);
+}
+.zc-btn.primary {
+    background: var(--primary-color);
+    color: #fff;
+    border-color: var(--primary-color);
+}
+.zc-btn.history {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+.zc-btn.edit {
+    border-color: var(--text-muted);
+    color: var(--text-muted);
+}
+
+/* === Modal === */
+.modal-backdrop {
+    background: rgba(0,0,0,0.55);
+    border-radius: 12px;
+    padding: 24px;
+    width: 100%;
+    max-width: 600px;
+    display: flex;
+    justify-content: center;
+}
+.history-modal {
+    background: var(--card-background);
+    border-radius: 14px;
+    width: 100%;
+    max-width: 540px;
+    max-height: 85vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+}
+.hm-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border-color);
+}
+.hm-header h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+.hm-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+.hm-close:hover { background: var(--border-color); }
+.hm-body {
+    overflow-y: auto;
+    padding: 14px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+/* Filters */
+.filters {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.filter-group {
+    display: flex;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+.filters select {
+    padding: 7px 10px;
+    border: 1px solid var(--border-color);
+    background: var(--card-background);
+    color: var(--text-color);
+    border-radius: 8px;
+    font-size: 13px;
+    flex: 1;
+    min-width: 0;
+}
+.period-toggle {
+    display: flex;
+    background: var(--border-color);
+    border-radius: 8px;
+    padding: 3px;
+}
+.period-toggle button {
+    border: none;
+    background: transparent;
+    color: var(--text-color);
+    padding: 5px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+}
+.period-toggle button.active {
+    background: var(--card-background);
+    color: var(--primary-color);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Summary cards */
+.summary-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+}
+.summary-row.two { grid-template-columns: repeat(2, 1fr); }
+.summary-card {
+    background: var(--background-color);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px 12px;
+    text-align: center;
+}
+.summary-card .label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 4px;
+}
+.summary-card .value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-color);
+    line-height: 1.1;
+}
+.summary-card .unit {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-left: 2px;
+}
+
+/* Line chart */
+.chart-block {
+    background: var(--background-color);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 14px 12px 6px;
+}
+.chart-title {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.chart-title .legend {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    text-transform: none;
+    letter-spacing: 0;
+}
+.chart-title .legend span { display: flex; align-items: center; gap: 4px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary-color); }
+.legend-dot.multi { background: var(--warning-color); }
+.legend-dot.today { background: var(--success-color); border: 2px solid var(--success-color); box-sizing: border-box; }
+.legend-dot.plan { background: var(--text-muted); border-radius: 1px; height: 3px; width: 14px; }
+
+.compare-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-color);
+    margin: 6px 0 10px;
+    cursor: pointer;
+    user-select: none;
+}
+.compare-toggle input { margin: 0; cursor: pointer; }
+
+.savings-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(76,175,80,0.10);
+    border: 1px solid rgba(76,175,80,0.30);
+    color: var(--success-color);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+}
+.savings-banner .icon { font-size: 20px; }
+.savings-banner .savings-main { font-size: 13px; }
+.savings-banner .savings-main b { font-weight: 700; }
+.savings-banner .savings-main .approx { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
+.savings-banner .savings-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.savings-banner.over {
+    background: rgba(244,67,54,0.08);
+    border-color: rgba(244,67,54,0.30);
+    color: var(--danger-color);
+}
+
+.chart-svg {
+    width: 100%;
+    height: 130px;
+    overflow: visible;
+}
+.chart-line {
+    stroke: var(--primary-color);
+    stroke-width: 2;
+    fill: none;
+    stroke-linejoin: round;
+}
+.chart-line.plan {
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    opacity: 0.7;
+}
+.chart-marker.plan {
+    fill: var(--card-background);
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    opacity: 0.8;
+}
+.chart-area {
+    fill: var(--primary-color);
+    fill-opacity: 0.08;
+    stroke: none;
+}
+.chart-grid line {
+    stroke: var(--border-color);
+    stroke-dasharray: 2 3;
+    opacity: 0.6;
+}
+.chart-marker {
+    fill: var(--primary-color);
+    stroke: var(--card-background);
+    stroke-width: 2;
+}
+.chart-marker.multi {
+    fill: var(--warning-color);
+}
+.chart-marker.empty {
+    fill: var(--card-background);
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+}
+.chart-marker.today {
+    fill: var(--card-background);
+    stroke: var(--success-color);
+    stroke-width: 2.5;
+}
+.chart-label {
+    font-size: 10px;
+    fill: var(--text-muted);
+    text-anchor: middle;
+}
+.chart-label.today {
+    fill: var(--success-color);
+    font-weight: 600;
+}
+.chart-value {
+    font-size: 10px;
+    fill: var(--primary-color);
+    text-anchor: middle;
+    font-weight: 600;
+}
+.chart-value.muted { fill: var(--text-muted); font-weight: 400; }
+.chart-badge-bg { fill: var(--warning-color); }
+.chart-badge-text {
+    font-size: 9px;
+    fill: #fff;
+    text-anchor: middle;
+    font-weight: 700;
+}
+
+/* Runs list */
+.runs-section h3 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.runs-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.run-row {
+    display: grid;
+    grid-template-columns: 22px 1fr auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 13px;
+}
+.run-row:last-child { border-bottom: none; }
+.run-row .status-icon {
+    font-size: 16px;
+    text-align: center;
+}
+.run-row .when {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    min-width: 0;
+}
+.run-row .when .top {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    flex-wrap: wrap;
+}
+.run-row .when .date { font-weight: 600; }
+.run-row .when .zone-name { color: var(--text-muted); font-size: 11px; }
+.run-row .when .time {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.run-row .duration {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--primary-color);
+    text-align: right;
+}
+.run-row .duration .min { font-size: 11px; color: var(--text-muted); font-weight: 400; margin-left: 2px; }
+.run-row .source {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--border-color);
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.run-row .source.manual { background: rgba(33,150,243,0.15); color: var(--primary-color); }
+.run-row .source.program { background: rgba(156,39,176,0.15); color: var(--purple); }
+.run-row .source.api { background: rgba(255,152,0,0.15); color: var(--warning-color); }
+.run-row.aborted { opacity: 0.75; }
+.run-row.aborted .duration { color: var(--warning-color); }
+.run-row.aborted .status-icon { color: var(--warning-color); }
+
+/* Day separator for multi-run days */
+.day-divider {
+    background: var(--background-color);
+    padding: 4px 12px;
+    font-size: 10px;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.hm-footer {
+    padding: 10px 18px;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.hm-footer .export {
+    background: transparent;
+    border: none;
+    color: var(--primary-color);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+.hm-footer .export:hover { background: var(--border-color); }
+
+/* Notes */
+.notes {
+    width: 100%;
+    max-width: 560px;
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.notes h4 { margin: 0 0 8px; font-size: 13px; }
+.notes ul { margin: 0; padding-left: 18px; }
+.notes li { margin-bottom: 4px; }
+.notes .q { color: var(--warning-color); }
+.notes code {
+    background: var(--background-color);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+/* Mobile */
+@media (max-width: 540px) {
+    body { padding: 10px; }
+    .modal-backdrop { padding: 0; align-items: flex-end; }
+    .history-modal {
+        max-height: 92vh;
+        border-radius: 16px 16px 0 0;
+        max-width: 100%;
+    }
+    .summary-card .value { font-size: 17px; }
+    .run-row { font-size: 12px; padding: 9px 10px; }
+    .filters { flex-direction: column; align-items: stretch; }
+    .period-toggle { align-self: flex-end; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===== 1. Toolbar with global history button ===== -->
+<div class="mockup-section">
+    <div class="mockup-label">1. Главная страница — кнопка «История» рядом с «Аварийная остановка»</div>
+    <div class="toolbar-preview">
+        <button class="btn-emergency">⛔ Аварийная остановка</button>
+        <button class="btn-global-history">📊 История</button>
+    </div>
+</div>
+
+<!-- ===== 2. Zone card — admin view ===== -->
+<div class="mockup-section">
+    <div class="mockup-label">2a. Карточка зоны — режим админа</div>
+    <div class="zone-card-preview">
+        <h3>#8 — За летней кухней</h3>
+        <div class="meta">Группа: Газон · 15 мин</div>
+        <div class="btn-row">
+            <button class="zc-btn edit">✎ Редактировать</button>
+            <button class="zc-btn history">📊 История</button>
+        </div>
+        <div class="btn-row">
+            <button class="zc-btn primary">▶ Запустить</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== 2b. Zone card — non-admin view ===== -->
+<div class="mockup-section">
+    <div class="mockup-label">2b. Карточка зоны — не админ</div>
+    <div class="zone-card-preview">
+        <h3>#8 — За летней кухней</h3>
+        <div class="meta">Группа: Газон · 15 мин</div>
+        <div class="btn-row">
+            <button class="zc-btn history">📊 История</button>
+        </div>
+        <div class="btn-row">
+            <button class="zc-btn primary">▶ Запустить</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== 3. History modal ===== -->
+<div class="mockup-section">
+    <div class="mockup-label">3. Модальное окно «История полива» (с фильтрами + линейный график)</div>
+    <div class="modal-backdrop">
+        <div class="history-modal">
+
+            <div class="hm-header">
+                <h2>💧 История полива</h2>
+                <button class="hm-close" title="Закрыть">×</button>
+            </div>
+
+            <div class="hm-body">
+
+                <div class="filters">
+                    <div class="filter-group">
+                        <select>
+                            <option>Все группы</option>
+                            <option>Газон</option>
+                            <option>Огород</option>
+                            <option>Деревья</option>
+                        </select>
+                        <select>
+                            <option>Все зоны</option>
+                            <option selected>#8 За летней кухней</option>
+                            <option>#9 Возле дома</option>
+                        </select>
+                    </div>
+                    <div class="period-toggle">
+                        <button class="active">7 дн</button>
+                        <button>30 дн</button>
+                    </div>
+                </div>
+
+                <div class="summary-row">
+                    <div class="summary-card">
+                        <div class="label">Минут</div>
+                        <div class="value">112<span class="unit">мин</span></div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="label">Запусков</div>
+                        <div class="value">8</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="label">Литров</div>
+                        <div class="value">187<span class="unit">л</span></div>
+                    </div>
+                </div>
+
+                <div class="chart-block">
+                    <div class="chart-title">
+                        <span>Минут в день</span>
+                        <span class="legend">
+                            <span><span class="legend-dot"></span>Факт</span>
+                            <span><span class="legend-dot plan"></span>План (без погоды)</span>
+                        </span>
+                    </div>
+                    <label class="compare-toggle">
+                        <input type="checkbox" checked>
+                        <span>🌧 Сравнить с базовым планом (без умного алгоритма)</span>
+                    </label>
+                    <div class="savings-banner">
+                        <span class="icon">💧</span>
+                        <div>
+                            <div class="savings-main">Умный алгоритм сэкономил <b>28 мин</b> <span class="approx">≈ 47 л</span></div>
+                            <div class="savings-sub">За 7 дней · из 140 запланированных минут пропущено 28 (20%)</div>
+                        </div>
+                    </div>
+                    <!--
+                        Data points (последние 7 дней):
+                        Вт: 0      | Ср: 12   | Чт: 25  | Пт: 0   | Сб: 15  | Вс: 35 (2 запуска) | Пн: 25 (сегодня, 2 запуска)
+                        Y-range: 0 .. 35 max. Chart area: 20..280 x 10..90.
+                    -->
+                    <svg class="chart-svg" viewBox="0 0 320 130" preserveAspectRatio="none">
+                        <!-- grid -->
+                        <g class="chart-grid">
+                            <line x1="20" y1="20"  x2="300" y2="20"/>
+                            <line x1="20" y1="55"  x2="300" y2="55"/>
+                            <line x1="20" y1="90"  x2="300" y2="90"/>
+                        </g>
+                        <!-- area under FACT line -->
+                        <path class="chart-area" d="
+                            M 20,90
+                            L 20,90
+                            L 66.7,70
+                            L 113.3,30
+                            L 160,90
+                            L 206.7,65
+                            L 253.3,5
+                            L 300,30
+                            L 300,90 Z"/>
+                        <!-- PLAN line (dashed) — данные: 20,20,25,20,20,20,20 -->
+                        <path class="chart-line plan" d="
+                            M 20,40
+                            L 66.7,40
+                            L 113.3,30
+                            L 160,40
+                            L 206.7,40
+                            L 253.3,40
+                            L 300,40"/>
+                        <!-- plan markers -->
+                        <circle class="chart-marker plan" cx="20"    cy="40" r="3"/>
+                        <circle class="chart-marker plan" cx="66.7"  cy="40" r="3"/>
+                        <circle class="chart-marker plan" cx="113.3" cy="30" r="3"/>
+                        <circle class="chart-marker plan" cx="160"   cy="40" r="3"/>
+                        <circle class="chart-marker plan" cx="206.7" cy="40" r="3"/>
+                        <circle class="chart-marker plan" cx="253.3" cy="40" r="3"/>
+                        <circle class="chart-marker plan" cx="300"   cy="40" r="3"/>
+                        <!-- FACT line -->
+                        <path class="chart-line" d="
+                            M 20,90
+                            L 66.7,70
+                            L 113.3,30
+                            L 160,90
+                            L 206.7,65
+                            L 253.3,5
+                            L 300,30"/>
+
+                        <!-- markers + value labels -->
+                        <!-- Вт: 0 -->
+                        <circle class="chart-marker empty" cx="20"  cy="90" r="4"/>
+                        <text class="chart-value muted" x="20"  y="78">—</text>
+                        <text class="chart-label"       x="20"  y="115">Вт</text>
+
+                        <!-- Ср: 12 -->
+                        <circle class="chart-marker" cx="66.7" cy="70" r="4.5"/>
+                        <text class="chart-value" x="66.7" y="58">12</text>
+                        <text class="chart-label" x="66.7" y="115">Ср</text>
+
+                        <!-- Чт: 25 -->
+                        <circle class="chart-marker" cx="113.3" cy="30" r="4.5"/>
+                        <text class="chart-value" x="113.3" y="18">25</text>
+                        <text class="chart-label" x="113.3" y="115">Чт</text>
+
+                        <!-- Пт: 0 -->
+                        <circle class="chart-marker empty" cx="160" cy="90" r="4"/>
+                        <text class="chart-value muted" x="160" y="78">—</text>
+                        <text class="chart-label" x="160" y="115">Пт</text>
+
+                        <!-- Сб: 15 -->
+                        <circle class="chart-marker" cx="206.7" cy="65" r="4.5"/>
+                        <text class="chart-value" x="206.7" y="53">15</text>
+                        <text class="chart-label" x="206.7" y="115">Сб</text>
+
+                        <!-- Вс: 35 (2 запуска, multi marker) -->
+                        <circle class="chart-marker multi" cx="253.3" cy="5" r="5.5"/>
+                        <circle class="chart-badge-bg" cx="263" cy="0" r="6"/>
+                        <text class="chart-badge-text" x="263" y="3">2</text>
+                        <text class="chart-value" x="253.3" y="-8" style="display:none">35</text>
+                        <text class="chart-label" x="253.3" y="115">Вс</text>
+
+                        <!-- Пн: 25 (today, 2 запуска) -->
+                        <circle class="chart-marker today" cx="300" cy="30" r="5"/>
+                        <circle class="chart-badge-bg" cx="310" cy="25" r="6"/>
+                        <text class="chart-badge-text" x="310" y="28">2</text>
+                        <text class="chart-value" x="300" y="18" style="display:none">25</text>
+                        <text class="chart-label today" x="300" y="115">Пн</text>
+                    </svg>
+                </div>
+
+                <div class="runs-section">
+                    <h3>Запуски</h3>
+                    <div class="runs-list">
+
+                        <div class="day-divider">Пн, 11 мая · 2 запуска · 25 мин</div>
+                        <div class="run-row">
+                            <span class="status-icon" title="Успешно">✓</span>
+                            <div class="when">
+                                <div class="top"><span class="date">11 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">07:00 → 07:15</span>
+                            </div>
+                            <div class="duration">15<span class="min">мин</span></div>
+                            <span class="source program">Программа</span>
+                        </div>
+                        <div class="run-row">
+                            <span class="status-icon" title="Успешно">✓</span>
+                            <div class="when">
+                                <div class="top"><span class="date">11 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">12:30 → 12:40</span>
+                            </div>
+                            <div class="duration">10<span class="min">мин</span></div>
+                            <span class="source manual">Вручную</span>
+                        </div>
+
+                        <div class="day-divider">Вс, 10 мая · 2 запуска · 35 мин</div>
+                        <div class="run-row">
+                            <span class="status-icon" title="Успешно">✓</span>
+                            <div class="when">
+                                <div class="top"><span class="date">10 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">06:00 → 06:20</span>
+                            </div>
+                            <div class="duration">20<span class="min">мин</span></div>
+                            <span class="source program">Программа</span>
+                        </div>
+                        <div class="run-row">
+                            <span class="status-icon" title="Успешно">✓</span>
+                            <div class="when">
+                                <div class="top"><span class="date">10 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">21:00 → 21:15</span>
+                            </div>
+                            <div class="duration">15<span class="min">мин</span></div>
+                            <span class="source program">Программа</span>
+                        </div>
+
+                        <div class="day-divider">Сб, 09 мая</div>
+                        <div class="run-row">
+                            <span class="status-icon" title="Успешно">✓</span>
+                            <div class="when">
+                                <div class="top"><span class="date">09 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">14:32 → 14:47</span>
+                            </div>
+                            <div class="duration">15<span class="min">мин</span></div>
+                            <span class="source manual">Вручную</span>
+                        </div>
+
+                        <div class="day-divider">Чт, 07 мая</div>
+                        <div class="run-row aborted">
+                            <span class="status-icon" title="Прервано">⚠</span>
+                            <div class="when">
+                                <div class="top"><span class="date">07 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">07:00 → 07:25 (план 30)</span>
+                            </div>
+                            <div class="duration">25<span class="min">мин</span></div>
+                            <span class="source program">Программа</span>
+                        </div>
+
+                        <div class="day-divider">Ср, 06 мая</div>
+                        <div class="run-row">
+                            <span class="status-icon" title="Успешно">✓</span>
+                            <div class="when">
+                                <div class="top"><span class="date">06 мая</span><span class="zone-name">#8 За летней кухней</span></div>
+                                <span class="time">07:00 → 07:12</span>
+                            </div>
+                            <div class="duration">12<span class="min">мин</span></div>
+                            <span class="source program">Программа</span>
+                        </div>
+
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="hm-footer">
+                <span>7 дней · 8 запусков · 112 мин</span>
+                <button class="export">↓ Экспорт CSV</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="notes">
+    <h4>Что нового в v3</h4>
+    <ul>
+        <li><b>🌧 Сравнение с базовым планом</b> — галка над графиком. При включении показывается пунктирная серая линия «План без погодного алгоритма» поверх синей «Факт». Видно, где умный алгоритм пропустил полив из-за дождя / снизил из-за прогноза.</li>
+        <li><b>Баннер экономии</b> прямо под графиком: «Умный алгоритм сэкономил 28 мин ≈ 47 л» (зелёный) — либо красный «Полито на N мин больше плана» если корректировка увеличила полив.</li>
+        <li><b>Tooltip на маркерах</b> (в Chart.js делается из коробки): «Чт, 7 мая · Факт 25 мин · План 30 мин · Прервано вручную».</li>
+    </ul>
+
+    <h4 style="margin-top:14px;">Зафиксировано (по ответам):</h4>
+    <ul>
+        <li>Глобальная кнопка — только рядом с «Аварийная остановка» (не на /zones, /groups)</li>
+        <li>Период по умолчанию — <b>7 дней</b></li>
+        <li>«Все зоны» = одна линия (суммарные минуты), фильтр по группе вручную</li>
+        <li>Кнопка «Повторить» в списке запусков — <b>не нужна</b></li>
+        <li>Литры если частично — показывать с пометкой «частично»</li>
+        <li>Сортировка — новые сверху</li>
+        <li>Колонка <code>zone_runs.source</code> — миграция (<code>program</code> / <code>manual</code> / <code>api</code>)</li>
+    </ul>
+
+    <h4 style="margin-top:14px;">Библиотека графиков — рекомендация: <b>Chart.js v4</b></h4>
+    <ul>
+        <li><b>Почему Chart.js</b>: vanilla JS, multi-line + fill + dashed line из коробки, отличный tooltip-engine (можно положить разбивку «2 запуска: 10+15 мин»), responsive, MIT, ~60КБ gzip, огромное community.</li>
+        <li><b>Установка</b>: один тег <code>&lt;script src="https://cdn.jsdelivr.net/npm/chart.js@4"&gt;</code> или локально через npm/static — выбор за тобой.</li>
+        <li><b>Альтернативы</b>: <i>ApexCharts</i> (~140КБ, красивее, но тяжелее), <i>uPlot</i> (~40КБ, низкоуровневая), <i>Plotly</i> (~3МБ — слишком тяжёлая).</li>
+        <li><b>На какие фишки Chart.js завязываемся</b>: <code>type: 'line'</code> + <code>pointRadius</code> для маркеров, два dataset'а (Факт / План) с <code>borderDash</code> для пунктира, кастомный tooltip-callback для разбивки по запускам, плагин <code>annotation</code> (опционально) для зелёной заливки «сэкономлено».</li>
+    </ul>
+
+    <h4 style="margin-top:14px;">Новые уточнения <span class="q">⚠</span></h4>
+    <ul>
+        <li class="q"><b>Сравнительный режим по умолчанию</b> — галка включена сразу или пользователь сам включает? (в макете — включена для наглядности)</li>
+        <li class="q"><b>«План без алгоритма»</b> = сколько было бы по расписанию (programs) без weather_skip / weather_adjustment? Или включая ручные запуски тоже? Я предполагаю первое — только запланированный автополив, ручные запуски всегда сверху факта.</li>
+        <li class="q"><b>Если расписания не было</b> для зоны (например, новая зона) — что показывать на «План»? Скрывать линию или рисовать как 0?</li>
+    </ul>
+</div>
+
+</body>
+</html>
