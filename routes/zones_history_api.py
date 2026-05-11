@@ -364,6 +364,6 @@ def get_zone_history_csv(zone_id: int):
         ])
 
     fname = f"irrigation-history-zone-{zone_id}-{_iso_local(from_d)}_{_iso_local(to_d)}.csv"
-    resp = Response(buf.getvalue(), mimetype='text/csv; charset=utf-8')
+    resp = Response(buf.getvalue(), mimetype='text/csv')
     resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
     return resp

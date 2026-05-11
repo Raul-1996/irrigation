@@ -223,7 +223,7 @@
     var d = state.lastData;
     if (!d) return;
     var s = d.summary || {};
-    var minutes = Math.round(s.actual_minutes || 0);
+    var minutes = Math.round(s.total_minutes || 0);
     var runs = s.total_runs || 0;
     $('historyTotalMinutes').textContent = minutes;
     $('historyTotalRuns').textContent = runs;
@@ -351,7 +351,7 @@
     }
     noplan.hidden = true;
     var planMin = Math.round(s.plan_minutes || 0);
-    var actMin = Math.round(s.actual_minutes || 0);
+    var actMin = Math.round(s.total_minutes || 0);
     var saved = planMin - actMin;
     if (saved > 0) {
       banner.hidden = false;
@@ -387,23 +387,34 @@
     var dates = Object.keys(groups).sort().reverse();
     var html = '';
     dates.forEach(function (date) {
-      html += '<div class="history-runs__day-header">' + formatDateLong(date) + '</div>';
-      groups[date].forEach(function (r) {
+      var dayRuns = groups[date];
+      var dayMin = 0;
+      dayRuns.forEach(function (r) { dayMin += (r.duration_min || 0); });
+      var headExtra = dayRuns.length > 1
+        ? ' · ' + dayRuns.length + ' запуска · ' + dayMin + ' мин'
+        : '';
+      html += '<div class="history-runs__day-header">' + safeText(formatDateLong(date)) + headExtra + '</div>';
+      dayRuns.forEach(function (r) {
         html += renderRunRow(r);
       });
     });
     box.innerHTML = html;
   }
 
+  var SOURCE_LABELS = { program: 'Программа', manual: 'Вручную', api: 'API' };
+
   function renderRunRow(r) {
     var interrupted = (r.status && r.status !== 'ok');
     var cls = 'history-run' + (interrupted ? ' is-interrupted' : '');
     var icon = interrupted ? '⏹' : '✓';
-    var time = utcIsoToLocalTime(r.start_utc);
+    var tStart = utcIsoToLocalTime(r.start_utc);
+    var tEnd = utcIsoToLocalTime(r.end_utc);
+    var time = tEnd ? (tStart + ' → ' + tEnd) : tStart;
     var dur = (r.duration_min != null) ? r.duration_min : '—';
     var zoneLabel = (r.zone_name) ? ('#' + r.zone_id + ' ' + r.zone_name) : ('#' + r.zone_id);
-    var sourceBadge = r.source
-      ? '<span class="history-run__source">' + safeText(r.source) + '</span>'
+    var srcLabel = r.source ? (SOURCE_LABELS[r.source] || r.source) : '';
+    var sourceBadge = srcLabel
+      ? '<span class="history-run__source history-run__source--' + safeText(r.source) + '">' + safeText(srcLabel) + '</span>'
       : '';
     return '<div class="' + cls + '">'
       + '<span class="history-run__icon">' + icon + '</span>'
@@ -428,9 +439,13 @@
     var h = String(d.getHours()).padStart(2, '0'); var m = String(d.getMinutes()).padStart(2, '0');
     return h + ':' + m;
   }
+  var WEEKDAY_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+  var MONTH_RU = ['янв','фев','мар','апр','мая','июн','июл','авг','сен','окт','ноя','дек'];
   function formatDateLong(iso) {
     if (!iso || iso.length < 10) return iso || '';
-    return iso.slice(8, 10) + '.' + iso.slice(5, 7) + '.' + iso.slice(0, 4);
+    var d = new Date(iso + 'T00:00:00');
+    if (isNaN(d.getTime())) return iso;
+    return WEEKDAY_RU[d.getDay()] + ', ' + d.getDate() + ' ' + MONTH_RU[d.getMonth()];
   }
 
   // ---------- Footer ----------
@@ -440,7 +455,7 @@
     var s = d.summary || {};
     var bits = [
       (s.total_runs || 0) + ' запусков',
-      Math.round(s.actual_minutes || 0) + ' мин',
+      Math.round(s.total_minutes || 0) + ' мин',
     ];
     if (s.has_liters) bits.push(Math.round(s.total_liters || 0) + ' л' + (s.liters_partial ? '*' : ''));
     f.textContent = bits.join(' · ');
