@@ -853,6 +853,22 @@
     }
     .weather-coeff-val.skip {
         color: var(--danger-color, #f44336);
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        line-height: 1.1;
+        gap: 1px;
+    }
+    .weather-coeff-val.skip .skip-main {
+        font-size: 0.95rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    .weather-coeff-val.skip .skip-reason {
+        font-size: 0.65rem;
+        font-weight: 500;
+        opacity: 0.85;
+        white-space: nowrap;
     }
     .weather-coeff-label {
         font-size: 0.65rem;
@@ -1292,6 +1308,8 @@
         .weather-icon { font-size: 1.6rem; }
         .weather-temp { font-size: 1.3rem; }
         .weather-coeff-val { font-size: 1.1rem; }
+        .weather-coeff-val.skip .skip-main { font-size: 0.85rem; }
+        .weather-coeff-val.skip .skip-reason { font-size: 0.6rem; }
         .weather-metrics { font-size: 0.75rem; gap: 0.5rem; margin-top: 4px; }
         #sidebar-active-zone { padding: 8px; margin-top: 6px; border-radius: 8px; }
     }

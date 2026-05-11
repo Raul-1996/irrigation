@@ -24,6 +24,21 @@ _STATE_MACHINE_FIELDS = {
 }
 
 
+def _weather_skip_today() -> bool:
+    """Issue #34: if today's weather decision is skip, next-watering must not
+    return a same-day slot — scheduler would skip it anyway. Returns False on
+    any error (best-effort: better to show a same-day slot than 'Никогда')."""
+    try:
+        from services.weather_adjustment import get_weather_adjustment
+        adj = get_weather_adjustment(db.db_path)
+        if not adj.is_enabled():
+            return False
+        return bool(adj.should_skip().get('skip'))
+    except (ImportError, OSError, sqlite3.Error, ValueError, TypeError) as e:
+        logger.debug("Weather-skip check failed in next-watering: %s", e)
+        return False
+
+
 # ---- Zone CRUD ----
 
 @zones_crud_api_bp.route('/api/zones')
@@ -221,6 +236,13 @@ def api_zone_next_watering(zone_id):
             })
 
         now = datetime.now()
+        # Issue #34: weather skip in effect → bump lower bound past today so
+        # cards show the next eligible day, not a slot the scheduler will skip.
+        if _weather_skip_today():
+            tomorrow_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                                 + timedelta(days=1))
+            if tomorrow_midnight > now:
+                now = tomorrow_midnight
         try:
             pu = zone.get('postpone_until')
             if pu:
@@ -336,6 +358,14 @@ def api_zones_next_watering_bulk():
                 cum += int(duration_by_zone.get(zid, 0))
             offset_map_per_program.append({'prog': p, 'offsets': offsets})
         now = datetime.now()
+        # Issue #34: weather skip in effect → push baseline past today so all
+        # per-program candidates land on the next eligible day, mirroring the
+        # single-zone endpoint above.
+        if _weather_skip_today():
+            tomorrow_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                                 + timedelta(days=1))
+            if tomorrow_midnight > now:
+                now = tomorrow_midnight
         # Per-zone postpone lookup — lets us advance the per-zone lower bound
         # so cards never display a next-run inside an active postpone window.
         zone_by_id = {int(z['id']): z for z in all_zones}

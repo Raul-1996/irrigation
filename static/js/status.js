@@ -1425,6 +1425,20 @@
         if (!label) return s; // незнакомая причина — отдаём как есть
         return tail ? (label + ': ' + tail) : label;
     }
+    // Issue #33b: фраза "из-за <причина>" — для виджета "Полив отложен (из-за дождя)".
+    function weatherReasonPhrase(reason) {
+        if (!reason) return '';
+        var head = String(reason).split(':', 1)[0].trim().toLowerCase();
+        var map = {
+            'rain_skip': 'из-за дождя',
+            'rain_forecast_skip': 'из-за прогноза дождя',
+            'freeze_skip': 'из-за заморозков',
+            'freeze_forecast_skip': 'из-за прогноза заморозков',
+            'wind_skip': 'из-за ветра',
+            'wind_forecast_skip': 'из-за прогноза ветра'
+        };
+        return map[head] || '';
+    }
 
     function renderWeatherSummary(j) {
         var cur = j.current || {};
@@ -1447,10 +1461,9 @@
         if (coeffEl) {
             if (skip) {
                 var skipReason = adj.skip_reason || j.skip_reason;
-                var loc = localizeWeatherReason(skipReason);
-                // Только головное слово причины в скобках (без числовых деталей "5.2mm за 24ч").
-                var locHead = loc ? loc.split(':', 1)[0].trim() : '';
-                coeffEl.textContent = locHead ? ('Пропуск (' + locHead + ')') : 'Пропуск';
+                var phrase = weatherReasonPhrase(skipReason);
+                coeffEl.innerHTML = '<span class="skip-main">Полив отложен</span>'
+                    + (phrase ? '<span class="skip-reason">(' + phrase + ')</span>' : '');
                 coeffEl.style.color = 'var(--danger-color, #f44336)';
                 coeffEl.classList.add('skip');
             } else {
@@ -1572,7 +1585,8 @@
         var skip = adj.skip;
         if (coeff !== undefined || skip) {
             var summaryColor = skip ? 'var(--danger-color, #f44336)' : 'var(--success-color, #4caf50)';
-            var summaryText = skip ? ('Пропуск: ' + localizeWeatherReason(adj.skip_reason || '')) : ('Коэффициент: ' + coeff + '%');
+            var skipPhrase = weatherReasonPhrase(adj.skip_reason || '');
+            var summaryText = skip ? ('Полив отложен' + (skipPhrase ? ' ' + skipPhrase : '')) : ('Коэффициент: ' + coeff + '%');
             html += '<div style="margin-top:0.5rem;padding:0.4rem;background:rgba(33,150,243,0.08);border-radius:6px;text-align:center;font-size:0.8rem;">'
                 + '<strong style="color:' + summaryColor + ';">' + summaryText + '</strong></div>';
         }
@@ -1598,7 +1612,7 @@
                 var badgeText = 'ПОЛИВ';
                 if (it.decision === 'skip' || it.decision === 'stop') {
                     badgeCls = 'weather-badge-skip';
-                    badgeText = 'Пропуск';
+                    badgeText = 'Отложен';
                 } else if (it.decision === 'adjust' || (it.coefficient && it.coefficient < 100)) {
                     badgeCls = 'weather-badge-adj';
                     badgeText = it.coefficient + '%';
