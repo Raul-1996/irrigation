@@ -1,0 +1,73 @@
+{# Issue #35: irrigation history modal — opened from status.html and zone cards. #}
+<div class="history-overlay" id="historyOverlay" hidden onclick="if(event.target===this)historyModal.close()">
+  <div class="history-modal" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+    <div class="history-modal__header">
+      <div class="history-modal__title" id="historyTitle">💧 История полива</div>
+      <button class="history-modal__close" type="button" aria-label="Закрыть"
+              onclick="historyModal.close()">✕</button>
+    </div>
+
+    <div class="history-modal__filters">
+      <div class="history-filter">
+        <label for="historyGroupSelect">Группа</label>
+        <select id="historyGroupSelect"></select>
+      </div>
+      <div class="history-filter">
+        <label for="historyZoneSelect">Зона</label>
+        <select id="historyZoneSelect"></select>
+      </div>
+      <div class="history-filter history-filter--range">
+        <div class="history-range" role="group" aria-label="Период">
+          <button type="button" class="history-range__btn is-active" data-days="7">7д</button>
+          <button type="button" class="history-range__btn" data-days="30">30д</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="history-modal__body">
+      <div class="history-summary" id="historySummary">
+        <div class="history-summary__card">
+          <div class="history-summary__label">Минут</div>
+          <div class="history-summary__value" id="historyTotalMinutes">—</div>
+        </div>
+        <div class="history-summary__card">
+          <div class="history-summary__label">Запусков</div>
+          <div class="history-summary__value" id="historyTotalRuns">—</div>
+        </div>
+        <div class="history-summary__card" id="historyLitersCard">
+          <div class="history-summary__label">Литров</div>
+          <div class="history-summary__value">
+            <span id="historyTotalLiters">—</span>
+            <span class="history-summary__sub" id="historyLitersSub" hidden>частично</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="history-chart-wrap">
+        <canvas id="historyChart" height="220"></canvas>
+        <div class="history-chart-empty" id="historyChartEmpty" hidden>
+          За выбранный период нет запусков
+        </div>
+      </div>
+
+      <label class="history-compare">
+        <input type="checkbox" id="historyCompareToggle" checked>
+        <span>🌧 Сравнить с базовым планом (без умного алгоритма)</span>
+      </label>
+
+      <div class="history-banner" id="historySavingsBanner" hidden></div>
+      <div class="history-noplan" id="historyNoPlanNote" hidden>
+        Для этой зоны нет программы — сравнить не с чем
+      </div>
+
+      <div class="history-runs" id="historyRunsList">
+        <div class="history-runs__empty">Нет запусков</div>
+      </div>
+    </div>
+
+    <div class="history-modal__footer">
+      <div class="history-modal__stats" id="historyFooterStats">—</div>
+      <button type="button" class="history-modal__export" id="historyCsvBtn">↓ Экспорт CSV</button>
+    </div>
+  </div>
+</div>

@@ -24,7 +24,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     
     <link rel="stylesheet" href="/static/css/base.css">
-    
+    <link rel="stylesheet" href="/static/css/history.css">
+
     {% block extra_css %}{% endblock %}
 </head>
 <body>
@@ -73,8 +74,13 @@
     <!-- Notification container -->
     <div class="notification-container" id="notification-container"></div>
 
+    <!-- Issue #35: irrigation history modal — included on every page. -->
+    {% include '_history_modal.html' %}
+
     <script src="{{ asset('static/js/app.js') }}"></script>
     <script src="{{ asset('static/js/audit.js') }}" defer></script>
+    <script src="/static/vendor/chart.umd.min.js" defer></script>
+    <script src="{{ asset('static/js/history.js') }}" defer></script>
 
     {% block extra_js %}{% endblock %}
 </body>
