@@ -35,22 +35,26 @@ except (ImportError, AttributeError) as e:
     logger.debug("Handled exception in apscheduler logger setup: %s", e)
 
 
-def job_run_program(program_id: int, zones: list, program_name: str):
+def job_run_program(program_id: int, zones: list, program_name: str, manual: bool = False):
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
-            s._run_program_threaded(int(program_id), [int(z) for z in zones], str(program_name))
+            s._run_program_threaded(int(program_id), [int(z) for z in zones], str(program_name),
+                                    manual=bool(manual))
     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
         logger.debug("Handled exception in job_run_program: %s", e)
 
 
-def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None):
+def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None,
+                           manual: bool = False):
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
-            s._run_group_sequence(int(group_id), [int(z) for z in zone_ids], override_duration=override_duration)
+            s._run_group_sequence(int(group_id), [int(z) for z in zone_ids],
+                                  override_duration=override_duration,
+                                  manual=bool(manual))
     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
         logger.debug("Handled exception in job_run_group_sequence: %s", e)
 

@@ -92,16 +92,18 @@ def _audit_timer_fire(action: str, target: str, payload: dict) -> None:
         logger.exception("scheduler timer fire audit failed (action=%s)", action)
 
 
-def job_run_program(program_id: int, zones: list, program_name: str):
+def job_run_program(program_id: int, zones: list, program_name: str,
+                    manual: bool = False):
     _audit_timer_fire('scheduler_timer_fire',
                       f'program:{int(program_id)}',
                       {'job': 'run_program', 'zones': list(zones),
-                       'program_name': str(program_name)})
+                       'program_name': str(program_name), 'manual': bool(manual)})
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
         if s is not None:
-            s._run_program_threaded(int(program_id), [int(z) for z in zones], str(program_name))
+            s._run_program_threaded(int(program_id), [int(z) for z in zones], str(program_name),
+                                    manual=bool(manual))
     except (sqlite3.Error, OSError, ValueError, TypeError):
         # Promoted to logger.exception — scheduled program runs that silently
         # fail are catastrophic; we want a stack trace in app.log.
@@ -111,18 +113,21 @@ def job_run_program(program_id: int, zones: list, program_name: str):
 def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int = None,
                            override_percent: int = None,
                            ad_hoc_program_id: Optional[int] = None,
-                           ad_hoc_program_name: Optional[str] = None):
+                           ad_hoc_program_name: Optional[str] = None,
+                           manual: bool = False):
     # Issue #12: override_percent kwarg added with default=None — APScheduler
     # binds args positionally, but our scheduler.add_job(args=[...]) call passes
     # only positional args we control, so adding a trailing optional kwarg is
     # safe for in-flight jobs from prior deploys (they won't include it).
     # Issue #15: ad_hoc_program_id/name pass through to _run_group_sequence
     # for ad-hoc audit metadata (negative sentinel id).
+    # Issue #31: manual flag bypasses weather skip in _run_group_sequence.
     _audit_timer_fire('scheduler_timer_fire',
                       f'group:{int(group_id)}',
                       {'job': 'run_group_sequence', 'zone_ids': list(zone_ids),
                        'override_duration': override_duration,
-                       'override_percent': override_percent})
+                       'override_percent': override_percent,
+                       'manual': bool(manual)})
     try:
         from irrigation_scheduler import get_scheduler
         s = get_scheduler()
@@ -131,7 +136,8 @@ def job_run_group_sequence(group_id: int, zone_ids: list, override_duration: int
                                   override_duration=override_duration,
                                   override_percent=override_percent,
                                   ad_hoc_program_id=ad_hoc_program_id,
-                                  ad_hoc_program_name=ad_hoc_program_name)
+                                  ad_hoc_program_name=ad_hoc_program_name,
+                                  manual=bool(manual))
     except (sqlite3.Error, OSError, ValueError, TypeError):
         logger.exception("job_run_group_sequence failed (group_id=%s)", group_id)
 
@@ -592,8 +598,15 @@ class IrrigationScheduler:
             logger.debug("Weather adjustment error: %s", e)
             return base_duration
 
-    def _run_program_threaded(self, program_id: int, zones: List[int], program_name: str):
-        """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler"""
+    def _run_program_threaded(self, program_id: int, zones: List[int], program_name: str,
+                              manual: bool = False):
+        """Последовательный запуск зон в отдельном потоке, чтобы не блокировать APScheduler.
+
+        Issue #31: ``manual=True`` — ручной запуск из UI/API. Bypass weather skip
+        и weather-adjusted duration (пользователь сам решил полить, погода — его
+        ответственность). По умолчанию manual=False — scheduled cron jobs
+        продолжают уважать погодные ограничения.
+        """
         # Issue #16 §6.4 + Issue #14 C1: pre-register a cancel-event for
         # every distinct group this program will touch, so
         # is_group_session_active(gid) returns True while the program is in
@@ -691,27 +704,30 @@ class IrrigationScheduler:
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in _run_program_threaded: %s", e)
 
-            # Weather check before program: skip entire program if conditions are bad
-            skip_info = self._check_weather_skip(zones[0] if zones else 0, program_id)
-            try:
-                from services.weather_adjustment import get_weather_adjustment
-                _adj = get_weather_adjustment(self.db.db_path)
-                if _adj.is_enabled():
-                    _w = _adj._get_weather()
-                    _coeff = _adj.get_coefficient()
-                    _adj.log_decision(_w, _coeff, bool(skip_info.get('skip')), skip_info.get('reason', ''))
-            except Exception as e:
-                logger.debug("log_decision error: %s", e)
-            if skip_info.get('skip'):
-                logger.info(f"Программа {program_id} ({program_name}) пропущена из-за погоды: {skip_info.get('reason')}")
+            # Weather check before program: skip entire program if conditions are bad.
+            # Issue #31: manual runs bypass weather skip — user just looked at the
+            # sky and pressed Run, system must not second-guess.
+            if not manual:
+                skip_info = self._check_weather_skip(zones[0] if zones else 0, program_id)
                 try:
-                    self.db.add_log('program_weather_skip', json.dumps({
-                        'program_id': program_id, 'program_name': program_name,
-                        'reason': skip_info.get('reason', ''),
-                    }))
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                    logger.debug("Program weather skip log error: %s", e)
-                return
+                    from services.weather_adjustment import get_weather_adjustment
+                    _adj = get_weather_adjustment(self.db.db_path)
+                    if _adj.is_enabled():
+                        _w = _adj._get_weather()
+                        _coeff = _adj.get_coefficient()
+                        _adj.log_decision(_w, _coeff, bool(skip_info.get('skip')), skip_info.get('reason', ''))
+                except Exception as e:
+                    logger.debug("log_decision error: %s", e)
+                if skip_info.get('skip'):
+                    logger.info(f"Программа {program_id} ({program_name}) пропущена из-за погоды: {skip_info.get('reason')}")
+                    try:
+                        self.db.add_log('program_weather_skip', json.dumps({
+                            'program_id': program_id, 'program_name': program_name,
+                            'reason': skip_info.get('reason', ''),
+                        }))
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                        logger.debug("Program weather skip log error: %s", e)
+                    return
 
             for i, zone_id in enumerate(zones):
                 zone = self.db.get_zone(zone_id)
@@ -751,7 +767,11 @@ class IrrigationScheduler:
                         logger.info(f"Зона {zone_id} отложена до {postpone_until}")
                         continue
 
-                duration = self._get_weather_adjusted_duration(zone_id, int(zone['duration']))
+                # Issue #31: manual runs use full zone duration without weather coefficient.
+                if manual:
+                    duration = int(zone['duration'])
+                else:
+                    duration = self._get_weather_adjusted_duration(zone_id, int(zone['duration']))
                 if duration <= 0:
                     logger.info(f"Программа {program_id}: зона {zone_id} имеет нулевую длительность (weather coef=0), пропуск")
                     continue
@@ -1320,7 +1340,8 @@ class IrrigationScheduler:
                              override_percent: Optional[int] = None,
                              zone_ids: Optional[List[int]] = None,
                              ad_hoc_program_id: Optional[int] = None,
-                             ad_hoc_program_name: Optional[str] = None):
+                             ad_hoc_program_name: Optional[str] = None,
+                             manual: bool = False):
         """Остановить все зоны группы и запустить последовательный полив всех зон по порядку.
 
         Issue #12: ``override_percent`` (one of PERCENT_PRESETS) — when set,
@@ -1428,6 +1449,7 @@ class IrrigationScheduler:
                     override_percent=override_percent,
                     ad_hoc_program_id=ad_hoc_program_id,
                     ad_hoc_program_name=ad_hoc_program_name,
+                    manual=manual,
                 )
             else:
                 # Запускаем последовательность в отдельном джобе прямо сейчас
@@ -1437,6 +1459,7 @@ class IrrigationScheduler:
                         'override_percent': override_percent,
                         'ad_hoc_program_id': ad_hoc_program_id,
                         'ad_hoc_program_name': ad_hoc_program_name,
+                        'manual': manual,
                     },
                     id=f"group_seq:{group_id}:{int(datetime.now().timestamp())}",
                     replace_existing=False,
@@ -1466,7 +1489,8 @@ class IrrigationScheduler:
                             override_duration: int = None,
                             override_percent: Optional[int] = None,
                             ad_hoc_program_id: Optional[int] = None,
-                            ad_hoc_program_name: Optional[str] = None):
+                            ad_hoc_program_name: Optional[str] = None,
+                            manual: bool = False):
         """Выполняет последовательный полив зон группы. Выполняется в пуле потоков APScheduler.
 
         Issue #12: ``override_percent`` plumbed through; per-zone duration is
@@ -1517,17 +1541,21 @@ class IrrigationScheduler:
         # in specs/issue-16-review.md.
         cancel_event = self.group_cancel_events.get(group_id)
         try:
-            # Weather check before group sequence
-            skip_info = self._check_weather_skip(zone_ids[0] if zone_ids else 0, 0)
-            try:
-                from services.weather_adjustment import get_weather_adjustment
-                _adj = get_weather_adjustment(self.db.db_path)
-                if _adj.is_enabled():
-                    _w = _adj._get_weather()
-                    _coeff = _adj.get_coefficient()
-                    _adj.log_decision(_w, _coeff, bool(skip_info.get('skip')), skip_info.get('reason', ''))
-            except Exception as e:
-                logger.debug("log_decision error: %s", e)
+            # Weather check before group sequence.
+            # Issue #31: manual runs bypass weather skip entirely.
+            if not manual:
+                skip_info = self._check_weather_skip(zone_ids[0] if zone_ids else 0, 0)
+                try:
+                    from services.weather_adjustment import get_weather_adjustment
+                    _adj = get_weather_adjustment(self.db.db_path)
+                    if _adj.is_enabled():
+                        _w = _adj._get_weather()
+                        _coeff = _adj.get_coefficient()
+                        _adj.log_decision(_w, _coeff, bool(skip_info.get('skip')), skip_info.get('reason', ''))
+                except Exception as e:
+                    logger.debug("log_decision error: %s", e)
+            else:
+                skip_info = {'skip': False, 'reason': ''}
             if skip_info.get('skip'):
                 logger.info(f"Группа {group_id}: последовательный полив пропущен из-за погоды: {skip_info.get('reason')}")
                 try:
@@ -1558,7 +1586,11 @@ class IrrigationScheduler:
                 # the zone's own duration — preserving prior behaviour byte-
                 # for-byte.
                 base_dur, _ = _per_zone_dur(zone, override_duration, override_percent)
-                duration = self._get_weather_adjusted_duration(zone_id, base_dur)
+                # Issue #31: manual runs use base duration without weather coefficient.
+                if manual:
+                    duration = base_dur
+                else:
+                    duration = self._get_weather_adjusted_duration(zone_id, base_dur)
                 if duration <= 0:
                     logger.info(f"Группа {group_id}: зона {zone_id} имеет нулевую длительность, пропуск")
                     continue
@@ -1641,6 +1673,43 @@ class IrrigationScheduler:
                             _pub(server, t, '1', min_interval_sec=0.0, qos=2, retain=True)
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("Handled exception in line_851: %s", e)
+                # Issue #32: open zone_runs row so "Последний полив" picks it up.
+                # Pre-fix _run_group_sequence published MQTT directly, never calling
+                # create_zone_run — leaving every group-sequence run invisible in UI.
+                try:
+                    gid_for_run = int(zone.get('group_id') or 0)
+                    if gid_for_run and gid_for_run != 999:
+                        raw_pulses: Optional[int] = None
+                        liters_per_pulse: int = 1
+                        base_m3: Optional[float] = None
+                        try:
+                            groups_for_run = self.db.get_groups() or []
+                            g_for_run = next(
+                                (gg for gg in groups_for_run if int(gg.get('id')) == gid_for_run),
+                                None,
+                            )
+                        except (sqlite3.Error, OSError):
+                            g_for_run = None
+                        if g_for_run and int(g_for_run.get('use_water_meter') or 0) == 1:
+                            try:
+                                from services import water_monitor as _wm
+                                raw_pulses = _wm.get_pulses_at_or_before(gid_for_run, time.time())
+                                pulse = str(g_for_run.get('water_pulse_size') or '1l')
+                                liters_per_pulse = 100 if pulse == '100l' else 10 if pulse == '10l' else 1
+                                base_m3 = float(g_for_run.get('water_base_value_m3') or 0.0)
+                            except (sqlite3.Error, OSError, ImportError):
+                                logger.exception(
+                                    "_run_group_sequence: meter snapshot failed (continuing)"
+                                )
+                        self.db.create_zone_run(
+                            int(zone_id), gid_for_run, start_ts, time.monotonic(),
+                            raw_pulses, liters_per_pulse, base_m3,
+                        )
+                except (sqlite3.Error, OSError, ValueError, TypeError):
+                    logger.exception(
+                        "_run_group_sequence: create_zone_run failed (zone=%s gid=%s)",
+                        zone_id, zone.get('group_id'),
+                    )
                 try:
                     _zs_payload = {
                         'group_id': group_id,

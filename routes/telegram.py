@@ -135,7 +135,8 @@ def _do_group_start(group_id: int) -> str:
         s = get_scheduler()
         if not s:
             return 'Планировщик недоступен'
-        ok = s.start_group_sequence(int(group_id))
+        # Issue #31: manual=True — Telegram-initiated run is user-initiated.
+        ok = s.start_group_sequence(int(group_id), manual=True)
         return '▶ Запущен полив группы' if ok else 'Не удалось запустить'
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Exception in _do_group_start: %s", e)

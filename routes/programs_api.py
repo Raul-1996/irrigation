@@ -216,9 +216,11 @@ def api_run_program(prog_id):
     try:
         import threading
         from scheduler.jobs import job_run_program
+        # Issue #31: manual=True — bypass weather skip / coefficient for user-initiated runs.
         threading.Thread(
             target=job_run_program,
             args=(int(prog_id), [int(z) for z in zones], str(name)),
+            kwargs={'manual': True},
             daemon=True,
         ).start()
     except (ImportError, RuntimeError, ValueError, TypeError) as e:

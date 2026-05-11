@@ -1406,6 +1406,25 @@
         if (j.cache_age_sec !== undefined && j.cache_age_sec !== null) parts.push(formatCacheAge(j.cache_age_sec));
         return parts.join(' · ');
     }
+    // Issue #33: причина пропуска полива из weather adjustment приходит латиницей
+    // (rain_skip, freeze_skip, ...). Маппим в человекочитаемый русский — UI на главной.
+    function localizeWeatherReason(reason) {
+        if (!reason) return '';
+        var s = String(reason);
+        var head = s.split(':', 1)[0].trim().toLowerCase();
+        var tail = s.indexOf(':') >= 0 ? s.slice(s.indexOf(':') + 1).trim() : '';
+        var map = {
+            'rain_skip': 'Дождь',
+            'rain_forecast_skip': 'Прогноз дождя',
+            'freeze_skip': 'Заморозки',
+            'freeze_forecast_skip': 'Прогноз заморозков',
+            'wind_skip': 'Ветер',
+            'wind_forecast_skip': 'Прогноз ветра'
+        };
+        var label = map[head];
+        if (!label) return s; // незнакомая причина — отдаём как есть
+        return tail ? (label + ': ' + tail) : label;
+    }
 
     function renderWeatherSummary(j) {
         var cur = j.current || {};
@@ -1427,7 +1446,11 @@
         var coeffEl = document.getElementById('w-coeff');
         if (coeffEl) {
             if (skip) {
-                coeffEl.textContent = 'SKIP';
+                var skipReason = adj.skip_reason || j.skip_reason;
+                var loc = localizeWeatherReason(skipReason);
+                // Только головное слово причины в скобках (без числовых деталей "5.2mm за 24ч").
+                var locHead = loc ? loc.split(':', 1)[0].trim() : '';
+                coeffEl.textContent = locHead ? ('Пропуск (' + locHead + ')') : 'Пропуск';
                 coeffEl.style.color = 'var(--danger-color, #f44336)';
                 coeffEl.classList.add('skip');
             } else {
@@ -1549,7 +1572,7 @@
         var skip = adj.skip;
         if (coeff !== undefined || skip) {
             var summaryColor = skip ? 'var(--danger-color, #f44336)' : 'var(--success-color, #4caf50)';
-            var summaryText = skip ? ('SKIP: ' + (adj.skip_reason || '')) : ('Коэффициент: ' + coeff + '%');
+            var summaryText = skip ? ('Пропуск: ' + localizeWeatherReason(adj.skip_reason || '')) : ('Коэффициент: ' + coeff + '%');
             html += '<div style="margin-top:0.5rem;padding:0.4rem;background:rgba(33,150,243,0.08);border-radius:6px;text-align:center;font-size:0.8rem;">'
                 + '<strong style="color:' + summaryColor + ';">' + summaryText + '</strong></div>';
         }
@@ -1575,7 +1598,7 @@
                 var badgeText = 'ПОЛИВ';
                 if (it.decision === 'skip' || it.decision === 'stop') {
                     badgeCls = 'weather-badge-skip';
-                    badgeText = 'SKIP';
+                    badgeText = 'Пропуск';
                 } else if (it.decision === 'adjust' || (it.coefficient && it.coefficient < 100)) {
                     badgeCls = 'weather-badge-adj';
                     badgeText = it.coefficient + '%';
@@ -1586,7 +1609,7 @@
                 html += '<div class="weather-hist-item">'
                     + '<span class="weather-hist-date">' + date + '</span>'
                     + '<span class="weather-badge ' + badgeCls + '">' + badgeText + '</span>'
-                    + '<span>' + (it.reason || '') + '</span>'
+                    + '<span>' + localizeWeatherReason(it.reason || '') + '</span>'
                     + '</div>';
             }
             el.innerHTML = html;

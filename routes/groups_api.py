@@ -350,9 +350,11 @@ def api_start_group_from_first(group_id):
             except (ValueError, TypeError, KeyError, AttributeError) as e:
                 logger.debug("group warnings preflight failed: %s", e)
                 warnings = []
+        # Issue #31: manual=True — bypass weather skip for user-initiated runs.
         ok = scheduler.start_group_sequence(group_id,
                                             override_duration=override_dur,
-                                            override_percent=override_pct)
+                                            override_percent=override_pct,
+                                            manual=True)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось запустить последовательный полив группы"}), 400
         try:
@@ -647,6 +649,7 @@ def api_run_selected(gid):
         ad_hoc_id = -int(time.time())
         ad_hoc_name = _build_ad_hoc_name(zone_ids, override_dur, override_pct)
 
+        # Issue #31: manual=True — bypass weather skip for user-initiated runs.
         ok = scheduler.start_group_sequence(
             int(gid),
             override_duration=override_dur,
@@ -654,6 +657,7 @@ def api_run_selected(gid):
             zone_ids=zone_ids,
             ad_hoc_program_id=ad_hoc_id,
             ad_hoc_program_name=ad_hoc_name,
+            manual=True,
         )
         if not ok:
             return jsonify({'success': False, 'message': 'Не удалось запустить'}), 400
