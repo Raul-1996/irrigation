@@ -1913,13 +1913,16 @@
             html += '</div>'; // detail-grid
 
             html += '<div class="zc-actions">';
+            if (isAdmin) {
+                html += '<button class="zc-btn-edit zc-btn-half" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️ Редактировать</button>';
+            }
+            html += '<button class="zc-btn-history" onclick="event.stopPropagation();window.historyModal&&window.historyModal.openForZone(' + z.id + ')" data-audit-action="zone_history_open_click" data-audit-target="zone_' + z.id + '">📊 История</button>';
+            html += '</div>';
+            html += '<div class="zc-actions zc-actions--primary">';
             if (isRunning) {
                 html += '<button class="zc-btn-stop" onclick="event.stopPropagation();' + startAction + '">⏹ Стоп</button>';
             } else {
                 html += '<button class="zc-btn-run" onclick="event.stopPropagation();showRunPopup(' + z.id + ',' + z.duration + ')">▶ Запустить</button>';
-            }
-            if (isAdmin) {
-                html += '<button class="zc-btn-edit" onclick="event.stopPropagation();openZoneSheet(' + z.id + ')">✏️</button>';
             }
             html += '</div>';
 
