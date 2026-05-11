@@ -78,6 +78,7 @@ from routes.system_config_api import system_config_api_bp
 from routes.system_emergency_api import system_emergency_api_bp
 from routes.weather_api import weather_api_bp
 from routes.audit_api import audit_api_bp
+from routes.zones_history_api import zones_history_api_bp
 from routes.health_api import (
     health_api_bp,
     init_metrics as _init_metrics,
@@ -403,7 +404,7 @@ try:
 except ImportError as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
 
-for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp, audit_api_bp):
+for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp, audit_api_bp, zones_history_api_bp):
     app.register_blueprint(bp)
 
 # F2 — observability endpoints: /healthz, /readyz, /metrics.
