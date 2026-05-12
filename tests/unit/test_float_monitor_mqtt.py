@@ -7,9 +7,10 @@ Spec refs:
 - program-queue-tests-spec.md §3.4
 - program-queue-spec.md §3.3, §3.4, §3.10
 """
+
+import contextlib
 import sqlite3
-import threading
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,6 +21,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers & Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _create_db_tables(db_path):
     """Create minimal DB schema for FloatMonitor MQTT tests."""
@@ -71,18 +73,33 @@ def _create_db_tables(db_path):
     return db_path
 
 
-def _insert_group(db_path, group_id, name="Test Group", float_enabled=1,
-                  float_mqtt_topic="/devices/wb-gpio/controls/A1_IN",
-                  float_mqtt_server_id=1, float_mode='NO',
-                  float_timeout_minutes=30, float_debounce_seconds=5):
+def _insert_group(
+    db_path,
+    group_id,
+    name="Test Group",
+    float_enabled=1,
+    float_mqtt_topic="/devices/wb-gpio/controls/A1_IN",
+    float_mqtt_server_id=1,
+    float_mode="NO",
+    float_timeout_minutes=30,
+    float_debounce_seconds=5,
+):
     """Insert a test group."""
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO groups (id, name, float_enabled, float_mqtt_topic, "
         "float_mqtt_server_id, float_mode, float_timeout_minutes, float_debounce_seconds) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (group_id, name, float_enabled, float_mqtt_topic,
-         float_mqtt_server_id, float_mode, float_timeout_minutes, float_debounce_seconds)
+        (
+            group_id,
+            name,
+            float_enabled,
+            float_mqtt_topic,
+            float_mqtt_server_id,
+            float_mode,
+            float_timeout_minutes,
+            float_debounce_seconds,
+        ),
     )
     conn.commit()
     conn.close()
@@ -93,7 +110,7 @@ def _insert_mqtt_server(db_path, server_id=1):
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO mqtt_servers (id, name, host, port) VALUES (?, ?, ?, ?)",
-        (server_id, "Test MQTT", "127.0.0.1", 1883)
+        (server_id, "Test MQTT", "127.0.0.1", 1883),
     )
     conn.commit()
     conn.close()
@@ -144,6 +161,7 @@ def mock_telegram():
 def float_monitor(mock_db_path, mock_mqtt_clients, mock_queue_manager, mock_telegram):
     """FloatMonitor with mocked dependencies."""
     from services.float_monitor import FloatMonitor
+
     fm = FloatMonitor(
         db_path=mock_db_path,
         mqtt_clients=mock_mqtt_clients,
@@ -151,26 +169,26 @@ def float_monitor(mock_db_path, mock_mqtt_clients, mock_queue_manager, mock_tele
         telegram_notify=mock_telegram,
     )
     yield fm
-    try:
+    with contextlib.suppress(Exception):
         fm.stop()
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
 # 3.4  MQTT Integration Tests (8)
 # ---------------------------------------------------------------------------
 
+
 class TestFloatMonitorMQTT:
     """MQTT subscription/unsubscription mechanics for FloatMonitor."""
 
-    def test_start_subscribes_to_correct_topics(self, float_monitor, mock_db_path,
-                                                 mock_mqtt_client):
+    def test_start_subscribes_to_correct_topics(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#1: start() subscribes to MQTT topics of all float_enabled groups."""
-        _insert_group(mock_db_path, 1, name="Group 1", float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
-        _insert_group(mock_db_path, 2, name="Group 2", float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A2_IN")
+        _insert_group(
+            mock_db_path, 1, name="Group 1", float_enabled=1, float_mqtt_topic="/devices/wb-gpio/controls/A1_IN"
+        )
+        _insert_group(
+            mock_db_path, 2, name="Group 2", float_enabled=1, float_mqtt_topic="/devices/wb-gpio/controls/A2_IN"
+        )
 
         float_monitor.start()
 
@@ -182,8 +200,7 @@ class TestFloatMonitorMQTT:
 
     def test_stop_unsubscribes(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#2: stop() unsubscribes from all float MQTT topics."""
-        _insert_group(mock_db_path, 1, float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
+        _insert_group(mock_db_path, 1, float_enabled=1, float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
 
         float_monitor.start()
         float_monitor.stop()
@@ -196,16 +213,13 @@ class TestFloatMonitorMQTT:
 
     def test_reload_group_resubscribes(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#3: reload_group() unsubscribes old topic, subscribes new one."""
-        _insert_group(mock_db_path, 1, float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
+        _insert_group(mock_db_path, 1, float_enabled=1, float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
 
         float_monitor.start()
 
         # Change the topic in DB
         conn = sqlite3.connect(mock_db_path)
-        conn.execute(
-            "UPDATE groups SET float_mqtt_topic='/devices/wb-gpio/controls/A3_IN' WHERE id=1"
-        )
+        conn.execute("UPDATE groups SET float_mqtt_topic='/devices/wb-gpio/controls/A3_IN' WHERE id=1")
         conn.commit()
         conn.close()
 
@@ -224,11 +238,9 @@ class TestFloatMonitorMQTT:
         sub_topics = [c[0][0] for c in sub_calls]
         assert "/devices/wb-gpio/controls/A3_IN" in sub_topics
 
-    def test_mqtt_reconnect_restores_subscriptions(self, float_monitor, mock_db_path,
-                                                    mock_mqtt_client):
+    def test_mqtt_reconnect_restores_subscriptions(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#4: MQTT disconnect → reconnect → subscriptions restored."""
-        _insert_group(mock_db_path, 1, float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
+        _insert_group(mock_db_path, 1, float_enabled=1, float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
 
         float_monitor.start()
         initial_sub_count = mock_mqtt_client.subscribe.call_count
@@ -236,7 +248,7 @@ class TestFloatMonitorMQTT:
         # Simulate reconnect by calling on_connect callback
         # FloatMonitor should have registered an on_connect handler
         # that re-subscribes to all topics
-        if hasattr(float_monitor, '_on_mqtt_connect'):
+        if hasattr(float_monitor, "_on_mqtt_connect"):
             float_monitor._on_mqtt_connect(mock_mqtt_client, None, None, 0)
         elif mock_mqtt_client.on_connect is not None:
             mock_mqtt_client.on_connect(mock_mqtt_client, None, None, 0)
@@ -258,11 +270,9 @@ class TestFloatMonitorMQTT:
         # State should not change
         assert float_monitor.is_paused(1) is False
 
-    def test_float_disabled_no_subscription(self, float_monitor, mock_db_path,
-                                             mock_mqtt_client):
+    def test_float_disabled_no_subscription(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#6: Group with float_enabled=False → no MQTT subscription for it."""
-        _insert_group(mock_db_path, 1, float_enabled=0,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
+        _insert_group(mock_db_path, 1, float_enabled=0, float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
 
         float_monitor.start()
 
@@ -272,15 +282,24 @@ class TestFloatMonitorMQTT:
             sub_topics = [c[0][0] for c in sub_calls]
             assert "/devices/wb-gpio/controls/A1_IN" not in sub_topics
 
-    def test_two_floats_two_subscriptions(self, float_monitor, mock_db_path,
-                                           mock_mqtt_client):
+    def test_two_floats_two_subscriptions(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#7: 2 groups with float_enabled → 2 separate subscriptions, correct routing."""
-        _insert_group(mock_db_path, 1, name="Group 1", float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN",
-                      float_debounce_seconds=0)
-        _insert_group(mock_db_path, 2, name="Group 2", float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A2_IN",
-                      float_debounce_seconds=0)
+        _insert_group(
+            mock_db_path,
+            1,
+            name="Group 1",
+            float_enabled=1,
+            float_mqtt_topic="/devices/wb-gpio/controls/A1_IN",
+            float_debounce_seconds=0,
+        )
+        _insert_group(
+            mock_db_path,
+            2,
+            name="Group 2",
+            float_enabled=1,
+            float_mqtt_topic="/devices/wb-gpio/controls/A2_IN",
+            float_debounce_seconds=0,
+        )
 
         float_monitor.start()
 
@@ -299,11 +318,9 @@ class TestFloatMonitorMQTT:
         float_monitor._on_float_message(2, "0")  # Group 2 OFF
         assert float_monitor.is_paused(2) is True
 
-    def test_tripped_topic_subscription(self, float_monitor, mock_db_path,
-                                         mock_mqtt_client):
+    def test_tripped_topic_subscription(self, float_monitor, mock_db_path, mock_mqtt_client):
         """#8: float_enabled group also subscribes to wb-rules tripped topic."""
-        _insert_group(mock_db_path, 1, float_enabled=1,
-                      float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
+        _insert_group(mock_db_path, 1, float_enabled=1, float_mqtt_topic="/devices/wb-gpio/controls/A1_IN")
 
         float_monitor.start()
 

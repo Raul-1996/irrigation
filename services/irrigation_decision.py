@@ -5,7 +5,6 @@ Pure logic module, no DB/MQTT dependencies. Python 3.9 compatible.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
 
 from services.et_calculator import (
     MIN_IRRIGATION_MM,
@@ -18,12 +17,12 @@ logger = logging.getLogger(__name__)
 # Decision constants
 # ---------------------------------------------------------------------------
 
-DECISION_STOP = 'stop'            # Irrigation forbidden
-DECISION_SKIP = 'skip'            # Skip this cycle
-DECISION_POSTPONE = 'postpone'    # Postpone (wind)
-DECISION_EMERGENCY = 'emergency'  # Emergency irrigation
-DECISION_IRRIGATE = 'irrigate'    # Standard irrigation
-DECISION_SYRINGE = 'syringe'     # Syringe cooling cycle
+DECISION_STOP = "stop"  # Irrigation forbidden
+DECISION_SKIP = "skip"  # Skip this cycle
+DECISION_POSTPONE = "postpone"  # Postpone (wind)
+DECISION_EMERGENCY = "emergency"  # Emergency irrigation
+DECISION_IRRIGATE = "irrigate"  # Standard irrigation
+DECISION_SYRINGE = "syringe"  # Syringe cooling cycle
 
 # ---------------------------------------------------------------------------
 # Season boundaries
@@ -73,18 +72,19 @@ SYRINGE_CONFIG = {
 # Decision result
 # ---------------------------------------------------------------------------
 
-class IrrigationDecision(object):
+
+class IrrigationDecision:
     """Result of the decision engine evaluation."""
 
     def __init__(
         self,
-        decision,       # type: str
-        reason,         # type: str
-        rule_id,        # type: int
+        decision,  # type: str
+        reason,  # type: str
+        rule_id,  # type: int
         coefficient=100,  # type: int
         syringe=False,  # type: bool
         syringe_time=None,  # type: Optional[str]
-        extra=None,     # type: Optional[Dict[str, Any]]
+        extra=None,  # type: Optional[Dict[str, Any]]
     ):
         self.decision = decision
         self.reason = reason
@@ -110,14 +110,13 @@ class IrrigationDecision(object):
         return result
 
     def __repr__(self):
-        return "IrrigationDecision(decision=%r, reason=%r, rule_id=%d)" % (
-            self.decision, self.reason, self.rule_id
-        )
+        return "IrrigationDecision(decision=%r, reason=%r, rule_id=%d)" % (self.decision, self.reason, self.rule_id)
 
 
 # ---------------------------------------------------------------------------
 # Helper: season check
 # ---------------------------------------------------------------------------
+
 
 def _is_in_season(site_id, month, day):
     # type: (str, int, int) -> bool
@@ -143,17 +142,18 @@ def _is_in_season(site_id, month, day):
 # Main decision function
 # ---------------------------------------------------------------------------
 
+
 def evaluate_decision(
-    site_id,                  # type: str
-    month,                    # type: int
-    day,                      # type: int
-    t_avg,                    # type: float
-    t_current,                # type: float
-    precip_24h,               # type: float
-    precip_48h,               # type: float
-    precip_forecast_12h,      # type: float
-    wind_speed_kmh,           # type: float
-    soil_moisture_pct=None,   # type: Optional[float]
+    site_id,  # type: str
+    month,  # type: int
+    day,  # type: int
+    t_avg,  # type: float
+    t_current,  # type: float
+    precip_24h,  # type: float
+    precip_48h,  # type: float
+    precip_forecast_12h,  # type: float
+    wind_speed_kmh,  # type: float
+    soil_moisture_pct=None,  # type: Optional[float]
 ):
     # type: (...) -> IrrigationDecision
     """Apply the decision table from IRRIGATION-ALGORITHM.md.
@@ -189,7 +189,7 @@ def evaluate_decision(
     if t_current < FROST_THRESHOLD_C:
         return IrrigationDecision(
             decision=DECISION_STOP,
-            reason="frost: %.1f°C < %.0f°C" % (t_current, FROST_THRESHOLD_C),
+            reason=f"frost: {t_current:.1f}°C < {FROST_THRESHOLD_C:.0f}°C",
             rule_id=2,
             coefficient=0,
         )
@@ -198,7 +198,7 @@ def evaluate_decision(
     if wind_speed_kmh > WIND_THRESHOLD_KMH:
         return IrrigationDecision(
             decision=DECISION_POSTPONE,
-            reason="wind: %.1f km/h > %.0f km/h" % (wind_speed_kmh, WIND_THRESHOLD_KMH),
+            reason=f"wind: {wind_speed_kmh:.1f} km/h > {WIND_THRESHOLD_KMH:.0f} km/h",
             rule_id=3,
             extra={"retry_hours": 2, "max_retries": 3},
         )
@@ -207,7 +207,7 @@ def evaluate_decision(
     if precip_24h > RAIN_24H_THRESHOLD_MM:
         return IrrigationDecision(
             decision=DECISION_SKIP,
-            reason="rain_24h: %.1f mm > %.0f mm" % (precip_24h, RAIN_24H_THRESHOLD_MM),
+            reason=f"rain_24h: {precip_24h:.1f} mm > {RAIN_24H_THRESHOLD_MM:.0f} mm",
             rule_id=4,
             coefficient=0,
         )
@@ -216,7 +216,7 @@ def evaluate_decision(
     if precip_forecast_12h > RAIN_FORECAST_THRESHOLD_MM:
         return IrrigationDecision(
             decision=DECISION_SKIP,
-            reason="rain_forecast: %.1f mm > %.0f mm" % (precip_forecast_12h, RAIN_FORECAST_THRESHOLD_MM),
+            reason=f"rain_forecast: {precip_forecast_12h:.1f} mm > {RAIN_FORECAST_THRESHOLD_MM:.0f} mm",
             rule_id=5,
             coefficient=0,
         )
@@ -225,7 +225,7 @@ def evaluate_decision(
     if soil_moisture_pct is not None and soil_moisture_pct >= SOIL_MOIST_OK_PCT:
         return IrrigationDecision(
             decision=DECISION_SKIP,
-            reason="soil_moist: %.0f%% >= %.0f%%" % (soil_moisture_pct, SOIL_MOIST_OK_PCT),
+            reason=f"soil_moist: {soil_moisture_pct:.0f}% >= {SOIL_MOIST_OK_PCT:.0f}%",
             rule_id=6,
             coefficient=0,
         )
@@ -234,7 +234,7 @@ def evaluate_decision(
     if soil_moisture_pct is not None and soil_moisture_pct < SOIL_CRITICAL_PCT:
         return IrrigationDecision(
             decision=DECISION_EMERGENCY,
-            reason="soil_critical: %.0f%% < %.0f%%" % (soil_moisture_pct, SOIL_CRITICAL_PCT),
+            reason=f"soil_critical: {soil_moisture_pct:.0f}% < {SOIL_CRITICAL_PCT:.0f}%",
             rule_id=7,
             coefficient=100 + EMERGENCY_BOOST_PCT,
             extra={"boost_pct": EMERGENCY_BOOST_PCT},
@@ -245,7 +245,7 @@ def evaluate_decision(
     if irrigation_need < MIN_IRRIGATION_MM:
         return IrrigationDecision(
             decision=DECISION_SKIP,
-            reason="below_min: %.1f mm < %.1f mm" % (irrigation_need, MIN_IRRIGATION_MM),
+            reason=f"below_min: {irrigation_need:.1f} mm < {MIN_IRRIGATION_MM:.1f} mm",
             rule_id=8,
             coefficient=0,
         )
@@ -257,16 +257,14 @@ def evaluate_decision(
     syringe_cfg = SYRINGE_CONFIG.get(site_id)
 
     # --- Rule 9: Syringe for Orsk (t > 35) ---
-    if site_id == "orsk" and syringe_cfg is not None:
-        if t_current > syringe_cfg["temp_threshold_c"]:
-            syringe = True
-            syringe_time = syringe_cfg["syringe_time"]
+    if site_id == "orsk" and syringe_cfg is not None and t_current > syringe_cfg["temp_threshold_c"]:
+        syringe = True
+        syringe_time = syringe_cfg["syringe_time"]
 
     # --- Rule 10: Syringe for Cholpon-Ata (t > 28) ---
-    if site_id == "cholpon_ata" and syringe_cfg is not None:
-        if t_current > syringe_cfg["temp_threshold_c"]:
-            syringe = True
-            syringe_time = syringe_cfg["syringe_time"]
+    if site_id == "cholpon_ata" and syringe_cfg is not None and t_current > syringe_cfg["temp_threshold_c"]:
+        syringe = True
+        syringe_time = syringe_cfg["syringe_time"]
 
     # --- Rule 11: Cycle-soak detection (informational) ---
     # Actual cycle-soak is computed per-zone by et_calculator.calc_cycle_soak().
@@ -275,9 +273,9 @@ def evaluate_decision(
     extra["irrigation_need_mm"] = round(irrigation_need, 2)
 
     # --- Rule 12: Standard irrigation ---
-    reason = "irrigate: need %.1f mm" % irrigation_need
+    reason = f"irrigate: need {irrigation_need:.1f} mm"
     if syringe:
-        reason += " + syringe at %s" % syringe_time
+        reason += f" + syringe at {syringe_time}"
 
     return IrrigationDecision(
         decision=DECISION_IRRIGATE,
@@ -295,17 +293,18 @@ def evaluate_decision(
 # (useful for debugging / decision log display)
 # ---------------------------------------------------------------------------
 
+
 def evaluate_decision_verbose(
-    site_id,                  # type: str
-    month,                    # type: int
-    day,                      # type: int
-    t_avg,                    # type: float
-    t_current,                # type: float
-    precip_24h,               # type: float
-    precip_48h,               # type: float
-    precip_forecast_12h,      # type: float
-    wind_speed_kmh,           # type: float
-    soil_moisture_pct=None,   # type: Optional[float]
+    site_id,  # type: str
+    month,  # type: int
+    day,  # type: int
+    t_avg,  # type: float
+    t_current,  # type: float
+    precip_24h,  # type: float
+    precip_48h,  # type: float
+    precip_forecast_12h,  # type: float
+    wind_speed_kmh,  # type: float
+    soil_moisture_pct=None,  # type: Optional[float]
 ):
     # type: (...) -> Dict[str, Any]
     """Evaluate decision and return detailed rule check results.
@@ -328,65 +327,95 @@ def evaluate_decision_verbose(
     rules_checked = []  # type: List[Dict[str, Any]]
 
     in_season = _is_in_season(site_id, month, day)
-    rules_checked.append({
-        "rule_id": 1, "name": "off_season",
-        "condition": "in_season=%s" % in_season,
-        "triggered": not in_season,
-    })
+    rules_checked.append(
+        {
+            "rule_id": 1,
+            "name": "off_season",
+            "condition": f"in_season={in_season}",
+            "triggered": not in_season,
+        }
+    )
 
-    rules_checked.append({
-        "rule_id": 2, "name": "frost",
-        "condition": "t_current=%.1f < %.0f" % (t_current, FROST_THRESHOLD_C),
-        "triggered": t_current < FROST_THRESHOLD_C,
-    })
+    rules_checked.append(
+        {
+            "rule_id": 2,
+            "name": "frost",
+            "condition": f"t_current={t_current:.1f} < {FROST_THRESHOLD_C:.0f}",
+            "triggered": t_current < FROST_THRESHOLD_C,
+        }
+    )
 
-    rules_checked.append({
-        "rule_id": 3, "name": "wind",
-        "condition": "wind=%.1f > %.0f" % (wind_speed_kmh, WIND_THRESHOLD_KMH),
-        "triggered": wind_speed_kmh > WIND_THRESHOLD_KMH,
-    })
+    rules_checked.append(
+        {
+            "rule_id": 3,
+            "name": "wind",
+            "condition": f"wind={wind_speed_kmh:.1f} > {WIND_THRESHOLD_KMH:.0f}",
+            "triggered": wind_speed_kmh > WIND_THRESHOLD_KMH,
+        }
+    )
 
-    rules_checked.append({
-        "rule_id": 4, "name": "rain_24h",
-        "condition": "precip_24h=%.1f > %.0f" % (precip_24h, RAIN_24H_THRESHOLD_MM),
-        "triggered": precip_24h > RAIN_24H_THRESHOLD_MM,
-    })
+    rules_checked.append(
+        {
+            "rule_id": 4,
+            "name": "rain_24h",
+            "condition": f"precip_24h={precip_24h:.1f} > {RAIN_24H_THRESHOLD_MM:.0f}",
+            "triggered": precip_24h > RAIN_24H_THRESHOLD_MM,
+        }
+    )
 
-    rules_checked.append({
-        "rule_id": 5, "name": "rain_forecast",
-        "condition": "forecast_12h=%.1f > %.0f" % (precip_forecast_12h, RAIN_FORECAST_THRESHOLD_MM),
-        "triggered": precip_forecast_12h > RAIN_FORECAST_THRESHOLD_MM,
-    })
+    rules_checked.append(
+        {
+            "rule_id": 5,
+            "name": "rain_forecast",
+            "condition": f"forecast_12h={precip_forecast_12h:.1f} > {RAIN_FORECAST_THRESHOLD_MM:.0f}",
+            "triggered": precip_forecast_12h > RAIN_FORECAST_THRESHOLD_MM,
+        }
+    )
 
     if soil_moisture_pct is not None:
-        rules_checked.append({
-            "rule_id": 6, "name": "soil_moist",
-            "condition": "soil=%.0f%% >= %.0f%%" % (soil_moisture_pct, SOIL_MOIST_OK_PCT),
-            "triggered": soil_moisture_pct >= SOIL_MOIST_OK_PCT,
-        })
-        rules_checked.append({
-            "rule_id": 7, "name": "soil_critical",
-            "condition": "soil=%.0f%% < %.0f%%" % (soil_moisture_pct, SOIL_CRITICAL_PCT),
-            "triggered": soil_moisture_pct < SOIL_CRITICAL_PCT,
-        })
+        rules_checked.append(
+            {
+                "rule_id": 6,
+                "name": "soil_moist",
+                "condition": f"soil={soil_moisture_pct:.0f}% >= {SOIL_MOIST_OK_PCT:.0f}%",
+                "triggered": soil_moisture_pct >= SOIL_MOIST_OK_PCT,
+            }
+        )
+        rules_checked.append(
+            {
+                "rule_id": 7,
+                "name": "soil_critical",
+                "condition": f"soil={soil_moisture_pct:.0f}% < {SOIL_CRITICAL_PCT:.0f}%",
+                "triggered": soil_moisture_pct < SOIL_CRITICAL_PCT,
+            }
+        )
     else:
-        rules_checked.append({
-            "rule_id": 6, "name": "soil_moist",
-            "condition": "no sensor",
-            "triggered": False,
-        })
-        rules_checked.append({
-            "rule_id": 7, "name": "soil_critical",
-            "condition": "no sensor",
-            "triggered": False,
-        })
+        rules_checked.append(
+            {
+                "rule_id": 6,
+                "name": "soil_moist",
+                "condition": "no sensor",
+                "triggered": False,
+            }
+        )
+        rules_checked.append(
+            {
+                "rule_id": 7,
+                "name": "soil_critical",
+                "condition": "no sensor",
+                "triggered": False,
+            }
+        )
 
     irrigation_need = calc_irrigation_need(t_avg, precip_48h, site_id)
-    rules_checked.append({
-        "rule_id": 8, "name": "below_min",
-        "condition": "need=%.1f < %.1f" % (irrigation_need, MIN_IRRIGATION_MM),
-        "triggered": irrigation_need < MIN_IRRIGATION_MM,
-    })
+    rules_checked.append(
+        {
+            "rule_id": 8,
+            "name": "below_min",
+            "condition": f"need={irrigation_need:.1f} < {MIN_IRRIGATION_MM:.1f}",
+            "triggered": irrigation_need < MIN_IRRIGATION_MM,
+        }
+    )
 
     return {
         "decision": decision,

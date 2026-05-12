@@ -1,15 +1,15 @@
 import logging
 import threading
-from typing import Dict
 
 # CQ-001..004 (MASTER-C2 extension): logger.debug(...) was used below without
 # `import logging`. Those branches (RuntimeError from lock acquire/release) are
 # rare in practice but if hit would raise NameError and crash the caller.
 logger = logging.getLogger(__name__)
 
-_group_locks: Dict[int, threading.RLock] = {}
-_zone_locks: Dict[int, threading.RLock] = {}
+_group_locks: dict[int, threading.RLock] = {}
+_zone_locks: dict[int, threading.RLock] = {}
 _gl_lock = threading.Lock()
+
 
 def group_lock(group_id: int) -> threading.RLock:
     with _gl_lock:
@@ -19,6 +19,7 @@ def group_lock(group_id: int) -> threading.RLock:
             _group_locks[int(group_id)] = lk
         return lk
 
+
 def zone_lock(zone_id: int) -> threading.RLock:
     with _gl_lock:
         lk = _zone_locks.get(int(zone_id))
@@ -26,7 +27,6 @@ def zone_lock(zone_id: int) -> threading.RLock:
             lk = threading.RLock()
             _zone_locks[int(zone_id)] = lk
         return lk
-
 
 
 def _is_locked(lock: threading.RLock) -> bool:
@@ -46,20 +46,20 @@ def _is_locked(lock: threading.RLock) -> bool:
         return False
 
 
-def snapshot_group_locks() -> Dict[int, bool]:
+def snapshot_group_locks() -> dict[int, bool]:
     """Возвращает {group_id: locked_bool}."""
     with _gl_lock:
         return {gid: _is_locked(lk) for gid, lk in _group_locks.items()}
 
 
-def snapshot_zone_locks() -> Dict[int, bool]:
+def snapshot_zone_locks() -> dict[int, bool]:
     """Возвращает {zone_id: locked_bool}."""
     with _gl_lock:
         return {zid: _is_locked(lk) for zid, lk in _zone_locks.items()}
 
 
-def snapshot_all_locks() -> Dict[str, Dict[int, bool]]:
+def snapshot_all_locks() -> dict[str, dict[int, bool]]:
     return {
-        'groups': snapshot_group_locks(),
-        'zones': snapshot_zone_locks(),
+        "groups": snapshot_group_locks(),
+        "zones": snapshot_zone_locks(),
     }

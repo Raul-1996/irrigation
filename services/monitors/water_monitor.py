@@ -1,9 +1,8 @@
 import logging
 import sqlite3
 import threading
-from datetime import datetime
-from typing import Optional, Dict, Deque, Tuple
 from collections import deque
+from datetime import datetime
 
 from database import db
 
@@ -17,12 +16,13 @@ logger = logging.getLogger(__name__)
 
 class WaterMonitor:
     """Подписывается на топики счётчиков воды по группам, хранит последние импульсы и рассчитывает поток."""
+
     def __init__(self):
-        self._clients: Dict[int, mqtt.Client] = {}  # key: group_id
-        self._topics: Dict[int, str] = {}
-        self._server_ids: Dict[int, int] = {}
-        self._pulse_liters: Dict[int, int] = {}  # 1|10|100
-        self._samples: Dict[int, Deque[Tuple[float, int]]] = {}  # ts, pulses
+        self._clients: dict[int, mqtt.Client] = {}  # key: group_id
+        self._topics: dict[int, str] = {}
+        self._server_ids: dict[int, int] = {}
+        self._pulse_liters: dict[int, int] = {}  # 1|10|100
+        self._samples: dict[int, deque[tuple[float, int]]] = {}  # ts, pulses
         self._lock = threading.Lock()
 
     def start(self):
@@ -32,17 +32,17 @@ class WaterMonitor:
             groups = db.get_groups() or []
             for g in groups:
                 try:
-                    gid = int(g.get('id'))
+                    gid = int(g.get("id"))
                     if gid == 999:
                         continue
-                    if int(g.get('use_water_meter') or 0) != 1:
+                    if int(g.get("use_water_meter") or 0) != 1:
                         continue
-                    topic = (g.get('water_mqtt_topic') or '').strip()
-                    sid = g.get('water_mqtt_server_id')
+                    topic = (g.get("water_mqtt_topic") or "").strip()
+                    sid = g.get("water_mqtt_server_id")
                     if not topic or not sid:
                         continue
-                    pulse = str(g.get('water_pulse_size') or '1l')
-                    liters = 100 if pulse == '100l' else 10 if pulse == '10l' else 1
+                    pulse = str(g.get("water_pulse_size") or "1l")
+                    liters = 100 if pulse == "100l" else 10 if pulse == "10l" else 1
                     # already started?
                     if gid in self._clients:
                         # update settings
@@ -54,20 +54,22 @@ class WaterMonitor:
                     if not server:
                         continue
                     cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                    if server.get('username'):
-                        cl.username_pw_set(server.get('username'), server.get('password') or None)
+                    if server.get("username"):
+                        cl.username_pw_set(server.get("username"), server.get("password") or None)
+
                     def _on_message(c, u, msg, _gid=gid):
                         try:
-                            p = msg.payload.decode('utf-8', errors='ignore').strip()
-                            pulses = int(''.join([ch for ch in p if (ch.isdigit() or ch=='-')]))
+                            p = msg.payload.decode("utf-8", errors="ignore").strip()
+                            pulses = int("".join([ch for ch in p if (ch.isdigit() or ch == "-")]))
                             ts = datetime.now().timestamp()
                             with self._lock:
                                 dq = self._samples.setdefault(_gid, deque(maxlen=256))
                                 dq.append((ts, pulses))
                         except (ValueError, TypeError, KeyError):
-                            logger.exception('WaterMonitor on_message failed')
+                            logger.exception("WaterMonitor on_message failed")
+
                     cl.on_message = _on_message
-                    cl.connect(server.get('host') or '127.0.0.1', int(server.get('port') or 1883), 10)
+                    cl.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 10)
                     cl.subscribe(topic, qos=0)
                     cl.loop_start()
                     with self._lock:
@@ -77,17 +79,17 @@ class WaterMonitor:
                         self._pulse_liters[gid] = liters
                         self._samples.setdefault(gid, deque(maxlen=256))
                 except (ConnectionError, TimeoutError, OSError):
-                    logger.exception('WaterMonitor start group failed')
+                    logger.exception("WaterMonitor start group failed")
         except (ConnectionError, TimeoutError, OSError):
-            logger.exception('WaterMonitor start failed')
+            logger.exception("WaterMonitor start failed")
 
-    def get_current_reading_m3(self, group_id: int) -> Optional[float]:
+    def get_current_reading_m3(self, group_id: int) -> float | None:
         try:
-            g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(group_id)), None)
+            g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == int(group_id)), None)
             if not g:
                 return None
-            base_m3 = float(g.get('water_base_value_m3') or 0.0)
-            base_p = int(g.get('water_base_pulses') or 0)
+            base_m3 = float(g.get("water_base_value_m3") or 0.0)
+            base_p = int(g.get("water_base_pulses") or 0)
             liters = self._pulse_liters.get(int(group_id), 1)
             with self._lock:
                 dq = self._samples.get(int(group_id)) or deque()
@@ -99,12 +101,12 @@ class WaterMonitor:
             logger.debug("Exception in get_current_reading_m3: %s", e)
             return None
 
-    def get_flow_lpm(self, group_id: int, since_iso: Optional[str]) -> Optional[float]:
+    def get_flow_lpm(self, group_id: int, since_iso: str | None) -> float | None:
         try:
             if not since_iso:
                 return None
             try:
-                since_ts = datetime.strptime(since_iso, '%Y-%m-%d %H:%M:%S').timestamp()
+                since_ts = datetime.strptime(since_iso, "%Y-%m-%d %H:%M:%S").timestamp()
             except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in get_flow_lpm: %s", e)
                 return None
@@ -135,13 +137,13 @@ class WaterMonitor:
             logger.debug("Exception in line_430: %s", e)
             return None
 
-    def summarize_run(self, group_id: int, since_iso: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
+    def summarize_run(self, group_id: int, since_iso: str | None) -> tuple[float | None, float | None]:
         """Возвращает (total_liters, avg_flow_lpm) за интервал с момента старта до последнего сэмпла."""
         try:
             if not since_iso:
                 return (None, None)
             try:
-                since_ts = datetime.strptime(since_iso, '%Y-%m-%d %H:%M:%S').timestamp()
+                since_ts = datetime.strptime(since_iso, "%Y-%m-%d %H:%M:%S").timestamp()
             except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in summarize_run: %s", e)
                 return (None, None)
@@ -162,7 +164,7 @@ class WaterMonitor:
             logger.debug("Exception in summarize_run: %s", e)
             return (None, None)
 
-    def get_raw_pulses(self, group_id: int) -> Optional[int]:
+    def get_raw_pulses(self, group_id: int) -> int | None:
         """Возвращает последние сырые импульсы для группы (или None, если нет сэмплов)."""
         try:
             with self._lock:
@@ -174,7 +176,7 @@ class WaterMonitor:
             logger.debug("Exception in get_raw_pulses: %s", e)
             return None
 
-    def get_pulses_at_or_before(self, group_id: int, ts: float) -> Optional[int]:
+    def get_pulses_at_or_before(self, group_id: int, ts: float) -> int | None:
         """Пульсы на момент ts (берём последний сэмпл с ts' <= заданного)."""
         try:
             with self._lock:
@@ -192,7 +194,7 @@ class WaterMonitor:
             logger.debug("Exception in get_pulses_at_or_before: %s", e)
             return None
 
-    def get_pulses_at_or_after(self, group_id: int, ts: float) -> Optional[int]:
+    def get_pulses_at_or_after(self, group_id: int, ts: float) -> int | None:
         """Пульсы после/на момент ts (берём первый сэмпл с ts' >= заданного)."""
         try:
             with self._lock:
@@ -215,4 +217,4 @@ def start_water_monitor():
     try:
         water_monitor.start()
     except (ConnectionError, TimeoutError, OSError, ValueError):
-        logger.exception('start_water_monitor failed')
+        logger.exception("start_water_monitor failed")

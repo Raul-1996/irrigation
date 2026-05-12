@@ -11,14 +11,13 @@ import functools
 import logging
 import threading
 import time
-from typing import Dict, List, Tuple
 
 from flask import jsonify, request
 
 logger = logging.getLogger(__name__)
 
 # {(ip, group_name): [timestamp, ...]}
-_REQUESTS: Dict[Tuple[str, str], List[float]] = {}
+_REQUESTS: dict[tuple[str, str], list[float]] = {}
 _LOCK = threading.Lock()
 
 # Prune old entries every N calls to avoid unbounded memory growth
@@ -38,7 +37,7 @@ def _prune_old(now: float, window: float = 120.0) -> None:
         del _REQUESTS[k]
 
 
-def _is_allowed(ip: str, group: str, max_requests: int, window_sec: int) -> Tuple[bool, int]:
+def _is_allowed(ip: str, group: str, max_requests: int, window_sec: int) -> tuple[bool, int]:
     """Check if *ip* may proceed for *group*.
 
     Returns (allowed, retry_after_seconds).
@@ -80,31 +79,37 @@ def rate_limit(group: str, max_requests: int = 30, window_sec: int = 60):
     Returns HTTP 429 with ``Retry-After`` header when limit is exceeded.
     Skips rate-limiting when ``app.config['TESTING']`` is truthy.
     """
+
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             # Skip in test mode
             try:
                 from flask import current_app
-                if current_app.config.get('TESTING'):
+
+                if current_app.config.get("TESTING"):
                     return fn(*args, **kwargs)
             except RuntimeError:
                 pass
 
-            ip = request.remote_addr or '0.0.0.0'
+            ip = request.remote_addr or "0.0.0.0"
             allowed, retry_after = _is_allowed(ip, group, max_requests, window_sec)
             if not allowed:
-                resp = jsonify({
-                    'success': False,
-                    'message': 'Too many requests',
-                    'error_code': 'RATE_LIMITED',
-                    'retry_after': retry_after,
-                })
+                resp = jsonify(
+                    {
+                        "success": False,
+                        "message": "Too many requests",
+                        "error_code": "RATE_LIMITED",
+                        "retry_after": retry_after,
+                    }
+                )
                 resp.status_code = 429
-                resp.headers['Retry-After'] = str(retry_after)
+                resp.headers["Retry-After"] = str(retry_after)
                 return resp
             return fn(*args, **kwargs)
+
         return wrapper
+
     return decorator
 
 

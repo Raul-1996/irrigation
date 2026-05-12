@@ -5,11 +5,12 @@ Extracted from app.py (TASK-015).  The module does NOT import ``app`` or
 ``db`` directly — every dependency is injected via :func:`init` or passed
 as function arguments so that circular imports are impossible.
 """
-import sqlite3
 
+import contextlib
 import json
 import logging
 import queue
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -21,14 +22,14 @@ logger = logging.getLogger(__name__)
 # Global hub state
 # ---------------------------------------------------------------------------
 MAX_SSE_CLIENTS: int = 20  # Was 5 — too restrictive for multi-tab / multi-device
-                           # ops usage (phone + laptop + admin panel already = 3).
-                           # 20 matches tests/performance/test_sse_load (10 clients)
-                           # + admin panel + mobile overhead.
+# ops usage (phone + laptop + admin panel already = 3).
+# 20 matches tests/performance/test_sse_load (10 clients)
+# + admin panel + mobile overhead.
 
 _SSE_HUB_STARTED: bool = False
 _SSE_HUB_LOCK: threading.Lock = threading.Lock()
-_SSE_HUB_CLIENTS: list = []          # list[queue.Queue]
-_SSE_HUB_MQTT: dict = {}             # sid → paho client
+_SSE_HUB_CLIENTS: list = []  # list[queue.Queue]
+_SSE_HUB_MQTT: dict = {}  # sid → paho client
 _SSE_META_BUFFER: deque = deque(maxlen=100)
 _SSE_CLEANER_STARTED: bool = False
 
@@ -37,8 +38,8 @@ _LAST_MANUAL_STOP: dict[int, float] = {}
 _LAST_STOP_LOCK: threading.Lock = threading.Lock()
 
 # Injected dependencies (set via init())
-_db = None          # database instance
-_mqtt = None        # paho.mqtt.client module
+_db = None  # database instance
+_mqtt = None  # paho.mqtt.client module
 _app_config = None  # app.config dict-like
 _publish_mqtt_value_fn = None
 _normalize_topic_fn = None
@@ -48,6 +49,7 @@ _get_scheduler_fn = None
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
+
 
 def init(*, db, mqtt_module, app_config, publish_mqtt_value, normalize_topic, get_scheduler):
     """Inject runtime dependencies.  Call once at app startup (before any
@@ -84,10 +86,8 @@ def broadcast(data_json: str) -> None:
                 except queue.Full:
                     dead.append(q)
             for q in dead:
-                try:
+                with contextlib.suppress(ValueError):
                     _SSE_HUB_CLIENTS.remove(q)
-                except ValueError:
-                    pass
     except (RuntimeError, OSError) as e:
         logger.warning("Broadcast failed: %s", e)
     if dead:
@@ -118,6 +118,7 @@ def recently_stopped(zone_id: int, window_sec: int = 5) -> bool:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _rebuild_subscriptions():
     """Build zone-topic and master-valve-topic maps from the database."""
     zones = _db.get_zones()
@@ -125,25 +126,25 @@ def _rebuild_subscriptions():
     zone_topics: dict = {}
     mv_topics: dict = {}
     for z in zones:
-        sid = z.get('mqtt_server_id')
-        topic = (z.get('topic') or '').strip()
+        sid = z.get("mqtt_server_id")
+        topic = (z.get("topic") or "").strip()
         if not sid or not topic:
             continue
-        t = topic if str(topic).startswith('/') else '/' + str(topic)
-        zone_topics.setdefault(int(sid), {}).setdefault(t, []).append(int(z['id']))
+        t = topic if str(topic).startswith("/") else "/" + str(topic)
+        zone_topics.setdefault(int(sid), {}).setdefault(t, []).append(int(z["id"]))
     for g in groups:
         try:
-            if int(g.get('use_master_valve') or 0) != 1:
+            if int(g.get("use_master_valve") or 0) != 1:
                 continue
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in _rebuild_subscriptions: %s", e)
             continue
-        mtopic = (g.get('master_mqtt_topic') or '').strip()
-        msid = g.get('master_mqtt_server_id')
+        mtopic = (g.get("master_mqtt_topic") or "").strip()
+        msid = g.get("master_mqtt_server_id")
         if not mtopic or not msid:
             continue
-        t = mtopic if str(mtopic).startswith('/') else '/' + str(mtopic)
-        mv_topics.setdefault(int(msid), {}).setdefault(t, []).append(int(g.get('id')))
+        t = mtopic if str(mtopic).startswith("/") else "/" + str(mtopic)
+        mv_topics.setdefault(int(msid), {}).setdefault(t, []).append(int(g.get("id")))
     return zone_topics, mv_topics
 
 
@@ -155,7 +156,7 @@ def ensure_hub_started() -> None:
         return
 
     # Skip real MQTT connections in tests
-    if _app_config and _app_config.get('TESTING'):
+    if _app_config and _app_config.get("TESTING"):
         with _SSE_HUB_LOCK:
             _SSE_HUB_STARTED = True
         return
@@ -169,29 +170,30 @@ def ensure_hub_started() -> None:
             if not server:
                 continue
             try:
-                client = _mqtt.Client(_mqtt.CallbackAPIVersion.VERSION2,
-                                      client_id=(server.get('client_id') or None))
-                if server.get('username'):
-                    client.username_pw_set(server.get('username'), server.get('password') or None)
+                client = _mqtt.Client(_mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get("client_id") or None))
+                if server.get("username"):
+                    client.username_pw_set(server.get("username"), server.get("password") or None)
 
                 def _on_message(cl, userdata, msg, sid_local=int(sid)):
-                    t = str(getattr(msg, 'topic', '') or '')
-                    if not t.startswith('/'):
-                        t = '/' + t
+                    t = str(getattr(msg, "topic", "") or "")
+                    if not t.startswith("/"):
+                        t = "/" + t
                     try:
-                        payload = msg.payload.decode('utf-8', errors='ignore').strip()
+                        payload = msg.payload.decode("utf-8", errors="ignore").strip()
                     except (ValueError, TypeError, KeyError) as e:
                         logger.debug("Exception in _on_message: %s", e)
                         payload = str(msg.payload)
 
                     # Meta topic → buffer only
-                    if t.endswith('/meta'):
+                    if t.endswith("/meta"):
                         try:
-                            _SSE_META_BUFFER.append({
-                                'topic': t,
-                                'payload': payload,
-                                'ts': datetime.now().strftime('%H:%M:%S'),
-                            })
+                            _SSE_META_BUFFER.append(
+                                {
+                                    "topic": t,
+                                    "payload": payload,
+                                    "ts": datetime.now().strftime("%H:%M:%S"),
+                                }
+                            )
                         except (ValueError, TypeError, KeyError) as e:
                             logger.debug("Handled exception in _on_message: %s", e)
                         return
@@ -201,13 +203,13 @@ def ensure_hub_started() -> None:
 
                     # Master-valve event
                     if mv_group_ids:
-                        mv_state = 'open' if payload in ('1', 'true', 'ON', 'on') else 'closed'
+                        mv_state = "open" if payload in ("1", "true", "ON", "on") else "closed"
                         for gid in mv_group_ids:
                             try:
-                                _db.update_group_fields(int(gid), {'master_valve_observed': mv_state})
+                                _db.update_group_fields(int(gid), {"master_valve_observed": mv_state})
                             except (sqlite3.Error, OSError) as e:
                                 logger.debug("Handled exception in line_184: %s", e)
-                            data_mv = json.dumps({'mv_group_id': int(gid), 'mv_state': mv_state})
+                            data_mv = json.dumps({"mv_group_id": int(gid), "mv_state": mv_state})
                             with _SSE_HUB_LOCK:
                                 for q in list(_SSE_HUB_CLIENTS):
                                     try:
@@ -216,27 +218,27 @@ def ensure_hub_started() -> None:
                                         logger.debug("Handled exception in line_191: %s", e)
                         return
 
-                    new_state = 'on' if payload in ('1', 'true', 'ON', 'on') else 'off'
+                    new_state = "on" if payload in ("1", "true", "ON", "on") else "off"
 
                     # Emergency stop override
-                    if _app_config.get('EMERGENCY_STOP') and new_state == 'on':
-                        new_state = 'off'
+                    if _app_config.get("EMERGENCY_STOP") and new_state == "on":
+                        new_state = "off"
                         try:
                             srv = _db.get_mqtt_server(int(sid_local))
                             if srv:
-                                _publish_mqtt_value_fn(srv, t, '0')
+                                _publish_mqtt_value_fn(srv, t, "0")
                         except (ConnectionError, TimeoutError, OSError) as e:
                             logger.debug("Handled exception in line_204: %s", e)
 
                     # Anti-restart window
                     try:
                         for zid in list(zone_ids):
-                            if new_state == 'on' and recently_stopped(int(zid), window_sec=5):
-                                new_state = 'off'
+                            if new_state == "on" and recently_stopped(int(zid), window_sec=5):
+                                new_state = "off"
                                 try:
                                     srv2 = _db.get_mqtt_server(int(sid_local))
                                     if srv2:
-                                        _publish_mqtt_value_fn(srv2, t, '0')
+                                        _publish_mqtt_value_fn(srv2, t, "0")
                                 except (ConnectionError, TimeoutError, OSError) as e:
                                     logger.debug("Handled exception in line_216: %s", e)
                     except (ConnectionError, TimeoutError, OSError) as e:
@@ -246,19 +248,18 @@ def ensure_hub_started() -> None:
                     for zid in zone_ids:
                         try:
                             z = _db.get_zone(int(zid)) or {}
-                            updates = {'state': new_state}
-                            if new_state == 'on':
-                                if not z.get('watering_start_time'):
-                                    updates['watering_start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                    updates['watering_start_source'] = 'remote'
+                            updates = {"state": new_state}
+                            if new_state == "on":
+                                if not z.get("watering_start_time"):
+                                    updates["watering_start_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    updates["watering_start_source"] = "remote"
                                 try:
                                     sched = _get_scheduler_fn()
                                     if sched:
-                                        dur = int(z.get('duration') or 0)
+                                        dur = int(z.get("duration") or 0)
                                         if dur > 0:
                                             sched.cancel_zone_jobs(int(zid))
-                                            sched.schedule_zone_stop(int(zid), dur,
-                                                                     command_id=str(int(time.time())))
+                                            sched.schedule_zone_stop(int(zid), dur, command_id=str(int(time.time())))
                                 except (ValueError, TypeError, KeyError) as e:
                                     logger.debug("Handled exception in line_238: %s", e)
                             else:
@@ -270,22 +271,25 @@ def ensure_hub_started() -> None:
                                 # Gate on watering_start_time so an
                                 # idempotent off->off transition doesn't
                                 # try to find/close a non-existent open run.
-                                if z.get('watering_start_time'):
+                                if z.get("watering_start_time"):
                                     try:
                                         run = _db.get_open_zone_run(int(zid))
                                         if run:
                                             _db.finish_zone_run(
-                                                int(run['id']),
-                                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                                int(run["id"]),
+                                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                                 time.monotonic(),
-                                                None, None, None,
-                                                status='ok',
+                                                None,
+                                                None,
+                                                None,
+                                                status="ok",
                                             )
                                     except (sqlite3.Error, OSError):
                                         logger.exception(
-                                            'sse_hub: finish_zone_run on observed off failed zid=%s', zid,
+                                            "sse_hub: finish_zone_run on observed off failed zid=%s",
+                                            zid,
                                         )
-                                updates['watering_start_time'] = None
+                                updates["watering_start_time"] = None
                                 try:
                                     sched = _get_scheduler_fn()
                                     if sched:
@@ -297,7 +301,7 @@ def ensure_hub_started() -> None:
                             except (TypeError, AttributeError) as e:
                                 logger.debug("Exception in line_252: %s", e)
                                 updates2 = dict(updates)
-                            updates2['observed_state'] = new_state
+                            updates2["observed_state"] = new_state
                             # Externally-driven state change (MQTT observation
                             # of the relay coming on/off) — CRITICAL audit
                             # path because this can flip a zone to 'on' even
@@ -308,26 +312,27 @@ def ensure_hub_started() -> None:
                             # zone or did the relay flip externally?"
                             try:
                                 from services.zones_state import update_zone_state as _uzs
+
                                 # Pass _db explicitly so the audited write goes
                                 # to the same instance whose state we just observed.
-                                _uzs(int(zid), updates2,
-                                     audit_reason='mqtt_observed_change',
-                                     db=_db)
+                                _uzs(int(zid), updates2, audit_reason="mqtt_observed_change", db=_db)
                             except (sqlite3.Error, OSError, ImportError):
                                 logger.exception(
-                                    "sse_hub: audited mqtt_observed_change failed zone=%s — "
-                                    "doing raw update_zone", zid,
+                                    "sse_hub: audited mqtt_observed_change failed zone=%s — doing raw update_zone",
+                                    zid,
                                 )
                                 _db.update_zone(int(zid), updates2)
                         except (sqlite3.Error, OSError) as e:
                             logger.debug("Handled exception in line_257: %s", e)
 
-                        data = json.dumps({
-                            'zone_id': int(zid),
-                            'topic': t,
-                            'payload': payload,
-                            'state': new_state,
-                        })
+                        data = json.dumps(
+                            {
+                                "zone_id": int(zid),
+                                "topic": t,
+                                "payload": payload,
+                                "state": new_state,
+                            }
+                        )
                         # Fan-out to all SSE subscribers
                         with _SSE_HUB_LOCK:
                             for q in list(_SSE_HUB_CLIENTS):
@@ -337,16 +342,15 @@ def ensure_hub_started() -> None:
                                     logger.debug("Handled exception in line_271: %s", e)
 
                 client.on_message = _on_message
-                client.connect(server.get('host') or '127.0.0.1',
-                               int(server.get('port') or 1883), 5)
+                client.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 5)
                 # Subscribe to zone topics
-                for t in topics.keys():
+                for t in topics:
                     try:
                         client.subscribe(t, qos=1)
                     except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in line_281: %s", e)
                 # Subscribe to master-valve topics for this server
-                for t_mv in mv_topics.get(int(sid), {}).keys():
+                for t_mv in mv_topics.get(int(sid), {}):
                     try:
                         client.subscribe(t_mv, qos=1)
                     except (ConnectionError, TimeoutError, OSError) as e:
@@ -378,7 +382,7 @@ def _ensure_cleaner_started() -> None:
     t.start()
 
 
-def register_client() -> 'queue.Queue':
+def register_client() -> "queue.Queue":
     """Create and register a new SSE client queue.  Returns the queue.
 
     Enforces MAX_SSE_CLIENTS — evicts oldest client when limit is reached.
@@ -401,7 +405,7 @@ def register_client() -> 'queue.Queue':
     return msg_queue
 
 
-def unregister_client(msg_queue: 'queue.Queue') -> None:
+def unregister_client(msg_queue: "queue.Queue") -> None:
     """Remove a client queue from the hub."""
     with _SSE_HUB_LOCK:
         try:

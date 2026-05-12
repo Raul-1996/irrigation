@@ -10,20 +10,18 @@ Key principles:
 """
 
 import logging
-import sqlite3
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Optional, List, Any
 
 from db.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
 # Hysteresis constants (S6)
-FLOAT_MIN_RUN_TIME = 60      # seconds — min run time after resume before re-pause
-FLOAT_MAX_TRIPS = 3           # max trips within window
-FLOAT_TRIP_WINDOW = 300       # seconds (5 min)
+FLOAT_MIN_RUN_TIME = 60  # seconds — min run time after resume before re-pause
+FLOAT_MAX_TRIPS = 3  # max trips within window
+FLOAT_TRIP_WINDOW = 300  # seconds (5 min)
 
 
 class _GroupState:
@@ -32,32 +30,31 @@ class _GroupState:
     def __init__(self, group_id):
         # type: (int) -> None
         self.group_id = group_id
-        self.level_ok = True          # True = water present
+        self.level_ok = True  # True = water present
         self.paused = False
-        self.paused_since = None      # type: Optional[str]  # ISO datetime
+        self.paused_since = None  # type: Optional[str]  # ISO datetime
         self.paused_since_mono = None  # type: Optional[float]  # monotonic
-        self.timeout_at = None        # type: Optional[float]  # monotonic
+        self.timeout_at = None  # type: Optional[float]  # monotonic
         self.timeout_minutes = 30
-        self.paused_zones = []        # type: List[int]
+        self.paused_zones = []  # type: List[int]
         self.resume_event = threading.Event()
         self.emergency_stopped = False
 
         # Debounce
         self.debounce_seconds = 5
-        self.pending_level_ok = None   # type: Optional[bool]
-        self.pending_since = None      # type: Optional[float]  # monotonic
+        self.pending_level_ok = None  # type: Optional[bool]
+        self.pending_since = None  # type: Optional[float]  # monotonic
         self.confirmed_level_ok = True  # last confirmed (debounced) value
 
         # Hysteresis
-        self.trip_times = []           # type: List[float]  # monotonic timestamps
-        self.last_resume_at = None     # type: Optional[float]
+        self.trip_times = []  # type: List[float]  # monotonic timestamps
+        self.last_resume_at = None  # type: Optional[float]
 
 
 class FloatMonitor:
     """Monitors tank float valves per-group via MQTT."""
 
-    def __init__(self, db_path, mqtt_clients, queue_manager, telegram_notify=None,
-                 repo=None):
+    def __init__(self, db_path, mqtt_clients, queue_manager, telegram_notify=None, repo=None):
         # type: (str, Dict[int, Any], Any, Optional[Any], Optional[Any]) -> None
         self.db_path = db_path
         self.mqtt_clients = mqtt_clients or {}
@@ -71,17 +68,19 @@ class FloatMonitor:
         if repo is None:
             try:
                 from db.float import FloatRepository
+
                 repo = FloatRepository(db_path)
             except ImportError:
-                logger.exception("FloatMonitor: FloatRepository import failed, "
-                                 "falling back to direct sqlite3 (PHYS-3 risk)")
+                logger.exception(
+                    "FloatMonitor: FloatRepository import failed, falling back to direct sqlite3 (PHYS-3 risk)"
+                )
                 repo = None
         self._repo = repo
 
         self._lock = threading.Lock()
-        self._states = {}              # type: Dict[int, _GroupState]
-        self._subscriptions = {}       # type: Dict[int, dict]  # group_id -> {topic, server_id, tripped_topic}
-        self._topic_to_group = {}      # type: Dict[str, int]   # mqtt topic -> group_id
+        self._states = {}  # type: Dict[int, _GroupState]
+        self._subscriptions = {}  # type: Dict[int, dict]  # group_id -> {topic, server_id, tripped_topic}
+        self._topic_to_group = {}  # type: Dict[str, int]   # mqtt topic -> group_id
         self._started = False
         self._original_on_message = {}  # type: Dict[int, Any]  # server_id -> original callback
 
@@ -121,15 +120,15 @@ class FloatMonitor:
             gs = self._states.get(group_id)
             if gs is None:
                 return {
-                    'group_id': group_id,
-                    'level_ok': True,
-                    'paused': False,
-                    'paused_since': None,
-                    'timeout_at': None,
-                    'paused_zones': [],
-                    'hysteresis': {
-                        'trip_count': 0,
-                        'emergency_stopped': False,
+                    "group_id": group_id,
+                    "level_ok": True,
+                    "paused": False,
+                    "paused_since": None,
+                    "timeout_at": None,
+                    "paused_zones": [],
+                    "hysteresis": {
+                        "trip_count": 0,
+                        "emergency_stopped": False,
                     },
                 }
             timeout_at_str = None
@@ -137,19 +136,19 @@ class FloatMonitor:
                 try:
                     remaining_timeout = gs.timeout_at - time.monotonic()
                     if remaining_timeout > 0:
-                        timeout_at_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        timeout_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     pass
             return {
-                'group_id': group_id,
-                'level_ok': gs.level_ok,
-                'paused': gs.paused,
-                'paused_since': gs.paused_since,
-                'timeout_at': timeout_at_str,
-                'paused_zones': list(gs.paused_zones),
-                'hysteresis': {
-                    'trip_count': len(gs.trip_times),
-                    'emergency_stopped': gs.emergency_stopped,
+                "group_id": group_id,
+                "level_ok": gs.level_ok,
+                "paused": gs.paused,
+                "paused_since": gs.paused_since,
+                "timeout_at": timeout_at_str,
+                "paused_zones": list(gs.paused_zones),
+                "hysteresis": {
+                    "trip_count": len(gs.trip_times),
+                    "emergency_stopped": gs.emergency_stopped,
                 },
             }
 
@@ -190,13 +189,13 @@ class FloatMonitor:
 
         while True:
             if resume_event.is_set():
-                return 'resumed'
+                return "resumed"
             if cancel_event and cancel_event.is_set():
-                return 'cancelled'
+                return "cancelled"
             if shutdown_event and shutdown_event.is_set():
-                return 'shutdown'
+                return "shutdown"
             if time.monotonic() >= deadline:
-                return 'timeout'
+                return "timeout"
             # Wait with short timeout for responsive checking
             resume_event.wait(timeout=1.0)
 
@@ -210,9 +209,9 @@ class FloatMonitor:
         payload = str(payload).strip().lower()
 
         # Parse payload to raw boolean
-        if payload in ('1', 'true', 'on'):
+        if payload in ("1", "true", "on"):
             raw_val = True
-        elif payload in ('0', 'false', 'off'):
+        elif payload in ("0", "false", "off"):
             raw_val = False
         else:
             # Invalid payload — ignore
@@ -226,8 +225,8 @@ class FloatMonitor:
 
             # Apply NO/NC mode
             group_cfg = self._subscriptions.get(group_id, {})
-            mode = group_cfg.get('float_mode', 'NO')
-            if mode == 'NC':
+            mode = group_cfg.get("float_mode", "NO")
+            if mode == "NC":
                 level_ok = not raw_val
             else:
                 level_ok = raw_val
@@ -284,11 +283,11 @@ class FloatMonitor:
         if len(gs.trip_times) >= FLOAT_MAX_TRIPS:
             gs.emergency_stopped = True
             gs.paused = True
-            gs.paused_since = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            gs.paused_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             gs.paused_since_mono = now
             gs.resume_event.clear()
 
-            group_name = self._subscriptions.get(gs.group_id, {}).get('name', 'Группа %d' % gs.group_id)
+            group_name = self._subscriptions.get(gs.group_id, {}).get("name", "Группа %d" % gs.group_id)
             trip_count = len(gs.trip_times)
 
             # Release lock for external calls
@@ -313,14 +312,15 @@ class FloatMonitor:
         # Check hysteresis min_run_time warning
         if gs.last_resume_at is not None and (now - gs.last_resume_at) < FLOAT_MIN_RUN_TIME:
             logger.warning(
-                "FloatMonitor: float_pause_too_soon for group %d "
-                "(%.0fs since last resume, min_run_time=%ds)",
-                gs.group_id, now - gs.last_resume_at, FLOAT_MIN_RUN_TIME
+                "FloatMonitor: float_pause_too_soon for group %d (%.0fs since last resume, min_run_time=%ds)",
+                gs.group_id,
+                now - gs.last_resume_at,
+                FLOAT_MIN_RUN_TIME,
             )
 
         # Set pause state
         gs.paused = True
-        gs.paused_since = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        gs.paused_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         gs.paused_since_mono = now
         gs.timeout_at = now + gs.timeout_minutes * 60
         gs.resume_event.clear()
@@ -330,17 +330,15 @@ class FloatMonitor:
         gs.paused_zones = paused_zones
 
         # Log float event
-        self._log_float_event(gs.group_id, 'float_pause', paused_zones)
+        self._log_float_event(gs.group_id, "float_pause", paused_zones)
 
         # Telegram notification (release lock)
         if self.telegram_notify:
-            group_name = self._subscriptions.get(gs.group_id, {}).get('name', 'Группа %d' % gs.group_id)
+            group_name = self._subscriptions.get(gs.group_id, {}).get("name", "Группа %d" % gs.group_id)
             self._lock.release()
             try:
                 try:
-                    self.telegram_notify(
-                        "⚠️ Группа %s: уровень воды низкий, полив приостановлен" % group_name
-                    )
+                    self.telegram_notify(f"⚠️ Группа {group_name}: уровень воды низкий, полив приостановлен")
                 except Exception:
                     logger.exception("FloatMonitor: telegram_notify failed")
             finally:
@@ -365,18 +363,16 @@ class FloatMonitor:
         gs.resume_event.set()
 
         # Log float event
-        self._log_float_event(gs.group_id, 'float_resume', gs.paused_zones)
+        self._log_float_event(gs.group_id, "float_resume", gs.paused_zones)
         gs.paused_zones = []
 
         # Telegram notification
         if self.telegram_notify:
-            group_name = self._subscriptions.get(gs.group_id, {}).get('name', 'Группа %d' % gs.group_id)
+            group_name = self._subscriptions.get(gs.group_id, {}).get("name", "Группа %d" % gs.group_id)
             self._lock.release()
             try:
                 try:
-                    self.telegram_notify(
-                        "✅ Группа %s: уровень восстановлен, полив возобновлён" % group_name
-                    )
+                    self.telegram_notify(f"✅ Группа {group_name}: уровень восстановлен, полив возобновлён")
                 except Exception:
                     logger.exception("FloatMonitor: telegram_notify failed")
             finally:
@@ -400,15 +396,15 @@ class FloatMonitor:
 
         # Process timeouts outside lock
         for group_id in timed_out:
-            group_name = self._subscriptions.get(group_id, {}).get('name', 'Группа %d' % group_id)
-            timeout_min = self._subscriptions.get(group_id, {}).get('float_timeout_minutes', 30)
+            group_name = self._subscriptions.get(group_id, {}).get("name", "Группа %d" % group_id)
+            timeout_min = self._subscriptions.get(group_id, {}).get("float_timeout_minutes", 30)
 
             try:
                 self.queue_manager.cancel_group(group_id)
             except Exception:
                 logger.exception("FloatMonitor: cancel_group failed for group %d", group_id)
 
-            self._log_float_event(group_id, 'float_timeout_emergency_stop', [])
+            self._log_float_event(group_id, "float_timeout_emergency_stop", [])
 
             if self.telegram_notify:
                 try:
@@ -461,16 +457,14 @@ class FloatMonitor:
             conn = self._get_db()
             try:
                 rows = conn.execute(
-                    "SELECT id, duration FROM zones WHERE group_id=? AND state='on'",
-                    (group_id,)
+                    "SELECT id, duration FROM zones WHERE group_id=? AND state='on'", (group_id,)
                 ).fetchall()
                 for row in rows:
-                    zone_id = row['id']
-                    duration = row['duration'] or 0
+                    zone_id = row["id"]
+                    duration = row["duration"] or 0
                     conn.execute(
-                        "UPDATE zones SET state='paused', pause_reason='float', "
-                        "pause_remaining_seconds=? WHERE id=?",
-                        (duration, zone_id)
+                        "UPDATE zones SET state='paused', pause_reason='float', pause_remaining_seconds=? WHERE id=?",
+                        (duration, zone_id),
                     )
                     paused.append(zone_id)
                 conn.commit()
@@ -495,7 +489,7 @@ class FloatMonitor:
             try:
                 conn.execute(
                     "INSERT INTO float_events (group_id, event_type, paused_zones) VALUES (?, ?, ?)",
-                    (group_id, event_type, str(paused_zones))
+                    (group_id, event_type, str(paused_zones)),
                 )
                 conn.commit()
             finally:
@@ -549,13 +543,13 @@ class FloatMonitor:
                         "SELECT id, name, float_enabled, float_mqtt_topic, float_mqtt_server_id, "
                         "float_mode, float_timeout_minutes, float_debounce_seconds "
                         "FROM groups WHERE id=?",
-                        (group_id,)
+                        (group_id,),
                     ).fetchone()
                     row = dict(raw) if raw else None
                 finally:
                     conn.close()
 
-            if row and row.get('float_enabled'):
+            if row and row.get("float_enabled"):
                 self._subscribe_group(dict(row))
         except Exception:
             logger.exception("FloatMonitor: _load_group failed for group %d", group_id)
@@ -563,13 +557,13 @@ class FloatMonitor:
     def _subscribe_group(self, cfg):
         # type: (dict) -> None
         """Subscribe to MQTT for a group (called with lock held)."""
-        group_id = cfg['id']
-        topic = (cfg.get('float_mqtt_topic') or '').strip()
-        server_id = cfg.get('float_mqtt_server_id')
-        mode = cfg.get('float_mode', 'NO')
-        timeout_min = cfg.get('float_timeout_minutes', 30)
-        debounce_sec = cfg.get('float_debounce_seconds', 5)
-        name = cfg.get('name', '')
+        group_id = cfg["id"]
+        topic = (cfg.get("float_mqtt_topic") or "").strip()
+        server_id = cfg.get("float_mqtt_server_id")
+        mode = cfg.get("float_mode", "NO")
+        timeout_min = cfg.get("float_timeout_minutes", 30)
+        debounce_sec = cfg.get("float_debounce_seconds", 5)
+        name = cfg.get("name", "")
 
         if not topic or not server_id:
             return
@@ -582,13 +576,13 @@ class FloatMonitor:
         # Store subscription info
         tripped_topic = "/devices/float-watchdog/controls/group_%d_tripped" % group_id
         self._subscriptions[group_id] = {
-            'topic': topic,
-            'server_id': server_id,
-            'float_mode': mode,
-            'float_timeout_minutes': timeout_min,
-            'float_debounce_seconds': debounce_sec,
-            'tripped_topic': tripped_topic,
-            'name': name,
+            "topic": topic,
+            "server_id": server_id,
+            "float_mode": mode,
+            "float_timeout_minutes": timeout_min,
+            "float_debounce_seconds": debounce_sec,
+            "tripped_topic": tripped_topic,
+            "name": name,
         }
 
         # Map topics to group
@@ -619,7 +613,7 @@ class FloatMonitor:
 
         # Store on_connect for reconnection
         if server_id not in self._original_on_message:
-            self._original_on_message[server_id] = getattr(client, 'on_connect', None)
+            self._original_on_message[server_id] = getattr(client, "on_connect", None)
             client.on_connect = self._on_mqtt_connect
 
     def _unsubscribe_group(self, group_id):
@@ -629,9 +623,9 @@ class FloatMonitor:
         if not sub:
             return
 
-        topic = sub['topic']
-        tripped_topic = sub['tripped_topic']
-        server_id = sub['server_id']
+        topic = sub["topic"]
+        tripped_topic = sub["tripped_topic"]
+        server_id = sub["server_id"]
         client = self.mqtt_clients.get(server_id)
 
         if client:

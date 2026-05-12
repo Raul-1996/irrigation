@@ -1,17 +1,15 @@
 """Issue #35: unit tests for services.history_calc — pure functions."""
-from datetime import date, datetime, timedelta, timezone
 
-import pytest
+from datetime import date, datetime, timedelta
 
 from services.history_calc import (
     _program_runs_on,
-    calculate_plan_for_zone,
     calculate_actual_for_zone,
+    calculate_plan_for_zone,
     calculate_summary,
-    zone_has_active_program,
     date_range,
+    zone_has_active_program,
 )
-
 
 # Reference Monday 2026-05-04 (weekday 0).
 MON = date(2026, 5, 4)
@@ -23,17 +21,17 @@ SUN = date(2026, 5, 10)
 def _prog(**kw):
     """Build a program dict with sensible defaults."""
     base = {
-        'id': 1,
-        'name': 'P',
-        'time': '07:00',
-        'extra_times': [],
-        'days': [0],          # Mon
-        'zones': [1],
-        'schedule_type': 'weekdays',
-        'interval_days': None,
-        'even_odd': None,
-        'enabled': 1,
-        'created_at': '2026-01-01 00:00:00',
+        "id": 1,
+        "name": "P",
+        "time": "07:00",
+        "extra_times": [],
+        "days": [0],  # Mon
+        "zones": [1],
+        "schedule_type": "weekdays",
+        "interval_days": None,
+        "even_odd": None,
+        "enabled": 1,
+        "created_at": "2026-01-01 00:00:00",
     }
     base.update(kw)
     return base
@@ -50,27 +48,20 @@ class TestProgramRunsOn:
 
     def test_even_odd_even(self):
         # 2026-05-04 is day 4 → even
-        assert _program_runs_on(
-            _prog(schedule_type='even-odd', even_odd='even'), MON
-        ) is True
+        assert _program_runs_on(_prog(schedule_type="even-odd", even_odd="even"), MON) is True
         # 2026-05-05 day 5 → odd, even-odd='even' ⇒ no fire
-        assert _program_runs_on(
-            _prog(schedule_type='even-odd', even_odd='even'), TUE
-        ) is False
+        assert _program_runs_on(_prog(schedule_type="even-odd", even_odd="even"), TUE) is False
 
     def test_even_odd_odd(self):
-        assert _program_runs_on(
-            _prog(schedule_type='even-odd', even_odd='odd'), TUE
-        ) is True
-        assert _program_runs_on(
-            _prog(schedule_type='even-odd', even_odd='odd'), MON
-        ) is False
+        assert _program_runs_on(_prog(schedule_type="even-odd", even_odd="odd"), TUE) is True
+        assert _program_runs_on(_prog(schedule_type="even-odd", even_odd="odd"), MON) is False
 
     def test_interval_anchor_at_created_at(self):
         """interval_days=3 with anchor 2026-05-04 ⇒ fires every 3 days from anchor."""
         p = _prog(
-            schedule_type='interval', interval_days=3,
-            created_at='2026-05-04 00:00:00',
+            schedule_type="interval",
+            interval_days=3,
+            created_at="2026-05-04 00:00:00",
         )
         assert _program_runs_on(p, date(2026, 5, 4)) is True
         assert _program_runs_on(p, date(2026, 5, 5)) is False
@@ -94,13 +85,13 @@ class TestCalculatePlan:
         """Two programs that both fire on same day ⇒ minutes sum."""
         progs = [
             _prog(id=1, days=[0], zones=[1]),
-            _prog(id=2, days=[0], zones=[1], time='18:00'),
+            _prog(id=2, days=[0], zones=[1], time="18:00"),
         ]
         plan = calculate_plan_for_zone(1, 10, [MON], progs)
         assert plan[MON] == 20
 
     def test_zone_extra_times_doubles_minutes(self):
-        progs = [_prog(days=[0], zones=[1], extra_times=['19:00'])]
+        progs = [_prog(days=[0], zones=[1], extra_times=["19:00"])]
         plan = calculate_plan_for_zone(1, 10, [MON], progs)
         # main 07:00 + extra 19:00 = 2 firings ⇒ 20 min
         assert plan[MON] == 20
@@ -132,33 +123,25 @@ class TestZoneHasActivePlan:
 
 class TestCalculateActual:
     def _run(self, start: str, end: str):
-        return {'start_utc': start, 'end_utc': end}
+        return {"start_utc": start, "end_utc": end}
 
     def test_one_run_one_day(self):
         # Run from 2026-05-04 07:00 to 07:15 UTC (15 min)
-        runs = [self._run('2026-05-04T07:00:00Z', '2026-05-04T07:15:00Z')]
+        runs = [self._run("2026-05-04T07:00:00Z", "2026-05-04T07:15:00Z")]
         # Use the local date that 07:00 UTC falls into for cross-TZ safety:
-        local_d = datetime.fromisoformat(
-            '2026-05-04T07:00:00+00:00'
-        ).astimezone().date()
-        minutes, counts = calculate_actual_for_zone(
-            runs, [local_d, local_d + timedelta(days=1)]
-        )
+        local_d = datetime.fromisoformat("2026-05-04T07:00:00+00:00").astimezone().date()
+        minutes, counts = calculate_actual_for_zone(runs, [local_d, local_d + timedelta(days=1)])
         assert minutes[local_d] == 15
         assert counts[local_d] == 1
 
     def test_multiple_runs_same_day(self):
         runs = [
-            self._run('2026-05-04T07:00:00Z', '2026-05-04T07:10:00Z'),
-            self._run('2026-05-04T18:00:00Z', '2026-05-04T18:20:00Z'),
+            self._run("2026-05-04T07:00:00Z", "2026-05-04T07:10:00Z"),
+            self._run("2026-05-04T18:00:00Z", "2026-05-04T18:20:00Z"),
         ]
-        local_d = datetime.fromisoformat(
-            '2026-05-04T07:00:00+00:00'
-        ).astimezone().date()
+        local_d = datetime.fromisoformat("2026-05-04T07:00:00+00:00").astimezone().date()
         # Second run might roll over to next day in some TZs; pick both.
-        local_d2 = datetime.fromisoformat(
-            '2026-05-04T18:00:00+00:00'
-        ).astimezone().date()
+        local_d2 = datetime.fromisoformat("2026-05-04T18:00:00+00:00").astimezone().date()
         minutes, counts = calculate_actual_for_zone(runs, [local_d, local_d2])
         if local_d == local_d2:
             assert minutes[local_d] == 30
@@ -168,10 +151,8 @@ class TestCalculateActual:
             assert minutes[local_d2] == 20
 
     def test_open_run_contributes_zero(self):
-        runs = [{'start_utc': '2026-05-04T07:00:00Z', 'end_utc': None}]
-        local_d = datetime.fromisoformat(
-            '2026-05-04T07:00:00+00:00'
-        ).astimezone().date()
+        runs = [{"start_utc": "2026-05-04T07:00:00Z", "end_utc": None}]
+        local_d = datetime.fromisoformat("2026-05-04T07:00:00+00:00").astimezone().date()
         minutes, counts = calculate_actual_for_zone(runs, [local_d])
         assert minutes[local_d] == 0
         # Still counts as a "run started today" — UI lists it.
@@ -181,15 +162,15 @@ class TestCalculateActual:
 class TestSummary:
     def test_saved_positive_when_actual_under_plan(self):
         s = calculate_summary(actual_minutes_total=100, plan_minutes_total=140, has_plan=True)
-        assert s == {'plan_minutes': 140, 'saved_minutes': 40, 'has_plan': True}
+        assert s == {"plan_minutes": 140, "saved_minutes": 40, "has_plan": True}
 
     def test_saved_negative_when_actual_over_plan(self):
         s = calculate_summary(actual_minutes_total=200, plan_minutes_total=140, has_plan=True)
-        assert s['saved_minutes'] == -60
+        assert s["saved_minutes"] == -60
 
     def test_zero_when_no_plan(self):
         s = calculate_summary(actual_minutes_total=50, plan_minutes_total=0, has_plan=False)
-        assert s == {'plan_minutes': 0, 'saved_minutes': 0, 'has_plan': False}
+        assert s == {"plan_minutes": 0, "saved_minutes": 0, "has_plan": False}
 
 
 class TestDateRange:

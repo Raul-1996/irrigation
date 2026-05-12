@@ -1,10 +1,9 @@
 """Tests for SSE hub hardening: client limits, dead detection, timeouts."""
-import pytest
+
 import os
 import queue
-import time
 
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
 
 
 class TestSSEClientLimit:
@@ -12,18 +11,21 @@ class TestSSEClientLimit:
 
     def setup_method(self):
         from services import sse_hub
+
         # Clean slate
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def teardown_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def test_register_respects_max_limit(self):
         """Register 25 clients → only MAX_SSE_CLIENTS remain."""
         from services import sse_hub
+
         queues = []
         for _ in range(25):
             queues.append(sse_hub.register_client())
@@ -34,6 +36,7 @@ class TestSSEClientLimit:
     def test_oldest_evicted_on_limit(self):
         """When limit hit, oldest client gets None sentinel."""
         from services import sse_hub
+
         first = sse_hub.register_client()
         for _ in range(sse_hub.MAX_SSE_CLIENTS):
             sse_hub.register_client()
@@ -49,6 +52,7 @@ class TestSSEClientLimit:
     def test_queue_maxsize_reduced(self):
         """New client queues should have maxsize=100."""
         from services import sse_hub
+
         q = sse_hub.register_client()
         assert q.maxsize == 100
         sse_hub.unregister_client(q)
@@ -59,17 +63,20 @@ class TestDeadClientDetection:
 
     def setup_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def teardown_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def test_full_queue_removed_on_broadcast(self):
         """Client with full queue is removed during broadcast."""
         from services import sse_hub
+
         alive = sse_hub.register_client()
         dead = sse_hub.register_client()
 
@@ -91,6 +98,7 @@ class TestDeadClientDetection:
     def test_healthy_clients_survive_broadcast(self):
         """Healthy clients are not removed."""
         from services import sse_hub
+
         q1 = sse_hub.register_client()
         q2 = sse_hub.register_client()
         sse_hub.broadcast('{"ok": true}')
@@ -105,17 +113,20 @@ class TestSentinelHandling:
 
     def setup_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def teardown_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def test_sentinel_stops_generator(self):
         """Generator breaks on None sentinel in queue."""
         from services import sse_hub
+
         q = sse_hub.register_client()
         # Put some data then sentinel
         q.put_nowait('{"data": 1}')
@@ -142,17 +153,20 @@ class TestInternalBroadcastDeadDetection:
 
     def setup_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def teardown_method(self):
         from services import sse_hub
+
         with sse_hub._SSE_HUB_LOCK:
             sse_hub._SSE_HUB_CLIENTS.clear()
 
     def test_multiple_dead_clients_removed(self):
         """Multiple dead clients are all removed in one broadcast."""
         from services import sse_hub
+
         alive = sse_hub.register_client()
         deads = []
         for _ in range(5):

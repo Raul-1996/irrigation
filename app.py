@@ -3,6 +3,7 @@
 All API routes live in routes/*_api.py blueprints.
 This file handles: app creation, config, logging, middleware, blueprint registration, boot-init.
 """
+
 # ── Logging MUST be configured FIRST (MASTER-C2) ───────────────────────────
 # setup_logging() attaches the rotating file handler to the ROOT logger and
 # force-resets basicConfig so that subsequent `logging.getLogger(__name__)`
@@ -17,21 +18,26 @@ This file handles: app creation, config, logging, middleware, blueprint registra
 # tests/unit/test_logging_setup.py.
 import logging
 import os as _os_early
-if _os_early.environ.get('TESTING') != '1' and 'PYTEST_CURRENT_TEST' not in _os_early.environ:
+
+if _os_early.environ.get("TESTING") != "1" and "PYTEST_CURRENT_TEST" not in _os_early.environ:
     from services.logging_setup import setup_logging as _setup_logging_early
-    _setup_logging_early(logging.getLogger('app'))
+
+    _setup_logging_early(logging.getLogger("app"))
 logger = logging.getLogger(__name__)
 
-import sqlite3
-from flask import Flask, render_template, jsonify, request, session, Response
-from datetime import datetime
 import json
-from database import db
-from utils import normalize_topic
 import os
-from irrigation_scheduler import init_scheduler, get_scheduler
-from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
+import sqlite3
+from datetime import datetime
+
+from flask import Flask, Response, jsonify, render_template, request, session
 from flask_wtf.csrf import CSRFProtect
+
+from database import db
+from irrigation_scheduler import get_scheduler, init_scheduler
+from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
+from utils import normalize_topic
+
 try:
     import paho.mqtt.client as mqtt
 except ImportError:
@@ -42,19 +48,20 @@ try:
 except ImportError:
     logging.getLogger(__name__).debug("services.events not available")
     _events = None
-import time as _perf_time
 import threading
-import time
+import time as _perf_time
+
 from config import Config
+from routes.auth import auth_bp
+from routes.files import files_bp
+from routes.groups import groups_bp
+from routes.programs import programs_bp
+from routes.settings import settings_bp
 
 # Page-rendering blueprints
 from routes.status import status_bp
-from routes.files import files_bp
 from routes.zones import zones_bp
-from routes.programs import programs_bp
-from routes.groups import groups_bp
-from routes.auth import auth_bp
-from routes.settings import settings_bp
+
 try:
     from routes.telegram import telegram_bp
 except ImportError as e:
@@ -67,35 +74,39 @@ except ImportError as e:
     reports_bp = None
 
 # API blueprints
-from routes.zones_crud_api import zones_crud_api_bp
-from routes.zones_photo_api import zones_photo_api_bp
-from routes.zones_watering_api import zones_watering_api_bp
-from routes.groups_api import groups_api_bp
-from routes.programs_api import programs_api_bp
-from routes.mqtt_api import mqtt_api_bp
-from routes.system_status_api import system_status_api_bp
-from routes.system_config_api import system_config_api_bp
-from routes.system_emergency_api import system_emergency_api_bp
-from routes.weather_api import weather_api_bp
 from routes.audit_api import audit_api_bp
-from routes.zones_history_api import zones_history_api_bp
+from routes.groups_api import groups_api_bp
 from routes.health_api import (
-    health_api_bp,
-    init_metrics as _init_metrics,
-    record_request_metrics as _record_request_metrics,
     WB_HTTP_IN_FLIGHT as _WB_HTTP_IN_FLIGHT,
 )
-
+from routes.health_api import (
+    health_api_bp,
+)
+from routes.health_api import (
+    record_request_metrics as _record_request_metrics,
+)
+from routes.mqtt_api import mqtt_api_bp
+from routes.programs_api import programs_api_bp
+from routes.system_config_api import system_config_api_bp
+from routes.system_emergency_api import system_emergency_api_bp
+from routes.system_status_api import system_status_api_bp
+from routes.weather_api import weather_api_bp
+from routes.zones_crud_api import zones_crud_api_bp
+from routes.zones_history_api import zones_history_api_bp
+from routes.zones_photo_api import zones_photo_api_bp
+from routes.zones_watering_api import zones_watering_api_bp
 
 try:
     from services.telegram_bot import subscribe_to_events as _tg_subscribe
+
     _tg_subscribe()
     from services.telegram_bot import start_long_polling_if_needed as _tg_poll_start
+
     _tg_poll_start()
 except ImportError as e:
     logging.getLogger(__name__).debug("Telegram bot init skipped: %s", e)
-from services.api_rate_limiter import _is_allowed as _rate_check
 from services import sse_hub as _sse_hub
+from services.api_rate_limiter import _is_allowed as _rate_check
 from services.app_init import initialize_app as _initialize_app
 
 # ── Logging already configured at the top of the file (MASTER-C2) ──────────
@@ -104,17 +115,22 @@ from services.app_init import initialize_app as _initialize_app
 app = Flask(__name__)
 # Use TestConfig when TESTING=1 to disable CSRF
 from config import TESTING as _TESTING_FLAG
+
 if _TESTING_FLAG:
     from config import TestConfig
+
     app.config.from_object(TestConfig)
 else:
     app.config.from_object(Config)
-app.config['MAX_CONTENT_LENGTH'] = 22 * 1024 * 1024  # 22MB (issue #11: route-level MAX_FILE_SIZE enforces 20MB; +2MB for multipart envelope)
+app.config["MAX_CONTENT_LENGTH"] = (
+    22 * 1024 * 1024
+)  # 22MB (issue #11: route-level MAX_FILE_SIZE enforces 20MB; +2MB for multipart envelope)
 app.db = db
 csrf = CSRFProtect(app)
 
 # Exempt login endpoint from CSRF — login page doesn't include CSRF token
 from routes.auth import api_login as _api_login_view
+
 csrf.exempt(_api_login_view)
 
 # ── CSRF policy (SEC-003 fix) ──────────────────────────────────────────────
@@ -129,35 +145,35 @@ csrf.exempt(_api_login_view)
 # that `static/js/app.js` already attaches on all non-GET fetch calls.
 #
 # Guest-accessible endpoints (remain CSRF-exempt):
-from routes.system_emergency_api import api_emergency_stop, api_emergency_resume
-from routes.system_config_api import api_env_config, api_postpone
-from routes.system_status_api import api_status
-from routes.zones_watering_api import start_zone, stop_zone, api_zone_mqtt_start, api_zone_mqtt_stop
-from routes.zones_crud_api import api_zones_next_watering_bulk
+from routes.audit_api import api_audit_ui_event
 from routes.groups_api import (
-    api_stop_group,
+    api_master_valve_toggle,
     api_start_group_from_first,
     api_start_zone_exclusive,
-    api_master_valve_toggle,
+    api_stop_group,
 )
-from routes.audit_api import api_audit_ui_event
+from routes.system_config_api import api_env_config, api_postpone
+from routes.system_emergency_api import api_emergency_resume, api_emergency_stop
+from routes.system_status_api import api_status
+from routes.zones_crud_api import api_zones_next_watering_bulk
+from routes.zones_watering_api import api_zone_mqtt_start, api_zone_mqtt_stop, start_zone, stop_zone
 
 for _view in (
-    api_env_config,        # /api/env
-    api_postpone,          # /api/postpone
-    api_emergency_stop,    # /api/emergency-stop
+    api_env_config,  # /api/env
+    api_postpone,  # /api/postpone
+    api_emergency_stop,  # /api/emergency-stop
     api_emergency_resume,  # /api/emergency-resume
-    api_status,            # /api/status
-    start_zone,            # /api/zones/<id>/start
-    stop_zone,             # /api/zones/<id>/stop
-    api_zone_mqtt_start,   # /api/zones/<id>/mqtt/start
-    api_zone_mqtt_stop,    # /api/zones/<id>/mqtt/stop
+    api_status,  # /api/status
+    start_zone,  # /api/zones/<id>/start
+    stop_zone,  # /api/zones/<id>/stop
+    api_zone_mqtt_start,  # /api/zones/<id>/mqtt/start
+    api_zone_mqtt_stop,  # /api/zones/<id>/mqtt/stop
     api_zones_next_watering_bulk,  # /api/zones/next-watering-bulk
-    api_stop_group,        # /api/groups/<id>/stop
+    api_stop_group,  # /api/groups/<id>/stop
     api_start_group_from_first,  # /api/groups/<id>/start-from-first
-    api_start_zone_exclusive,    # /api/groups/<id>/start-zone/<zid>
-    api_master_valve_toggle,     # /api/groups/<id>/master-valve/<action>
-    api_audit_ui_event,    # /api/audit/ui — guests/viewers must record clicks
+    api_start_zone_exclusive,  # /api/groups/<id>/start-zone/<zid>
+    api_master_valve_toggle,  # /api/groups/<id>/master-valve/<action>
+    api_audit_ui_event,  # /api/audit/ui — guests/viewers must record clicks
 ):
     csrf.exempt(_view)
 
@@ -173,10 +189,17 @@ for _view in (
 #   system_status_api_bp except /api/status
 #   groups_api_bp       (admin group CRUD; control endpoints exempt above)
 
-_sse_hub.init(db=db, mqtt_module=mqtt, app_config=app.config, publish_mqtt_value=_publish_mqtt_value, normalize_topic=normalize_topic, get_scheduler=get_scheduler)
+_sse_hub.init(
+    db=db,
+    mqtt_module=mqtt,
+    app_config=app.config,
+    publish_mqtt_value=_publish_mqtt_value,
+    normalize_topic=normalize_topic,
+    get_scheduler=get_scheduler,
+)
 
 try:
-    app.config.setdefault('SEND_FILE_MAX_AGE_DEFAULT', 60 * 60 * 24 * 7)
+    app.config.setdefault("SEND_FILE_MAX_AGE_DEFAULT", 60 * 60 * 24 * 7)
 except (TypeError, ValueError) as e:
     logger.debug("SEND_FILE_MAX_AGE_DEFAULT config: %s", e)
 
@@ -186,16 +209,19 @@ from services.version import get_app_version as _get_app_version
 
 APP_VERSION = _get_app_version()
 
+
 @app.context_processor
 def _inject_app_version():
     try:
-        sys_name = db.get_setting_value('system_name') or ''
-        asset = lambda path: f"{path}?v={APP_VERSION}"
-        return {'app_version': APP_VERSION, 'system_name': sys_name, 'asset': asset}
+        sys_name = db.get_setting_value("system_name") or ""
+
+        def asset(path):
+            return f"{path}?v={APP_VERSION}"
+
+        return {"app_version": APP_VERSION, "system_name": sys_name, "asset": asset}
     except (sqlite3.Error, OSError) as e:
         logger.debug("context processor fallback: %s", e)
-        return {'app_version': '1.0', 'system_name': '', 'asset': (lambda p: p)}
-
+        return {"app_version": "1.0", "system_name": "", "asset": (lambda p: p)}
 
 
 # ── Middleware ──────────────────────────────────────────────────────────────
@@ -205,7 +231,11 @@ def _inject_app_version():
 # `request._started_at`).
 from services.correlation import (
     correlation_id_var as _correlation_id_var,
+)
+from services.correlation import (
     extract_or_generate as _extract_or_generate_cid,
+)
+from services.correlation import (
     reset_correlation_id as _reset_correlation_id,
 )
 
@@ -240,21 +270,22 @@ def _assign_correlation_id():
     except (AttributeError, KeyError, TypeError) as e:
         logger.debug("correlation_id assign: %s", e)
 
+
 @app.after_request
 def _perf_add_server_timing(resp: Response):
     try:
-        t0 = getattr(request, '_started_at', None)
+        t0 = getattr(request, "_started_at", None)
         if t0 is not None:
-            resp.headers['Server-Timing'] = f"app;dur={int((_perf_time.time() - t0) * 1000)}"
+            resp.headers["Server-Timing"] = f"app;dur={int((_perf_time.time() - t0) * 1000)}"
     except (TypeError, ValueError, AttributeError) as e:
         logger.debug("perf timer end: %s", e)
     # F2 — record request-level Prometheus metrics
     try:
-        t0 = getattr(request, '_started_at', None)
+        t0 = getattr(request, "_started_at", None)
         dur = (_perf_time.time() - t0) if t0 is not None else 0.0
         _record_request_metrics(
             method=request.method,
-            endpoint=request.endpoint or 'unknown',
+            endpoint=request.endpoint or "unknown",
             status_code=resp.status_code,
             duration_s=dur,
         )
@@ -262,7 +293,7 @@ def _perf_add_server_timing(resp: Response):
         logger.debug("record request metrics: %s", e)
     # F2 — in-flight gauge decrement (only if we incremented it in before_request)
     try:
-        if getattr(request, '_wb_inflight_counted', False):
+        if getattr(request, "_wb_inflight_counted", False):
             _WB_HTTP_IN_FLIGHT.dec()
             request._wb_inflight_counted = False
     except Exception:
@@ -279,9 +310,9 @@ def _propagate_correlation_id(resp: Response):
     grab the header from the response verbatim.
     """
     try:
-        cid = getattr(request, '_correlation_id', None)
+        cid = getattr(request, "_correlation_id", None)
         if cid:
-            resp.headers['X-Request-ID'] = cid
+            resp.headers["X-Request-ID"] = cid
     except (AttributeError, TypeError) as e:
         logger.debug("correlation_id echo: %s", e)
     return resp
@@ -293,15 +324,16 @@ def _reset_correlation_id_on_teardown(exc):
 
     Runs even on exception paths (Flask guarantees teardown hooks fire).
     """
-    token = getattr(request, '_correlation_id_token', None)
+    token = getattr(request, "_correlation_id_token", None)
     if token is not None:
         _reset_correlation_id(token)
 
+
 @app.after_request
 def add_security_headers(resp):
-    resp.headers['X-Content-Type-Options'] = 'nosniff'
-    resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    resp.headers['Content-Security-Policy'] = (
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN"
+    resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; "
@@ -310,14 +342,17 @@ def add_security_headers(resp):
     )
     return resp
 
+
 try:
-    app.config.setdefault('SESSION_COOKIE_SAMESITE', 'Lax')
-    app.config.setdefault('SESSION_COOKIE_HTTPONLY', True)
-    if not Config.TESTING:
-        if 'SESSION_COOKIE_SECURE' not in app.config:
-            app.config['SESSION_COOKIE_SECURE'] = bool(os.environ.get('SESSION_COOKIE_SECURE', '0') in ('1', 'true', 'True'))
+    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
+    if not Config.TESTING and "SESSION_COOKIE_SECURE" not in app.config:
+        app.config["SESSION_COOKIE_SECURE"] = bool(
+            os.environ.get("SESSION_COOKIE_SECURE", "0") in ("1", "true", "True")
+        )
 except (TypeError, KeyError) as e:
     logger.debug("Session cookie config: %s", e)
+
 
 # ── Debug logging helpers ──────────────────────────────────────────────────
 def _is_debug_logging_enabled() -> bool:
@@ -327,6 +362,7 @@ def _is_debug_logging_enabled() -> bool:
         logger.debug("debug logging check: %s", e)
         return False
 
+
 def dlog(msg: str, *args) -> None:
     if _is_debug_logging_enabled():
         try:
@@ -334,26 +370,38 @@ def dlog(msg: str, *args) -> None:
         except (TypeError, ValueError) as e:
             logger.debug("dlog format error: %s", e)
 
+
 # ── Shared helper: check if a path is a "status action" allowed without admin ──
 # Service runs behind nginx basic auth. Internal Flask auth for zone/group
 # control is unnecessary — gardeners need start/stop without admin password.
 import re as _re
 
-_ALLOWED_PUBLIC_POSTS = {'/api/login', '/api/status', '/health', '/api/env', '/api/emergency-stop', '/api/emergency-resume', '/api/postpone', '/api/zones/next-watering-bulk', '/api/audit/ui'}
+_ALLOWED_PUBLIC_POSTS = {
+    "/api/login",
+    "/api/status",
+    "/health",
+    "/api/env",
+    "/api/emergency-stop",
+    "/api/emergency-resume",
+    "/api/postpone",
+    "/api/zones/next-watering-bulk",
+    "/api/audit/ui",
+}
 
 # Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
 _ALLOWED_PUBLIC_PATTERNS = [
-    _re.compile(r'^/api/zones/\d+/mqtt/start$'),
-    _re.compile(r'^/api/zones/\d+/mqtt/stop$'),
-    _re.compile(r'^/api/zones/\d+/start$'),
-    _re.compile(r'^/api/zones/\d+/stop$'),
-    _re.compile(r'^/api/groups/\d+/start-from-first$'),
-    _re.compile(r'^/api/groups/\d+/stop$'),
-    _re.compile(r'^/api/groups/\d+/master-valve/\w+$'),
-    _re.compile(r'^/api/groups/\d+/start-zone/\d+$'),
-    _re.compile(r'^/api/groups/\d+/run-selected$'),
-    _re.compile(r'^/api/groups/\d+/skip-current$'),
+    _re.compile(r"^/api/zones/\d+/mqtt/start$"),
+    _re.compile(r"^/api/zones/\d+/mqtt/stop$"),
+    _re.compile(r"^/api/zones/\d+/start$"),
+    _re.compile(r"^/api/zones/\d+/stop$"),
+    _re.compile(r"^/api/groups/\d+/start-from-first$"),
+    _re.compile(r"^/api/groups/\d+/stop$"),
+    _re.compile(r"^/api/groups/\d+/master-valve/\w+$"),
+    _re.compile(r"^/api/groups/\d+/start-zone/\d+$"),
+    _re.compile(r"^/api/groups/\d+/run-selected$"),
+    _re.compile(r"^/api/groups/\d+/skip-current$"),
 ]
+
 
 def _is_status_action(path):
     if path in _ALLOWED_PUBLIC_POSTS:
@@ -363,48 +411,74 @@ def _is_status_action(path):
             return True
     return False
 
+
 # ── Auth before-request ────────────────────────────────────────────────────
 @app.before_request
 def _auth_before_request():
-    if 'role' not in session:
-        session['role'] = 'guest'
+    if "role" not in session:
+        session["role"] = "guest"
     try:
-        if not app.config.get('TESTING'):
+        if not app.config.get("TESTING"):
             try:
                 db.ensure_password_change_required()
             except (sqlite3.Error, OSError) as e:
                 logger.debug("ensure_password_change_required: %s", e)
-            if request.path.startswith('/api/'):
-                if request.method == 'GET':
+            if request.path.startswith("/api/"):
+                if request.method == "GET":
                     return None
-                pth = request.path or ''
-                if session.get('role') == 'viewer' and request.method in ['POST', 'PUT', 'DELETE']:
-                    if pth != '/api/login':
-                        return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
-                if session.get('role') != 'admin' and not _is_status_action(pth):
-                    return jsonify({'success': False, 'message': 'auth required', 'error_code': 'UNAUTHENTICATED'}), 401
-                if session.get('role') == 'admin' and request.method in ['POST', 'PUT', 'DELETE']:
-                    must = db.get_setting_value('password_must_change') if True else None
-                    if str(must or '0') == '1' and request.path != '/api/password':
-                        return jsonify({'success': False, 'message': 'password change required', 'error_code': 'PASSWORD_MUST_CHANGE'}), 403
+                pth = request.path or ""
+                if session.get("role") == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
+                    if pth != "/api/login":
+                        return jsonify(
+                            {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
+                        ), 403
+                if session.get("role") != "admin" and not _is_status_action(pth):
+                    return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
+                if session.get("role") == "admin" and request.method in ["POST", "PUT", "DELETE"]:
+                    must = db.get_setting_value("password_must_change") if True else None
+                    if str(must or "0") == "1" and request.path != "/api/password":
+                        return jsonify(
+                            {
+                                "success": False,
+                                "message": "password change required",
+                                "error_code": "PASSWORD_MUST_CHANGE",
+                            }
+                        ), 403
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.warning("auth before_request error: %s", e)
+
 
 # ── Blueprint registration ─────────────────────────────────────────────────
 for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp):
     app.register_blueprint(bp)
 try:
-    if telegram_bp: app.register_blueprint(telegram_bp)
-    if reports_bp: app.register_blueprint(reports_bp)
+    if telegram_bp:
+        app.register_blueprint(telegram_bp)
+    if reports_bp:
+        app.register_blueprint(reports_bp)
 except (ValueError, TypeError, KeyError) as e:
     logger.warning("Optional blueprint registration failed: %s", e)
 try:
     from routes.mqtt import mqtt_bp
+
     app.register_blueprint(mqtt_bp)
 except ImportError as _e:
     logger.warning(f"MQTT blueprint not registered: {_e}")
 
-for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_api_bp, programs_api_bp, mqtt_api_bp, system_status_api_bp, system_config_api_bp, system_emergency_api_bp, weather_api_bp, audit_api_bp, zones_history_api_bp):
+for bp in (
+    zones_crud_api_bp,
+    zones_photo_api_bp,
+    zones_watering_api_bp,
+    groups_api_bp,
+    programs_api_bp,
+    mqtt_api_bp,
+    system_status_api_bp,
+    system_config_api_bp,
+    system_emergency_api_bp,
+    weather_api_bp,
+    audit_api_bp,
+    zones_history_api_bp,
+):
     app.register_blueprint(bp)
 
 # F2 — observability endpoints: /healthz, /readyz, /metrics.
@@ -413,67 +487,82 @@ for bp in (zones_crud_api_bp, zones_photo_api_bp, zones_watering_api_bp, groups_
 csrf.exempt(health_api_bp)
 app.register_blueprint(health_api_bp)
 
+
 # ── Mutation guard ─────────────────────────────────────────────────────────
 @app.before_request
 def _require_admin_for_mutations():
     try:
-        if app.config.get('TESTING'):
+        if app.config.get("TESTING"):
             return None
-        p = request.path or ''
-        if not p.startswith('/api/') or request.method == 'GET':
+        p = request.path or ""
+        if not p.startswith("/api/") or request.method == "GET":
             return None
-        role = session.get('role', 'guest')
-        if role == 'viewer' and request.method in ['POST', 'PUT', 'DELETE'] and p != '/api/login':
-            return jsonify({'success': False, 'message': 'viewer role: read-only access', 'error_code': 'FORBIDDEN'}), 403
-        if request.method in ['POST', 'PUT', 'DELETE']:
+        role = session.get("role", "guest")
+        if role == "viewer" and request.method in ["POST", "PUT", "DELETE"] and p != "/api/login":
+            return jsonify(
+                {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
+            ), 403
+        if request.method in ["POST", "PUT", "DELETE"]:
             # SECURITY FIX (VULN-003): removed /api/mqtt/ from whitelist
-            if p == '/api/login' or p.startswith('/api/env') or p == '/api/password':
+            if p == "/api/login" or p.startswith("/api/env") or p == "/api/password":
                 return None
-            if role != 'admin' and not _is_status_action(p):
-                return jsonify({'success': False, 'message': 'admin required', 'error_code': 'FORBIDDEN'}), 403
+            if role != "admin" and not _is_status_action(p):
+                return jsonify({"success": False, "message": "admin required", "error_code": "FORBIDDEN"}), 403
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.warning("mutation guard error: %s", e)
         return None
+
 
 # ── Group exclusivity watchdog ─────────────────────────────────────────────
 def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> None:
     try:
         group_zones = db.get_zones_by_group(group_id)
         try:
-            g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(group_id)), None)
-            mv_topic = normalize_topic((g.get('master_mqtt_topic') or '').strip()) if g else ''
+            g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == int(group_id)), None)
+            mv_topic = normalize_topic((g.get("master_mqtt_topic") or "").strip()) if g else ""
         except (TypeError, ValueError, StopIteration) as e:
             logger.debug("group exclusive mv_topic lookup: %s", e)
-            mv_topic = ''
+            mv_topic = ""
+
         def _is_mv(z):
-            try: return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
+            try:
+                return bool(mv_topic) and normalize_topic((z.get("topic") or "").strip()) == mv_topic
             except (TypeError, ValueError) as e:
                 logger.debug("_is_mv check: %s", e)
                 return False
-        on_zones = [z for z in group_zones if str(z.get('state')) == 'on' and not _is_mv(z)]
+
+        on_zones = [z for z in group_zones if str(z.get("state")) == "on" and not _is_mv(z)]
         if len(on_zones) <= 1:
             return
+
         def started_key(z):
-            try: return datetime.strptime(z.get('watering_start_time') or '', '%Y-%m-%d %H:%M:%S')
+            try:
+                return datetime.strptime(z.get("watering_start_time") or "", "%Y-%m-%d %H:%M:%S")
             except (ValueError, TypeError):
-                logger.debug("started_key parse failed for zone %s", z.get('id'))
+                logger.debug("started_key parse failed for zone %s", z.get("id"))
                 return datetime.min
+
         on_zones.sort(key=started_key, reverse=True)
         for z in on_zones[1:]:
             try:
-                sid = z.get('mqtt_server_id'); topic = (z.get('topic') or '').strip()
+                sid = z.get("mqtt_server_id")
+                topic = (z.get("topic") or "").strip()
                 if mqtt and sid and topic:
                     server = db.get_mqtt_server(int(sid))
-                    if server: _publish_mqtt_value(server, normalize_topic(topic), '0', min_interval_sec=0.0, qos=2, retain=True)
+                    if server:
+                        _publish_mqtt_value(
+                            server, normalize_topic(topic), "0", min_interval_sec=0.0, qos=2, retain=True
+                        )
             except (ConnectionError, TimeoutError, OSError) as e:
-                logger.warning("group exclusive mqtt off for zone %s: %s", z.get('id'), e)
+                logger.warning("group exclusive mqtt off for zone %s: %s", z.get("id"), e)
             try:
                 # Use central stop_zone to ensure master close scheduling runs
                 # alongside the DB transition (was: direct state='off' write).
                 from services.zone_control import stop_zone as _stop_central_gex
-                _stop_central_gex(int(z['id']), reason='group_exclusive', force=True)
+
+                _stop_central_gex(int(z["id"]), reason="group_exclusive", force=True)
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e:
-                logger.error("group exclusive stop_zone for %s: %s", z.get('id'), e)
+                logger.error("group exclusive stop_zone for %s: %s", z.get("id"), e)
                 # Fallback to direct DB update if central stop fails — but
                 # still go through the audited helper so 'group_exclusivity'
                 # transitions are visible to triage.  If even that path
@@ -482,141 +571,186 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                     # last_watering_time is no longer a column — derived
                     # from zone_runs at read time. Just transition state.
                     from services.zones_state import update_zone_state as _uzs
-                    _uzs(int(z['id']),
-                         {'state': 'off', 'watering_start_time': None},
-                         audit_reason='group_exclusivity')
+
+                    _uzs(int(z["id"]), {"state": "off", "watering_start_time": None}, audit_reason="group_exclusivity")
                 except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e2:
-                    logger.error("group exclusive audited fallback for zone %s: %s", z.get('id'), e2)
+                    logger.error("group exclusive audited fallback for zone %s: %s", z.get("id"), e2)
                     try:
-                        db.update_zone(int(z['id']), {'state': 'off', 'watering_start_time': None})
+                        db.update_zone(int(z["id"]), {"state": "off", "watering_start_time": None})
                     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e3:
-                        logger.error("group exclusive db update fallback for zone %s: %s", z.get('id'), e3)
-        try: db.add_log('warning', json.dumps({'type': 'group_exclusive_fix', 'group_id': group_id, 'kept_zone': on_zones[0].get('id'), 'turned_off': [z.get('id') for z in on_zones[1:]]}))
+                        logger.error("group exclusive db update fallback for zone %s: %s", z.get("id"), e3)
+        try:
+            db.add_log(
+                "warning",
+                json.dumps(
+                    {
+                        "type": "group_exclusive_fix",
+                        "group_id": group_id,
+                        "kept_zone": on_zones[0].get("id"),
+                        "turned_off": [z.get("id") for z in on_zones[1:]],
+                    }
+                ),
+            )
         except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError, TypeError, KeyError) as e:
             logger.debug("group exclusive log: %s", e)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Group exclusivity enforcement failed for group {group_id}: {e}")
+
 
 def _enforce_group_exclusive_all_groups() -> None:
     try:
         zones = db.get_zones()
         zones_by_group = {}
         for z in zones:
-            gid = int(z.get('group_id') or 0)
-            if gid in (0, 999): continue
+            gid = int(z.get("group_id") or 0)
+            if gid in (0, 999):
+                continue
             zones_by_group.setdefault(gid, []).append(z)
         for gid, arr in zones_by_group.items():
             try:
-                g = next((gg for gg in (db.get_groups() or []) if int(gg.get('id')) == int(gid)), None)
-                mv_topic = normalize_topic((g.get('master_mqtt_topic') or '').strip()) if g else ''
+                g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == int(gid)), None)
+                mv_topic = normalize_topic((g.get("master_mqtt_topic") or "").strip()) if g else ""
             except (TypeError, ValueError, StopIteration) as e:
                 logger.debug("enforce_all mv_topic: %s", e)
-                mv_topic = ''
+                mv_topic = ""
+
             def _is_mv(z):
-                try: return bool(mv_topic) and normalize_topic((z.get('topic') or '').strip()) == mv_topic
+                try:
+                    return bool(mv_topic) and normalize_topic((z.get("topic") or "").strip()) == mv_topic
                 except (TypeError, ValueError) as e:
                     logger.debug("_is_mv check (enforce_all): %s", e)
                     return False
-            if sum(1 for z in arr if str(z.get('state')) == 'on' and not _is_mv(z)) > 1:
-                _force_group_exclusive(gid, 'watchdog')
+
+            if sum(1 for z in arr if str(z.get("state")) == "on" and not _is_mv(z)) > 1:
+                _force_group_exclusive(gid, "watchdog")
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.exception("enforce_group_exclusive_all: %s", e)
+
 
 _WATCHDOG_STARTED = False
 _WATCHDOG_STOP_EVENT = threading.Event()
 
+
 def _start_single_zone_watchdog():
     global _WATCHDOG_STARTED
-    if _WATCHDOG_STARTED: return
+    if _WATCHDOG_STARTED:
+        return
     _WATCHDOG_STARTED = True
+
     def _run():
         while not _WATCHDOG_STOP_EVENT.is_set():
-            try: _enforce_group_exclusive_all_groups()
-            except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, RuntimeError) as e:  # catch-all: intentional
+            try:
+                _enforce_group_exclusive_all_groups()
+            except (
+                ConnectionError,
+                TimeoutError,
+                OSError,
+                sqlite3.Error,
+                ValueError,
+                RuntimeError,
+            ) as e:  # catch-all: intentional
                 logger.exception("watchdog loop: %s", e)
             _WATCHDOG_STOP_EVENT.wait(1.0)
+
     threading.Thread(target=_run, daemon=True).start()
 
+
 import atexit
+
 atexit.register(lambda: _WATCHDOG_STOP_EVENT.set())
 
 # ── Graceful shutdown: atexit fallback ──────────────────────────────────────
 from services.shutdown import shutdown_all_zones_off
+
 atexit.register(shutdown_all_zones_off, timeout_sec=5)
+
 
 # ── General API rate limiter ────────────────────────────────────────────────
 @app.before_request
 def _general_api_rate_limit():
     """Apply a general 30 req/min rate limit to all mutating API endpoints
     not already covered by endpoint-specific rate_limit decorators."""
-    if app.config.get('TESTING'):
+    if app.config.get("TESTING"):
         return None
-    p = request.path or ''
-    if not p.startswith('/api/') or request.method == 'GET':
+    p = request.path or ""
+    if not p.startswith("/api/") or request.method == "GET":
         return None
     # Skip paths that have their own decorators (mqtt_control, emergency, programs)
     # or non-mutable paths
-    skip_paths = {'/api/login', '/api/password', '/api/status', '/health', '/api/env'}
+    skip_paths = {"/api/login", "/api/password", "/api/status", "/health", "/api/env"}
     if p in skip_paths:
         return None
     # Specific groups already have their own limits applied via decorators
-    if '/mqtt/start' in p or '/mqtt/stop' in p:
+    if "/mqtt/start" in p or "/mqtt/stop" in p:
         return None
-    if p in ('/api/emergency-stop', '/api/emergency-resume'):
+    if p in ("/api/emergency-stop", "/api/emergency-resume"):
         return None
-    if p.startswith('/api/programs'):
+    if p.startswith("/api/programs"):
         return None
-    ip = request.remote_addr or '0.0.0.0'
-    allowed, retry_after = _rate_check(ip, 'general_mutation', 30, 60)
+    ip = request.remote_addr or "0.0.0.0"
+    allowed, retry_after = _rate_check(ip, "general_mutation", 30, 60)
     if not allowed:
-        resp = jsonify({
-            'success': False,
-            'message': 'Too many requests',
-            'error_code': 'RATE_LIMITED',
-            'retry_after': retry_after,
-        })
+        resp = jsonify(
+            {
+                "success": False,
+                "message": "Too many requests",
+                "error_code": "RATE_LIMITED",
+                "retry_after": retry_after,
+            }
+        )
         resp.status_code = 429
-        resp.headers['Retry-After'] = str(retry_after)
+        resp.headers["Retry-After"] = str(retry_after)
         return resp
+
 
 _mark_zone_stopped = _sse_hub.mark_zone_stopped
 _recently_stopped = _sse_hub.recently_stopped
 
+
 # ── Misc routes ────────────────────────────────────────────────────────────
 @app.errorhandler(404)
 def _not_found(e):
-    try: return render_template('404.html'), 404
+    try:
+        return render_template("404.html"), 404
     except (OSError, ValueError, RuntimeError) as e:  # catch-all: intentional
         logger.debug("404 template fallback: %s", e)
-        return jsonify({'error': 'Not found'}), 404
+        return jsonify({"error": "Not found"}), 404
 
-@app.route('/sw.js')
+
+@app.route("/sw.js")
 def service_worker():
-    sw_path = os.path.join(app.static_folder, 'sw.js')
+    sw_path = os.path.join(app.static_folder, "sw.js")
     # Sanitize: CACHE_NAME is a JS string literal — strip anything that could
     # break the quote or thrash cache between dev runs (e.g. spaces, '+dirty').
-    safe_version = _re.sub(r'[^A-Za-z0-9._-]', '-', APP_VERSION)
-    with open(sw_path, 'r', encoding='utf-8') as f:
-        body = f.read().replace('__APP_VERSION__', safe_version)
-    resp = app.response_class(body, mimetype='application/javascript')
-    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    safe_version = _re.sub(r"[^A-Za-z0-9._-]", "-", APP_VERSION)
+    with open(sw_path, encoding="utf-8") as f:
+        body = f.read().replace("__APP_VERSION__", safe_version)
+    resp = app.response_class(body, mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp
 
-@app.route('/ws')
+
+@app.route("/ws")
 def ws_stub():
-    resp = jsonify({'success': False, 'message': 'WebSocket not supported. Use SSE at /api/mqtt/zones-sse'})
-    resp.headers['Cache-Control'] = 'no-store'
+    resp = jsonify({"success": False, "message": "WebSocket not supported. Use SSE at /api/mqtt/zones-sse"})
+    resp.headers["Cache-Control"] = "no-store"
     return resp
+
 
 def _publish_mqtt_async(server, topic, value, min_interval_sec=0.0):
     try:
-        threading.Thread(target=lambda: _publish_mqtt_value(server, topic, value, min_interval_sec=min_interval_sec), daemon=True).start()
+        threading.Thread(
+            target=lambda: _publish_mqtt_value(server, topic, value, min_interval_sec=min_interval_sec), daemon=True
+        ).start()
     except (RuntimeError, OSError) as e:
         logger.warning("_publish_mqtt_async thread start: %s", e)
+
 
 _initialize_app(app, db, start_watchdog_fn=lambda: _start_single_zone_watchdog())
 
 # ── Main ───────────────────────────────────────────────────────────────────
-if __name__ == '__main__':
+if __name__ == "__main__":
     init_scheduler(db)
-    app.run(debug=True, host='0.0.0.0', port=8080)
+    # Direct `python app.py` is dev-only. Production uses run.py via hypercorn.
+    # debug flag follows FLASK_DEBUG env var (default off).
+    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", host="0.0.0.0", port=8080)  # nosec B104

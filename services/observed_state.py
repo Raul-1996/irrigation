@@ -5,13 +5,13 @@ and wait for the relay to echo back the expected state. On failure we retry the
 publish, and after exhausting retries we increment fault_count and send a
 Telegram alert.
 """
-import sqlite3
+
 import logging
+import sqlite3
 import threading
-import time
 from datetime import datetime
 
-from constants import OBSERVED_STATE_TIMEOUT_SEC, OBSERVED_STATE_MAX_RETRIES
+from constants import OBSERVED_STATE_MAX_RETRIES, OBSERVED_STATE_TIMEOUT_SEC
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ class StateVerifier:
         if self._db is None:
             try:
                 from database import db
+
                 self._db = db
             except ImportError as e:
                 logger.debug("Handled exception in db: %s", e)
@@ -44,6 +45,7 @@ class StateVerifier:
         if self._notifier is None:
             try:
                 from services.telegram_bot import notifier
+
                 self._notifier = notifier
             except ImportError as e:
                 logger.debug("Handled exception in notifier: %s", e)
@@ -53,6 +55,7 @@ class StateVerifier:
     def verify_async(self, zone_id: int, expected: str) -> None:
         """Fire-and-forget: launch verification in a background thread."""
         from config import TESTING
+
         if TESTING:
             return  # Skip async verification in tests
         t = threading.Thread(
@@ -69,7 +72,13 @@ class StateVerifier:
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
     # ------------------------------------------------------------------
-    def verify(self, zone_id: int, expected: str, timeout: float = OBSERVED_STATE_TIMEOUT_SEC, retries: int = OBSERVED_STATE_MAX_RETRIES) -> bool:
+    def verify(
+        self,
+        zone_id: int,
+        expected: str,
+        timeout: float = OBSERVED_STATE_TIMEOUT_SEC,
+        retries: int = OBSERVED_STATE_MAX_RETRIES,
+    ) -> bool:
         """Subscribe to the zone MQTT topic, wait for observed_state == expected.
 
         On timeout → retry publish.
@@ -91,8 +100,8 @@ class StateVerifier:
             logger.warning("StateVerifier: zone %s not found", zone_id)
             return False
 
-        topic = (zone.get('topic') or '').strip()
-        server_id = zone.get('mqtt_server_id')
+        topic = (zone.get("topic") or "").strip()
+        server_id = zone.get("mqtt_server_id")
         if not topic or not server_id:
             logger.debug("StateVerifier: zone %s has no topic/server, skipping", zone_id)
             return True  # nothing to verify
@@ -103,6 +112,7 @@ class StateVerifier:
             return False
 
         from utils import normalize_topic
+
         norm_topic = normalize_topic(topic)
         if not norm_topic:
             return True
@@ -115,14 +125,16 @@ class StateVerifier:
                 logger.info("StateVerifier: zone %s confirmed '%s' on attempt %d", zone_id, expected, attempt)
                 return True
 
-            logger.warning("StateVerifier: zone %s timeout waiting for '%s' (attempt %d/%d)",
-                           zone_id, expected, attempt, retries)
+            logger.warning(
+                "StateVerifier: zone %s timeout waiting for '%s' (attempt %d/%d)", zone_id, expected, attempt, retries
+            )
 
             # Retry publish (except on last attempt)
             if attempt < retries:
                 try:
                     from services.mqtt_pub import publish_mqtt_value
-                    value = '1' if expected.lower() in ('on', '1') else '0'
+
+                    value = "1" if expected.lower() in ("on", "1") else "0"
                     publish_mqtt_value(server, norm_topic, value, min_interval_sec=0.0, qos=2, retain=True)
                 except ImportError:
                     logger.exception("StateVerifier: retry publish failed zone=%s", zone_id)
@@ -136,18 +148,18 @@ class StateVerifier:
     def _expected_payloads(expected: str) -> set[str]:
         """Return set of MQTT payloads that satisfy the expected state."""
         e = expected.lower().strip()
-        if e in ('on', '1'):
-            return {'1', 'on', 'ON', 'true', 'True', 'TRUE'}
+        if e in ("on", "1"):
+            return {"1", "on", "ON", "true", "True", "TRUE"}
         else:
-            return {'0', 'off', 'OFF', 'false', 'False', 'FALSE'}
+            return {"0", "off", "OFF", "false", "False", "FALSE"}
 
-    def _subscribe_and_wait(self, server: dict, topic: str, expected_payloads: set[str],
-                            timeout: float) -> bool:
+    def _subscribe_and_wait(self, server: dict, topic: str, expected_payloads: set[str], timeout: float) -> bool:
         """Create a temporary MQTT client, subscribe, and wait for matching payload."""
         result = threading.Event()
         confirmed = [False]
 
         import uuid
+
         client_id = f"verifier_{uuid.uuid4().hex[:8]}"
 
         try:
@@ -156,18 +168,19 @@ class StateVerifier:
             logger.debug("Exception in _subscribe_and_wait: %s", e)
             cl = mqtt.Client(client_id=client_id)
 
-        if server.get('username'):
-            cl.username_pw_set(server.get('username'), server.get('password') or None)
+        if server.get("username"):
+            cl.username_pw_set(server.get("username"), server.get("password") or None)
 
         # TLS if needed
         try:
-            if int(server.get('tls_enabled') or 0) == 1:
+            if int(server.get("tls_enabled") or 0) == 1:
                 import ssl
-                ca = server.get('tls_ca_path') or None
-                cert = server.get('tls_cert_path') or None
-                key = server.get('tls_key_path') or None
+
+                ca = server.get("tls_ca_path") or None
+                cert = server.get("tls_cert_path") or None
+                key = server.get("tls_key_path") or None
                 cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
-                if int(server.get('tls_insecure') or 0) == 1:
+                if int(server.get("tls_insecure") or 0) == 1:
                     cl.tls_insecure_set(True)
         except ImportError:
             logger.exception("StateVerifier: TLS setup failed")
@@ -180,7 +193,7 @@ class StateVerifier:
 
         def on_message(client, userdata, msg):
             try:
-                payload = msg.payload.decode('utf-8', errors='replace').strip()
+                payload = msg.payload.decode("utf-8", errors="replace").strip()
                 if payload in expected_payloads:
                     confirmed[0] = True
                     result.set()
@@ -191,8 +204,8 @@ class StateVerifier:
         cl.on_message = on_message
 
         try:
-            host = server.get('host') or '127.0.0.1'
-            port = int(server.get('port') or 1883)
+            host = server.get("host") or "127.0.0.1"
+            port = int(server.get("port") or 1883)
             cl.connect(host, port, keepalive=int(timeout) + 5)
             cl.loop_start()
 
@@ -234,17 +247,17 @@ class StateVerifier:
         if not db:
             return
 
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        current_faults = int(zone.get('fault_count') or 0)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_faults = int(zone.get("fault_count") or 0)
         fields = {
-            'state': 'fault',
-            'fault_count': current_faults + 1,
-            'last_fault': now_str,
+            "state": "fault",
+            "fault_count": current_faults + 1,
+            "last_fault": now_str,
         }
         # observed_state is nullable — only set if schema has the column
         try:
-            if 'observed_state' in (zone.keys() if hasattr(zone, 'keys') else {}):
-                fields['observed_state'] = 'unconfirmed'
+            if "observed_state" in (zone.keys() if hasattr(zone, "keys") else {}):
+                fields["observed_state"] = "unconfirmed"
         except (AttributeError, TypeError):
             pass
 
@@ -257,7 +270,8 @@ class StateVerifier:
         db_inst = self.db
         try:
             from services.zones_state import update_zone_state as _uzs
-            _uzs(zone_id, fields, audit_reason='fault_detected', db=db_inst)
+
+            _uzs(zone_id, fields, audit_reason="fault_detected", db=db_inst)
         except (sqlite3.Error, OSError, ImportError):
             logger.exception(
                 "StateVerifier: audited fault persist failed zone=%s — falling back to raw update_zone",
@@ -269,7 +283,7 @@ class StateVerifier:
             except (sqlite3.Error, OSError):
                 logger.exception("StateVerifier: failed to persist fault state zone=%s", zone_id)
 
-        zone_name = zone.get('name') or f'#{zone_id}'
+        zone_name = zone.get("name") or f"#{zone_id}"
         alert_text = (
             f"⚠️ Зона «{zone_name}»: реле не подтвердило переключение в '{expected}'\n"
             f"Попыток: {OBSERVED_STATE_MAX_RETRIES}, fault_count: {current_faults + 1}\n"
@@ -281,11 +295,14 @@ class StateVerifier:
         # Publish event for Telegram
         try:
             from services import events
-            events.publish({
-                'type': 'critical_error',
-                'code': 'observed_state_fault',
-                'message': alert_text,
-            })
+
+            events.publish(
+                {
+                    "type": "critical_error",
+                    "code": "observed_state_fault",
+                    "message": alert_text,
+                }
+            )
         except ImportError as e:
             logger.debug("Handled exception in line_240: %s", e)
 
@@ -293,7 +310,7 @@ class StateVerifier:
         try:
             notifier = self.notifier
             if notifier and db:
-                admin_chat = db.get_setting_value('telegram_admin_chat_id')
+                admin_chat = db.get_setting_value("telegram_admin_chat_id")
                 if admin_chat:
                     notifier.send_text(int(admin_chat), alert_text)
         except (sqlite3.Error, OSError):

@@ -3,15 +3,15 @@
 Per-group FIFO queue with dedicated worker threads.
 Python 3.9 compatible.
 """
+
+import contextlib
 import logging
 import threading
 import uuid
-import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Deque, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +27,25 @@ def _audit_queue_transition(entry, new_state, prev_state=None, extra=None):
     """
     try:
         from services.audit import debug_audit
+
         payload = {
-            'entry_id': getattr(entry, 'entry_id', None),
-            'program_id': getattr(entry, 'program_id', None),
-            'program_name': getattr(entry, 'program_name', None),
-            'group_id': getattr(entry, 'group_id', None),
-            'zone_ids': list(getattr(entry, 'zone_ids', None) or []),
-            'from': prev_state.value if prev_state else None,
-            'to': new_state.value if new_state else None,
+            "entry_id": getattr(entry, "entry_id", None),
+            "program_id": getattr(entry, "program_id", None),
+            "program_name": getattr(entry, "program_name", None),
+            "group_id": getattr(entry, "group_id", None),
+            "zone_ids": list(getattr(entry, "zone_ids", None) or []),
+            "from": prev_state.value if prev_state else None,
+            "to": new_state.value if new_state else None,
         }
         if extra:
             payload.update(extra)
         debug_audit(
-            action_type='program_queue_transition',
-            source='scheduler',
-            target=f'group:{getattr(entry, "group_id", "?")}',
+            action_type="program_queue_transition",
+            source="scheduler",
+            target=f"group:{getattr(entry, 'group_id', '?')}",
             payload=payload,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("program_queue_transition audit failed")
 
 
@@ -52,24 +53,25 @@ def _audit_program_run(action, entry, extra=None):
     """Always-on audit for program_run_started / program_run_completed."""
     try:
         from services.audit import record_audit
+
         payload = {
-            'entry_id': getattr(entry, 'entry_id', None),
-            'program_id': getattr(entry, 'program_id', None),
-            'program_name': getattr(entry, 'program_name', None),
-            'group_id': getattr(entry, 'group_id', None),
-            'zone_ids': list(getattr(entry, 'zone_ids', None) or []),
-            'program_run_id': getattr(entry, 'program_run_id', None),
+            "entry_id": getattr(entry, "entry_id", None),
+            "program_id": getattr(entry, "program_id", None),
+            "program_name": getattr(entry, "program_name", None),
+            "group_id": getattr(entry, "group_id", None),
+            "zone_ids": list(getattr(entry, "zone_ids", None) or []),
+            "program_run_id": getattr(entry, "program_run_id", None),
         }
         if extra:
             payload.update(extra)
         record_audit(
             action_type=action,
-            source='scheduler',
-            target=f'group:{getattr(entry, "group_id", "?")}',
+            source="scheduler",
+            target=f"group:{getattr(entry, 'group_id', '?')}",
             payload=payload,
-            actor='system',
+            actor="system",
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("program_run audit failed (action=%s)", action)
 
 
@@ -88,12 +90,12 @@ class QueueEntry:
     program_id: int
     program_name: str
     group_id: int
-    zone_ids: List[int]
-    scheduled_time: Optional[datetime]
+    zone_ids: list[int]
+    scheduled_time: datetime | None
     state: QueueEntryState = QueueEntryState.WAITING
     enqueued_at: datetime = field(default_factory=datetime.now)
     excluded_wait_seconds: float = 0.0
-    program_run_id: Optional[str] = None
+    program_run_id: str | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
@@ -101,9 +103,9 @@ class QueueEntry:
 class GroupQueue:
     group_id: int
     lock: threading.Lock = field(default_factory=threading.Lock)
-    queue: Deque[QueueEntry] = field(default_factory=deque)
-    current: Optional[QueueEntry] = None
-    worker_thread: Optional[threading.Thread] = None
+    queue: deque[QueueEntry] = field(default_factory=deque)
+    current: QueueEntry | None = None
+    worker_thread: threading.Thread | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     new_item_event: threading.Event = field(default_factory=threading.Event)
 
@@ -138,10 +140,10 @@ class ProgramQueueManager:
 
     def enqueue(
         self,
-        program_id,       # type: int
-        program_name,     # type: str
-        group_id,         # type: int
-        zone_ids,         # type: List[int]
+        program_id,  # type: int
+        program_name,  # type: str
+        group_id,  # type: int
+        zone_ids,  # type: List[int]
         scheduled_time=None,  # type: Optional[datetime]
         program_run_id=None,  # type: Optional[str]
     ):
@@ -168,12 +170,10 @@ class ProgramQueueManager:
             total = len(gq.queue) + (1 if gq.current is not None else 0)
             if total >= self._max_queue_size:
                 if self._telegram_notify:
-                    try:
+                    with contextlib.suppress(Exception):
                         self._telegram_notify(
                             "Очередь группы %d переполнена (макс %d)" % (group_id, self._max_queue_size)
                         )
-                    except Exception:
-                        pass
                 return None
 
             gq.queue.append(entry)
@@ -201,10 +201,10 @@ class ProgramQueueManager:
 
         if gq is None:
             return {
-                'group_id': group_id,
-                'current': None,
-                'queue': [],
-                'queue_length': 0,
+                "group_id": group_id,
+                "current": None,
+                "queue": [],
+                "queue_length": 0,
             }
 
         with gq.lock:
@@ -214,17 +214,15 @@ class ProgramQueueManager:
 
         float_paused = False
         if self._float_monitor:
-            try:
+            with contextlib.suppress(Exception):
                 float_paused = self._float_monitor.is_paused()
-            except Exception:
-                pass
 
         return {
-            'group_id': group_id,
-            'current': current,
-            'queue': queue_list,
-            'queue_length': queue_length,
-            'float_paused': float_paused,
+            "group_id": group_id,
+            "current": current,
+            "queue": queue_list,
+            "queue_length": queue_length,
+            "float_paused": float_paused,
         }
 
     def get_all_queues_state(self):
@@ -245,19 +243,19 @@ class ProgramQueueManager:
                 worker_alive = gq.worker_thread is not None and gq.worker_thread.is_alive()
 
             result[gid] = {
-                'group_id': gid,
-                'current': current,
-                'queue': queue_list,
-                'queue_length': len(queue_list),
+                "group_id": gid,
+                "current": current,
+                "queue": queue_list,
+                "queue_length": len(queue_list),
             }
             total_entries += n
             if worker_alive:
                 active_workers += 1
 
         return {
-            'queues': result,
-            'total_entries': total_entries,
-            'active_workers': active_workers,
+            "queues": result,
+            "total_entries": total_entries,
+            "active_workers": active_workers,
         }
 
     def cancel_entry(self, entry_id):
@@ -266,7 +264,7 @@ class ProgramQueueManager:
         with self._global_lock:
             queues_copy = dict(self._queues)
 
-        for gid, gq in queues_copy.items():
+        for _gid, gq in queues_copy.items():
             with gq.lock:
                 # Check waiting entries in queue
                 for entry in gq.queue:
@@ -274,9 +272,12 @@ class ProgramQueueManager:
                         prev_state = entry.state
                         entry.state = QueueEntryState.CANCELLED
                         entry.cancel_event.set()
-                        _audit_queue_transition(entry, QueueEntryState.CANCELLED,
-                                                prev_state=prev_state,
-                                                extra={'cancel_source': 'cancel_entry'})
+                        _audit_queue_transition(
+                            entry,
+                            QueueEntryState.CANCELLED,
+                            prev_state=prev_state,
+                            extra={"cancel_source": "cancel_entry"},
+                        )
                         return True
 
                 # Check current running entry
@@ -284,16 +285,17 @@ class ProgramQueueManager:
                     prev_state = gq.current.state
                     gq.current.state = QueueEntryState.CANCELLED
                     gq.current.cancel_event.set()
-                    _audit_queue_transition(gq.current, QueueEntryState.CANCELLED,
-                                            prev_state=prev_state,
-                                            extra={'cancel_source': 'cancel_entry_running'})
+                    _audit_queue_transition(
+                        gq.current,
+                        QueueEntryState.CANCELLED,
+                        prev_state=prev_state,
+                        extra={"cancel_source": "cancel_entry_running"},
+                    )
                     # Wake up worker if waiting on float resume
                     resume_ev = None
                     if self._float_monitor:
-                        try:
+                        with contextlib.suppress(Exception):
                             resume_ev = self._float_monitor.get_resume_event()
-                        except Exception:
-                            pass
                     if resume_ev:
                         resume_ev.set()
                     return True
@@ -307,7 +309,7 @@ class ProgramQueueManager:
         with self._global_lock:
             queues_copy = dict(self._queues)
 
-        for gid, gq in queues_copy.items():
+        for _gid, gq in queues_copy.items():
             with gq.lock:
                 for entry in gq.queue:
                     if entry.program_id == program_id and entry.state == QueueEntryState.WAITING:
@@ -315,9 +317,11 @@ class ProgramQueueManager:
                         entry.cancel_event.set()
                         count += 1
 
-                if (gq.current is not None
-                        and gq.current.program_id == program_id
-                        and gq.current.state == QueueEntryState.RUNNING):
+                if (
+                    gq.current is not None
+                    and gq.current.program_id == program_id
+                    and gq.current.state == QueueEntryState.RUNNING
+                ):
                     gq.current.state = QueueEntryState.CANCELLED
                     gq.current.cancel_event.set()
                     count += 1
@@ -366,7 +370,7 @@ class ProgramQueueManager:
         with self._global_lock:
             queues_copy = dict(self._queues)
 
-        for gid, gq in queues_copy.items():
+        for _gid, gq in queues_copy.items():
             with gq.lock:
                 gq.cancel_event.set()
                 gq.new_item_event.set()
@@ -375,7 +379,7 @@ class ProgramQueueManager:
                 if gq.current is not None:
                     gq.current.cancel_event.set()
 
-        for gid, gq in queues_copy.items():
+        for _gid, gq in queues_copy.items():
             worker = gq.worker_thread
             if worker is not None and worker.is_alive():
                 worker.join(timeout=timeout)
@@ -426,9 +430,12 @@ class ProgramQueueManager:
                 if effective_wait > self._max_wait_minutes * 60:
                     prev_state = entry.state
                     entry.state = QueueEntryState.EXPIRED
-                    _audit_queue_transition(entry, QueueEntryState.EXPIRED,
-                                            prev_state=prev_state,
-                                            extra={'effective_wait_sec': int(effective_wait)})
+                    _audit_queue_transition(
+                        entry,
+                        QueueEntryState.EXPIRED,
+                        prev_state=prev_state,
+                        extra={"effective_wait_sec": int(effective_wait)},
+                    )
                     logger.info("Entry %s expired (waited %.0fs)", entry.entry_id, effective_wait)
                     continue
 
@@ -443,32 +450,29 @@ class ProgramQueueManager:
                 gq.current = entry
             _audit_queue_transition(entry, QueueEntryState.RUNNING, prev_state=prev_state)
             # Always-on audit: a program run actually started.
-            _audit_program_run('program_run_started', entry)
+            _audit_program_run("program_run_started", entry)
 
             try:
                 self._run_entry(entry)
                 if entry.state == QueueEntryState.RUNNING:
                     entry.state = QueueEntryState.COMPLETED
-                    _audit_queue_transition(entry, QueueEntryState.COMPLETED,
-                                            prev_state=QueueEntryState.RUNNING)
-                    _audit_program_run('program_run_completed', entry,
-                                       extra={'final_state': 'completed'})
+                    _audit_queue_transition(entry, QueueEntryState.COMPLETED, prev_state=QueueEntryState.RUNNING)
+                    _audit_program_run("program_run_completed", entry, extra={"final_state": "completed"})
                 elif entry.state == QueueEntryState.CANCELLED:
                     # Cancellation already audited by canceler — emit completion
                     # so external observers see the run terminated.
-                    _audit_program_run('program_run_completed', entry,
-                                       extra={'final_state': 'cancelled'})
+                    _audit_program_run("program_run_completed", entry, extra={"final_state": "cancelled"})
             except Exception as exc:
                 logger.exception("Entry %s failed", entry.entry_id)
                 if entry.state not in (QueueEntryState.CANCELLED, QueueEntryState.COMPLETED):
                     prev_state_f = entry.state
                     entry.state = QueueEntryState.FAILED
-                    _audit_queue_transition(entry, QueueEntryState.FAILED,
-                                            prev_state=prev_state_f,
-                                            extra={'error': str(exc)[:256]})
-                    _audit_program_run('program_run_completed', entry,
-                                       extra={'final_state': 'failed',
-                                              'error': str(exc)[:256]})
+                    _audit_queue_transition(
+                        entry, QueueEntryState.FAILED, prev_state=prev_state_f, extra={"error": str(exc)[:256]}
+                    )
+                    _audit_program_run(
+                        "program_run_completed", entry, extra={"final_state": "failed", "error": str(exc)[:256]}
+                    )
             finally:
                 with gq.lock:
                     if gq.current is entry:
@@ -504,22 +508,23 @@ class ProgramQueueManager:
             # K5: get weather coefficient at zone start time
             coeff = 100
             if self._get_weather_coefficient:
-                try:
+                with contextlib.suppress(Exception):
                     coeff = self._get_weather_coefficient()
-                except Exception:
-                    pass
 
             # TODO: actual zone control integration
             # For now, entry completes immediately (mocked in tests)
             logger.debug(
                 "Running zone %d for entry %s (coeff=%d)",
-                zone_id, entry.entry_id, coeff,
+                zone_id,
+                entry.entry_id,
+                coeff,
             )
 
 
 # ------------------------------------------------------------------
 # ProgramCompletionTracker
 # ------------------------------------------------------------------
+
 
 class ProgramCompletionTracker:
     """Track completion of multi-group program runs.
@@ -537,10 +542,10 @@ class ProgramCompletionTracker:
         """Register a program run with its expected entry IDs."""
         with self._lock:
             self._runs[program_run_id] = {
-                'program_id': program_id,
-                'program_name': program_name,
-                'entry_ids': set(entry_ids),
-                'finished': set(),
+                "program_id": program_id,
+                "program_name": program_name,
+                "entry_ids": set(entry_ids),
+                "finished": set(),
             }
 
     def entry_finished(self, program_run_id, entry_id):
@@ -551,8 +556,8 @@ class ProgramCompletionTracker:
             if run is None:
                 return True  # Unknown run — treat as complete (single-group)
 
-            run['finished'].add(entry_id)
-            all_done = run['finished'] >= run['entry_ids']
+            run["finished"].add(entry_id)
+            all_done = run["finished"] >= run["entry_ids"]
 
             if all_done:
                 del self._runs[program_run_id]
@@ -572,11 +577,11 @@ class ProgramCompletionTracker:
             result = {}
             for run_id, data in self._runs.items():
                 result[run_id] = {
-                    'program_id': data['program_id'],
-                    'program_name': data['program_name'],
-                    'total': len(data['entry_ids']),
-                    'finished': len(data['finished']),
-                    'remaining': len(data['entry_ids'] - data['finished']),
+                    "program_id": data["program_id"],
+                    "program_name": data["program_name"],
+                    "total": len(data["entry_ids"]),
+                    "finished": len(data["finished"]),
+                    "remaining": len(data["entry_ids"] - data["finished"]),
                 }
             return result
 
@@ -588,9 +593,9 @@ class ProgramCompletionTracker:
             if data is None:
                 return None
             return {
-                'program_id': data['program_id'],
-                'program_name': data['program_name'],
-                'total': len(data['entry_ids']),
-                'finished': len(data['finished']),
-                'complete': data['finished'] >= data['entry_ids'],
+                "program_id": data["program_id"],
+                "program_name": data["program_name"],
+                "total": len(data["entry_ids"]),
+                "finished": len(data["finished"]),
+                "complete": data["finished"] >= data["entry_ids"],
             }

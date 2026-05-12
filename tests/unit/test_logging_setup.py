@@ -1,8 +1,10 @@
 """Tests for services/logging_setup.py."""
-import pytest
+
 import os
 
-os.environ['TESTING'] = '1'
+import pytest
+
+os.environ["TESTING"] = "1"
 
 
 class TestLoggingSetup:
@@ -16,6 +18,7 @@ class TestLoggingSetup:
         """Module-level logging configuration should not crash."""
         try:
             import importlib
+
             import services.logging_setup as mod
             # Module should have executed its setup code on import
         except ImportError:

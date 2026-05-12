@@ -3,6 +3,7 @@
 Called from signal handlers (SIGTERM/SIGINT) and atexit fallback.
 Must never raise, never hang, never break existing functionality.
 """
+
 import logging
 import sqlite3
 import threading
@@ -34,16 +35,17 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     try:
         if db is None:
             from database import db as _default_db
+
             db = _default_db
     except ImportError:
-        logger.warning('Shutdown: cannot import database')
+        logger.warning("Shutdown: cannot import database")
         return
 
     try:
-        from utils import normalize_topic
         from services.mqtt_pub import get_or_create_mqtt_client
+        from utils import normalize_topic
     except ImportError:
-        logger.warning('Shutdown: cannot import mqtt_pub / utils')
+        logger.warning("Shutdown: cannot import mqtt_pub / utils")
         return
 
     # ── fetch zones ─────────────────────────────────────────────────
@@ -51,7 +53,7 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     try:
         zones = db.get_zones() or []
     except (sqlite3.Error, OSError, Exception) as exc:
-        logger.warning('Shutdown: cannot read zones: %s', exc)
+        logger.warning("Shutdown: cannot read zones: %s", exc)
         return
 
     # ── build publish list ──────────────────────────────────────────
@@ -60,8 +62,8 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
 
     for z in zones:
         try:
-            sid = z.get('mqtt_server_id')
-            topic_raw = (z.get('topic') or '').strip()
+            sid = z.get("mqtt_server_id")
+            topic_raw = (z.get("topic") or "").strip()
             if not sid or not topic_raw:
                 continue
             sid = int(sid)
@@ -73,30 +75,30 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
             server = server_cache.get(sid)
             if not server:
                 continue
-            zone_tasks.append((server, normalize_topic(topic_raw), int(z.get('id', 0))))
+            zone_tasks.append((server, normalize_topic(topic_raw), int(z.get("id", 0))))
         except (ValueError, TypeError, KeyError) as exc:
-            logger.warning('Shutdown: bad zone data: %s', exc)
+            logger.warning("Shutdown: bad zone data: %s", exc)
 
     # ── publish OFF to every zone ───────────────────────────────────
     inflight = []
     zone_count = 0
-    for server, topic, zone_id in zone_tasks:
+    for server, topic, _zone_id in zone_tasks:
         try:
             cl = get_or_create_mqtt_client(server)
             if cl is None:
-                logger.warning('Shutdown: MQTT client unavailable, skip %s', topic)
+                logger.warning("Shutdown: MQTT client unavailable, skip %s", topic)
                 continue
-            res = cl.publish(topic, payload='0', qos=2, retain=True)
+            res = cl.publish(topic, payload="0", qos=2, retain=True)
             inflight.append((topic, res))
             # Wirenboard /on compat
             try:
-                res_on = cl.publish(topic + '/on', payload='0', qos=2, retain=True)
-                inflight.append((topic + '/on', res_on))
+                res_on = cl.publish(topic + "/on", payload="0", qos=2, retain=True)
+                inflight.append((topic + "/on", res_on))
             except (ConnectionError, TimeoutError, OSError) as exc:
-                logger.debug('Shutdown: /on publish error %s: %s', topic, exc)
+                logger.debug("Shutdown: /on publish error %s: %s", topic, exc)
             zone_count += 1
         except (ConnectionError, TimeoutError, OSError, Exception) as exc:
-            logger.warning('Shutdown: publish error %s: %s', topic, exc)
+            logger.warning("Shutdown: publish error %s: %s", topic, exc)
 
     # ── master valves ───────────────────────────────────────────────
     master_count = 0
@@ -108,10 +110,10 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     seen_master_topics: set = set()
     for g in groups:
         try:
-            if int(g.get('use_master_valve') or 0) != 1:
+            if int(g.get("use_master_valve") or 0) != 1:
                 continue
-            mtopic_raw = (g.get('master_mqtt_topic') or '').strip()
-            msid = g.get('master_mqtt_server_id')
+            mtopic_raw = (g.get("master_mqtt_topic") or "").strip()
+            msid = g.get("master_mqtt_server_id")
             if not mtopic_raw or not msid:
                 continue
             msid = int(msid)
@@ -131,11 +133,11 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
                 continue
 
             try:
-                mode = (g.get('master_mode') or 'NC').strip().upper()
+                mode = (g.get("master_mode") or "NC").strip().upper()
             except (ValueError, TypeError, KeyError):
-                mode = 'NC'
+                mode = "NC"
             # Close: NC → '0' (de-energise = closed), NO → '1' (energise = closed)
-            close_val = '0' if mode == 'NC' else '1'
+            close_val = "0" if mode == "NC" else "1"
 
             cl = get_or_create_mqtt_client(mserver)
             if cl is None:
@@ -143,13 +145,13 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
             res = cl.publish(mtopic, payload=close_val, qos=2, retain=True)
             inflight.append((mtopic, res))
             try:
-                res_on = cl.publish(mtopic + '/on', payload=close_val, qos=2, retain=True)
-                inflight.append((mtopic + '/on', res_on))
+                res_on = cl.publish(mtopic + "/on", payload=close_val, qos=2, retain=True)
+                inflight.append((mtopic + "/on", res_on))
             except (ConnectionError, TimeoutError, OSError):
                 pass
             master_count += 1
         except (ValueError, TypeError, KeyError, ConnectionError, TimeoutError, OSError, Exception) as exc:
-            logger.warning('Shutdown: master valve error: %s', exc)
+            logger.warning("Shutdown: master valve error: %s", exc)
 
     # ── wait for publish acknowledgements ───────────────────────────
     success = 0
@@ -164,7 +166,7 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     # ── update DB state ─────────────────────────────────────────────
     for z in zones:
         try:
-            zid = int(z.get('id', 0))
+            zid = int(z.get("id", 0))
             if zid:
                 # Graceful shutdown of the whole app — all zones go OFF.
                 # Audit the transition so the next boot's operator can see
@@ -172,20 +174,23 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
                 # that turned off because of normal program completion).
                 try:
                     from services.zones_state import update_zone_state as _uzs
-                    _uzs(zid, {'state': 'off'},
-                         audit_reason='graceful_shutdown')
+
+                    _uzs(zid, {"state": "off"}, audit_reason="graceful_shutdown")
                 except (sqlite3.Error, OSError, ImportError):
                     logger.exception(
-                        "Shutdown: audited graceful_shutdown failed zone=%s — "
-                        "falling back to raw update_zone", zid,
+                        "Shutdown: audited graceful_shutdown failed zone=%s — falling back to raw update_zone",
+                        zid,
                     )
-                    db.update_zone(zid, {'state': 'off'})
+                    db.update_zone(zid, {"state": "off"})
         except (sqlite3.Error, OSError, Exception) as exc:
-            logger.debug('Shutdown: DB update error zone %s: %s', z.get('id'), exc)
+            logger.debug("Shutdown: DB update error zone %s: %s", z.get("id"), exc)
 
     logger.info(
-        'Shutdown: sent OFF to %d zones, %d master valves (%d confirmed, %d failed)',
-        zone_count, master_count, success, failed,
+        "Shutdown: sent OFF to %d zones, %d master valves (%d confirmed, %d failed)",
+        zone_count,
+        master_count,
+        success,
+        failed,
     )
 
 

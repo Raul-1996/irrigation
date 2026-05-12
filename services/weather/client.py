@@ -13,10 +13,11 @@ Two transport paths, in order of preference:
        Wirenboard deployments without the ``requests`` package. No retry
        (last-resort path; cache fallback handles failure).
 """
+
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from services.weather.models import (
     _OPEN_METEO_URL,
@@ -30,7 +31,7 @@ _RETRY_MAX_ATTEMPTS = 2  # total attempts (1 retry)
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
-def fetch_api(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+def fetch_api(lat: float, lon: float) -> dict[str, Any] | None:
     """Fetch raw weather data from Open-Meteo for the given coordinates.
 
     Args:
@@ -41,57 +42,64 @@ def fetch_api(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         Raw JSON payload as a dict, or ``None`` on any network / decode error.
         On ``None`` the caller is expected to fall back to cached data.
     """
-    hourly_params = ','.join([
-        'temperature_2m',
-        'relative_humidity_2m',
-        'precipitation',
-        'wind_speed_10m',
-        'et0_fao_evapotranspiration',
-        'weather_code',
-    ])
-    daily_params = ','.join([
-        'precipitation_sum',
-        'et0_fao_evapotranspiration',
-        'temperature_2m_max',
-        'temperature_2m_min',
-        'weather_code',
-        'sunrise',
-        'sunset',
-    ])
+    hourly_params = ",".join(
+        [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "precipitation",
+            "wind_speed_10m",
+            "et0_fao_evapotranspiration",
+            "weather_code",
+        ]
+    )
+    daily_params = ",".join(
+        [
+            "precipitation_sum",
+            "et0_fao_evapotranspiration",
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "weather_code",
+            "sunrise",
+            "sunset",
+        ]
+    )
 
     try:
         import requests
     except ImportError:
         try:
-            import urllib.request
             import urllib.parse
-            params = urllib.parse.urlencode({
-                'latitude': lat,
-                'longitude': lon,
-                'hourly': hourly_params,
-                'daily': daily_params,
-                'timezone': 'auto',
-                'forecast_days': 3,
-                'wind_speed_unit': 'ms',
-            })
-            url = '%s?%s' % (_OPEN_METEO_URL, params)
-            req = urllib.request.Request(url, headers={'User-Agent': 'WB-Irrigation/2.0'})
+            import urllib.request
+
+            params = urllib.parse.urlencode(
+                {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": hourly_params,
+                    "daily": daily_params,
+                    "timezone": "auto",
+                    "forecast_days": 3,
+                    "wind_speed_unit": "ms",
+                }
+            )
+            url = f"{_OPEN_METEO_URL}?{params}"
+            req = urllib.request.Request(url, headers={"User-Agent": "WB-Irrigation/2.0"})
             with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode('utf-8'))
+                return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             logger.warning("Weather API fetch (urllib) failed: %s", e)
             return None
 
     params = {
-        'latitude': lat,
-        'longitude': lon,
-        'hourly': hourly_params,
-        'daily': daily_params,
-        'timezone': 'auto',
-        'forecast_days': 3,
-        'wind_speed_unit': 'ms',
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": hourly_params,
+        "daily": daily_params,
+        "timezone": "auto",
+        "forecast_days": 3,
+        "wind_speed_unit": "ms",
     }
-    headers = {'User-Agent': 'WB-Irrigation/2.0'}
+    headers = {"User-Agent": "WB-Irrigation/2.0"}
 
     for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
         try:
@@ -106,17 +114,22 @@ def fetch_api(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             logger.warning(
                 "Weather API fetch attempt %d/%d failed (transient): %s",
-                attempt, _RETRY_MAX_ATTEMPTS, e,
+                attempt,
+                _RETRY_MAX_ATTEMPTS,
+                e,
             )
             if attempt >= _RETRY_MAX_ATTEMPTS:
                 return None
             time.sleep(_RETRY_BACKOFF_SEC)
         except requests.exceptions.HTTPError as e:
-            status = getattr(e.response, 'status_code', None)
+            status = getattr(e.response, "status_code", None)
             if status in _RETRYABLE_STATUS:
                 logger.warning(
                     "Weather API fetch attempt %d/%d failed (HTTP %s): %s",
-                    attempt, _RETRY_MAX_ATTEMPTS, status, e,
+                    attempt,
+                    _RETRY_MAX_ATTEMPTS,
+                    status,
+                    e,
                 )
                 if attempt >= _RETRY_MAX_ATTEMPTS:
                     return None

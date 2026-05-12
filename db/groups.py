@@ -1,6 +1,6 @@
-import sqlite3
 import logging
-from typing import List, Dict, Any, Optional
+import sqlite3
+from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
 
@@ -10,32 +10,32 @@ logger = logging.getLogger(__name__)
 class GroupRepository(BaseRepository):
     """Repository for group CRUD operations."""
 
-    def get_groups(self) -> List[Dict[str, Any]]:
+    def get_groups(self) -> list[dict[str, Any]]:
         """Получить все группы."""
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute('''
+                cursor = conn.execute("""
                     SELECT g.*, COUNT(z.id) as zone_count
                     FROM groups g
                     LEFT JOIN zones z ON g.id = z.group_id
                     GROUP BY g.id
                     ORDER BY g.id
-                ''')
+                """)
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             logger.error("Ошибка получения групп: %s", e)
             return []
 
     @retry_on_busy()
-    def create_group(self, name: str) -> Optional[Dict[str, Any]]:
+    def create_group(self, name: str) -> dict[str, Any] | None:
         """Создать новую группу."""
         try:
             with self._connect() as conn:
-                cursor = conn.execute('INSERT INTO groups (name) VALUES (?)', (name,))
+                cursor = conn.execute("INSERT INTO groups (name) VALUES (?)", (name,))
                 new_id = cursor.lastrowid
                 conn.commit()
-                return {'id': new_id, 'name': name, 'zone_count': 0}
+                return {"id": new_id, "name": name, "zone_count": 0}
         except sqlite3.Error as e:
             logger.error("Ошибка создания группы '%s': %s", name, e)
             return None
@@ -47,11 +47,11 @@ class GroupRepository(BaseRepository):
             if group_id == 999:
                 return False
             with self._connect() as conn:
-                cursor = conn.execute('SELECT COUNT(*) FROM zones WHERE group_id = ?', (group_id,))
+                cursor = conn.execute("SELECT COUNT(*) FROM zones WHERE group_id = ?", (group_id,))
                 cnt = cursor.fetchone()[0]
                 if cnt > 0:
                     return False
-                conn.execute('DELETE FROM groups WHERE id = ?', (group_id,))
+                conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -63,11 +63,14 @@ class GroupRepository(BaseRepository):
         """Обновить название группы."""
         try:
             with self._connect() as conn:
-                conn.execute('''
-                    UPDATE groups 
+                conn.execute(
+                    """
+                    UPDATE groups
                     SET name = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (name, group_id))
+                """,
+                    (name, group_id),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -75,16 +78,27 @@ class GroupRepository(BaseRepository):
             return False
 
     @retry_on_busy()
-    def update_group_fields(self, group_id: int, updates: Dict[str, Any]) -> bool:
+    def update_group_fields(self, group_id: int, updates: dict[str, Any]) -> bool:
         """Обновить произвольные поля группы (мастер-клапан, сенсоры)."""
         if not updates:
             return False
         allowed = {
-            'use_master_valve', 'master_mqtt_topic', 'master_mode', 'master_mqtt_server_id',
-            'use_pressure_sensor', 'pressure_mqtt_topic', 'pressure_unit', 'pressure_mqtt_server_id',
-            'use_water_meter', 'water_mqtt_topic', 'water_mqtt_server_id', 'master_valve_observed',
-            'water_pulse_size', 'water_base_value_m3', 'water_base_pulses',
-            'master_close_delay_sec'
+            "use_master_valve",
+            "master_mqtt_topic",
+            "master_mode",
+            "master_mqtt_server_id",
+            "use_pressure_sensor",
+            "pressure_mqtt_topic",
+            "pressure_unit",
+            "pressure_mqtt_server_id",
+            "use_water_meter",
+            "water_mqtt_topic",
+            "water_mqtt_server_id",
+            "master_valve_observed",
+            "water_pulse_size",
+            "water_base_value_m3",
+            "water_base_pulses",
+            "master_close_delay_sec",
         }
         set_parts = []
         params = []
@@ -109,11 +123,11 @@ class GroupRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT use_rain_sensor FROM groups WHERE id = ? LIMIT 1', (group_id,))
+                cur = conn.execute("SELECT use_rain_sensor FROM groups WHERE id = ? LIMIT 1", (group_id,))
                 row = cur.fetchone()
                 if not row:
                     return False
-                val = row['use_rain_sensor']
+                val = row["use_rain_sensor"]
                 return bool(int(val or 0))
         except sqlite3.Error as e:
             logger.error("Ошибка чтения use_rain_sensor для группы %s: %s", group_id, e)
@@ -123,30 +137,33 @@ class GroupRepository(BaseRepository):
     def set_group_use_rain(self, group_id: int, enabled: bool) -> bool:
         try:
             with self._connect() as conn:
-                conn.execute('UPDATE groups SET use_rain_sensor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-                             (1 if enabled else 0, group_id))
+                conn.execute(
+                    "UPDATE groups SET use_rain_sensor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (1 if enabled else 0, group_id),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
             logger.error("Ошибка записи use_rain_sensor для группы %s: %s", group_id, e)
             return False
 
-    def list_groups_min(self) -> List[Dict[str, Any]]:
+    def list_groups_min(self) -> list[dict[str, Any]]:
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT id, name FROM groups ORDER BY id')
+                cur = conn.execute("SELECT id, name FROM groups ORDER BY id")
                 return [dict(r) for r in cur.fetchall()]
         except sqlite3.Error as e:
             logger.error("Ошибка получения минимального списка групп: %s", e)
             return []
 
-    def list_zones_by_group_min(self, group_id: int) -> List[Dict[str, Any]]:
+    def list_zones_by_group_min(self, group_id: int) -> list[dict[str, Any]]:
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT id, name, duration, state FROM zones WHERE group_id=? ORDER BY id',
-                                   (int(group_id),))
+                cur = conn.execute(
+                    "SELECT id, name, duration, state FROM zones WHERE group_id=? ORDER BY id", (int(group_id),)
+                )
                 return [dict(r) for r in cur.fetchall()]
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон группы %s (min): %s", group_id, e)

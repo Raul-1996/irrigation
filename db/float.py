@@ -18,9 +18,10 @@ override `_connect()` — every repo now gets the same 30s busy timeout.
 
 See audit-report.md PHYS-3 for the full rationale.
 """
-from typing import Dict, List, Optional, Any
+
 import logging
 import sqlite3
+from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
 
@@ -42,7 +43,7 @@ class FloatRepository(BaseRepository):
 
     # ------------------------------------------------------------------
     @retry_on_busy()
-    def get_float_enabled_groups(self) -> List[Dict[str, Any]]:
+    def get_float_enabled_groups(self) -> list[dict[str, Any]]:
         """Return all groups with float_enabled=1."""
         try:
             with self._connect() as conn:
@@ -58,7 +59,7 @@ class FloatRepository(BaseRepository):
             return []
 
     @retry_on_busy()
-    def get_float_group(self, group_id: int) -> Optional[Dict[str, Any]]:
+    def get_float_group(self, group_id: int) -> dict[str, Any] | None:
         """Return a single group's float config or None."""
         try:
             with self._connect() as conn:
@@ -67,7 +68,7 @@ class FloatRepository(BaseRepository):
                     "float_mqtt_server_id, float_mode, float_timeout_minutes, "
                     "float_debounce_seconds "
                     "FROM groups WHERE id=?",
-                    (group_id,)
+                    (group_id,),
                 ).fetchone()
             return dict(row) if row else None
         except sqlite3.Error as e:
@@ -75,26 +76,24 @@ class FloatRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def pause_active_zones(self, group_id: int) -> List[int]:
+    def pause_active_zones(self, group_id: int) -> list[int]:
         """Mark all active zones in the group as paused='float'.
 
         Returns the list of zone IDs that were paused. Called from
         FloatMonitor when the float sensor reports the tank empty.
         """
-        paused: List[int] = []
+        paused: list[int] = []
         try:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT id, duration FROM zones WHERE group_id=? AND state='on'",
-                    (group_id,)
+                    "SELECT id, duration FROM zones WHERE group_id=? AND state='on'", (group_id,)
                 ).fetchall()
                 for row in rows:
-                    zone_id = row['id']
-                    duration = row['duration'] or 0
+                    zone_id = row["id"]
+                    duration = row["duration"] or 0
                     conn.execute(
-                        "UPDATE zones SET state='paused', pause_reason='float', "
-                        "pause_remaining_seconds=? WHERE id=?",
-                        (duration, zone_id)
+                        "UPDATE zones SET state='paused', pause_reason='float', pause_remaining_seconds=? WHERE id=?",
+                        (duration, zone_id),
                     )
                     paused.append(zone_id)
                 conn.commit()
@@ -103,8 +102,7 @@ class FloatRepository(BaseRepository):
         return paused
 
     @retry_on_busy()
-    def log_event(self, group_id: int, event_type: str,
-                  paused_zones: List[int]) -> bool:
+    def log_event(self, group_id: int, event_type: str, paused_zones: list[int]) -> bool:
         """Append a row to float_events (pause / resume / emergency_stop).
 
         Returns True on success, False on failure. Failures are logged
@@ -113,15 +111,16 @@ class FloatRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO float_events (group_id, event_type, paused_zones) "
-                    "VALUES (?, ?, ?)",
-                    (group_id, event_type, str(paused_zones))
+                    "INSERT INTO float_events (group_id, event_type, paused_zones) VALUES (?, ?, ?)",
+                    (group_id, event_type, str(paused_zones)),
                 )
                 conn.commit()
             return True
         except sqlite3.Error as e:
             logger.error(
                 "FloatRepository.log_event(group=%s, type=%s) failed: %s",
-                group_id, event_type, e,
+                group_id,
+                event_type,
+                e,
             )
             return False

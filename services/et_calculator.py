@@ -6,7 +6,6 @@ fescue) on chernozem soil. All formulas from IRRIGATION-ALGORITHM.md sections 1-
 Pure functions, no side effects, no DB/MQTT dependencies. Python 3.9 compatible.
 """
 
-from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -14,13 +13,13 @@ from typing import Dict, List, Optional
 
 # Altitude and microclimate corrections per site
 ALTITUDE_CORRECTION = {
-    "orsk": 1.0,           # 230 m, no correction needed
-    "cholpon_ata": 1.12,   # 1600 m: +12% ET due to UV and pressure
+    "orsk": 1.0,  # 230 m, no correction needed
+    "cholpon_ata": 1.12,  # 1600 m: +12% ET due to UV and pressure
 }
 
 LAKE_HUMIDITY_FACTOR = {
     "orsk": 1.0,
-    "cholpon_ata": 0.92,   # -8% ET due to lake humidity (Issyk-Kul)
+    "cholpon_ata": 0.92,  # -8% ET due to lake humidity (Issyk-Kul)
 }
 
 # Hunter nozzle precipitation rates (mm/h)
@@ -47,6 +46,7 @@ CYCLE_SOAK_PAUSE_MIN = 12.0
 # ---------------------------------------------------------------------------
 # ET Base lookup (Table 1.1)
 # ---------------------------------------------------------------------------
+
 
 def lookup_et_base(t_avg):
     # type: (float) -> float
@@ -76,6 +76,7 @@ def lookup_et_base(t_avg):
 # Temperature coefficient Kt (Table 1.2)
 # ---------------------------------------------------------------------------
 
+
 def calc_kt(t_avg):
     # type: (float) -> float
     """Temperature correction coefficient Kt (Table 1.2).
@@ -91,7 +92,7 @@ def calc_kt(t_avg):
     elif t_avg < 20:
         return 0.85
     elif t_avg < 25:
-        return 1.0   # optimum for C3
+        return 1.0  # optimum for C3
     elif t_avg < 30:
         return 1.15
     elif t_avg < 35:
@@ -105,6 +106,7 @@ def calc_kt(t_avg):
 # ---------------------------------------------------------------------------
 # Precipitation effectiveness K_precip
 # ---------------------------------------------------------------------------
+
 
 def calc_k_precip(et_need_mm, precip_48h_mm):
     # type: (float, float) -> float
@@ -146,6 +148,7 @@ def calc_k_precip(et_need_mm, precip_48h_mm):
 # Corrected ET
 # ---------------------------------------------------------------------------
 
+
 def calc_et_corrected(t_avg, site_id):
     # type: (float, str) -> float
     """Calculate corrected daily ET (mm).
@@ -170,6 +173,7 @@ def calc_et_corrected(t_avg, site_id):
 # Irrigation need
 # ---------------------------------------------------------------------------
 
+
 def calc_irrigation_need(t_avg, precip_48h_mm, site_id):
     # type: (float, float, str) -> float
     """Calculate corrected irrigation need (mm) after precipitation deduction.
@@ -189,6 +193,7 @@ def calc_irrigation_need(t_avg, precip_48h_mm, site_id):
 # ---------------------------------------------------------------------------
 # Zone runtime
 # ---------------------------------------------------------------------------
+
 
 def calc_zone_runtime(irrigation_need_mm, pr_mm_h):
     # type: (float, float) -> float
@@ -214,6 +219,7 @@ def calc_zone_runtime(irrigation_need_mm, pr_mm_h):
 # ---------------------------------------------------------------------------
 # Cycle-soak
 # ---------------------------------------------------------------------------
+
 
 def calc_cycle_soak(runtime_min, pr_mm_h, max_infiltration_mm_h=None):
     # type: (float, float, Optional[float]) -> List[Dict[str, float]]
@@ -247,9 +253,11 @@ def calc_cycle_soak(runtime_min, pr_mm_h, max_infiltration_mm_h=None):
         run = min(remaining, max_run_min)
         remaining -= run
         soak = CYCLE_SOAK_PAUSE_MIN if remaining > 0 else 0
-        cycles.append({
-            "run_min": round(run, 1),
-            "soak_min": soak,
-        })
+        cycles.append(
+            {
+                "run_min": round(run, 1),
+                "soak_min": soak,
+            }
+        )
 
     return cycles

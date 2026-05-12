@@ -12,16 +12,15 @@ Each test that historically read ``z['last_watering_time']`` now reads
 ``test_db.get_last_watering_time(zone['id'])`` instead, exercising the
 helper that the dict injection delegates to.
 """
+
 import os
 from datetime import datetime
 from unittest.mock import patch
 
-import pytest
-
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
 
 
-_FMT = '%Y-%m-%d %H:%M:%S'
+_FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def _parse(ts):
@@ -38,102 +37,149 @@ class TestStopZoneEndTime:
         last clearly differing from start when start is far in the past.
         """
         import time as _time
-        zone = test_db.create_zone({
-            'name': 'EndTime', 'duration': 10, 'group_id': 1,
-            'topic': '/test/end',
-        })
+
+        zone = test_db.create_zone(
+            {
+                "name": "EndTime",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/end",
+            }
+        )
         # Open a zone_run so stop_zone has something to finish.
-        old_start = '2026-01-01 10:00:00'
-        test_db.update_zone(zone['id'], {
-            'state': 'on',
-            'watering_start_time': old_start,
-        })
+        old_start = "2026-01-01 10:00:00"
+        test_db.update_zone(
+            zone["id"],
+            {
+                "state": "on",
+                "watering_start_time": old_start,
+            },
+        )
         run_id = test_db.create_zone_run(
-            int(zone['id']), 1, old_start, 0.0, None, 1, None,
+            int(zone["id"]),
+            1,
+            old_start,
+            0.0,
+            None,
+            1,
+            None,
         )
         assert run_id is not None
 
-        with patch('services.zone_control.db', test_db), \
-             patch('services.zone_control.publish_mqtt_value', return_value=True), \
-             patch('services.zone_control.water_monitor'), \
-             patch('services.zone_control.state_verifier'):
+        with (
+            patch("services.zone_control.db", test_db),
+            patch("services.zone_control.publish_mqtt_value", return_value=True),
+            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.state_verifier"),
+        ):
             from services.zone_control import stop_zone
+
             before = datetime.now().replace(microsecond=0)
             _time.sleep(0.01)  # ensure monotonic gap even on fast hardware
-            assert stop_zone(zone['id'], reason='test') is True
+            assert stop_zone(zone["id"], reason="test") is True
             after = datetime.now()
 
-        z = test_db.get_zone(zone['id'])
-        assert z['state'] == 'off'
-        assert z['watering_start_time'] is None
-        last_str = test_db.get_last_watering_time(int(zone['id']))
+        z = test_db.get_zone(zone["id"])
+        assert z["state"] == "off"
+        assert z["watering_start_time"] is None
+        last_str = test_db.get_last_watering_time(int(zone["id"]))
         last = _parse(last_str)
         # End time must be a NOW-ish timestamp, NOT the old start time.
-        assert last_str != old_start, (
-            'last_watering_time still equals the old start time — '
-            'the issue-#2 bug is back'
-        )
+        assert last_str != old_start, "last_watering_time still equals the old start time — the issue-#2 bug is back"
         # Bound check: last is between the moments we sampled around stop_zone.
-        assert before <= last <= after, (
-            f'last_watering_time={last} not in [{before}, {after}]'
-        )
+        assert before <= last <= after, f"last_watering_time={last} not in [{before}, {after}]"
 
     def test_idempotent_stop_does_not_overwrite(self, test_db):
         """Calling stop_zone on an already-off zone must NOT change
         get_last_watering_time. Without an open zone_run, there's
         nothing to finish — the prior most-recent ok run wins.
         """
-        zone = test_db.create_zone({
-            'name': 'Idempo', 'duration': 10, 'group_id': 1,
-            'topic': '/test/idem',
-        })
+        zone = test_db.create_zone(
+            {
+                "name": "Idempo",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/idem",
+            }
+        )
         # Seed a closed zone_run to act as the "prior end time".
-        prior_end = '2026-04-01 09:30:15'
+        prior_end = "2026-04-01 09:30:15"
         run_id = test_db.create_zone_run(
-            int(zone['id']), 1, '2026-04-01 09:00:00', 0.0, None, 1, None,
+            int(zone["id"]),
+            1,
+            "2026-04-01 09:00:00",
+            0.0,
+            None,
+            1,
+            None,
         )
         assert test_db.finish_zone_run(
-            int(run_id), prior_end, 1.0, None, None, None, status='ok',
+            int(run_id),
+            prior_end,
+            1.0,
+            None,
+            None,
+            None,
+            status="ok",
         )
         # Zone is already off (no open run, watering_start_time None).
-        test_db.update_zone(zone['id'], {'state': 'off'})
+        test_db.update_zone(zone["id"], {"state": "off"})
 
-        with patch('services.zone_control.db', test_db), \
-             patch('services.zone_control.publish_mqtt_value', return_value=True), \
-             patch('services.zone_control.water_monitor'), \
-             patch('services.zone_control.state_verifier'):
+        with (
+            patch("services.zone_control.db", test_db),
+            patch("services.zone_control.publish_mqtt_value", return_value=True),
+            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.state_verifier"),
+        ):
             from services.zone_control import stop_zone
-            assert stop_zone(zone['id'], reason='test') is True
+
+            assert stop_zone(zone["id"], reason="test") is True
 
         # Idempotent stop must not have moved the most-recent ok end_utc.
-        assert test_db.get_last_watering_time(int(zone['id'])) == prior_end
+        assert test_db.get_last_watering_time(int(zone["id"])) == prior_end
 
     def test_stop_zone_format_matches_finish_zone_run(self, test_db):
         """Format must be 'YYYY-MM-DD HH:MM:SS' — the UI does
         replace('T',' ').slice(0,16). Pin format to avoid drift.
         """
-        zone = test_db.create_zone({
-            'name': 'Fmt', 'duration': 10, 'group_id': 1,
-            'topic': '/test/fmt',
-        })
-        test_db.update_zone(zone['id'], {
-            'state': 'on',
-            'watering_start_time': '2026-01-01 10:00:00',
-        })
-        test_db.create_zone_run(
-            int(zone['id']), 1, '2026-01-01 10:00:00', 0.0, None, 1, None,
+        zone = test_db.create_zone(
+            {
+                "name": "Fmt",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/fmt",
+            }
         )
-        with patch('services.zone_control.db', test_db), \
-             patch('services.zone_control.publish_mqtt_value', return_value=True), \
-             patch('services.zone_control.water_monitor'), \
-             patch('services.zone_control.state_verifier'):
+        test_db.update_zone(
+            zone["id"],
+            {
+                "state": "on",
+                "watering_start_time": "2026-01-01 10:00:00",
+            },
+        )
+        test_db.create_zone_run(
+            int(zone["id"]),
+            1,
+            "2026-01-01 10:00:00",
+            0.0,
+            None,
+            1,
+            None,
+        )
+        with (
+            patch("services.zone_control.db", test_db),
+            patch("services.zone_control.publish_mqtt_value", return_value=True),
+            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.state_verifier"),
+        ):
             from services.zone_control import stop_zone
-            assert stop_zone(zone['id']) is True
-        last = test_db.get_last_watering_time(int(zone['id']))
+
+            assert stop_zone(zone["id"]) is True
+        last = test_db.get_last_watering_time(int(zone["id"]))
         # Strict parse — will raise if format is wrong.
         _parse(last)
         # And explicitly: no 'T' separator (ISO with T is the wrong shape).
-        assert 'T' not in last
+        assert "T" not in last
 
 
 class TestPeerOffEndTime:
@@ -143,46 +189,65 @@ class TestPeerOffEndTime:
         recorded — pre-refactor this leaked open runs forever.
         """
         import time as _time
-        z_running = test_db.create_zone({
-            'name': 'Running', 'duration': 10, 'group_id': 1,
-            'topic': '/test/run',
-        })
-        z_new = test_db.create_zone({
-            'name': 'NewlyStarted', 'duration': 10, 'group_id': 1,
-            'topic': '/test/new',
-        })
-        old_start = '2026-01-01 10:00:00'
-        test_db.update_zone(z_running['id'], {
-            'state': 'on',
-            'watering_start_time': old_start,
-        })
+
+        z_running = test_db.create_zone(
+            {
+                "name": "Running",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/run",
+            }
+        )
+        z_new = test_db.create_zone(
+            {
+                "name": "NewlyStarted",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/new",
+            }
+        )
+        old_start = "2026-01-01 10:00:00"
+        test_db.update_zone(
+            z_running["id"],
+            {
+                "state": "on",
+                "watering_start_time": old_start,
+            },
+        )
         # Open a zone_run for the running zone so peer_off has one to finish.
         test_db.create_zone_run(
-            int(z_running['id']), 1, old_start, 0.0, None, 1, None,
+            int(z_running["id"]),
+            1,
+            old_start,
+            0.0,
+            None,
+            1,
+            None,
         )
 
-        with patch('services.zone_control.db', test_db), \
-             patch('services.zone_control.publish_mqtt_value', return_value=True), \
-             patch('services.zone_control.water_monitor'), \
-             patch('services.zone_control.state_verifier'):
+        with (
+            patch("services.zone_control.db", test_db),
+            patch("services.zone_control.publish_mqtt_value", return_value=True),
+            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.state_verifier"),
+        ):
             from services.zone_control import exclusive_start_zone
+
             before = datetime.now().replace(microsecond=0)
             _time.sleep(0.01)
-            assert exclusive_start_zone(z_new['id']) is True
+            assert exclusive_start_zone(z_new["id"]) is True
             # Peer stops happen in a ThreadPoolExecutor — give them a beat.
             _time.sleep(1.0)
             after = datetime.now()
 
-        peer = test_db.get_zone(z_running['id'])
+        peer = test_db.get_zone(z_running["id"])
         # peer_off path may leave state='stopping' briefly on slower runners,
         # but by 1s after exclusive_start_zone the zone_run should be closed.
-        assert peer['state'] in ('off', 'stopping')
-        last_str = test_db.get_last_watering_time(int(z_running['id']))
+        assert peer["state"] in ("off", "stopping")
+        last_str = test_db.get_last_watering_time(int(z_running["id"]))
         if last_str is not None:
             last = _parse(last_str)
-            assert last_str != old_start, (
-                'peer_off path still records start-time as last_watering_time'
-            )
+            assert last_str != old_start, "peer_off path still records start-time as last_watering_time"
             assert before <= last <= after
 
 
@@ -202,35 +267,51 @@ class TestSchedulerAutoStopEndTime:
         should now report a fresh timestamp.
         """
         import time as _time
-        zone = test_db.create_zone({
-            'name': 'AutoStop', 'duration': 10, 'group_id': 1,
-            'topic': '/test/auto',
-        })
-        old_start = '2026-01-01 10:00:00'
-        test_db.update_zone(zone['id'], {
-            'state': 'on',
-            'watering_start_time': old_start,
-        })
+
+        zone = test_db.create_zone(
+            {
+                "name": "AutoStop",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/auto",
+            }
+        )
+        old_start = "2026-01-01 10:00:00"
+        test_db.update_zone(
+            zone["id"],
+            {
+                "state": "on",
+                "watering_start_time": old_start,
+            },
+        )
         test_db.create_zone_run(
-            int(zone['id']), 1, old_start, 0.0, None, 1, None,
+            int(zone["id"]),
+            1,
+            old_start,
+            0.0,
+            None,
+            1,
+            None,
         )
         from irrigation_scheduler import IrrigationScheduler
 
         class _StubSched:
             db = test_db
 
-        with patch('services.zone_control.db', test_db), \
-             patch('services.zone_control.publish_mqtt_value', return_value=True), \
-             patch('services.zone_control.water_monitor'), \
-             patch('services.zone_control.state_verifier'):
+        with (
+            patch("services.zone_control.db", test_db),
+            patch("services.zone_control.publish_mqtt_value", return_value=True),
+            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.state_verifier"),
+        ):
             before = datetime.now().replace(microsecond=0)
             _time.sleep(0.01)
-            IrrigationScheduler._stop_zone(_StubSched(), zone['id'])
+            IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
             after = datetime.now()
 
-        z = test_db.get_zone(zone['id'])
-        assert z['state'] == 'off'
-        last_str = test_db.get_last_watering_time(int(zone['id']))
+        z = test_db.get_zone(zone["id"])
+        assert z["state"] == "off"
+        last_str = test_db.get_last_watering_time(int(zone["id"]))
         assert last_str is not None
         last = _parse(last_str)
         assert last_str != old_start
@@ -241,47 +322,59 @@ class TestSchedulerAutoStopEndTime:
         zone state to 'off'. The open zone_run is left for boot_sync to
         abort — we assert state transition and clean watering_start_time.
         """
-        zone = test_db.create_zone({
-            'name': 'AutoStopFb', 'duration': 10, 'group_id': 1,
-            'topic': '/test/auto-fb',
-        })
-        old_start = '2026-01-01 10:00:00'
-        test_db.update_zone(zone['id'], {
-            'state': 'on',
-            'watering_start_time': old_start,
-        })
+        zone = test_db.create_zone(
+            {
+                "name": "AutoStopFb",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/auto-fb",
+            }
+        )
+        old_start = "2026-01-01 10:00:00"
+        test_db.update_zone(
+            zone["id"],
+            {
+                "state": "on",
+                "watering_start_time": old_start,
+            },
+        )
         from irrigation_scheduler import IrrigationScheduler
 
         class _StubSched:
             db = test_db
 
-        with patch('services.zone_control.stop_zone',
-                   side_effect=ValueError('forced fail for test')):
-            IrrigationScheduler._stop_zone(_StubSched(), zone['id'])
+        with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
+            IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
 
-        z = test_db.get_zone(zone['id'])
-        assert z['state'] == 'off'
-        assert z['watering_start_time'] is None
+        z = test_db.get_zone(zone["id"])
+        assert z["state"] == "off"
+        assert z["watering_start_time"] is None
 
     def test_zone_runner_fallback_when_central_fails(self, test_db):
         """Same contract for the scheduler.zone_runner mixin path."""
-        zone = test_db.create_zone({
-            'name': 'RunnerStop', 'duration': 10, 'group_id': 1,
-            'topic': '/test/runner',
-        })
-        test_db.update_zone(zone['id'], {
-            'state': 'on',
-            'watering_start_time': '2026-01-01 10:00:00',
-        })
+        zone = test_db.create_zone(
+            {
+                "name": "RunnerStop",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/test/runner",
+            }
+        )
+        test_db.update_zone(
+            zone["id"],
+            {
+                "state": "on",
+                "watering_start_time": "2026-01-01 10:00:00",
+            },
+        )
         from scheduler.zone_runner import ZoneRunnerMixin
 
         class _StubSched:
             db = test_db
 
-        with patch('services.zone_control.stop_zone',
-                   side_effect=ValueError('forced fail for test')):
-            ZoneRunnerMixin._stop_zone(_StubSched(), zone['id'])
+        with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
+            ZoneRunnerMixin._stop_zone(_StubSched(), zone["id"])
 
-        z = test_db.get_zone(zone['id'])
-        assert z['state'] == 'off'
-        assert z['watering_start_time'] is None
+        z = test_db.get_zone(zone["id"])
+        assert z["state"] == "off"
+        assert z["watering_start_time"] is None

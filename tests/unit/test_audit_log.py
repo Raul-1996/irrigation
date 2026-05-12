@@ -8,32 +8,31 @@ Covers:
 These tests use the per-test isolated SQLite DB fixture (``test_db``) so the
 production audit_log table is never touched.
 """
+
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime, timedelta
 
 import pytest
 
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
 
 
 # --------------------------------------------------------------------------- #
 # AuditRepository                                                              #
 # --------------------------------------------------------------------------- #
 
-class TestAuditRepository:
 
+class TestAuditRepository:
     def test_add_and_get_basic(self, test_db):
         rid = test_db.add_audit(
-            action_type='zone_modify',
-            source='api',
-            actor='admin',
-            target='zone:5',
-            payload={'duration': 15},
-            result='success',
-            ip='10.0.0.1',
+            action_type="zone_modify",
+            source="api",
+            actor="admin",
+            target="zone:5",
+            payload={"duration": 15},
+            result="success",
+            ip="10.0.0.1",
             duration_ms=42,
         )
         assert rid is not None and rid > 0
@@ -41,65 +40,66 @@ class TestAuditRepository:
         rows = test_db.get_audit_logs(limit=10)
         assert len(rows) == 1
         row = rows[0]
-        assert row['action_type'] == 'zone_modify'
-        assert row['source'] == 'api'
-        assert row['actor'] == 'admin'
-        assert row['target'] == 'zone:5'
-        assert row['result'] == 'success'
-        assert row['ip'] == '10.0.0.1'
-        assert int(row['duration_ms']) == 42
-        assert '"duration": 15' in (row['payload_json'] or '')
+        assert row["action_type"] == "zone_modify"
+        assert row["source"] == "api"
+        assert row["actor"] == "admin"
+        assert row["target"] == "zone:5"
+        assert row["result"] == "success"
+        assert row["ip"] == "10.0.0.1"
+        assert int(row["duration_ms"]) == 42
+        assert '"duration": 15' in (row["payload_json"] or "")
 
     def test_add_handles_none_payload(self, test_db):
         """A None payload must NOT raise — just store NULL."""
-        rid = test_db.add_audit(action_type='ping', source='api', payload=None)
+        rid = test_db.add_audit(action_type="ping", source="api", payload=None)
         assert rid is not None
         rows = test_db.get_audit_logs(limit=1)
-        assert rows[0]['payload_json'] in (None, '')
+        assert rows[0]["payload_json"] in (None, "")
 
     def test_add_payload_str_passthrough(self, test_db):
         """Already-JSON string payload must remain as-is."""
-        test_db.add_audit(action_type='x', payload='{"k":1}')
+        test_db.add_audit(action_type="x", payload='{"k":1}')
         rows = test_db.get_audit_logs(limit=1)
-        assert rows[0]['payload_json'] == '{"k":1}'
+        assert rows[0]["payload_json"] == '{"k":1}'
 
     def test_count_with_filters(self, test_db):
-        for i in range(5):
-            test_db.add_audit(action_type='zone_modify', actor='admin')
-        for i in range(3):
-            test_db.add_audit(action_type='program_create', actor='viewer')
+        for _i in range(5):
+            test_db.add_audit(action_type="zone_modify", actor="admin")
+        for _i in range(3):
+            test_db.add_audit(action_type="program_create", actor="viewer")
 
         assert test_db.count_audit_logs() == 8
-        assert test_db.count_audit_logs(action_type='zone_modify') == 5
-        assert test_db.count_audit_logs(actor='viewer') == 3
-        assert test_db.count_audit_logs(actor='nobody') == 0
+        assert test_db.count_audit_logs(action_type="zone_modify") == 5
+        assert test_db.count_audit_logs(actor="viewer") == 3
+        assert test_db.count_audit_logs(actor="nobody") == 0
 
     def test_get_pagination(self, test_db):
         for i in range(10):
-            test_db.add_audit(action_type=f'act_{i}')
+            test_db.add_audit(action_type=f"act_{i}")
         page1 = test_db.get_audit_logs(limit=4, offset=0)
         page2 = test_db.get_audit_logs(limit=4, offset=4)
         assert len(page1) == 4
         assert len(page2) == 4
         # Newest first → distinct ids per page
-        ids1 = {r['id'] for r in page1}
-        ids2 = {r['id'] for r in page2}
+        ids1 = {r["id"] for r in page1}
+        ids2 = {r["id"] for r in page2}
         assert ids1.isdisjoint(ids2)
 
     def test_distinct_action_types(self, test_db):
-        test_db.add_audit(action_type='a')
-        test_db.add_audit(action_type='b')
-        test_db.add_audit(action_type='a')   # duplicate
-        test_db.add_audit(action_type='c')
+        test_db.add_audit(action_type="a")
+        test_db.add_audit(action_type="b")
+        test_db.add_audit(action_type="a")  # duplicate
+        test_db.add_audit(action_type="c")
         types = test_db.get_distinct_audit_action_types()
-        assert sorted(types) == ['a', 'b', 'c']
+        assert sorted(types) == ["a", "b", "c"]
 
     def test_cleanup_old_rows(self, test_db):
         """cleanup_audit_logs must remove rows older than threshold."""
         # Insert 3 rows with manual past timestamps
         import sqlite3
-        for n in range(3):
-            test_db.add_audit(action_type='old')
+
+        for _n in range(3):
+            test_db.add_audit(action_type="old")
         # Backdate two of them to 10 days ago
         with sqlite3.connect(test_db.db_path) as conn:
             conn.execute(
@@ -114,7 +114,7 @@ class TestAuditRepository:
 
     def test_cleanup_clamps_min_days(self, test_db):
         """Sanity: 0 or negative days is clamped to ≥1, never wipes everything."""
-        test_db.add_audit(action_type='fresh')
+        test_db.add_audit(action_type="fresh")
         deleted = test_db.cleanup_audit_logs(older_than_days=0)
         # Fresh row stays — ts is `now`, not <-1 day
         assert deleted == 0
@@ -125,36 +125,41 @@ class TestAuditRepository:
 # Redaction helpers                                                            #
 # --------------------------------------------------------------------------- #
 
-class TestRedact:
 
+class TestRedact:
     def test_redacts_password(self):
         from services.audit import _redact
-        out = _redact({'username': 'admin', 'password': 's3cr3t'})
-        assert out['username'] == 'admin'
-        assert out['password'] == '***'
+
+        out = _redact({"username": "admin", "password": "s3cr3t"})
+        assert out["username"] == "admin"
+        assert out["password"] == "***"
 
     def test_redacts_nested_token(self):
         from services.audit import _redact
-        out = _redact({'config': {'api_token': 'abc', 'host': 'mqtt'}})
-        assert out['config']['api_token'] == '***'
-        assert out['config']['host'] == 'mqtt'
+
+        out = _redact({"config": {"api_token": "abc", "host": "mqtt"}})
+        assert out["config"]["api_token"] == "***"
+        assert out["config"]["host"] == "mqtt"
 
     def test_redacts_in_list(self):
         from services.audit import _redact
-        out = _redact([{'session_id': 'xyz'}, {'name': 'ok'}])
-        assert out[0]['session_id'] == '***'
-        assert out[1]['name'] == 'ok'
+
+        out = _redact([{"session_id": "xyz"}, {"name": "ok"}])
+        assert out[0]["session_id"] == "***"
+        assert out[1]["name"] == "ok"
 
     def test_truncates_long_string(self):
-        from services.audit import _redact, _MAX_VALUE_LEN
-        long = 'A' * (_MAX_VALUE_LEN + 100)
+        from services.audit import _MAX_VALUE_LEN, _redact
+
+        long = "A" * (_MAX_VALUE_LEN + 100)
         out = _redact(long)
         assert isinstance(out, str)
         assert len(out) <= _MAX_VALUE_LEN + 20  # +'…(truncated)'
-        assert out.endswith('…(truncated)')
+        assert out.endswith("…(truncated)")
 
     def test_passes_through_primitives(self):
         from services.audit import _redact
+
         assert _redact(42) == 42
         assert _redact(3.14) == 3.14
         assert _redact(True) is True
@@ -165,30 +170,32 @@ class TestRedact:
 # record_audit helper                                                          #
 # --------------------------------------------------------------------------- #
 
-class TestRecordAudit:
 
+class TestRecordAudit:
     def test_writes_row_with_redaction(self, test_db, monkeypatch):
         # Repoint the global db used by services.audit to our test DB.
         import database as db_mod
-        monkeypatch.setattr(db_mod, 'db', test_db, raising=False)
+
+        monkeypatch.setattr(db_mod, "db", test_db, raising=False)
 
         from services.audit import record_audit
+
         record_audit(
-            action_type='unit_test',
-            source='unit',
-            target='thing:1',
-            payload={'username': 'u', 'password': 'p'},
-            actor='tester',
+            action_type="unit_test",
+            source="unit",
+            target="thing:1",
+            payload={"username": "u", "password": "p"},
+            actor="tester",
             duration_ms=11,
         )
         rows = test_db.get_audit_logs(limit=5)
-        assert any(r['action_type'] == 'unit_test' for r in rows)
-        row = next(r for r in rows if r['action_type'] == 'unit_test')
-        assert row['actor'] == 'tester'
-        assert row['source'] == 'unit'
-        assert row['target'] == 'thing:1'
-        assert '"password": "***"' in row['payload_json']
-        assert '"username": "u"' in row['payload_json']
+        assert any(r["action_type"] == "unit_test" for r in rows)
+        row = next(r for r in rows if r["action_type"] == "unit_test")
+        assert row["actor"] == "tester"
+        assert row["source"] == "unit"
+        assert row["target"] == "thing:1"
+        assert '"password": "***"' in row["payload_json"]
+        assert '"username": "u"' in row["payload_json"]
 
     def test_swallows_db_failure(self, monkeypatch):
         """record_audit must NEVER raise even if DB layer blows up."""
@@ -196,17 +203,19 @@ class TestRecordAudit:
 
         class _Boom:
             def add_audit(self, **kw):
-                raise RuntimeError('disk full')
+                raise RuntimeError("disk full")
 
-        monkeypatch.setattr(db_mod, 'db', _Boom(), raising=False)
+        monkeypatch.setattr(db_mod, "db", _Boom(), raising=False)
         from services.audit import record_audit
+
         # Should not raise
-        record_audit(action_type='boom', payload={'k': 1})
+        record_audit(action_type="boom", payload={"k": 1})
 
 
 # --------------------------------------------------------------------------- #
 # @audit_log decorator: HTTPException 4xx classification (S1)                  #
 # --------------------------------------------------------------------------- #
+
 
 class TestAuditLogHTTPExceptionClassification:
     """werkzeug HTTPException 4xx must surface as failure:{code}, not error.
@@ -229,75 +238,74 @@ class TestAuditLogHTTPExceptionClassification:
                 captured.append(kw)
                 return 1
 
-        monkeypatch.setattr(db_mod, 'db', _Capture(), raising=False)
+        monkeypatch.setattr(db_mod, "db", _Capture(), raising=False)
         return captured
 
     def test_4xx_httpexception_is_failure_not_error(self, monkeypatch, app):
         captured = self._captured_rows(monkeypatch)
 
         from werkzeug.exceptions import BadRequest
+
         from services.audit import audit_log
 
-        @audit_log('test_4xx', source='unit')
+        @audit_log("test_4xx", source="unit")
         def handler():
-            raise BadRequest('malformed json')
+            raise BadRequest("malformed json")
 
-        with app.test_request_context('/api/test', method='POST'):
-            with pytest.raises(BadRequest):
-                handler()
+        with app.test_request_context("/api/test", method="POST"), pytest.raises(BadRequest):
+            handler()
 
-        assert captured, 'audit row was not written'
+        assert captured, "audit row was not written"
         row = captured[-1]
-        assert row['result'] == 'failure:400', row
+        assert row["result"] == "failure:400", row
         # 4xx is a client problem, not an audit-pipeline error
-        assert row.get('error') in (None, ''), row
+        assert row.get("error") in (None, ""), row
 
     def test_403_httpexception_is_failure(self, monkeypatch, app):
         captured = self._captured_rows(monkeypatch)
 
         from werkzeug.exceptions import Forbidden
+
         from services.audit import audit_log
 
-        @audit_log('test_403', source='unit')
+        @audit_log("test_403", source="unit")
         def handler():
             raise Forbidden()
 
-        with app.test_request_context('/api/test', method='POST'):
-            with pytest.raises(Forbidden):
-                handler()
+        with app.test_request_context("/api/test", method="POST"), pytest.raises(Forbidden):
+            handler()
 
-        assert captured[-1]['result'] == 'failure:403'
+        assert captured[-1]["result"] == "failure:403"
 
     def test_5xx_httpexception_still_error(self, monkeypatch, app):
         captured = self._captured_rows(monkeypatch)
 
         from werkzeug.exceptions import InternalServerError
+
         from services.audit import audit_log
 
-        @audit_log('test_5xx', source='unit')
+        @audit_log("test_5xx", source="unit")
         def handler():
-            raise InternalServerError('oops')
+            raise InternalServerError("oops")
 
-        with app.test_request_context('/api/test', method='POST'):
-            with pytest.raises(InternalServerError):
-                handler()
+        with app.test_request_context("/api/test", method="POST"), pytest.raises(InternalServerError):
+            handler()
 
         row = captured[-1]
-        assert row['result'] == 'error', row
-        assert row.get('error'), 'error_msg should be set for 5xx'
+        assert row["result"] == "error", row
+        assert row.get("error"), "error_msg should be set for 5xx"
 
     def test_non_httpexception_still_error(self, monkeypatch, app):
         captured = self._captured_rows(monkeypatch)
         from services.audit import audit_log
 
-        @audit_log('test_runtime', source='unit')
+        @audit_log("test_runtime", source="unit")
         def handler():
-            raise RuntimeError('boom')
+            raise RuntimeError("boom")
 
-        with app.test_request_context('/api/test', method='POST'):
-            with pytest.raises(RuntimeError):
-                handler()
+        with app.test_request_context("/api/test", method="POST"), pytest.raises(RuntimeError):
+            handler()
 
         row = captured[-1]
-        assert row['result'] == 'error', row
-        assert 'RuntimeError' in (row.get('error') or '')
+        assert row["result"] == "error", row
+        assert "RuntimeError" in (row.get("error") or "")

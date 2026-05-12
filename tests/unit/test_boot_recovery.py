@@ -6,20 +6,22 @@
 - program_queue_log running → interrupted
 - recover_missed_runs → enqueue
 """
-import os
-import json
-import sqlite3
-import time
-import pytest
-from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock, call
 
-os.environ['TESTING'] = '1'
+import json
+import os
+import sqlite3
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+os.environ["TESTING"] = "1"
 
 
 # ---------------------------------------------------------------------------
 # Helpers: создаём тестовую БД с новыми таблицами
 # ---------------------------------------------------------------------------
+
 
 def _init_db(db_path):
     """Создаём все таблицы, включая новые из спеки."""
@@ -112,9 +114,7 @@ def _init_db(db_path):
 
     # Стандартные данные
     conn.execute("INSERT INTO groups (id, name) VALUES (1, 'Насос-1')")
-    conn.execute(
-        "INSERT INTO mqtt_servers (id, name, host, port) VALUES (1, 'Local', '127.0.0.1', 1883)"
-    )
+    conn.execute("INSERT INTO mqtt_servers (id, name, host, port) VALUES (1, 'Local', '127.0.0.1', 1883)")
     conn.commit()
     conn.close()
     return db_path
@@ -127,17 +127,25 @@ def boot_db(tmp_path):
     return _init_db(db_path)
 
 
-def _insert_zone(db_path, zone_id, name, state='off', group_id=1, duration=15,
-                 pause_reason=None, pause_remaining_seconds=None):
+def _insert_zone(
+    db_path, zone_id, name, state="off", group_id=1, duration=15, pause_reason=None, pause_remaining_seconds=None
+):
     """Вставляет зону с заданным состоянием."""
     conn = sqlite3.connect(db_path)
     conn.execute(
         """INSERT INTO zones (id, name, duration, group_id, topic, mqtt_server_id,
            state, pause_reason, pause_remaining_seconds)
            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)""",
-        (zone_id, name, duration, group_id,
-         '/devices/wb-mr6cv3_1/controls/K%d' % zone_id, state,
-         pause_reason, pause_remaining_seconds),
+        (
+            zone_id,
+            name,
+            duration,
+            group_id,
+            "/devices/wb-mr6cv3_1/controls/K%d" % zone_id,
+            state,
+            pause_reason,
+            pause_remaining_seconds,
+        ),
     )
     conn.commit()
     conn.close()
@@ -161,6 +169,7 @@ def _get_zone_state(db_path, zone_id):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestBootRecovery:
     """Boot Recovery — 6 тестов по спеке 3.7."""
 
@@ -168,7 +177,7 @@ class TestBootRecovery:
 
     def test_boot_paused_zones_off(self, boot_db):
         """При boot: zone state='paused', pause_reason='float' → OFF, state='off', reason=None."""
-        _insert_zone(boot_db, 3, 'Газон', state='paused', pause_reason='float')
+        _insert_zone(boot_db, 3, "Газон", state="paused", pause_reason="float")
 
         # Вызываем boot recovery
         # Используем прямой SQL так как stop_on_boot_active_zones зависит от IrrigationDB
@@ -179,39 +188,36 @@ class TestBootRecovery:
         ).fetchall()
 
         assert len(active) == 1
-        assert active[0]['state'] == 'paused'
-        assert active[0]['id'] == 3
+        assert active[0]["state"] == "paused"
+        assert active[0]["id"] == 3
 
         # Симулируем boot recovery: выключаем все non-off зоны
         for z in active:
             conn.execute(
                 "UPDATE zones SET state='off', pause_reason=NULL, pause_remaining_seconds=NULL WHERE id=?",
-                (z['id'],),
+                (z["id"],),
             )
         conn.commit()
         conn.close()
 
         result = _get_zone_state(boot_db, 3)
-        assert result['state'] == 'off'
-        assert result['pause_reason'] is None
-        assert result['pause_remaining_seconds'] is None
+        assert result["state"] == "off"
+        assert result["pause_reason"] is None
+        assert result["pause_remaining_seconds"] is None
 
     # === Test 2: pause_remaining > 0 → всё равно OFF ===
 
     def test_boot_paused_with_remaining_still_off(self, boot_db):
         """При boot: zone paused с remaining=720 → безусловно OFF (безопасность)."""
-        _insert_zone(boot_db, 3, 'Газон', state='paused', pause_reason='float',
-                     pause_remaining_seconds=720)
+        _insert_zone(boot_db, 3, "Газон", state="paused", pause_reason="float", pause_remaining_seconds=720)
 
         z_before = _get_zone_state(boot_db, 3)
-        assert z_before['state'] == 'paused'
-        assert z_before['pause_remaining_seconds'] == 720
+        assert z_before["state"] == "paused"
+        assert z_before["pause_remaining_seconds"] == 720
 
         # Boot recovery
         conn = sqlite3.connect(boot_db)
-        rows = conn.execute(
-            "SELECT id FROM zones WHERE state IN ('starting', 'on', 'stopping', 'paused')"
-        ).fetchall()
+        rows = conn.execute("SELECT id FROM zones WHERE state IN ('starting', 'on', 'stopping', 'paused')").fetchall()
         for r in rows:
             conn.execute(
                 "UPDATE zones SET state='off', pause_reason=NULL, pause_remaining_seconds=NULL WHERE id=?",
@@ -221,28 +227,28 @@ class TestBootRecovery:
         conn.close()
 
         z_after = _get_zone_state(boot_db, 3)
-        assert z_after['state'] == 'off'
-        assert z_after['pause_remaining_seconds'] is None, "remaining сбрасывается при boot"
+        assert z_after["state"] == "off"
+        assert z_after["pause_remaining_seconds"] is None, "remaining сбрасывается при boot"
 
     # === Test 3: zones state='on' → OFF (текущее поведение) ===
 
     def test_boot_on_zones_off(self, boot_db):
         """При boot: zone state='on' → OFF."""
-        _insert_zone(boot_db, 1, 'Клумба', state='on')
+        _insert_zone(boot_db, 1, "Клумба", state="on")
 
         conn = sqlite3.connect(boot_db)
         rows = conn.execute(
             "SELECT id, state FROM zones WHERE state IN ('starting', 'on', 'stopping', 'paused')"
         ).fetchall()
         assert len(rows) == 1
-        assert rows[0][1] == 'on'
+        assert rows[0][1] == "on"
 
         for r in rows:
             conn.execute("UPDATE zones SET state='off' WHERE id=?", (r[0],))
         conn.commit()
         conn.close()
 
-        assert _get_zone_state(boot_db, 1)['state'] == 'off'
+        assert _get_zone_state(boot_db, 1)["state"] == "off"
 
     # === Test 4: float_events незавершённая пауза → cleanup ===
 
@@ -251,49 +257,41 @@ class TestBootRecovery:
         conn = sqlite3.connect(boot_db)
         conn.execute(
             "INSERT INTO float_events (group_id, event_type, paused_zones) VALUES (1, 'low', ?)",
-            (json.dumps([{'zone_id': 3, 'remaining_seconds': 480}]),),
+            (json.dumps([{"zone_id": 3, "remaining_seconds": 480}]),),
         )
         conn.commit()
 
         # Проверяем что есть незавершённая пауза
-        events = conn.execute(
-            "SELECT * FROM float_events WHERE group_id=1 ORDER BY id"
-        ).fetchall()
+        events = conn.execute("SELECT * FROM float_events WHERE group_id=1 ORDER BY id").fetchall()
         assert len(events) == 1
 
         # Boot cleanup: добавляем boot_reset
-        conn.execute(
-            "INSERT INTO float_events (group_id, event_type) VALUES (1, 'boot_reset')"
-        )
+        conn.execute("INSERT INTO float_events (group_id, event_type) VALUES (1, 'boot_reset')")
         conn.commit()
 
-        events = conn.execute(
-            "SELECT event_type FROM float_events WHERE group_id=1 ORDER BY id"
-        ).fetchall()
+        events = conn.execute("SELECT event_type FROM float_events WHERE group_id=1 ORDER BY id").fetchall()
         conn.close()
 
         event_types = [e[0] for e in events]
-        assert 'boot_reset' in event_types, "boot_reset добавлен для cleanup"
+        assert "boot_reset" in event_types, "boot_reset добавлен для cleanup"
 
     # === Test 5: program_queue_log state='running' → 'interrupted' ===
 
     def test_boot_queue_log_running_interrupted(self, boot_db):
         """При boot: program_queue_log с state='running' → 'interrupted', completed_at = now."""
         conn = sqlite3.connect(boot_db)
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
             """INSERT INTO program_queue_log
                (entry_id, program_id, group_id, zone_ids, scheduled_time, enqueued_at, started_at, state)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            ('entry-001', 1, 1, '[1,2,3]', now_str, now_str, now_str, 'running'),
+            ("entry-001", 1, 1, "[1,2,3]", now_str, now_str, now_str, "running"),
         )
         conn.commit()
 
         # Проверяем running entry
-        row = conn.execute(
-            "SELECT state FROM program_queue_log WHERE entry_id='entry-001'"
-        ).fetchone()
-        assert row[0] == 'running'
+        row = conn.execute("SELECT state FROM program_queue_log WHERE entry_id='entry-001'").fetchone()
+        assert row[0] == "running"
 
         # Boot recovery: interrupted
         conn.execute(
@@ -302,12 +300,10 @@ class TestBootRecovery:
         )
         conn.commit()
 
-        row = conn.execute(
-            "SELECT state, completed_at FROM program_queue_log WHERE entry_id='entry-001'"
-        ).fetchone()
+        row = conn.execute("SELECT state, completed_at FROM program_queue_log WHERE entry_id='entry-001'").fetchone()
         conn.close()
 
-        assert row[0] == 'interrupted'
+        assert row[0] == "interrupted"
         assert row[1] is not None, "completed_at должен быть заполнен"
 
     # === Test 6: recover_missed_runs → enqueue ===
@@ -320,32 +316,29 @@ class TestBootRecovery:
         """
         now = datetime.now()
         # Программа запланирована на 10 мин назад, зона 20 мин → ещё не закончена
-        prog_time = (now - timedelta(minutes=10)).strftime('%H:%M')
+        prog_time = (now - timedelta(minutes=10)).strftime("%H:%M")
         # Используем test_db (из conftest) чтобы IrrigationDB корректно инициализировала схему
         conn = sqlite3.connect(test_db.db_path)
         conn.execute("INSERT OR IGNORE INTO groups (id, name) VALUES (1, 'G1')")
-        conn.execute(
-            "INSERT OR IGNORE INTO zones (id, name, duration, group_id) VALUES (1, 'z1', 20, 1)"
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO zones (id, name, duration, group_id) VALUES (2, 'z2', 20, 1)"
-        )
+        conn.execute("INSERT OR IGNORE INTO zones (id, name, duration, group_id) VALUES (1, 'z1', 20, 1)")
+        conn.execute("INSERT OR IGNORE INTO zones (id, name, duration, group_id) VALUES (2, 'z2', 20, 1)")
         conn.execute(
             "INSERT INTO programs (id, name, time, days, zones) VALUES (?, ?, ?, ?, ?)",
-            (10, 'Recovery Test', prog_time, json.dumps([now.weekday()]), json.dumps([1, 2])),
+            (10, "Recovery Test", prog_time, json.dumps([now.weekday()]), json.dumps([1, 2])),
         )
         conn.commit()
         conn.close()
 
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
 
         try:
-            has_qm = hasattr(sched, 'queue_manager') and sched.queue_manager is not None
+            has_qm = hasattr(sched, "queue_manager") and sched.queue_manager is not None
 
             if has_qm:
-                with patch.object(sched.queue_manager, 'enqueue') as mock_enqueue:
+                with patch.object(sched.queue_manager, "enqueue") as mock_enqueue:
                     mock_enqueue.return_value = MagicMock()
                     sched.load_programs()
                     sched.recover_missed_runs()
@@ -380,9 +373,10 @@ class TestBootRecoveryWithScheduler:
         conn.close()
 
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
 
-        with patch('services.zone_control.stop_zone') as mock_stop:
+        with patch("services.zone_control.stop_zone") as mock_stop:
             mock_stop.return_value = True
             sched.stop_on_boot_active_zones()
 

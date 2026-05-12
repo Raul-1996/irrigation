@@ -3,36 +3,28 @@
 Covers all 12 rules, priority ordering, seasonal boundaries, syringe logic.
 Python 3.9 compatible.
 """
-import os
-import pytest
 
-os.environ['TESTING'] = '1'
+import os
+
+os.environ["TESTING"] = "1"
 
 from services.irrigation_decision import (
-    DECISION_STOP,
-    DECISION_SKIP,
-    DECISION_POSTPONE,
     DECISION_EMERGENCY,
     DECISION_IRRIGATE,
-    SEASON_BOUNDS,
-    FROST_THRESHOLD_C,
-    WIND_THRESHOLD_KMH,
-    RAIN_24H_THRESHOLD_MM,
-    RAIN_FORECAST_THRESHOLD_MM,
-    SOIL_MOIST_OK_PCT,
-    SOIL_CRITICAL_PCT,
+    DECISION_POSTPONE,
+    DECISION_SKIP,
+    DECISION_STOP,
     EMERGENCY_BOOST_PCT,
-    SYRINGE_CONFIG,
     IrrigationDecision,
+    _is_in_season,
     evaluate_decision,
     evaluate_decision_verbose,
-    _is_in_season,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helper: default kwargs for a "normal summer day" in Orsk
 # ---------------------------------------------------------------------------
+
 
 def _base_kwargs(**overrides):
     """Return baseline kwargs for a normal irrigable day."""
@@ -55,6 +47,7 @@ def _base_kwargs(**overrides):
 # ---------------------------------------------------------------------------
 # Season check helper
 # ---------------------------------------------------------------------------
+
 
 class TestIsInSeason:
     def test_orsk_in_season(self):
@@ -88,6 +81,7 @@ class TestIsInSeason:
 # Rule 1: Off season
 # ---------------------------------------------------------------------------
 
+
 class TestRule1OffSeason:
     def test_orsk_march(self):
         d = evaluate_decision(**_base_kwargs(month=3, day=15))
@@ -119,6 +113,7 @@ class TestRule1OffSeason:
 # Rule 2: Frost
 # ---------------------------------------------------------------------------
 
+
 class TestRule2Frost:
     def test_frost(self):
         d = evaluate_decision(**_base_kwargs(t_current=3.0))
@@ -146,6 +141,7 @@ class TestRule2Frost:
 # Rule 3: Wind
 # ---------------------------------------------------------------------------
 
+
 class TestRule3Wind:
     def test_high_wind(self):
         d = evaluate_decision(**_base_kwargs(wind_speed_kmh=30.0))
@@ -172,6 +168,7 @@ class TestRule3Wind:
 # Rule 4: Rain 24h
 # ---------------------------------------------------------------------------
 
+
 class TestRule4Rain24h:
     def test_heavy_rain(self):
         d = evaluate_decision(**_base_kwargs(precip_24h=8.0))
@@ -194,6 +191,7 @@ class TestRule4Rain24h:
 # Rule 5: Rain forecast
 # ---------------------------------------------------------------------------
 
+
 class TestRule5RainForecast:
     def test_rain_forecast(self):
         d = evaluate_decision(**_base_kwargs(precip_forecast_12h=7.0))
@@ -214,6 +212,7 @@ class TestRule5RainForecast:
 # ---------------------------------------------------------------------------
 # Rule 6: Soil moisture OK
 # ---------------------------------------------------------------------------
+
 
 class TestRule6SoilMoist:
     def test_soil_moist(self):
@@ -241,6 +240,7 @@ class TestRule6SoilMoist:
 # ---------------------------------------------------------------------------
 # Rule 7: Soil critical
 # ---------------------------------------------------------------------------
+
 
 class TestRule7SoilCritical:
     def test_soil_critical(self):
@@ -272,6 +272,7 @@ class TestRule7SoilCritical:
 # Rule 8: Below minimum irrigation
 # ---------------------------------------------------------------------------
 
+
 class TestRule8BelowMin:
     def test_below_min(self):
         """Low temp + some rain -> very low need -> skip."""
@@ -292,27 +293,22 @@ class TestRule8BelowMin:
 # Rule 9: Syringe Orsk (t > 35)
 # ---------------------------------------------------------------------------
 
+
 class TestRule9SyringeOrsk:
     def test_syringe_orsk(self):
-        d = evaluate_decision(**_base_kwargs(
-            site_id="orsk", t_current=37.0, t_avg=35.0
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="orsk", t_current=37.0, t_avg=35.0))
         assert d.decision == DECISION_IRRIGATE
         assert d.syringe is True
         assert d.syringe_time == "13:00"
         assert d.rule_id == 9
 
     def test_no_syringe_below_threshold(self):
-        d = evaluate_decision(**_base_kwargs(
-            site_id="orsk", t_current=34.0, t_avg=25.0
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="orsk", t_current=34.0, t_avg=25.0))
         assert d.syringe is False
 
     def test_syringe_boundary(self):
         """Exactly at 35 -> no syringe (> not >=)."""
-        d = evaluate_decision(**_base_kwargs(
-            site_id="orsk", t_current=35.0, t_avg=25.0
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="orsk", t_current=35.0, t_avg=25.0))
         assert d.syringe is False
 
 
@@ -320,36 +316,29 @@ class TestRule9SyringeOrsk:
 # Rule 10: Syringe Cholpon-Ata (t > 28)
 # ---------------------------------------------------------------------------
 
+
 class TestRule10SyringeCholpon:
     def test_syringe_cholpon(self):
-        d = evaluate_decision(**_base_kwargs(
-            site_id="cholpon_ata", month=7, day=15,
-            t_current=30.0, t_avg=28.0
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="cholpon_ata", month=7, day=15, t_current=30.0, t_avg=28.0))
         assert d.decision == DECISION_IRRIGATE
         assert d.syringe is True
         assert d.syringe_time == "12:00"
         assert d.rule_id == 10
 
     def test_no_syringe_below(self):
-        d = evaluate_decision(**_base_kwargs(
-            site_id="cholpon_ata", month=7, day=15,
-            t_current=27.0, t_avg=25.0
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="cholpon_ata", month=7, day=15, t_current=27.0, t_avg=25.0))
         assert d.syringe is False
 
     def test_syringe_boundary(self):
         """Exactly at 28 -> no syringe."""
-        d = evaluate_decision(**_base_kwargs(
-            site_id="cholpon_ata", month=7, day=15,
-            t_current=28.0, t_avg=25.0
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="cholpon_ata", month=7, day=15, t_current=28.0, t_avg=25.0))
         assert d.syringe is False
 
 
 # ---------------------------------------------------------------------------
 # Rule 12: Normal irrigation
 # ---------------------------------------------------------------------------
+
 
 class TestRule12Normal:
     def test_normal_irrigate(self):
@@ -369,45 +358,35 @@ class TestRule12Normal:
 # Priority tests (higher priority wins)
 # ---------------------------------------------------------------------------
 
+
 class TestPriority:
     def test_frost_over_rain(self):
         """Rule 2 (frost) beats Rule 4 (rain)."""
-        d = evaluate_decision(**_base_kwargs(
-            t_current=3.0, precip_24h=10.0
-        ))
+        d = evaluate_decision(**_base_kwargs(t_current=3.0, precip_24h=10.0))
         assert d.decision == DECISION_STOP
         assert d.rule_id == 2
 
     def test_frost_over_wind(self):
         """Rule 2 (frost) beats Rule 3 (wind)."""
-        d = evaluate_decision(**_base_kwargs(
-            t_current=3.0, wind_speed_kmh=30.0
-        ))
+        d = evaluate_decision(**_base_kwargs(t_current=3.0, wind_speed_kmh=30.0))
         assert d.decision == DECISION_STOP
         assert d.rule_id == 2
 
     def test_wind_over_rain(self):
         """Rule 3 (wind) beats Rule 4 (rain)."""
-        d = evaluate_decision(**_base_kwargs(
-            wind_speed_kmh=30.0, precip_24h=10.0
-        ))
+        d = evaluate_decision(**_base_kwargs(wind_speed_kmh=30.0, precip_24h=10.0))
         assert d.decision == DECISION_POSTPONE
         assert d.rule_id == 3
 
     def test_off_season_over_everything(self):
         """Rule 1 (off_season) beats all."""
-        d = evaluate_decision(**_base_kwargs(
-            month=1, day=15,
-            t_current=3.0, wind_speed_kmh=30.0, precip_24h=10.0
-        ))
+        d = evaluate_decision(**_base_kwargs(month=1, day=15, t_current=3.0, wind_speed_kmh=30.0, precip_24h=10.0))
         assert d.decision == DECISION_STOP
         assert d.rule_id == 1
 
     def test_rain_24h_over_forecast(self):
         """Rule 4 (rain_24h) beats Rule 5 (forecast)."""
-        d = evaluate_decision(**_base_kwargs(
-            precip_24h=10.0, precip_forecast_12h=10.0
-        ))
+        d = evaluate_decision(**_base_kwargs(precip_24h=10.0, precip_forecast_12h=10.0))
         assert d.rule_id == 4
 
     def test_soil_ok_over_critical(self):
@@ -417,9 +396,7 @@ class TestPriority:
 
     def test_soil_critical_over_below_min(self):
         """Rule 7 (emergency) checked before Rule 8."""
-        d = evaluate_decision(**_base_kwargs(
-            soil_moisture_pct=20.0, t_avg=10.0
-        ))
+        d = evaluate_decision(**_base_kwargs(soil_moisture_pct=20.0, t_avg=10.0))
         assert d.decision == DECISION_EMERGENCY
         assert d.rule_id == 7
 
@@ -427,6 +404,7 @@ class TestPriority:
 # ---------------------------------------------------------------------------
 # IrrigationDecision methods
 # ---------------------------------------------------------------------------
+
 
 class TestIrrigationDecisionClass:
     def test_to_dict(self):
@@ -466,6 +444,7 @@ class TestIrrigationDecisionClass:
 # evaluate_decision_verbose
 # ---------------------------------------------------------------------------
 
+
 class TestVerbose:
     def test_returns_decision_and_rules(self):
         result = evaluate_decision_verbose(**_base_kwargs())
@@ -483,7 +462,7 @@ class TestVerbose:
 
     def test_off_season_triggered(self):
         result = evaluate_decision_verbose(**_base_kwargs(month=1, day=1))
-        rule1 = [r for r in result["rules"] if r["rule_id"] == 1][0]
+        rule1 = next(r for r in result["rules"] if r["rule_id"] == 1)
         assert rule1["triggered"] is True
 
     def test_irrigation_need_in_result(self):
@@ -495,13 +474,18 @@ class TestVerbose:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeCases:
     def test_all_conditions_bad(self):
         """Multiple bad conditions: highest priority wins (off_season)."""
         d = evaluate_decision(
-            site_id="orsk", month=1, day=1,
-            t_avg=0.0, t_current=-10.0,
-            precip_24h=50.0, precip_48h=80.0,
+            site_id="orsk",
+            month=1,
+            day=1,
+            t_avg=0.0,
+            t_current=-10.0,
+            precip_24h=50.0,
+            precip_48h=80.0,
             precip_forecast_12h=20.0,
             wind_speed_kmh=40.0,
             soil_moisture_pct=80.0,
@@ -522,17 +506,19 @@ class TestEdgeCases:
 
     def test_cholpon_early_season(self):
         """April 1 in Cholpon-Ata is in season."""
-        d = evaluate_decision(**_base_kwargs(
-            site_id="cholpon_ata", month=4, day=1
-        ))
+        d = evaluate_decision(**_base_kwargs(site_id="cholpon_ata", month=4, day=1))
         assert d.rule_id != 1
 
     def test_zero_everything(self):
         """Zero precip/wind, in season, warm -> irrigate."""
-        d = evaluate_decision(**_base_kwargs(
-            t_avg=22.0, t_current=22.0,
-            precip_24h=0.0, precip_48h=0.0,
-            precip_forecast_12h=0.0,
-            wind_speed_kmh=0.0,
-        ))
+        d = evaluate_decision(
+            **_base_kwargs(
+                t_avg=22.0,
+                t_current=22.0,
+                precip_24h=0.0,
+                precip_48h=0.0,
+                precip_forecast_12h=0.0,
+                wind_speed_kmh=0.0,
+            )
+        )
         assert d.decision == DECISION_IRRIGATE

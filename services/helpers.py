@@ -1,9 +1,11 @@
 """Shared API helpers used across multiple route blueprints."""
-from flask import jsonify
-from datetime import datetime
+
+import logging
 import os
 import re
-import logging
+from datetime import datetime
+
+from flask import jsonify
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,7 @@ class UnsafePathError(ValueError):
 # only widening — anything else (e.g. ZONE_5_thumbb.webp, ZONE_5_thumb_evil.webp)
 # still fails the anchored match.
 _ZONE_PHOTO_FILENAME_RE = re.compile(
-    r'^ZONE_\d+(_thumb)?\.(png|jpg|jpeg|gif|webp)$',
+    r"^ZONE_\d+(_thumb)?\.(png|jpg|jpeg|gif|webp)$",
     re.IGNORECASE,
 )
 
@@ -45,13 +47,13 @@ def safe_media_subpath(base_dir: str, relative_path: str) -> str:
     that separately. It only validates the path STRING.
     """
     if not relative_path or not isinstance(relative_path, str):
-        raise UnsafePathError('empty or non-string path')
+        raise UnsafePathError("empty or non-string path")
     # Reject absolute paths immediately — never join an absolute path.
     if os.path.isabs(relative_path):
-        raise UnsafePathError('absolute path not allowed')
+        raise UnsafePathError("absolute path not allowed")
     # Reject NUL byte (Python < 3.x protection; still prudent).
-    if '\x00' in relative_path:
-        raise UnsafePathError('NUL byte in path')
+    if "\x00" in relative_path:
+        raise UnsafePathError("NUL byte in path")
     # Normalize and ensure the real resolved path is within base_dir.
     base_abs = os.path.abspath(base_dir)
     joined = os.path.abspath(os.path.join(base_abs, relative_path))
@@ -60,11 +62,9 @@ def safe_media_subpath(base_dir: str, relative_path: str) -> str:
     try:
         common = os.path.commonpath([base_abs, joined])
     except ValueError as exc:
-        raise UnsafePathError(f'path resolution failed: {exc}') from exc
+        raise UnsafePathError(f"path resolution failed: {exc}") from exc
     if common != base_abs:
-        raise UnsafePathError(
-            f'path escapes base_dir (base={base_abs!r}, resolved={joined!r})'
-        )
+        raise UnsafePathError(f"path escapes base_dir (base={base_abs!r}, resolved={joined!r})")
     return joined
 
 
@@ -76,18 +76,19 @@ def safe_zone_photo_path(photo_path: str) -> str:
     Raises UnsafePathError on anything else.
     """
     if not photo_path:
-        raise UnsafePathError('empty photo_path')
+        raise UnsafePathError("empty photo_path")
     # First layer: the DB value must live under static/ — reject if it
     # already has a leading slash or tries to escape media/zones/.
     filename = os.path.basename(photo_path)
     if not _ZONE_PHOTO_FILENAME_RE.match(filename):
-        raise UnsafePathError(f'invalid zone photo filename: {filename!r}')
+        raise UnsafePathError(f"invalid zone photo filename: {filename!r}")
     # Second layer: normalise and check containment inside static/.
-    return safe_media_subpath('static', photo_path)
+    return safe_media_subpath("static", photo_path)
+
 
 # Unified API error helpers
-def api_error(error_code: str, message: str, status: int = 400, extra: dict = None):
-    payload = {'success': False, 'error_code': str(error_code), 'message': str(message)}
+def api_error(error_code: str, message: str, status: int = 400, extra: dict | None = None):
+    payload = {"success": False, "error_code": str(error_code), "message": str(message)}
     if extra:
         try:
             payload.update(extra)
@@ -96,7 +97,7 @@ def api_error(error_code: str, message: str, status: int = 400, extra: dict = No
     return jsonify(payload), int(status)
 
 
-def api_soft(error_code: str, message: str, extra: dict = None):
+def api_soft(error_code: str, message: str, extra: dict | None = None):
     """Soft 200 responses with explicit error_code for diagnostics."""
     return api_error(error_code, message, 200, extra)
 
@@ -105,7 +106,7 @@ def parse_dt(s: str):
     """Parse datetime string in common formats."""
     if not s:
         return None
-    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
             return datetime.strptime(s, fmt)
         except (ValueError, TypeError, KeyError) as e:
@@ -115,13 +116,13 @@ def parse_dt(s: str):
 
 
 # Media / upload constants
-MEDIA_ROOT = 'static/media'
-ZONE_MEDIA_SUBDIR = 'zones'
-MAP_MEDIA_SUBDIR = 'maps'
+MEDIA_ROOT = "static/media"
+ZONE_MEDIA_SUBDIR = "zones"
+MAP_MEDIA_SUBDIR = "maps"
 UPLOAD_FOLDER = os.path.join(MEDIA_ROOT, ZONE_MEDIA_SUBDIR)
 MAP_DIR = os.path.join(MEDIA_ROOT, MAP_MEDIA_SUBDIR)
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-ALLOWED_MIME_TYPES = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+ALLOWED_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB (issue #11)
 
 # Ensure directories exist

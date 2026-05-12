@@ -1,11 +1,4 @@
 """Coverage boost: unit tests for services and core modules."""
-import json
-import sqlite3
-import time
-import threading
-import pytest
-from unittest.mock import patch, MagicMock
-from database import IrrigationDB
 
 
 class TestDatabaseFacade:
@@ -32,21 +25,21 @@ class TestDatabaseFacade:
         assert test_db.get_mqtt_server(99999) is None
 
     def test_get_setting_value(self, test_db):
-        test_db.set_setting_value('test_key', 'test_value')
-        assert test_db.get_setting_value('test_key') == 'test_value'
+        test_db.set_setting_value("test_key", "test_value")
+        assert test_db.get_setting_value("test_key") == "test_value"
 
     def test_get_setting_value_missing(self, test_db):
-        val = test_db.get_setting_value('nonexistent_key')
+        val = test_db.get_setting_value("nonexistent_key")
         assert val is None
 
     def test_add_log(self, test_db):
-        test_db.add_log('test_type', 'test details')
+        test_db.add_log("test_type", "test details")
         logs = test_db.get_logs()
         assert len(logs) >= 1
 
     def test_get_logs_with_type(self, test_db):
-        test_db.add_log('specific_type', 'details')
-        logs = test_db.get_logs(event_type='specific_type')
+        test_db.add_log("specific_type", "details")
+        logs = test_db.get_logs(event_type="specific_type")
         assert isinstance(logs, list)
 
     def test_get_early_off_seconds(self, test_db):
@@ -70,12 +63,14 @@ class TestSchedulerModule:
 
     def test_get_scheduler_before_init(self):
         from irrigation_scheduler import get_scheduler
+
         # May return None or an instance depending on test order
         result = get_scheduler()
-        assert result is None or hasattr(result, 'start')
+        assert result is None or hasattr(result, "start")
 
     def test_irrigation_scheduler_init(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         assert sched.db == test_db
         assert not sched.is_running
@@ -83,25 +78,29 @@ class TestSchedulerModule:
 
     def test_parse_dt(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
-        assert sched._parse_dt('2024-01-01 12:00:00') is not None
-        assert sched._parse_dt('2024-01-01 12:00') is not None
+        assert sched._parse_dt("2024-01-01 12:00:00") is not None
+        assert sched._parse_dt("2024-01-01 12:00") is not None
         assert sched._parse_dt(None) is None
-        assert sched._parse_dt('invalid') is None
-        assert sched._parse_dt('') is None
+        assert sched._parse_dt("invalid") is None
+        assert sched._parse_dt("") is None
 
     def test_get_active_zones(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         assert sched.get_active_zones() == {}
 
     def test_get_active_programs(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         assert sched.get_active_programs() == {}
 
     def test_schedule_master_valve_cap(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -112,6 +111,7 @@ class TestSchedulerModule:
 
     def test_cancel_group_jobs(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -121,6 +121,7 @@ class TestSchedulerModule:
 
     def test_cleanup_jobs_on_boot(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -130,6 +131,7 @@ class TestSchedulerModule:
 
     def test_stop_on_boot_active_zones(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -139,6 +141,7 @@ class TestSchedulerModule:
 
     def test_recover_missed_runs(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -148,17 +151,20 @@ class TestSchedulerModule:
 
     def test_check_weather_skip_disabled(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         result = sched._check_weather_skip(1, 1)
-        assert result.get('skip') is False
+        assert result.get("skip") is False
 
     def test_get_weather_adjusted_duration_disabled(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         assert sched._get_weather_adjusted_duration(1, 10) == 10
 
     def test_start_group_sequence_no_zones(self, test_db):
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -168,8 +174,9 @@ class TestSchedulerModule:
             sched.stop()
 
     def test_start_group_sequence_with_zones(self, test_db):
-        test_db.create_zone({'name': 'Z1', 'duration': 1, 'group_id': 1})
+        test_db.create_zone({"name": "Z1", "duration": 1, "group_id": 1})
         from irrigation_scheduler import IrrigationScheduler
+
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
@@ -184,9 +191,10 @@ class TestEventsModule:
 
     def test_publish_subscribe(self):
         from services import events
+
         received = []
         events.subscribe(lambda ev: received.append(ev))
-        events.publish({'type': 'test', 'id': 'cov1'})
+        events.publish({"type": "test", "id": "cov1"})
         assert len(received) >= 1
 
 
@@ -196,13 +204,15 @@ class TestHelpersModule:
     def test_api_error(self, app):
         with app.app_context():
             from services.helpers import api_error
-            resp = api_error('TEST_ERR', 'test error message', 400)
+
+            resp = api_error("TEST_ERR", "test error message", 400)
             assert resp is not None
 
     def test_api_soft(self, app):
         with app.app_context():
             from services.helpers import api_soft
-            resp = api_soft('SOFT_ERR', 'test warning')
+
+            resp = api_soft("SOFT_ERR", "test warning")
             assert resp is not None
 
 
@@ -211,6 +221,7 @@ class TestLocksModule:
 
     def test_snapshot_all_locks(self):
         from services.locks import snapshot_all_locks
+
         result = snapshot_all_locks()
         assert isinstance(result, dict)
 
@@ -220,6 +231,7 @@ class TestSecurityModule:
 
     def test_admin_required_import(self):
         from services.security import admin_required
+
         assert callable(admin_required)
 
 
@@ -228,9 +240,10 @@ class TestRateLimiter:
 
     def test_rate_limiter(self):
         from services.rate_limiter import LoginRateLimiter
+
         rl = LoginRateLimiter()
         # Should not be locked initially
-        ok, _ = rl.check('192.168.99.99')
+        ok, _ = rl.check("192.168.99.99")
         assert ok is True
 
 
@@ -239,4 +252,5 @@ class TestConstants:
 
     def test_mqtt_cache_ttl(self):
         from constants import MQTT_CACHE_TTL_SEC
+
         assert isinstance(MQTT_CACHE_TTL_SEC, (int, float))

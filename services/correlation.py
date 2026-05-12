@@ -13,20 +13,21 @@ Every HTTP request carries a unique ID that:
 The header is validated against a strict regex to prevent log-injection
 and keep downstream consumers (jq, Loki, Grafana search) safe.
 """
+
 from __future__ import annotations
 
+import contextlib
 import re
 import uuid
 from contextvars import ContextVar, Token
-from typing import Optional
-
 
 # ── ContextVar ──────────────────────────────────────────────────────────────
 # `default=None` lets :func:`get_correlation_id` return None when no request
 # is in flight (CLI jobs, APScheduler ticks, tests).  The WBJsonFormatter uses
 # that to omit the key entirely rather than emit `"correlation_id": null`.
-correlation_id_var: ContextVar[Optional[str]] = ContextVar(
-    'wb_correlation_id', default=None,
+correlation_id_var: ContextVar[str | None] = ContextVar(
+    "wb_correlation_id",
+    default=None,
 )
 
 
@@ -36,10 +37,10 @@ correlation_id_var: ContextVar[Optional[str]] = ContextVar(
 #   * no shell-special / quote characters (prevents log-injection)
 #   * 8..64 chars (long enough to be useful, short enough not to bloat logs)
 # Anything failing the regex is rejected — caller then generates a fresh UUID.
-_CID_RE = re.compile(r'^[A-Za-z0-9\-_]{8,64}$')
+_CID_RE = re.compile(r"^[A-Za-z0-9\-_]{8,64}$")
 
 
-def validate_correlation_id(raw: Optional[str]) -> Optional[str]:
+def validate_correlation_id(raw: str | None) -> str | None:
     """Return ``raw`` when it matches :data:`_CID_RE`; else ``None``.
 
     Examples::
@@ -74,7 +75,8 @@ def generate_correlation_id() -> str:
 
 # ── ContextVar helpers ──────────────────────────────────────────────────────
 
-def get_correlation_id() -> Optional[str]:
+
+def get_correlation_id() -> str | None:
     """Return the current request's correlation ID or ``None``.
 
     Read by :class:`services.logging_setup.WBJsonFormatter` on every log
@@ -99,13 +101,12 @@ def reset_correlation_id(token: Token) -> None:
     Swallows :class:`ValueError` when the context was already torn down
     (e.g. exception during request handling left Flask in a weird state).
     """
-    try:
+    with contextlib.suppress(ValueError, LookupError):
         correlation_id_var.reset(token)
-    except (ValueError, LookupError):
-        pass
 
 
 # ── Header extraction (called by app.py before_request) ─────────────────────
+
 
 def extract_or_generate(headers) -> str:
     """Extract a correlation ID from request headers or generate a fresh one.
@@ -116,9 +117,9 @@ def extract_or_generate(headers) -> str:
     """
     raw = None
     try:
-        raw = headers.get('X-Request-ID')
+        raw = headers.get("X-Request-ID")
         if not raw:
-            raw = headers.get('X-Correlation-ID')
+            raw = headers.get("X-Correlation-ID")
     except (AttributeError, KeyError):
         raw = None
     return validate_correlation_id(raw) or generate_correlation_id()

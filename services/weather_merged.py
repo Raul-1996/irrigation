@@ -3,22 +3,23 @@
 All functionality has been moved to services.weather.
 This file exists only so that existing imports and test patches continue to work.
 """
-from services.weather import (  # noqa: F401
-    SENSOR_STALE_TIMEOUT,
-    _merge_temperature,
-    _merge_humidity,
-    _merge_rain,
-    _build_sensor_status,
-    _build_forecast_24h,
-    _build_forecast_3d,
-    _build_astronomy,
-    _get_weather_code,
-    _get_rain_state,
-    _get_env_state,
-    _get_api_weather,
-)
 
 import time
+
+from services.weather import (
+    SENSOR_STALE_TIMEOUT,
+    _build_astronomy,
+    _build_forecast_3d,
+    _build_forecast_24h,
+    _build_sensor_status,
+    _get_api_weather,
+    _get_env_state,
+    _get_rain_state,
+    _get_weather_code,
+    _merge_humidity,
+    _merge_rain,
+    _merge_temperature,
+)
 
 
 def get_merged_weather(db_path):
@@ -76,17 +77,17 @@ def get_merged_weather(db_path):
 
 
 __all__ = [
-    'SENSOR_STALE_TIMEOUT',
-    'get_merged_weather',
-    '_merge_temperature',
-    '_merge_humidity',
-    '_merge_rain',
-    '_build_sensor_status',
-    '_build_forecast_24h',
-    '_build_forecast_3d',
-    '_build_astronomy',
-    '_get_weather_code',
-    '_get_rain_state',
-    '_get_env_state',
-    '_get_api_weather',
+    "SENSOR_STALE_TIMEOUT",
+    "_build_astronomy",
+    "_build_forecast_3d",
+    "_build_forecast_24h",
+    "_build_sensor_status",
+    "_get_api_weather",
+    "_get_env_state",
+    "_get_rain_state",
+    "_get_weather_code",
+    "_merge_humidity",
+    "_merge_rain",
+    "_merge_temperature",
+    "get_merged_weather",
 ]

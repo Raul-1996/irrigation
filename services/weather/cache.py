@@ -16,18 +16,19 @@ are kept here (unchanged from the monolithic module). Migrating to
 decomposition with a repository migration in a single wave was judged too
 risky by the Wave 4 scope owner.
 """
+
 import json
 import logging
 import sqlite3
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
-from services.weather.models import WeatherData, _CACHE_TTL_SEC
+from services.weather.models import _CACHE_TTL_SEC, WeatherData
 
 logger = logging.getLogger(__name__)
 
 
-def get_location(db_path: str) -> Optional[Dict[str, float]]:
+def get_location(db_path: str) -> dict[str, float] | None:
     """Read (latitude, longitude) from the ``settings`` table.
 
     Args:
@@ -44,17 +45,17 @@ def get_location(db_path: str) -> Optional[Dict[str, float]]:
             lat_row = cur.fetchone()
             cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.longitude'")
             lon_row = cur.fetchone()
-            if lat_row and lon_row and lat_row['value'] and lon_row['value']:
+            if lat_row and lon_row and lat_row["value"] and lon_row["value"]:
                 return {
-                    'latitude': float(lat_row['value']),
-                    'longitude': float(lon_row['value']),
+                    "latitude": float(lat_row["value"]),
+                    "longitude": float(lon_row["value"]),
                 }
     except (sqlite3.Error, ValueError, TypeError) as e:
         logger.debug("Weather location read error: %s", e)
     return None
 
 
-def read_fresh(db_path: str, lat: float, lon: float) -> Optional[WeatherData]:
+def read_fresh(db_path: str, lat: float, lon: float) -> WeatherData | None:
     """Return cached weather data if still within the TTL window.
 
     Args:
@@ -70,24 +71,24 @@ def read_fresh(db_path: str, lat: float, lon: float) -> Optional[WeatherData]:
         with sqlite3.connect(db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                'SELECT data, fetched_at FROM weather_cache '
-                'WHERE latitude = ? AND longitude = ? '
-                'ORDER BY fetched_at DESC LIMIT 1',
+                "SELECT data, fetched_at FROM weather_cache "
+                "WHERE latitude = ? AND longitude = ? "
+                "ORDER BY fetched_at DESC LIMIT 1",
                 (round(lat, 4), round(lon, 4)),
             )
             row = cur.fetchone()
             if row:
-                fetched_at = float(row['fetched_at'])
+                fetched_at = float(row["fetched_at"])
                 if time.time() - fetched_at < _CACHE_TTL_SEC:
-                    data = json.loads(row['data'])
-                    data['_fetched_at'] = fetched_at
+                    data = json.loads(row["data"])
+                    data["_fetched_at"] = fetched_at
                     return WeatherData(data)
     except (sqlite3.Error, json.JSONDecodeError, ValueError, TypeError) as e:
         logger.debug("Weather cache read error: %s", e)
     return None
 
 
-def read_stale(db_path: str, lat: float, lon: float) -> Optional[WeatherData]:
+def read_stale(db_path: str, lat: float, lon: float) -> WeatherData | None:
     """Return the most recent cached entry regardless of age.
 
     Used by the degraded-mode fallback when the API is unreachable — stale
@@ -107,15 +108,15 @@ def read_stale(db_path: str, lat: float, lon: float) -> Optional[WeatherData]:
         with sqlite3.connect(db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                'SELECT data, fetched_at FROM weather_cache '
-                'WHERE latitude = ? AND longitude = ? '
-                'ORDER BY fetched_at DESC LIMIT 1',
+                "SELECT data, fetched_at FROM weather_cache "
+                "WHERE latitude = ? AND longitude = ? "
+                "ORDER BY fetched_at DESC LIMIT 1",
                 (round(lat, 4), round(lon, 4)),
             )
             row = cur.fetchone()
             if row:
-                data = json.loads(row['data'])
-                data['_fetched_at'] = float(row['fetched_at'])
+                data = json.loads(row["data"])
+                data["_fetched_at"] = float(row["fetched_at"])
                 logger.info("Weather: using stale cache (API unavailable)")
                 return WeatherData(data)
     except (sqlite3.Error, json.JSONDecodeError) as e:
@@ -123,7 +124,7 @@ def read_stale(db_path: str, lat: float, lon: float) -> Optional[WeatherData]:
     return None
 
 
-def save(db_path: str, lat: float, lon: float, data: Dict[str, Any]) -> None:
+def save(db_path: str, lat: float, lon: float, data: dict[str, Any]) -> None:
     """Upsert the raw API payload into ``weather_cache`` and prune old rows.
 
     Old rows are defined as those with ``fetched_at`` older than 24 hours.
@@ -142,12 +143,11 @@ def save(db_path: str, lat: float, lon: float, data: Dict[str, Any]) -> None:
         with sqlite3.connect(db_path, timeout=5) as conn:
             now = time.time()
             conn.execute(
-                'INSERT OR REPLACE INTO weather_cache '
-                '(latitude, longitude, data, fetched_at) VALUES (?, ?, ?, ?)',
+                "INSERT OR REPLACE INTO weather_cache (latitude, longitude, data, fetched_at) VALUES (?, ?, ?, ?)",
                 (round(lat, 4), round(lon, 4), json.dumps(data), now),
             )
             conn.execute(
-                'DELETE FROM weather_cache WHERE fetched_at < ?',
+                "DELETE FROM weather_cache WHERE fetched_at < ?",
                 (now - 24 * 3600,),
             )
             conn.commit()

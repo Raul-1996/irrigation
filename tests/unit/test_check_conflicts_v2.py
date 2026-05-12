@@ -13,19 +13,21 @@
             "current_weather_coefficient": int,
         }
 """
-import os
-import json
-import sqlite3
-import pytest
-from unittest.mock import patch, MagicMock
-from typing import Dict, Any, List
 
-os.environ['TESTING'] = '1'
+import json
+import os
+import sqlite3
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+os.environ["TESTING"] = "1"
 
 
 # ---------------------------------------------------------------------------
 # Helpers: создаём тестовую БД со всеми нужными таблицами и данными
 # ---------------------------------------------------------------------------
+
 
 def _create_test_db(tmp_path, groups=None, zones=None, programs=None, settings=None):
     """Создаёт SQLite БД с таблицами groups, zones, programs, settings.
@@ -69,19 +71,19 @@ def _create_test_db(tmp_path, groups=None, zones=None, programs=None, settings=N
         )
     """)
 
-    for g in (groups or []):
-        conn.execute("INSERT INTO groups (id, name) VALUES (?, ?)", (g['id'], g['name']))
+    for g in groups or []:
+        conn.execute("INSERT INTO groups (id, name) VALUES (?, ?)", (g["id"], g["name"]))
 
-    for z in (zones or []):
+    for z in zones or []:
         conn.execute(
             "INSERT INTO zones (id, name, duration, group_id) VALUES (?, ?, ?, ?)",
-            (z['id'], z.get('name', 'zone_%d' % z['id']), z['duration'], z['group_id']),
+            (z["id"], z.get("name", "zone_%d" % z["id"]), z["duration"], z["group_id"]),
         )
 
-    for p in (programs or []):
+    for p in programs or []:
         conn.execute(
             "INSERT INTO programs (id, name, time, days, zones) VALUES (?, ?, ?, ?, ?)",
-            (p['id'], p['name'], p['time'], json.dumps(p['days']), json.dumps(p['zones'])),
+            (p["id"], p["name"], p["time"], json.dumps(p["days"]), json.dumps(p["zones"])),
         )
 
     for key, value in (settings or {}).items():
@@ -96,6 +98,7 @@ def _create_test_db(tmp_path, groups=None, zones=None, programs=None, settings=N
 # Базовая фикстура с двумя группами, зонами и одной программой
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def conflict_db(tmp_path):
     """БД с:
@@ -106,21 +109,21 @@ def conflict_db(tmp_path):
     db_path = _create_test_db(
         tmp_path,
         groups=[
-            {'id': 1, 'name': 'Насос-1'},
-            {'id': 2, 'name': 'Насос-2'},
+            {"id": 1, "name": "Насос-1"},
+            {"id": 2, "name": "Насос-2"},
         ],
         zones=[
-            {'id': 1, 'name': 'Газон', 'duration': 15, 'group_id': 1},
-            {'id': 2, 'name': 'Клумба', 'duration': 15, 'group_id': 1},
-            {'id': 3, 'name': 'Огород', 'duration': 15, 'group_id': 1},
-            {'id': 10, 'name': 'Теплица', 'duration': 20, 'group_id': 2},
-            {'id': 11, 'name': 'Сад', 'duration': 20, 'group_id': 2},
+            {"id": 1, "name": "Газон", "duration": 15, "group_id": 1},
+            {"id": 2, "name": "Клумба", "duration": 15, "group_id": 1},
+            {"id": 3, "name": "Огород", "duration": 15, "group_id": 1},
+            {"id": 10, "name": "Теплица", "duration": 20, "group_id": 2},
+            {"id": 11, "name": "Сад", "duration": 20, "group_id": 2},
         ],
         programs=[
-            {'id': 1, 'name': 'Утро', 'time': '06:00', 'days': [0, 2, 4], 'zones': [1, 2, 3]},
+            {"id": 1, "name": "Утро", "time": "06:00", "days": [0, 2, 4], "zones": [1, 2, 3]},
         ],
         settings={
-            'max_weather_coefficient': '200',
+            "max_weather_coefficient": "200",
         },
     )
     return db_path
@@ -133,6 +136,7 @@ def conflict_db(tmp_path):
 _check_fn = None
 try:
     from db.programs import ProgramRepository
+
     _check_fn = ProgramRepository
 except ImportError:
     pass
@@ -145,8 +149,9 @@ def _get_check_fn(db_path):
     repo = _check_fn(db_path)
     # Проверяем наличие расширенного API (weather_factor параметр)
     import inspect
+
     sig = inspect.signature(repo.check_program_conflicts)
-    if 'weather_factor' not in sig.parameters:
+    if "weather_factor" not in sig.parameters:
         pytest.xfail("check_program_conflicts ещё не расширен (нет параметра weather_factor)")
     return repo.check_program_conflicts
 
@@ -163,23 +168,23 @@ class TestCheckConflictsV2:
         # Проверяем конфликт для новой программы B: 06:30, зоны [1,2] (группа 1), дни [0,2,4]
         result = check(
             program_id=None,  # новая программа
-            time='06:30',
+            time="06:30",
             zones=[1, 2],
             days=[0, 2, 4],
             weather_factor=100,  # base
         )
 
         assert isinstance(result, dict)
-        assert result['has_conflicts'] is True
-        conflicts = result['conflicts']
+        assert result["has_conflicts"] is True
+        conflicts = result["conflicts"]
         assert len(conflicts) >= 1
 
-        error_conflicts = [c for c in conflicts if c.get('level') == 'error']
+        error_conflicts = [c for c in conflicts if c.get("level") == "error"]
         assert len(error_conflicts) >= 1, "Конфликт при base → level='error'"
 
         c = error_conflicts[0]
-        assert c['program_id'] == 1
-        assert c['overlap_minutes'] > 0
+        assert c["program_id"] == 1
+        assert c["overlap_minutes"] > 0
 
     # === Test 2: Конфликт только при weather 150% → level=warning ===
 
@@ -189,7 +194,7 @@ class TestCheckConflictsV2:
 
         result = check(
             program_id=None,
-            time='07:00',
+            time="07:00",
             zones=[1, 2],
             days=[0, 2, 4],
             weather_factor=150,
@@ -198,10 +203,10 @@ class TestCheckConflictsV2:
         assert isinstance(result, dict)
         # При base=100% нет конфликта (45 мин, 06:00-06:45 < 07:00)
         # При weather=150% → 67.5 мин, 06:00-07:07 > 07:00 → warning
-        if result['has_conflicts']:
-            warning_conflicts = [c for c in result['conflicts'] if c.get('level') == 'warning']
+        if result["has_conflicts"]:
+            warning_conflicts = [c for c in result["conflicts"] if c.get("level") == "warning"]
             assert len(warning_conflicts) >= 1, "Конфликт только при weather>100% → level='warning'"
-            assert warning_conflicts[0].get('weather_factor', 0) > 100
+            assert warning_conflicts[0].get("weather_factor", 0) > 100
         # Если реализация не находит конфликт (другая логика группировки) — тоже допустимо
 
     # === Test 3: Нет конфликта даже при 200% ===
@@ -210,28 +215,28 @@ class TestCheckConflictsV2:
         """ProgA 06:00, 20 мин base (зоны с коротким duration). ProgB 07:00. 200% → 40 мин → до 06:40."""
         db_path = _create_test_db(
             tmp_path,
-            groups=[{'id': 1, 'name': 'G1'}],
+            groups=[{"id": 1, "name": "G1"}],
             zones=[
-                {'id': 1, 'name': 'z1', 'duration': 10, 'group_id': 1},
-                {'id': 2, 'name': 'z2', 'duration': 10, 'group_id': 1},
+                {"id": 1, "name": "z1", "duration": 10, "group_id": 1},
+                {"id": 2, "name": "z2", "duration": 10, "group_id": 1},
             ],
             programs=[
-                {'id': 1, 'name': 'A', 'time': '06:00', 'days': [0, 1, 2, 3, 4], 'zones': [1, 2]},
+                {"id": 1, "name": "A", "time": "06:00", "days": [0, 1, 2, 3, 4], "zones": [1, 2]},
             ],
-            settings={'max_weather_coefficient': '200'},
+            settings={"max_weather_coefficient": "200"},
         )
         check = _get_check_fn(db_path)
 
         result = check(
             program_id=None,
-            time='07:00',
+            time="07:00",
             zones=[1, 2],
             days=[0, 1, 2, 3, 4],
             weather_factor=200,
         )
 
-        assert result['has_conflicts'] is False, "Нет конфликта: 20 мин * 200% = 40 мин, до 06:40 < 07:00"
-        assert len(result.get('conflicts', [])) == 0
+        assert result["has_conflicts"] is False, "Нет конфликта: 20 мин * 200% = 40 мин, до 06:40 < 07:00"
+        assert len(result.get("conflicts", [])) == 0
 
     # === Test 4: Разные группы, одно время → нет конфликта ===
 
@@ -241,13 +246,13 @@ class TestCheckConflictsV2:
 
         result = check(
             program_id=None,
-            time='06:00',
+            time="06:00",
             zones=[10, 11],  # группа 2
             days=[0, 2, 4],
             weather_factor=100,
         )
 
-        assert result['has_conflicts'] is False, "Разные группы работают параллельно — нет конфликта"
+        assert result["has_conflicts"] is False, "Разные группы работают параллельно — нет конфликта"
 
     # === Test 5: Одна группа, зазор 5 мин, base 60 → error при weather 120% ===
 
@@ -257,30 +262,38 @@ class TestCheckConflictsV2:
         """
         db_path = _create_test_db(
             tmp_path,
-            groups=[{'id': 1, 'name': 'G1'}],
+            groups=[{"id": 1, "name": "G1"}],
             zones=[
-                {'id': 1, 'name': 'z1', 'duration': 30, 'group_id': 1},
-                {'id': 2, 'name': 'z2', 'duration': 30, 'group_id': 1},
+                {"id": 1, "name": "z1", "duration": 30, "group_id": 1},
+                {"id": 2, "name": "z2", "duration": 30, "group_id": 1},
             ],
             programs=[
-                {'id': 1, 'name': 'A', 'time': '06:00', 'days': [0], 'zones': [1, 2]},
+                {"id": 1, "name": "A", "time": "06:00", "days": [0], "zones": [1, 2]},
             ],
-            settings={'max_weather_coefficient': '200'},
+            settings={"max_weather_coefficient": "200"},
         )
         check = _get_check_fn(db_path)
 
         # При base (100%) нет конфликта: A заканчивает в 07:00, B стартует в 07:05
         result_base = check(
-            program_id=None, time='07:05', zones=[1, 2], days=[0], weather_factor=100,
+            program_id=None,
+            time="07:05",
+            zones=[1, 2],
+            days=[0],
+            weather_factor=100,
         )
-        assert result_base['has_conflicts'] is False, "При base нет конфликта"
+        assert result_base["has_conflicts"] is False, "При base нет конфликта"
 
         # При weather=120%: 60*1.2=72 мин → A до 07:12 → overlap с B (07:05)
         result_weather = check(
-            program_id=None, time='07:05', zones=[1, 2], days=[0], weather_factor=120,
+            program_id=None,
+            time="07:05",
+            zones=[1, 2],
+            days=[0],
+            weather_factor=120,
         )
-        if result_weather['has_conflicts']:
-            warning = [c for c in result_weather['conflicts'] if c.get('level') == 'warning']
+        if result_weather["has_conflicts"]:
+            warning = [c for c in result_weather["conflicts"] if c.get("level") == "warning"]
             assert len(warning) >= 1, "При weather 120% → warning"
 
     # === Test 6: include_weather=True uses settings ===
@@ -292,7 +305,7 @@ class TestCheckConflictsV2:
         # settings.max_weather_coefficient = 200 (установлено в фикстуре)
         result = check(
             program_id=None,
-            time='06:30',
+            time="06:30",
             zones=[1, 2],
             days=[0, 2, 4],
             include_weather=True,
@@ -308,7 +321,7 @@ class TestCheckConflictsV2:
         """Response содержит current_weather_coefficient."""
         check = _get_check_fn(conflict_db)
 
-        with patch('services.weather_adjustment.get_weather_adjustment') as mock_wa:
+        with patch("services.weather_adjustment.get_weather_adjustment") as mock_wa:
             mock_adj = MagicMock()
             mock_adj.get_coefficient.return_value = 120
             mock_adj.is_enabled.return_value = True
@@ -316,15 +329,13 @@ class TestCheckConflictsV2:
 
             result = check(
                 program_id=None,
-                time='06:30',
+                time="06:30",
                 zones=[1, 2],
                 days=[0, 2, 4],
                 weather_factor=100,
             )
 
-        assert 'current_weather_coefficient' in result, (
-            "Ответ должен содержать current_weather_coefficient"
-        )
+        assert "current_weather_coefficient" in result, "Ответ должен содержать current_weather_coefficient"
         # Значение может быть 120 (замоканное) или дефолтное — зависит от реализации
 
     # === Test 8: Пустой zones → нет конфликта ===
@@ -335,14 +346,14 @@ class TestCheckConflictsV2:
 
         result = check(
             program_id=None,
-            time='06:00',
+            time="06:00",
             zones=[],
             days=[0, 2, 4],
             weather_factor=100,
         )
 
-        assert result['has_conflicts'] is False
-        assert len(result.get('conflicts', [])) == 0
+        assert result["has_conflicts"] is False
+        assert len(result.get("conflicts", [])) == 0
 
 
 class TestCheckConflictsCurrentBehavior:
@@ -354,11 +365,12 @@ class TestCheckConflictsCurrentBehavior:
     def test_current_returns_list(self, conflict_db):
         """Текущая реализация возвращает list конфликтов."""
         from db.programs import ProgramRepository
+
         repo = ProgramRepository(conflict_db)
 
         result = repo.check_program_conflicts(
             program_id=None,
-            time='06:30',
+            time="06:30",
             zones=[1, 2],
             days=[0, 2, 4],
         )
@@ -368,11 +380,12 @@ class TestCheckConflictsCurrentBehavior:
     def test_current_no_conflict_different_days(self, conflict_db):
         """Разные дни → нет конфликта."""
         from db.programs import ProgramRepository
+
         repo = ProgramRepository(conflict_db)
 
         result = repo.check_program_conflicts(
             program_id=None,
-            time='06:00',
+            time="06:00",
             zones=[1, 2, 3],
             days=[1, 3, 5],  # Вт, Чт, Сб — не пересекается с [0, 2, 4]
         )
@@ -380,16 +393,17 @@ class TestCheckConflictsCurrentBehavior:
         if isinstance(result, list):
             assert len(result) == 0, "Разные дни — нет конфликта"
         else:
-            assert result.get('has_conflicts') is False
+            assert result.get("has_conflicts") is False
 
     def test_current_empty_zones_no_error(self, conflict_db):
         """Пустые zones → нет crash."""
         from db.programs import ProgramRepository
+
         repo = ProgramRepository(conflict_db)
 
         result = repo.check_program_conflicts(
             program_id=None,
-            time='06:00',
+            time="06:00",
             zones=[],
             days=[0, 2, 4],
         )
@@ -397,4 +411,4 @@ class TestCheckConflictsCurrentBehavior:
         if isinstance(result, list):
             assert len(result) == 0
         else:
-            assert result.get('has_conflicts') is False
+            assert result.get("has_conflicts") is False

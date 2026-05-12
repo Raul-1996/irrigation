@@ -1,8 +1,7 @@
 import logging
-import os
 import threading
 import time
-from typing import Any, Optional, Dict, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +12,7 @@ except ImportError as e:
     mqtt = None
 
 from utils import normalize_topic
+
 try:
     from database import db as _db
 except ImportError as e:
@@ -23,21 +23,21 @@ except ImportError as e:
 # import lazily inside publish_mqtt_value to keep startup time clean.
 
 # Caches and locks
-_MQTT_CLIENTS: Dict[int, object] = {}
+_MQTT_CLIENTS: dict[int, object] = {}
 _MQTT_CLIENTS_LOCK = threading.Lock()
-_TOPIC_LAST_SEND: Dict[Tuple[int, str], Tuple[str, float]] = {}
+_TOPIC_LAST_SEND: dict[tuple[int, str], tuple[str, float]] = {}
 _TOPIC_LOCK = threading.Lock()
-_SERVER_CACHE: Dict[int, Tuple[dict, float]] = {}
+_SERVER_CACHE: dict[int, tuple[dict, float]] = {}
 from constants import MQTT_CACHE_TTL_SEC
 
 _SERVER_CACHE_TTL = float(MQTT_CACHE_TTL_SEC)
 
 
-def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
+def get_or_create_mqtt_client(server: dict[str, Any]) -> Any | None:
     if mqtt is None:
         return None
     try:
-        sid = int(server.get('id')) if server.get('id') is not None else 0
+        sid = int(server.get("id")) if server.get("id") is not None else 0
     except (ValueError, TypeError, KeyError) as e:
         logger.debug("Exception in get_or_create_mqtt_client: %s", e)
         sid = 0
@@ -46,24 +46,25 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
         if cl is None:
             try:
                 cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-                if server.get('username'):
-                    cl.username_pw_set(server.get('username'), server.get('password') or None)
+                if server.get("username"):
+                    cl.username_pw_set(server.get("username"), server.get("password") or None)
                 # TLS options (если включены)
                 try:
-                    if int(server.get('tls_enabled') or 0) == 1:
+                    if int(server.get("tls_enabled") or 0) == 1:
                         import ssl
-                        ca = server.get('tls_ca_path') or None
-                        cert = server.get('tls_cert_path') or None
-                        key = server.get('tls_key_path') or None
-                        tls_ver = (server.get('tls_version') or '').upper().strip()
-                        version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ('', 'TLS', 'TLS_CLIENT') else ssl.PROTOCOL_TLS
+
+                        ca = server.get("tls_ca_path") or None
+                        cert = server.get("tls_cert_path") or None
+                        key = server.get("tls_key_path") or None
+                        tls_ver = (server.get("tls_version") or "").upper().strip()
+                        version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ("", "TLS", "TLS_CLIENT") else ssl.PROTOCOL_TLS
                         cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
-                        if int(server.get('tls_insecure') or 0) == 1:
+                        if int(server.get("tls_insecure") or 0) == 1:
                             cl.tls_insecure_set(True)
                 except (ImportError, OSError, ValueError):
-                    logger.exception('MQTT TLS setup failed for publisher')
-                host = server.get('host') or '127.0.0.1'
-                port = int(server.get('port') or 1883)
+                    logger.exception("MQTT TLS setup failed for publisher")
+                host = server.get("host") or "127.0.0.1"
+                port = int(server.get("port") or 1883)
                 try:
                     # быстрый авто-ре-коннект
                     try:
@@ -89,12 +90,14 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
                     logger.exception("MQTT connect failed sid=%s host=%s:%s", sid, host, port)
                     # не кэшируем неудачное подключение
                     return None
+
                 def _on_disconnect(c, u, rc, properties=None):
                     # оставляем клиента в кеше: loop_start и reconnect_delay_set обеспечат авто-переподключение
                     try:
                         logger.info("MQTT client disconnected sid=%s rc=%s (auto-reconnect active)", sid, rc)
                     except (ConnectionError, TimeoutError, OSError) as e:
                         logger.debug("Handled exception in _on_disconnect: %s", e)
+
                 cl.on_disconnect = _on_disconnect
                 _MQTT_CLIENTS[sid] = cl
             except (ConnectionError, TimeoutError, OSError) as e:
@@ -103,11 +106,18 @@ def get_or_create_mqtt_client(server: Dict[str, Any]) -> Optional[Any]:
         return cl
 
 
-def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: float = 0.2, retain: bool = False,
-                       meta: Optional[Dict[str, str]] = None, qos: int = 0) -> bool:
+def publish_mqtt_value(
+    server: dict,
+    topic: str,
+    value: str,
+    min_interval_sec: float = 0.2,
+    retain: bool = False,
+    meta: dict[str, str] | None = None,
+    qos: int = 0,
+) -> bool:
     try:
         t = normalize_topic(topic)
-        sid = int(server.get('id')) if server.get('id') else None
+        sid = int(server.get("id")) if server.get("id") else None
         # normalize server via TTL cache
         if sid is not None and _db is not None:
             try:
@@ -145,7 +155,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 attempts += 1
                 res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
                 try:
-                    rc = getattr(res, 'rc', 0)
+                    rc = getattr(res, "rc", 0)
                 except (KeyError, TypeError, ValueError) as e:
                     logger.debug("Exception in line_138: %s", e)
                     rc = 0
@@ -158,7 +168,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                     logger.debug("Handled exception in line_146: %s", e)
                 time.sleep(0.1)
             if attempts >= 10 and rc != 0:
-                logger.error('MQTT publish failed after retries')
+                logger.error("MQTT publish failed after retries")
                 # OQ2: only audit publish-failure for QoS>=1.  At QoS=0
                 # there is no broker ack by design — what we'd be
                 # recording is a *local* connect-rc problem on a
@@ -170,19 +180,24 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                 if effective_qos >= 1:
                     try:
                         from services.audit import record_audit
+
                         record_audit(
-                            action_type='mqtt_publish_failure',
-                            source='mqtt',
+                            action_type="mqtt_publish_failure",
+                            source="mqtt",
                             target=t,
-                            payload={'value': value, 'qos': effective_qos,
-                                     'retain': bool(retain), 'rc': int(rc),
-                                     'reason': 'connect_rc_retries_exhausted',
-                                     'attempts': attempts},
-                            actor='system',
-                            result='failure',
-                            error=f'rc={rc} after {attempts} attempts',
+                            payload={
+                                "value": value,
+                                "qos": effective_qos,
+                                "retain": bool(retain),
+                                "rc": int(rc),
+                                "reason": "connect_rc_retries_exhausted",
+                                "attempts": attempts,
+                            },
+                            actor="system",
+                            result="failure",
+                            error=f"rc={rc} after {attempts} attempts",
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception("mqtt_publish_failure: record_audit failed")
                 return False
             # For QoS >= 1: wait for broker acknowledgement with retry + backoff
@@ -209,22 +224,26 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
                     # Always-on audit: QoS≥1 delivery failure is principal-critical.
                     try:
                         from services.audit import record_audit
+
                         record_audit(
-                            action_type='mqtt_publish_failure',
-                            source='mqtt',
+                            action_type="mqtt_publish_failure",
+                            source="mqtt",
                             target=t,
-                            payload={'value': value, 'qos': effective_qos,
-                                     'retain': bool(retain),
-                                     'reason': 'wait_for_publish_retries_exhausted'},
-                            actor='system',
-                            result='failure',
-                            error=f'QoS{effective_qos} delivery failed after 3 retries',
+                            payload={
+                                "value": value,
+                                "qos": effective_qos,
+                                "retain": bool(retain),
+                                "reason": "wait_for_publish_retries_exhausted",
+                            },
+                            actor="system",
+                            result="failure",
+                            error=f"QoS{effective_qos} delivery failed after 3 retries",
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception("mqtt_publish_failure: record_audit failed")
                     return False
         except (ConnectionError, TimeoutError, OSError):
-            logger.exception('MQTT publish failed')
+            logger.exception("MQTT publish failed")
             return False
 
         # Debug-level audit: every successful publish. Volume is high
@@ -232,20 +251,24 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
         # `settings.logging.debug` so audit_log doesn't blow up in normal use.
         try:
             from services.audit import debug_audit
+
             debug_audit(
-                action_type='mqtt_publish',
-                source='mqtt',
+                action_type="mqtt_publish",
+                source="mqtt",
                 target=t,
-                payload={'value': value, 'qos': effective_qos,
-                         'retain': bool(retain),
-                         'meta': meta if isinstance(meta, dict) else None},
+                payload={
+                    "value": value,
+                    "qos": effective_qos,
+                    "retain": bool(retain),
+                    "meta": meta if isinstance(meta, dict) else None,
+                },
             )
-        except Exception:  # noqa: BLE001 — never break publish on audit failure
+        except Exception:
             logger.debug("debug_audit(mqtt_publish) failed", exc_info=True)
 
         # Also publish to the control topic '/on' for Wirenboard compatibility
         try:
-            t_on = t + '/on'
+            t_on = t + "/on"
             on_key = (sid or 0, t_on)
             now2 = time.time()
             with _TOPIC_LOCK:
@@ -264,8 +287,8 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
         # Optional: publish meta information to a side topic for diagnostics/idempotence
         try:
             if meta:
-                t_meta = t + '/meta'
-                payload_meta = ';'.join([f"{k}={v}" for k, v in meta.items() if v is not None])
+                t_meta = t + "/meta"
+                payload_meta = ";".join([f"{k}={v}" for k, v in meta.items() if v is not None])
                 if payload_meta:
                     cl.publish(t_meta, payload=payload_meta, qos=0, retain=False)
         except (ConnectionError, TimeoutError, OSError) as e:
@@ -275,7 +298,7 @@ def publish_mqtt_value(server: dict, topic: str, value: str, min_interval_sec: f
 
         return True
     except (ConnectionError, TimeoutError, OSError):
-        logger.exception('publish_mqtt_value failed')
+        logger.exception("publish_mqtt_value failed")
         return False
 
 
@@ -296,5 +319,6 @@ def _shutdown_mqtt_clients() -> None:
 
 
 from config import TESTING as _TESTING
+
 if not _TESTING:
     atexit.register(_shutdown_mqtt_clients)

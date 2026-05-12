@@ -32,11 +32,12 @@ What it does:
 
 This call is best-effort: an audit failure must never break the hot path.
 """
+
 from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 # NB: import the `database` module rather than re-binding ``db`` at module
 # load.  Tests routinely patch ``services.zone_control.db`` (which used to
@@ -49,11 +50,11 @@ logger = logging.getLogger(__name__)
 
 def update_zone_state(
     zone_id: int,
-    updates: Dict[str, Any],
+    updates: dict[str, Any],
     *,
-    audit_reason: str = '',
-    db: Optional[Any] = None,
-) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    audit_reason: str = "",
+    db: Any | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
     """Apply versioned zone update and emit ``zone_state_change`` audit row.
 
     Args:
@@ -91,16 +92,17 @@ def update_zone_state(
     if db is None:
         try:
             from services import zone_control as _zc_mod  # late import: avoid circular
-            db = getattr(_zc_mod, 'db', None)
+
+            db = getattr(_zc_mod, "db", None)
         except ImportError:
             db = None
     if db is None:
-        db = getattr(_database_mod, 'db', None)
+        db = getattr(_database_mod, "db", None)
     if db is None:
         logger.error("update_zone_state: no db available — cannot write zone=%s", zone_id)
         return False, None
 
-    prev_zone: Optional[Dict[str, Any]] = None
+    prev_zone: dict[str, Any] | None = None
     ok = False
     try:
         ok, prev_zone = db.update_zone_versioned(zone_id, updates)
@@ -110,7 +112,8 @@ def update_zone_state(
         # audit.  Keep the ok=False/prev_zone=None defaults so the fallback
         # branch runs.
         logger.exception(
-            "update_zone_state: versioned update failed (zone=%s)", zone_id,
+            "update_zone_state: versioned update failed (zone=%s)",
+            zone_id,
         )
         ok = False
         prev_zone = None
@@ -139,30 +142,31 @@ def update_zone_state(
     # Emit zone_state_change ONLY when state is actually changing.  Always-on
     # audit (not gated by debug flag) — zone state transitions are the most
     # principal-critical signal in the irrigation system.
-    new_state = updates.get('state')
+    new_state = updates.get("state")
     if new_state is not None:
-        prev_state = (prev_zone or {}).get('state')
-        if str(new_state).lower() != str(prev_state or '').lower():
+        prev_state = (prev_zone or {}).get("state")
+        if str(new_state).lower() != str(prev_state or "").lower():
             try:
                 # Local import to avoid pulling Flask/sqlite into modules that
                 # only want this helper for read-only state writes.
                 from services.audit import record_audit
+
                 record_audit(
-                    action_type='zone_state_change',
-                    source='zones_state',
-                    target=f'zone:{int(zone_id)}',
+                    action_type="zone_state_change",
+                    source="zones_state",
+                    target=f"zone:{int(zone_id)}",
                     payload={
-                        'from': prev_state,
-                        'to': new_state,
-                        'reason': audit_reason or 'unknown',
-                        'commanded_state': updates.get('commanded_state'),
+                        "from": prev_state,
+                        "to": new_state,
+                        "reason": audit_reason or "unknown",
+                        "commanded_state": updates.get("commanded_state"),
                     },
-                    actor='system',
+                    actor="system",
                 )
-            except Exception:  # noqa: BLE001 — audit must never break hot path
+            except Exception:
                 logger.exception(
-                    "update_zone_state: record_audit zone_state_change "
-                    "failed (zone=%s)", zone_id,
+                    "update_zone_state: record_audit zone_state_change failed (zone=%s)",
+                    zone_id,
                 )
 
     return ok, prev_zone

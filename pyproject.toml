@@ -41,16 +41,40 @@ select = [
 ignore = [
     "E501",   # line too long — handled by line-length setting
     "E741",   # ambiguous variable names (l, I, O)
+    "E402",   # module-level import not at top — early TESTING-check needs it
+    "B007",   # loop variable not used — too noisy
     "B008",   # function call in default argument (common in Flask)
+    "B018",   # useless expression — false positives on test scaffolding
+    "B023",   # function in loop captures loop variable — flagged for review separately
     "B905",   # zip without strict=
+    "BLE001", # blind except — legacy guard pattern, intentional
+    "F401",   # unused import — covers availability-check pattern (import inside try/except)
+    "F841",   # unused local variable — too noisy, will tackle gradually
+    "SIM102", # nested if — readability preference
+    "SIM105", # contextlib.suppress — overkill for one-liners
     "SIM108", # ternary operator — readability preference
     "SIM110", # reimplemented builtin — not always clearer
+    "SIM113", # use enumerate — manual index sometimes clearer
+    "SIM117", # combine with statements — readability preference
+    "RUF001", # ambiguous unicode in strings — Russian locale, expected
+    "RUF002", # ambiguous unicode in docstrings — Russian locale, expected
+    "RUF003", # ambiguous unicode in comments — Russian locale, expected
     "RUF012", # mutable class attributes — too noisy for Flask
+    "RUF059", # unused unpacked variable — minor
+    "UP031",  # printf-style → f-string — large refactor, separate tracking
     "UP035",  # deprecated typing imports — gradual migration
 ]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "config", "database", "db", "routes", "services", "utils", "irrigation_scheduler"]
+
+[tool.bandit]
+# Skipped checks are false positives or out-of-scope for now:
+# B104 (bind 0.0.0.0): LAN-only Flask dev runner / IP fallback strings
+# B413 (pycryptodome import): API deprecation note, not a vulnerability
+# B608 (f-string SQL): admin-only paths with no user-controlled identifiers
+# B310 (urlopen): hardcoded weather API URL, no user input
+skips = ["B104", "B413", "B608", "B310"]
 
 [tool.ruff.format]
 quote-style = "double"

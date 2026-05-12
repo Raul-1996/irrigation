@@ -1,11 +1,11 @@
 """Performance tests: SSE with multiple clients."""
-import pytest
+
 import os
-import queue
-import threading
 import time
 
-os.environ['TESTING'] = '1'
+import pytest
+
+os.environ["TESTING"] = "1"
 
 pytestmark = pytest.mark.slow
 

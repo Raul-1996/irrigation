@@ -1,8 +1,8 @@
-import sqlite3
 import json
 import logging
-from typing import List, Dict, Any, Optional
+import sqlite3
 from datetime import datetime
+from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
 
@@ -13,11 +13,11 @@ class TelegramRepository(BaseRepository):
     """Repository for bot_users, subscriptions, audit, FSM, idempotency."""
 
     # --- Bot users ---
-    def get_bot_user_by_chat(self, chat_id: int) -> Optional[Dict[str, Any]]:
+    def get_bot_user_by_chat(self, chat_id: int) -> dict[str, Any] | None:
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT * FROM bot_users WHERE chat_id = ? LIMIT 1', (int(chat_id),))
+                cur = conn.execute("SELECT * FROM bot_users WHERE chat_id = ? LIMIT 1", (int(chat_id),))
                 row = cur.fetchone()
                 return dict(row) if row else None
         except sqlite3.Error as e:
@@ -25,14 +25,17 @@ class TelegramRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def upsert_bot_user(self, chat_id: int, username: Optional[str], first_name: Optional[str]) -> bool:
+    def upsert_bot_user(self, chat_id: int, username: str | None, first_name: str | None) -> bool:
         try:
             with self._connect() as conn:
-                conn.execute('''
+                conn.execute(
+                    """
                     INSERT INTO bot_users(chat_id, username, first_name, created_at)
                     VALUES(?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, last_seen_at=CURRENT_TIMESTAMP
-                ''', (int(chat_id), username, first_name))
+                """,
+                    (int(chat_id), username, first_name),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -40,12 +43,13 @@ class TelegramRepository(BaseRepository):
             return False
 
     @retry_on_busy()
-    def set_bot_user_authorized(self, chat_id: int, role: str = 'user') -> bool:
+    def set_bot_user_authorized(self, chat_id: int, role: str = "user") -> bool:
         try:
             with self._connect() as conn:
                 conn.execute(
-                    'UPDATE bot_users SET is_authorized=1, role=?, failed_attempts=0, locked_until=NULL, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
-                    (str(role), int(chat_id)))
+                    "UPDATE bot_users SET is_authorized=1, role=?, failed_attempts=0, locked_until=NULL, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+                    (str(role), int(chat_id)),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -57,10 +61,11 @@ class TelegramRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.execute(
-                    'UPDATE bot_users SET failed_attempts=COALESCE(failed_attempts,0)+1, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
-                    (int(chat_id),))
+                    "UPDATE bot_users SET failed_attempts=COALESCE(failed_attempts,0)+1, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+                    (int(chat_id),),
+                )
                 conn.commit()
-                cur = conn.execute('SELECT failed_attempts FROM bot_users WHERE chat_id=?', (int(chat_id),))
+                cur = conn.execute("SELECT failed_attempts FROM bot_users WHERE chat_id=?", (int(chat_id),))
                 row = cur.fetchone()
                 return int(row[0]) if row else 0
         except sqlite3.Error as e:
@@ -71,7 +76,7 @@ class TelegramRepository(BaseRepository):
     def lock_bot_user_until(self, chat_id: int, until_iso: str) -> bool:
         try:
             with self._connect() as conn:
-                conn.execute('UPDATE bot_users SET locked_until=? WHERE chat_id=?', (str(until_iso), int(chat_id)))
+                conn.execute("UPDATE bot_users SET locked_until=? WHERE chat_id=?", (str(until_iso), int(chat_id)))
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -80,7 +85,7 @@ class TelegramRepository(BaseRepository):
 
     # --- FSM ---
     @retry_on_busy()
-    def set_bot_fsm(self, chat_id: int, state: Optional[str], data: Optional[dict]) -> bool:
+    def set_bot_fsm(self, chat_id: int, state: str | None, data: dict | None) -> bool:
         try:
             with self._connect() as conn:
                 try:
@@ -89,8 +94,8 @@ class TelegramRepository(BaseRepository):
                     logger.debug("set_user_state JSON encode: %s", e)
                     payload = None
                 conn.execute(
-                    'UPDATE bot_users SET fsm_state=?, fsm_data=?, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?',
-                    (None if state is None else str(state), payload, int(chat_id))
+                    "UPDATE bot_users SET fsm_state=?, fsm_data=?, last_seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+                    (None if state is None else str(state), payload, int(chat_id)),
                 )
                 conn.commit()
                 return True
@@ -102,14 +107,14 @@ class TelegramRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('SELECT fsm_state, fsm_data FROM bot_users WHERE chat_id=?', (int(chat_id),))
+                cur = conn.execute("SELECT fsm_state, fsm_data FROM bot_users WHERE chat_id=?", (int(chat_id),))
                 row = cur.fetchone()
                 if not row:
                     return None, None
-                st = row['fsm_state']
+                st = row["fsm_state"]
                 data = None
                 try:
-                    data = json.loads(row['fsm_data']) if row['fsm_data'] else None
+                    data = json.loads(row["fsm_data"]) if row["fsm_data"] else None
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.debug("get_user_state JSON decode: %s", e)
                     data = None
@@ -124,13 +129,17 @@ class TelegramRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 try:
-                    conn.execute('DELETE FROM bot_idempotency WHERE created_at < datetime("now", ?)',
-                                 (f'-{int(ttl_seconds)} seconds',))
+                    conn.execute(
+                        'DELETE FROM bot_idempotency WHERE created_at < datetime("now", ?)',
+                        (f"-{int(ttl_seconds)} seconds",),
+                    )
                 except sqlite3.Error as e:
                     logger.debug("Ошибка очистки старых идемпотентных токенов: %s", e)
                 try:
-                    conn.execute('INSERT INTO bot_idempotency(token, chat_id, action) VALUES(?,?,?)',
-                                 (str(token), int(chat_id), str(action)))
+                    conn.execute(
+                        "INSERT INTO bot_idempotency(token, chat_id, action) VALUES(?,?,?)",
+                        (str(token), int(chat_id), str(action)),
+                    )
                     conn.commit()
                     return True
                 except sqlite3.IntegrityError:
@@ -145,19 +154,22 @@ class TelegramRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('''
+                cur = conn.execute(
+                    """
                     SELECT notif_critical, notif_emergency, notif_postpone, notif_zone_events, notif_rain
                     FROM bot_users WHERE chat_id=? LIMIT 1
-                ''', (int(chat_id),))
+                """,
+                    (int(chat_id),),
+                )
                 row = cur.fetchone()
                 if not row:
                     return {}
                 return {
-                    'critical': int(row['notif_critical'] or 0),
-                    'emergency': int(row['notif_emergency'] or 0),
-                    'postpone': int(row['notif_postpone'] or 0),
-                    'zone_events': int(row['notif_zone_events'] or 0),
-                    'rain': int(row['notif_rain'] or 0),
+                    "critical": int(row["notif_critical"] or 0),
+                    "emergency": int(row["notif_emergency"] or 0),
+                    "postpone": int(row["notif_postpone"] or 0),
+                    "zone_events": int(row["notif_zone_events"] or 0),
+                    "rain": int(row["notif_rain"] or 0),
                 }
         except sqlite3.Error as e:
             logger.error("Ошибка чтения настроек уведомлений chat_id=%s: %s", chat_id, e)
@@ -171,11 +183,11 @@ class TelegramRepository(BaseRepository):
         # future refactor that accidentally sources `col` from request
         # data from promoting this line to a full SQLi.
         allowed = {
-            'critical': 'notif_critical',
-            'emergency': 'notif_emergency',
-            'postpone': 'notif_postpone',
-            'zone_events': 'notif_zone_events',
-            'rain': 'notif_rain',
+            "critical": "notif_critical",
+            "emergency": "notif_emergency",
+            "postpone": "notif_postpone",
+            "zone_events": "notif_zone_events",
+            "rain": "notif_rain",
         }
         col = allowed.get(key)
         if not col:
@@ -189,7 +201,7 @@ class TelegramRepository(BaseRepository):
                 # col is proven to be a literal from the whitelist above;
                 # chat_id is cast to int.
                 conn.execute(
-                    f'UPDATE bot_users SET {col}=? WHERE chat_id=?',
+                    f"UPDATE bot_users SET {col}=? WHERE chat_id=?",
                     (1 if enabled else 0, int(chat_id)),
                 )
                 conn.commit()
@@ -199,26 +211,29 @@ class TelegramRepository(BaseRepository):
             return False
 
     # --- Subscriptions ---
-    def get_due_bot_subscriptions(self, now_local: datetime) -> List[Dict[str, Any]]:
+    def get_due_bot_subscriptions(self, now_local: datetime) -> list[dict[str, Any]]:
         try:
-            hhmm = now_local.strftime('%H:%M')
+            hhmm = now_local.strftime("%H:%M")
             dow = now_local.weekday()
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('''
+                cur = conn.execute(
+                    """
                     SELECT bs.*, bu.chat_id FROM bot_subscriptions bs
                     JOIN bot_users bu ON bu.id = bs.user_id
                     WHERE bs.enabled=1 AND bs.time_local=?
-                ''', (hhmm,))
+                """,
+                    (hhmm,),
+                )
                 out = []
                 for r in cur.fetchall():
                     rec = dict(r)
-                    if str(rec.get('type')) == 'weekly':
-                        mask = (rec.get('dow_mask') or '').strip()
+                    if str(rec.get("type")) == "weekly":
+                        mask = (rec.get("dow_mask") or "").strip()
                         if not mask:
                             continue
                         try:
-                            ok = mask[dow] == '1'
+                            ok = mask[dow] == "1"
                         except (IndexError, TypeError) as e:
                             logger.debug("dow_mask check failed for reminder: %s", e)
                             ok = False
@@ -231,22 +246,25 @@ class TelegramRepository(BaseRepository):
             return []
 
     @retry_on_busy()
-    def create_or_update_subscription(self, user_id: int, sub_type: str, fmt: str, time_local: str,
-                                      dow_mask: Optional[str], enabled: bool = True) -> bool:
+    def create_or_update_subscription(
+        self, user_id: int, sub_type: str, fmt: str, time_local: str, dow_mask: str | None, enabled: bool = True
+    ) -> bool:
         try:
             with self._connect() as conn:
-                cur = conn.execute('SELECT id FROM bot_subscriptions WHERE user_id=? AND type=?',
-                                   (int(user_id), str(sub_type)))
+                cur = conn.execute(
+                    "SELECT id FROM bot_subscriptions WHERE user_id=? AND type=?", (int(user_id), str(sub_type))
+                )
                 row = cur.fetchone()
                 if row:
                     conn.execute(
-                        'UPDATE bot_subscriptions SET format=?, time_local=?, dow_mask=?, enabled=? WHERE id=?',
-                        (str(fmt), str(time_local), (dow_mask or ''), 1 if enabled else 0, int(row[0])))
+                        "UPDATE bot_subscriptions SET format=?, time_local=?, dow_mask=?, enabled=? WHERE id=?",
+                        (str(fmt), str(time_local), (dow_mask or ""), 1 if enabled else 0, int(row[0])),
+                    )
                 else:
                     conn.execute(
-                        'INSERT INTO bot_subscriptions(user_id, type, format, time_local, dow_mask, enabled) VALUES(?,?,?,?,?,?)',
-                        (int(user_id), str(sub_type), str(fmt), str(time_local), (dow_mask or ''),
-                         1 if enabled else 0))
+                        "INSERT INTO bot_subscriptions(user_id, type, format, time_local, dow_mask, enabled) VALUES(?,?,?,?,?,?)",
+                        (int(user_id), str(sub_type), str(fmt), str(time_local), (dow_mask or ""), 1 if enabled else 0),
+                    )
                 conn.commit()
                 return True
         except sqlite3.Error as e:

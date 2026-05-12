@@ -1,27 +1,27 @@
 """Tests for settings DB: settings, password, migrations."""
-import pytest
+
 import os
 
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
 
 
 class TestSettings:
     def test_get_set_setting(self, test_db):
-        test_db.set_setting_value('test_key', 'test_value')
-        assert test_db.get_setting_value('test_key') == 'test_value'
+        test_db.set_setting_value("test_key", "test_value")
+        assert test_db.get_setting_value("test_key") == "test_value"
 
     def test_get_nonexistent_setting(self, test_db):
-        result = test_db.get_setting_value('nonexistent_key_12345')
+        result = test_db.get_setting_value("nonexistent_key_12345")
         assert result is None
 
     def test_overwrite_setting(self, test_db):
-        test_db.set_setting_value('k', 'v1')
-        test_db.set_setting_value('k', 'v2')
-        assert test_db.get_setting_value('k') == 'v2'
+        test_db.set_setting_value("k", "v1")
+        test_db.set_setting_value("k", "v2")
+        assert test_db.get_setting_value("k") == "v2"
 
     def test_set_none_value(self, test_db):
-        test_db.set_setting_value('nullable', None)
-        assert test_db.get_setting_value('nullable') is None
+        test_db.set_setting_value("nullable", None)
+        assert test_db.get_setting_value("nullable") is None
 
 
 class TestPassword:
@@ -31,15 +31,16 @@ class TestPassword:
         assert h is not None
 
     def test_set_password(self, test_db):
-        test_db.set_password('new_secure_password')
+        test_db.set_password("new_secure_password")
         h = test_db.get_password_hash()
         assert h is not None
         from werkzeug.security import check_password_hash
-        assert check_password_hash(h, 'new_secure_password')
+
+        assert check_password_hash(h, "new_secure_password")
 
     def test_set_password_changes_hash(self, test_db):
         old_hash = test_db.get_password_hash()
-        test_db.set_password('another_password_99')
+        test_db.set_password("another_password_99")
         new_hash = test_db.get_password_hash()
         assert old_hash != new_hash
 
@@ -61,10 +62,10 @@ class TestRainConfig:
         assert isinstance(cfg, dict)
 
     def test_set_rain_config(self, test_db):
-        cfg = {'enabled': True, 'topic': '/rain/sensor', 'type': 'NO', 'server_id': 1}
+        cfg = {"enabled": True, "topic": "/rain/sensor", "type": "NO", "server_id": 1}
         test_db.set_rain_config(cfg)
         stored = test_db.get_rain_config()
-        assert stored.get('enabled') is True or stored.get('enabled') == 'True'
+        assert stored.get("enabled") is True or stored.get("enabled") == "True"
 
 
 class TestEarlyOff:

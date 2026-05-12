@@ -1,12 +1,13 @@
 """E2E tests: concurrent requests, race conditions."""
-import pytest
-import os
+
 import threading
+
+import pytest
 
 pytestmark = pytest.mark.e2e
 
-CONTROLLER_URL = 'http://10.2.5.244:8080'
-PASSWORD = '1234'
+CONTROLLER_URL = "http://10.2.5.244:8080"
+PASSWORD = "1234"
 
 
 @pytest.fixture
@@ -15,15 +16,15 @@ def live_session():
         import httpx
     except ImportError:
         pytest.skip("httpx not installed")
-    
+
     client = httpx.Client(base_url=CONTROLLER_URL, timeout=10)
     try:
-        resp = client.post('/api/login', json={'password': PASSWORD})
+        resp = client.post("/api/login", json={"password": PASSWORD})
         if resp.status_code != 200:
             pytest.skip(f"Cannot login: {resp.status_code}")
     except (ConnectionError, TimeoutError, OSError) as e:
         pytest.skip(f"Cannot connect: {e}")
-    
+
     yield client
     client.close()
 
@@ -32,14 +33,15 @@ class TestConcurrentRequests:
     def test_concurrent_status_requests(self, live_session):
         """Multiple concurrent status requests should all succeed."""
         import httpx
+
         results = []
         errors = []
 
         def fetch_status():
             try:
                 client = httpx.Client(base_url=CONTROLLER_URL, timeout=10)
-                client.post('/api/login', json={'password': PASSWORD})
-                resp = client.get('/api/status')
+                client.post("/api/login", json={"password": PASSWORD})
+                resp = client.get("/api/status")
                 results.append(resp.status_code)
                 client.close()
             except (ConnectionError, TimeoutError, OSError) as e:
@@ -57,13 +59,14 @@ class TestConcurrentRequests:
     def test_concurrent_zone_reads(self, live_session):
         """Concurrent zone reads should not cause conflicts."""
         import httpx
+
         results = []
 
         def read_zones():
             try:
                 client = httpx.Client(base_url=CONTROLLER_URL, timeout=10)
-                client.post('/api/login', json={'password': PASSWORD})
-                resp = client.get('/api/zones')
+                client.post("/api/login", json={"password": PASSWORD})
+                resp = client.get("/api/zones")
                 results.append(resp.status_code)
                 client.close()
             except (ConnectionError, TimeoutError, OSError):

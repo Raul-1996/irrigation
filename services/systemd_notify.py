@@ -8,6 +8,7 @@ Protocol: datagram to $NOTIFY_SOCKET with ASCII payload.
 
 When $NOTIFY_SOCKET is not set (dev / not under systemd), every call is a no-op.
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,17 +24,17 @@ _WATCHDOG_INTERVAL_SEC = 20  # WatchdogSec=60 in unit => send every 20s = 3x saf
 
 
 def _notify(message: str) -> bool:
-    addr = os.environ.get('NOTIFY_SOCKET')
+    addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
         return False
     # Abstract socket convention: a leading '@' means abstract namespace -> replace with NUL byte.
-    if addr.startswith('@'):
-        addr = '\0' + addr[1:]
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
-            s.sendto(message.encode('utf-8'), addr)
+            s.sendto(message.encode("utf-8"), addr)
         return True
-    except (OSError, socket.error) as e:
+    except OSError as e:
         logger.warning("sd_notify send failed: %s", e)
         return False
 
@@ -66,14 +67,16 @@ def _heartbeat_loop():
 
 def start_heartbeat() -> None:
     global _HEARTBEAT_THREAD
-    if os.environ.get('WB_WATCHDOG_ENABLED', '1') != '1':
+    if os.environ.get("WB_WATCHDOG_ENABLED", "1") != "1":
         logger.info("sd_notify heartbeat disabled via WB_WATCHDOG_ENABLED=0")
         return
     if _HEARTBEAT_THREAD is not None and _HEARTBEAT_THREAD.is_alive():
         return
     _HEARTBEAT_STOP.clear()
     _HEARTBEAT_THREAD = threading.Thread(
-        target=_heartbeat_loop, name="sd-notify-heartbeat", daemon=True,
+        target=_heartbeat_loop,
+        name="sd-notify-heartbeat",
+        daemon=True,
     )
     _HEARTBEAT_THREAD.start()
 

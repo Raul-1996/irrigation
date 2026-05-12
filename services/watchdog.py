@@ -4,17 +4,16 @@ Background daemon thread that periodically checks for zones that have been ON
 longer than the configured cap (default 240 minutes) and forcefully stops them.
 Also monitors concurrent zone count per group and sends Telegram alerts on anomalies.
 """
-import sqlite3
 
-import threading
-import time
 import logging
+import sqlite3
+import threading
 from datetime import datetime
 
 from constants import (
-    ZONE_CAP_DEFAULT_MIN,
     MAX_CONCURRENT_ZONES,
     WATCHDOG_INTERVAL_SEC,
+    ZONE_CAP_DEFAULT_MIN,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +34,7 @@ class ZoneWatchdog(threading.Thread):
             zone_control_module: Module with stop_zone(zone_id, reason, force) function.
             interval: Check interval in seconds.
         """
-        super().__init__(name='ZoneWatchdog')
+        super().__init__(name="ZoneWatchdog")
         self.db = db
         self.zone_control = zone_control_module
         self.interval = interval
@@ -52,7 +51,14 @@ class ZoneWatchdog(threading.Thread):
         while not self._stop_event.is_set():
             try:
                 self._check_zones()
-            except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, RuntimeError) as e:  # catch-all: intentional
+            except (
+                ConnectionError,
+                TimeoutError,
+                OSError,
+                sqlite3.Error,
+                ValueError,
+                RuntimeError,
+            ) as e:  # catch-all: intentional
                 logger.exception("Watchdog error: %s", e)
             self._stop_event.wait(self.interval)
         logger.info("ZoneWatchdog stopped")
@@ -60,7 +66,7 @@ class ZoneWatchdog(threading.Thread):
     def _get_zone_cap_minutes(self) -> int:
         """Read zone cap from settings, fallback to default."""
         try:
-            val = self.db.get_setting_value('zone_cap_minutes')
+            val = self.db.get_setting_value("zone_cap_minutes")
             if val is not None:
                 return max(1, int(val))
         except (sqlite3.Error, OSError) as e:
@@ -75,29 +81,32 @@ class ZoneWatchdog(threading.Thread):
 
         on_zones = []
         for z in zones:
-            if str(z.get('state') or '').lower() != 'on':
+            if str(z.get("state") or "").lower() != "on":
                 continue
             on_zones.append(z)
             # Check time cap
-            start_str = z.get('watering_start_time')
+            start_str = z.get("watering_start_time")
             if not start_str:
                 continue
             try:
-                start_dt = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
             except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Exception in _check_zones: %s", e)
                 continue
             elapsed_min = (now - start_dt).total_seconds() / 60.0
             if elapsed_min > cap_minutes:
-                zone_id = int(z.get('id'))
-                zone_name = z.get('name', f'Zone {zone_id}')
+                zone_id = int(z.get("id"))
+                zone_name = z.get("name", f"Zone {zone_id}")
                 logger.critical(
                     "WATCHDOG: Zone %d (%s) has been ON for %.0f min (cap=%d min). Force stopping!",
-                    zone_id, zone_name, elapsed_min, cap_minutes
+                    zone_id,
+                    zone_name,
+                    elapsed_min,
+                    cap_minutes,
                 )
                 # Force stop the zone
                 try:
-                    self.zone_control.stop_zone(zone_id, reason='watchdog_cap', force=True)
+                    self.zone_control.stop_zone(zone_id, reason="watchdog_cap", force=True)
                 except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
                     logger.exception("Watchdog: failed to stop zone %d", zone_id)
                 # Send Telegram alert
@@ -108,20 +117,25 @@ class ZoneWatchdog(threading.Thread):
                 # Log to DB
                 try:
                     import json
-                    self.db.add_log('watchdog_cap_stop', json.dumps({
-                        'zone_id': zone_id,
-                        'zone_name': zone_name,
-                        'elapsed_min': int(elapsed_min),
-                        'cap_min': cap_minutes
-                    }))
+
+                    self.db.add_log(
+                        "watchdog_cap_stop",
+                        json.dumps(
+                            {
+                                "zone_id": zone_id,
+                                "zone_name": zone_name,
+                                "elapsed_min": int(elapsed_min),
+                                "cap_min": cap_minutes,
+                            }
+                        ),
+                    )
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                     logger.debug("Handled exception in line_112: %s", e)
 
         # Check concurrent count
         if len(on_zones) > MAX_CONCURRENT_ZONES:
             logger.warning(
-                "WATCHDOG: %d zones are ON simultaneously (threshold=%d)",
-                len(on_zones), MAX_CONCURRENT_ZONES
+                "WATCHDOG: %d zones are ON simultaneously (threshold=%d)", len(on_zones), MAX_CONCURRENT_ZONES
             )
             self._send_alert(
                 f"⚠️ WATCHDOG: {len(on_zones)} зон включены одновременно "
@@ -131,10 +145,11 @@ class ZoneWatchdog(threading.Thread):
     def _send_alert(self, message: str) -> None:
         """Send alert via Telegram to admin chat (best-effort)."""
         try:
-            admin_chat = self.db.get_setting_value('telegram_admin_chat_id')
+            admin_chat = self.db.get_setting_value("telegram_admin_chat_id")
             if not admin_chat:
                 return
             from services.telegram_bot import notifier
+
             if notifier:
                 notifier.send_message(int(admin_chat), message)
         except ImportError:

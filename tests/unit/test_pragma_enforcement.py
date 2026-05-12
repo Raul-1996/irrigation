@@ -18,8 +18,10 @@ db/migrations.py. Adding the FK requires the `add_foreign_keys_v2`
 migration described in irrigation-audit/architecture/target-state.md
 (zones_new rebuild). Logged as future work.
 """
+
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import tempfile
@@ -27,9 +29,9 @@ import tempfile
 import pytest
 
 from db.base import BaseRepository
-from db.zones import ZoneRepository
-from db.groups import GroupRepository
 from db.float import FloatRepository
+from db.groups import GroupRepository
+from db.zones import ZoneRepository
 
 
 @pytest.fixture
@@ -58,15 +60,14 @@ def tmp_db_path():
         yield path
     finally:
         for ext in ("", "-wal", "-shm"):
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(path + ext)
-            except OSError:
-                pass
 
 
 # ---------------------------------------------------------------------------
 # Core PRAGMA contract
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "repo_cls",
@@ -89,9 +90,7 @@ def test_busy_timeout_30000(tmp_db_path, repo_cls):
     repo = repo_cls(tmp_db_path)
     with repo._connect() as conn:
         value = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-    assert value == 30000, (
-        f"{repo_cls.__name__}: busy_timeout should be 30000, got {value}"
-    )
+    assert value == 30000, f"{repo_cls.__name__}: busy_timeout should be 30000, got {value}"
 
 
 @pytest.mark.parametrize(
@@ -103,14 +102,13 @@ def test_journal_mode_wal(tmp_db_path, repo_cls):
     repo = repo_cls(tmp_db_path)
     with repo._connect() as conn:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() == "wal", (
-        f"{repo_cls.__name__}: journal_mode should be wal, got {mode!r}"
-    )
+    assert mode.lower() == "wal", f"{repo_cls.__name__}: journal_mode should be wal, got {mode!r}"
 
 
 # ---------------------------------------------------------------------------
 # FK enforcement (bonus, skipped due to schema)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip(
     reason=(
@@ -127,10 +125,9 @@ def test_zones_group_id_fk_integrity_future(tmp_db_path):
     migration is applied; that's the signal to unskip this test.
     """
     repo = ZoneRepository(tmp_db_path)
-    with repo._connect() as conn:
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO zones (id, name, group_id) VALUES (?, ?, ?)",
-                (999, "ghost-zone", 424242),
-            )
-            conn.commit()
+    with repo._connect() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO zones (id, name, group_id) VALUES (?, ?, ?)",
+            (999, "ghost-zone", 424242),
+        )
+        conn.commit()

@@ -6,13 +6,15 @@
 - Меню «Группы»: список групп
 - Экран группы: две кнопки — «Запустить» и «Остановить»
 """
-import sqlite3
 
-from typing import Optional, Tuple, List, Dict
 import json
+import logging
+import sqlite3
 from datetime import datetime, timedelta
 
 from database import db
+
+logger = logging.getLogger(__name__)
 
 _notifier = None  # инжектируется из services/telegram_bot.py
 
@@ -24,48 +26,49 @@ def set_notifier(n) -> None:
 
 # ---------- helpers ----------
 
-def _btn(text: str, data: str) -> Dict:
+
+def _btn(text: str, data: str) -> dict:
     return {"text": text, "callback_data": data}
 
 
-def _inline_markup(rows: List[List[Dict]]) -> dict:
+def _inline_markup(rows: list[list[dict]]) -> dict:
     return {"inline_keyboard": rows}
 
 
-def _cb_decode(data: str) -> Dict:
+def _cb_decode(data: str) -> dict:
     # Плоский и предсказуемый формат: menu:*, group:<id>, group_start:<id>, group_stop:<id>
     if not isinstance(data, str):
         return {}
-    if data.startswith('menu:'):
-        return {"t": "menu", "a": data.split(':', 1)[1]}
-    if data.startswith('group_start:'):
+    if data.startswith("menu:"):
+        return {"t": "menu", "a": data.split(":", 1)[1]}
+    if data.startswith("group_start:"):
         try:
-            return {"t": "group_start", "gid": int(data.split(':', 1)[1])}
+            return {"t": "group_start", "gid": int(data.split(":", 1)[1])}
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in _cb_decode: %s", e)
             return {}
-    if data.startswith('group_stop:'):
+    if data.startswith("group_stop:"):
         try:
-            return {"t": "group_stop", "gid": int(data.split(':', 1)[1])}
+            return {"t": "group_stop", "gid": int(data.split(":", 1)[1])}
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in _cb_decode: %s", e)
             return {}
-    if data.startswith('group:'):
+    if data.startswith("group:"):
         try:
-            return {"t": "group", "gid": int(data.split(':', 1)[1])}
+            return {"t": "group", "gid": int(data.split(":", 1)[1])}
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in _cb_decode: %s", e)
             return {}
     # Совместимость со старым форматом
-    if data.startswith('groupsel:'):
+    if data.startswith("groupsel:"):
         try:
-            return {"t": "group", "gid": int(data.split(':', 1)[1])}
+            return {"t": "group", "gid": int(data.split(":", 1)[1])}
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in _cb_decode: %s", e)
             return {}
-    if data.startswith('postpone:'):
+    if data.startswith("postpone:"):
         try:
-            _, gid, days = data.split(':', 2)
+            _, gid, days = data.split(":", 2)
             return {"t": "postpone", "gid": int(gid), "days": int(days)}
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Exception in line_69: %s", e)
@@ -81,114 +84,120 @@ def _cb_decode(data: str) -> Dict:
 
 # ---------- экраны ----------
 
-def _screen_main_menu() -> Tuple[str, dict]:
-    rows = [[_btn('Группы', 'menu:groups')]]
-    return 'Главное меню:', _inline_markup(rows)
+
+def _screen_main_menu() -> tuple[str, dict]:
+    rows = [[_btn("Группы", "menu:groups")]]
+    return "Главное меню:", _inline_markup(rows)
 
 
-def _screen_groups_list() -> Tuple[str, dict]:
+def _screen_groups_list() -> tuple[str, dict]:
     groups = db.list_groups_min() or []
     if not groups:
-        return 'Группы не найдены.', _inline_markup([[ _btn('⬅️ Назад', 'menu:root') ]])
+        return "Группы не найдены.", _inline_markup([[_btn("⬅️ Назад", "menu:root")]])
 
-    rows: List[List[Dict]] = []
-    row: List[Dict] = []
+    rows: list[list[dict]] = []
+    row: list[dict] = []
     for g in groups:
-        row.append(_btn(str(g.get('name') or f"#{g.get('id')}") , f"group:{int(g['id'])}"))
+        row.append(_btn(str(g.get("name") or f"#{g.get('id')}"), f"group:{int(g['id'])}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([_btn('⬅️ Назад', 'menu:root')])
-    return 'Выберите группу:', _inline_markup(rows)
+    rows.append([_btn("⬅️ Назад", "menu:root")])
+    return "Выберите группу:", _inline_markup(rows)
 
 
-def _screen_group_actions(group_id: int) -> Tuple[str, dict]:
+def _screen_group_actions(group_id: int) -> tuple[str, dict]:
     # Безопасно получаем название группы
     g = {}
     try:
         gl = db.list_groups_min() or []
-        g = next((gg for gg in gl if int(gg.get('id')) == int(group_id)), {})
+        g = next((gg for gg in gl if int(gg.get("id")) == int(group_id)), {})
     except (sqlite3.Error, OSError) as e:
         logger.debug("Exception in _screen_group_actions: %s", e)
         g = {}
-    name = g.get('name') or f"#{group_id}"
+    name = g.get("name") or f"#{group_id}"
     rows = [
-        [_btn('▶ Запустить', f'group_start:{int(group_id)}')],
-        [_btn('⏹ Остановить', f'group_stop:{int(group_id)}')],
+        [_btn("▶ Запустить", f"group_start:{int(group_id)}")],
+        [_btn("⏹ Остановить", f"group_stop:{int(group_id)}")],
         [
-            _btn('⏰ Отложить 1 день', f'postpone:{int(group_id)}:1'),
-            _btn('2 дня', f'postpone:{int(group_id)}:2'),
-            _btn('3 дня', f'postpone:{int(group_id)}:3'),
+            _btn("⏰ Отложить 1 день", f"postpone:{int(group_id)}:1"),
+            _btn("2 дня", f"postpone:{int(group_id)}:2"),
+            _btn("3 дня", f"postpone:{int(group_id)}:3"),
         ],
-        [_btn('⬅️ К группам', 'menu:groups')],
+        [_btn("⬅️ К группам", "menu:groups")],
     ]
     return f"Группа {name} (id={int(group_id)})", _inline_markup(rows)
 
 
 # ---------- действия ----------
 
+
 def _do_group_start(group_id: int) -> str:
     try:
         from irrigation_scheduler import get_scheduler
+
         s = get_scheduler()
         if not s:
-            return 'Планировщик недоступен'
+            return "Планировщик недоступен"
         # Issue #31: manual=True — Telegram-initiated run is user-initiated.
         ok = s.start_group_sequence(int(group_id), manual=True)
-        return '▶ Запущен полив группы' if ok else 'Не удалось запустить'
+        return "▶ Запущен полив группы" if ok else "Не удалось запустить"
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Exception in _do_group_start: %s", e)
-        return 'Ошибка запуска группы'
+        return "Ошибка запуска группы"
 
 
 def _do_group_stop(group_id: int) -> str:
     try:
         from services.zone_control import stop_all_in_group
-        stop_all_in_group(int(group_id), reason='telegram', force=True)
-        return '⏹ Полив группы остановлен'
+
+        stop_all_in_group(int(group_id), reason="telegram", force=True)
+        return "⏹ Полив группы остановлен"
     except ImportError as e:
         logger.debug("Exception in _do_group_stop: %s", e)
-        return 'Ошибка остановки группы'
+        return "Ошибка остановки группы"
 
 
 def _do_group_postpone(group_id: int, days: int) -> str:
     try:
         days = int(days)
         until_date = datetime.now() + timedelta(days=days)
-        postpone_until = until_date.strftime('%Y-%m-%d 23:59:59')
+        postpone_until = until_date.strftime("%Y-%m-%d 23:59:59")
         zones = db.get_zones() or []
         for z in zones:
             try:
-                if int(z.get('group_id') or 0) == int(group_id):
-                    db.update_zone_postpone(int(z['id']), postpone_until, 'manual')
+                if int(z.get("group_id") or 0) == int(group_id):
+                    db.update_zone_postpone(int(z["id"]), postpone_until, "manual")
             except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in _do_group_postpone: %s", e)
         try:
             from services.zone_control import stop_all_in_group
-            stop_all_in_group(int(group_id), reason='manual_postpone', force=True)
+
+            stop_all_in_group(int(group_id), reason="manual_postpone", force=True)
         except ImportError as e:
             logger.debug("Handled exception in _do_group_postpone: %s", e)
-        return f'⏰ Полив отложен на {days} дн. до {postpone_until}'
+        return f"⏰ Полив отложен на {days} дн. до {postpone_until}"
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Exception in _do_group_postpone: %s", e)
-        return 'Ошибка отложки группы'
+        return "Ошибка отложки группы"
 
 
 # ---------- роутер ----------
 
-def process_callback_json(chat_id: int, jd: Dict, message_id: Optional[int] = None) -> None:
+
+def process_callback_json(chat_id: int, jd: dict, message_id: int | None = None) -> None:
     if _notifier is None:
         return
 
-    t = jd.get('t')
+    t = jd.get("t")
 
-    if t == 'menu':
-        a = jd.get('a')
-        if a in (None, 'root'):
+    if t == "menu":
+        a = jd.get("a")
+        if a in (None, "root"):
             text, markup = _screen_main_menu()
-        elif a == 'groups':
+        elif a == "groups":
             text, markup = _screen_groups_list()
         else:
             text, markup = _screen_main_menu()
@@ -198,8 +207,8 @@ def process_callback_json(chat_id: int, jd: Dict, message_id: Optional[int] = No
             _notifier.send_message(chat_id, text, reply_markup=markup)
         return
 
-    if t == 'group':
-        gid = int(jd.get('gid'))
+    if t == "group":
+        gid = int(jd.get("gid"))
         text, markup = _screen_group_actions(gid)
         if message_id:
             _notifier.edit_message_text(chat_id, message_id, text, reply_markup=markup)
@@ -207,8 +216,8 @@ def process_callback_json(chat_id: int, jd: Dict, message_id: Optional[int] = No
             _notifier.send_message(chat_id, text, reply_markup=markup)
         return
 
-    if t == 'group_start':
-        gid = int(jd.get('gid'))
+    if t == "group_start":
+        gid = int(jd.get("gid"))
         notice = _do_group_start(gid)
         text, markup = _screen_group_actions(gid)
         if message_id:
@@ -218,8 +227,8 @@ def process_callback_json(chat_id: int, jd: Dict, message_id: Optional[int] = No
         _notifier.send_text(chat_id, notice)
         return
 
-    if t == 'group_stop':
-        gid = int(jd.get('gid'))
+    if t == "group_stop":
+        gid = int(jd.get("gid"))
         notice = _do_group_stop(gid)
         text, markup = _screen_group_actions(gid)
         if message_id:
@@ -229,9 +238,9 @@ def process_callback_json(chat_id: int, jd: Dict, message_id: Optional[int] = No
         _notifier.send_text(chat_id, notice)
         return
 
-    if t == 'postpone':
-        gid = int(jd.get('gid'))
-        days = int(jd.get('days') or 1)
+    if t == "postpone":
+        gid = int(jd.get("gid"))
+        days = int(jd.get("days") or 1)
         notice = _do_group_postpone(gid, days)
         text, markup = _screen_group_actions(gid)
         if message_id:

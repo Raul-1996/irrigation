@@ -37,7 +37,6 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +44,14 @@ logger = logging.getLogger(__name__)
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 
 # Module-level cache. ``None`` means "not yet resolved".
-_CACHED: Optional[str] = None
+_CACHED: str | None = None
 
 # Hard timeout (seconds) for each git invocation.
 _GIT_TIMEOUT_SEC: int = 3
 
 # Anchor tag marking the start of the v2 line. Commits since this tag
 # form the second component of the version string.
-V2_BASE_TAG: str = 'v2-base'
+V2_BASE_TAG: str = "v2-base"
 
 
 def _run_git(args: list[str]):
@@ -75,9 +74,11 @@ def _run_git(args: list[str]):
     try:
         return subprocess.run(
             [
-                'git',
-                '--git-dir', str(REPO_ROOT / '.git'),
-                '--work-tree', str(REPO_ROOT),
+                "git",
+                "--git-dir",
+                str(REPO_ROOT / ".git"),
+                "--work-tree",
+                str(REPO_ROOT),
                 *args,
             ],
             capture_output=True,
@@ -91,42 +92,44 @@ def _run_git(args: list[str]):
         return None
 
 
-def _try_git_describe() -> Optional[str]:
+def _try_git_describe() -> str | None:
     """Compose ``2.<N> (<sha>[+dirty])`` via two git invocations.
 
     Returns ``None`` if either invocation fails or yields empty output.
     Never raises.
     """
-    count_proc = _run_git(['rev-list', '--count', f'{V2_BASE_TAG}..HEAD'])
+    count_proc = _run_git(["rev-list", "--count", f"{V2_BASE_TAG}..HEAD"])
     if count_proc is None or count_proc.returncode != 0:
         if count_proc is not None:
             # Git is present and refused — unexpected, surface it. The legitimate
             # "no git" cases (missing binary, timeout) stay at debug via _run_git's
             # except clause.
-            logger.warning("rev-list non-zero exit: rc=%s stderr=%r",
-                           count_proc.returncode, (count_proc.stderr or '').strip())
+            logger.warning(
+                "rev-list non-zero exit: rc=%s stderr=%r", count_proc.returncode, (count_proc.stderr or "").strip()
+            )
         return None
-    count = (count_proc.stdout or '').strip()
+    count = (count_proc.stdout or "").strip()
     if not count:
         return None
 
-    sha_proc = _run_git(['describe', '--always', '--dirty=+dirty'])
+    sha_proc = _run_git(["describe", "--always", "--dirty=+dirty"])
     if sha_proc is None or sha_proc.returncode != 0:
         if sha_proc is not None:
-            logger.warning("describe non-zero exit: rc=%s stderr=%r",
-                           sha_proc.returncode, (sha_proc.stderr or '').strip())
+            logger.warning(
+                "describe non-zero exit: rc=%s stderr=%r", sha_proc.returncode, (sha_proc.stderr or "").strip()
+            )
         return None
-    sha = (sha_proc.stdout or '').strip()
+    sha = (sha_proc.stdout or "").strip()
     if not sha:
         return None
 
-    return f'2.{count} ({sha})'
+    return f"2.{count} ({sha})"
 
 
-def _try_version_file() -> Optional[str]:
+def _try_version_file() -> str | None:
     """Return the trimmed contents of ``<repo>/VERSION`` or ``None``."""
     try:
-        text = (REPO_ROOT / 'VERSION').read_text(encoding='utf-8').strip()
+        text = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as e:
         logger.debug("VERSION file read failed: %s", e)
         return None
@@ -148,7 +151,7 @@ def get_app_version() -> str:
     if version is None:
         version = _try_version_file()
     if version is None:
-        version = 'unknown'
+        version = "unknown"
 
     _CACHED = version
     return _CACHED

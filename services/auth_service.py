@@ -1,7 +1,9 @@
 import logging
-from database import db
-from werkzeug.security import check_password_hash
 import sqlite3
+
+from werkzeug.security import check_password_hash
+
+from database import db
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +27,11 @@ def verify_password(password: str) -> tuple[bool, str]:
     try:
         stored_hash = db.get_password_hash()
         if stored_hash and check_password_hash(stored_hash, password):
-            return True, 'admin'
+            return True, "admin"
     except (sqlite3.Error, OSError) as e:
         logger.debug("Password check failed: %s", e)
 
-    return False, 'guest'
+    return False, "guest"
 
 
 # Удалены неиспользуемые JWT-хелперы
-
-

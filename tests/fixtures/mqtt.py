@@ -1,6 +1,8 @@
 """MQTT fixtures: mock client for unit tests, real broker for integration."""
-import pytest
+
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class MockMQTTClient:
@@ -25,16 +27,18 @@ class MockMQTTClient:
         result = MagicMock()
         result.rc = 0
         result.wait_for_publish = MagicMock()
-        self.published.append({
-            'topic': topic,
-            'payload': payload,
-            'qos': qos,
-            'retain': retain,
-        })
+        self.published.append(
+            {
+                "topic": topic,
+                "payload": payload,
+                "qos": qos,
+                "retain": retain,
+            }
+        )
         return result
 
     def subscribe(self, topic, qos=0):
-        self.subscribed.append({'topic': topic, 'qos': qos})
+        self.subscribed.append({"topic": topic, "qos": qos})
 
     def loop_start(self):
         pass
@@ -109,5 +113,7 @@ def mock_mqtt_module(mock_mqtt_client):
 @pytest.fixture
 def patched_mqtt(mock_mqtt_module):
     """Patch 'paho.mqtt.client' globally for unit tests."""
-    with patch.dict('sys.modules', {'paho.mqtt.client': mock_mqtt_module, 'paho': MagicMock(), 'paho.mqtt': MagicMock()}):
+    with patch.dict(
+        "sys.modules", {"paho.mqtt.client": mock_mqtt_module, "paho": MagicMock(), "paho.mqtt": MagicMock()}
+    ):
         yield mock_mqtt_module

@@ -1,9 +1,10 @@
 """Comprehensive tests for services/telegram_bot.py — mock-based, no real Telegram."""
-import pytest
-import os
-from unittest.mock import patch, MagicMock, AsyncMock
 
-os.environ['TESTING'] = '1'
+import os
+
+import pytest
+
+os.environ["TESTING"] = "1"
 
 
 class TestTelegramBotImport:

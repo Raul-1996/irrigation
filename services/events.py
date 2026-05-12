@@ -1,7 +1,7 @@
+import logging
 import threading
 import time
-import logging
-from typing import Callable, Dict, Any
+from typing import Any, Callable
 
 from constants import DEDUP_SET_MAX_SIZE, DEDUP_TTL_SEC
 
@@ -12,7 +12,8 @@ _SUBS = []  # list[Callable[[dict], None]]
 _DEDUP = set()
 _DEDUP_TTL = float(DEDUP_TTL_SEC)
 
-def publish(event: Dict[str, Any]) -> None:
+
+def publish(event: dict[str, Any]) -> None:
     try:
         key = f"{event.get('type')}:{event.get('id') or event.get('event_id') or event.get('ts')}"
         now = time.time()
@@ -31,11 +32,12 @@ def publish(event: Dict[str, Any]) -> None:
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.debug("Handled exception in publish: %s", e)
 
-def subscribe(callback: Callable[[Dict[str, Any]], None]) -> None:
+
+def subscribe(callback: Callable[[dict[str, Any]], None]) -> None:
     with _BUS_LOCK:
         _SUBS.append(callback)
+
 
 def _cleanup(now: float) -> None:
     if len(_DEDUP) > DEDUP_SET_MAX_SIZE:
         _DEDUP.clear()
-

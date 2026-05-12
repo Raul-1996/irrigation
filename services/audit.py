@@ -20,14 +20,14 @@ Behaviour:
   - Best-effort: a failure to write the audit row never breaks the handler.
   - Strips secrets from payload via key blacklist.
 """
+
 from __future__ import annotations
 
 import functools
-import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Iterable
 
 # werkzeug HTTPException — needed so we can classify 4xx aborts as
 # `failure:{code}` instead of bucket them with real handler errors.  Import
@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, Iterable, Optional
 # present (tooling, schema-migration scripts, etc.).
 try:
     from werkzeug.exceptions import HTTPException as _WerkzeugHTTPException
-except Exception:  # noqa: BLE001 — broad on purpose
+except Exception:
     _WerkzeugHTTPException = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # invalidate explicitly when the toggle endpoint flips it.
 _DEBUG_FLAG_TTL_SEC = 5.0
 _DEBUG_FLAG_LOCK = threading.Lock()
-_DEBUG_FLAG_CACHE: Dict[str, Any] = {'value': False, 'fetched_at': 0.0}
+_DEBUG_FLAG_CACHE: dict[str, Any] = {"value": False, "fetched_at": 0.0}
 
 
 def _is_debug_audit_enabled() -> bool:
@@ -58,18 +58,19 @@ def _is_debug_audit_enabled() -> bool:
     """
     now = time.time()
     with _DEBUG_FLAG_LOCK:
-        cached_at = _DEBUG_FLAG_CACHE.get('fetched_at') or 0.0
+        cached_at = _DEBUG_FLAG_CACHE.get("fetched_at") or 0.0
         if (now - cached_at) < _DEBUG_FLAG_TTL_SEC:
-            return bool(_DEBUG_FLAG_CACHE.get('value'))
+            return bool(_DEBUG_FLAG_CACHE.get("value"))
     # Miss — refresh outside the lock to avoid blocking concurrent readers.
     try:
         from database import db as _db  # local import — avoid circular
+
         val = bool(_db.get_logging_debug())
-    except Exception:  # noqa: BLE001 — never raise from audit hot path
+    except Exception:
         val = False
     with _DEBUG_FLAG_LOCK:
-        _DEBUG_FLAG_CACHE['value'] = val
-        _DEBUG_FLAG_CACHE['fetched_at'] = now
+        _DEBUG_FLAG_CACHE["value"] = val
+        _DEBUG_FLAG_CACHE["fetched_at"] = now
     return val
 
 
@@ -81,12 +82,20 @@ def invalidate_debug_audit_cache() -> None:
     instead of waiting up to ``_DEBUG_FLAG_TTL_SEC`` seconds.
     """
     with _DEBUG_FLAG_LOCK:
-        _DEBUG_FLAG_CACHE['fetched_at'] = 0.0
+        _DEBUG_FLAG_CACHE["fetched_at"] = 0.0
+
 
 # Keys whose values must NEVER be logged to audit_log payload.
 _SECRET_KEY_FRAGMENTS = (
-    'password', 'token', 'secret', 'api_key', 'apikey',
-    'csrf', 'session', 'authorization', 'cookie',
+    "password",
+    "token",
+    "secret",
+    "api_key",
+    "apikey",
+    "csrf",
+    "session",
+    "authorization",
+    "cookie",
 )
 
 # Cap for individual payload values (avoid runaway logging of large blobs).
@@ -117,11 +126,11 @@ def _redact(value: Any, _depth: int = 0) -> Any:
     if _depth >= _MAX_REDACT_DEPTH:
         # Summarise without further recursion.
         if isinstance(value, dict):
-            return {'__truncated_depth__': True, '__keys__': len(value)}
+            return {"__truncated_depth__": True, "__keys__": len(value)}
         if isinstance(value, (list, tuple)):
-            return ['__truncated_depth__', f'len={len(value)}']
+            return ["__truncated_depth__", f"len={len(value)}"]
         if isinstance(value, str):
-            return value[:_MAX_VALUE_LEN] + ('…(truncated)' if len(value) > _MAX_VALUE_LEN else '')
+            return value[:_MAX_VALUE_LEN] + ("…(truncated)" if len(value) > _MAX_VALUE_LEN else "")
         if isinstance(value, (int, float, bool)) or value is None:
             return value
         try:
@@ -129,13 +138,13 @@ def _redact(value: Any, _depth: int = 0) -> Any:
         except (TypeError, ValueError):
             return None
     if isinstance(value, dict):
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for i, (k, v) in enumerate(value.items()):
             if i >= _MAX_PAYLOAD_KEYS:
-                out['__truncated__'] = True
+                out["__truncated__"] = True
                 break
             if _is_secret_key(k):
-                out[str(k)] = '***'
+                out[str(k)] = "***"
             else:
                 out[str(k)] = _redact(v, _depth + 1)
         return out
@@ -143,7 +152,7 @@ def _redact(value: Any, _depth: int = 0) -> Any:
         return [_redact(v, _depth + 1) for v in list(value)[:_MAX_PAYLOAD_KEYS]]
     if isinstance(value, str):
         if len(value) > _MAX_VALUE_LEN:
-            return value[:_MAX_VALUE_LEN] + '…(truncated)'
+            return value[:_MAX_VALUE_LEN] + "…(truncated)"
         return value
     if isinstance(value, (int, float, bool)) or value is None:
         return value
@@ -155,16 +164,16 @@ def _redact(value: Any, _depth: int = 0) -> Any:
     return s[:_MAX_VALUE_LEN]
 
 
-def _extract_payload(req) -> Optional[Dict[str, Any]]:
+def _extract_payload(req) -> dict[str, Any] | None:
     """Build a redacted dict from request JSON body + form fields."""
-    payload: Dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     try:
         body = req.get_json(silent=True)
         if isinstance(body, dict):
             for k, v in body.items():
                 payload[str(k)] = v
         elif body is not None:
-            payload['__body__'] = body
+            payload["__body__"] = body
     except (ValueError, TypeError, AttributeError) as e:
         logger.debug("audit payload: get_json failed: %s", e)
     try:
@@ -177,7 +186,7 @@ def _extract_payload(req) -> Optional[Dict[str, Any]]:
         # Include query string args for completeness
         args = req.args.to_dict() if req.args else {}
         for k, v in args.items():
-            payload.setdefault(f'__qs__{k}', v)
+            payload.setdefault(f"__qs__{k}", v)
     except (AttributeError, ValueError, TypeError) as e:
         logger.debug("audit payload: args failed: %s", e)
 
@@ -190,33 +199,34 @@ def _resolve_actor(req) -> str:
     """Pull the actor name from Flask session (admin/viewer/guest)."""
     try:
         from flask import session  # local import — avoid circular at module load
+
         if not session:
-            return 'guest'
-        user = session.get('user') or session.get('username')
+            return "guest"
+        user = session.get("user") or session.get("username")
         if user:
             return str(user)
-        role = session.get('role')
-        return str(role) if role else 'guest'
+        role = session.get("role")
+        return str(role) if role else "guest"
     except (ImportError, RuntimeError, AttributeError):
-        return 'guest'
+        return "guest"
 
 
-def _resolve_ip(req) -> Optional[str]:
+def _resolve_ip(req) -> str | None:
     try:
         # Honour X-Forwarded-For if behind nginx
-        fwd = req.headers.get('X-Forwarded-For') if req.headers else None
+        fwd = req.headers.get("X-Forwarded-For") if req.headers else None
         if fwd:
-            return str(fwd).split(',')[0].strip()
+            return str(fwd).split(",")[0].strip()
         return req.remote_addr
     except (AttributeError, KeyError):
         return None
 
 
-def _safe_status_code(resp: Any) -> Optional[int]:
+def _safe_status_code(resp: Any) -> int | None:
     """Best-effort extraction of HTTP status from a Flask handler return value."""
     try:
         # Flask Response object
-        if hasattr(resp, 'status_code'):
+        if hasattr(resp, "status_code"):
             return int(resp.status_code)
         # (body, code) or (body, code, headers)
         if isinstance(resp, tuple) and len(resp) >= 2:
@@ -230,10 +240,10 @@ def _safe_status_code(resp: Any) -> Optional[int]:
 
 def audit_log(
     action_type: str,
-    target_extractor: Optional[Callable[..., str]] = None,
-    payload_filter: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-    source: str = 'api',
-    skip_methods: Iterable[str] = ('GET', 'HEAD', 'OPTIONS'),
+    target_extractor: Callable[..., str] | None = None,
+    payload_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    source: str = "api",
+    skip_methods: Iterable[str] = ("GET", "HEAD", "OPTIONS"),
 ):
     """Return a decorator that records a row in ``audit_log`` per call.
 
@@ -252,10 +262,11 @@ def audit_log(
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             from flask import request  # local import — no Flask dep at module load
+
             t0 = time.time()
             method = None
             try:
-                method = (request.method or '').upper()
+                method = (request.method or "").upper()
             except (RuntimeError, AttributeError):
                 method = None
 
@@ -266,7 +277,7 @@ def audit_log(
             # Resolve metadata BEFORE handler runs (in case handler clears session)
             actor = _resolve_actor(request)
             ip = _resolve_ip(request)
-            target: Optional[str] = None
+            target: str | None = None
             if target_extractor is not None:
                 try:
                     target = str(target_extractor(*args, **kwargs))
@@ -281,20 +292,20 @@ def audit_log(
                 except (TypeError, ValueError, KeyError) as e:
                     logger.debug("audit payload_filter failed: %s", e)
 
-            error_msg: Optional[str] = None
-            result_str = 'success'
-            status_code: Optional[int] = None
+            error_msg: str | None = None
+            result_str = "success"
+            status_code: int | None = None
             handler_result: Any = None
             try:
                 handler_result = fn(*args, **kwargs)
                 status_code = _safe_status_code(handler_result)
                 if status_code is not None:
                     if 200 <= status_code < 400:
-                        result_str = f'success:{status_code}'
+                        result_str = f"success:{status_code}"
                     else:
-                        result_str = f'failure:{status_code}'
+                        result_str = f"failure:{status_code}"
                 return handler_result
-            except Exception as exc:  # noqa: BLE001 — broad on purpose
+            except Exception as exc:
                 # Audit any *handler* failure but DO NOT swallow KeyboardInterrupt,
                 # SystemExit, or GeneratorExit (those are BaseException not
                 # Exception).  The previous ``except BaseException`` branch
@@ -315,23 +326,21 @@ def audit_log(
                 # ``failure:{code}`` (mirrors the explicit-status path
                 # above) and leave error_msg None.  5xx HTTPException and
                 # all other Exception subclasses still flag 'error'.
-                if (
-                    _WerkzeugHTTPException is not None
-                    and isinstance(exc, _WerkzeugHTTPException)
-                ):
-                    code = getattr(exc, 'code', None)
+                if _WerkzeugHTTPException is not None and isinstance(exc, _WerkzeugHTTPException):
+                    code = getattr(exc, "code", None)
                     if isinstance(code, int) and 400 <= code < 500:
                         status_code = code
-                        result_str = f'failure:{code}'
+                        result_str = f"failure:{code}"
                         raise
                 error_msg = f"{type(exc).__name__}: {exc}"[:512]
-                result_str = 'error'
+                result_str = "error"
                 raise
             finally:
                 duration_ms = int((time.time() - t0) * 1000)
                 # Best-effort write — never raise from inside the audit hook
                 try:
                     from database import db as _db  # local — avoid circular import
+
                     _db.add_audit(
                         action_type=action_type,
                         source=source,
@@ -343,23 +352,23 @@ def audit_log(
                         duration_ms=duration_ms,
                         actor=actor,
                     )
-                except Exception:  # noqa: BLE001 — never propagate
-                    logger.exception("audit_log decorator: add_audit failed (action=%s)",
-                                     action_type)
+                except Exception:
+                    logger.exception("audit_log decorator: add_audit failed (action=%s)", action_type)
 
         return wrapper
+
     return decorator
 
 
 # ─── Debug-only emit ───────────────────────────────────────────────────────
 def debug_audit(
     action_type: str,
-    source: str = 'system',
-    target: Optional[str] = None,
+    source: str = "system",
+    target: str | None = None,
     payload: Any = None,
-    actor: Optional[str] = 'system',
-    duration_ms: Optional[int] = None,
-    result: str = 'debug',
+    actor: str | None = "system",
+    duration_ms: int | None = None,
+    result: str = "debug",
 ) -> None:
     """Emit an audit row only when ``settings.logging.debug`` is enabled.
 
@@ -374,6 +383,7 @@ def debug_audit(
         if not _is_debug_audit_enabled():
             return
         from database import db as _db  # local — avoid circular at module load
+
         if isinstance(payload, dict):
             payload = _redact(payload)
         _db.add_audit(
@@ -387,30 +397,37 @@ def debug_audit(
             duration_ms=duration_ms,
             actor=actor,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("debug_audit failed (action=%s)", action_type)
 
 
 # Convenience helper for non-route call sites (scheduler jobs, MQTT callbacks).
 def record_audit(
     action_type: str,
-    source: str = 'scheduler',
-    target: Optional[str] = None,
+    source: str = "scheduler",
+    target: str | None = None,
     payload: Any = None,
-    result: str = 'success',
-    error: Optional[str] = None,
-    actor: Optional[str] = 'system',
-    duration_ms: Optional[int] = None,
+    result: str = "success",
+    error: str | None = None,
+    actor: str | None = "system",
+    duration_ms: int | None = None,
 ):
     """Direct audit-row insert for non-HTTP code paths.  Best-effort."""
     try:
         from database import db as _db
+
         if isinstance(payload, dict):
             payload = _redact(payload)
         _db.add_audit(
-            action_type=action_type, source=source, target=target,
-            payload=payload, result=result, error=error,
-            ip=None, duration_ms=duration_ms, actor=actor,
+            action_type=action_type,
+            source=source,
+            target=target,
+            payload=payload,
+            result=result,
+            error=error,
+            ip=None,
+            duration_ms=duration_ms,
+            actor=actor,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("record_audit failed (action=%s)", action_type)

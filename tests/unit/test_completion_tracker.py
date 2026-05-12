@@ -7,12 +7,13 @@
         is_program_complete(program_run_id) -> bool
         get_pending() -> Dict[str, Dict]
 """
+
 import os
 import threading
-import pytest
-from unittest.mock import MagicMock, patch
 
-os.environ['TESTING'] = '1'
+import pytest
+
+os.environ["TESTING"] = "1"
 
 
 # ---------------------------------------------------------------------------
@@ -23,6 +24,7 @@ os.environ['TESTING'] = '1'
 _tracker_cls = None
 try:
     from services.program_queue import ProgramCompletionTracker
+
     _tracker_cls = ProgramCompletionTracker
 except ImportError:
     pass
@@ -36,6 +38,7 @@ def _make_tracker():
 
 
 # === Test 1: Single entry → complete ===
+
 
 class TestCompletionTracker:
     """ProgramCompletionTracker — 6 тестов по спеке 3.5."""
@@ -175,7 +178,7 @@ class TestCompletionTrackerEdgeCases:
 
         pending = tracker.get_pending()
         assert run_id in pending
-        assert pending[run_id]['program_name'] == "Тест"
+        assert pending[run_id]["program_name"] == "Тест"
 
     def test_thread_safety_register_and_finish(self):
         """Параллельные register + entry_finished — без crash."""
@@ -198,4 +201,4 @@ class TestCompletionTrackerEdgeCases:
         for t in threads:
             t.join(timeout=5)
 
-        assert not errors, "Thread safety violation: %s" % errors
+        assert not errors, f"Thread safety violation: {errors}"

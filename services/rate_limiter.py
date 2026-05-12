@@ -6,17 +6,19 @@ after too many failures within a sliding time window.
 
 import threading
 import time
-from typing import Tuple
 
-from constants import LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SEC, LOGIN_LOCKOUT_SEC
+from constants import LOGIN_LOCKOUT_SEC, LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SEC
 
 
 class LoginRateLimiter:
     """Thread-safe IP-based rate limiter for login attempts."""
 
-    def __init__(self, max_attempts: int = LOGIN_MAX_ATTEMPTS,
-                 window_sec: int = LOGIN_WINDOW_SEC,
-                 lockout_sec: int = LOGIN_LOCKOUT_SEC) -> None:
+    def __init__(
+        self,
+        max_attempts: int = LOGIN_MAX_ATTEMPTS,
+        window_sec: int = LOGIN_WINDOW_SEC,
+        lockout_sec: int = LOGIN_LOCKOUT_SEC,
+    ) -> None:
         """
         Args:
             max_attempts: Maximum failed attempts before lockout.
@@ -30,7 +32,7 @@ class LoginRateLimiter:
         self.window_sec = window_sec
         self.lockout_sec = lockout_sec
 
-    def check(self, ip: str) -> Tuple[bool, int]:
+    def check(self, ip: str) -> tuple[bool, int]:
         """Check if an IP is allowed to attempt login.
 
         Returns:

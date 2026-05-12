@@ -1,5 +1,7 @@
 """Tests for desktop sidebar layout in status.html."""
+
 import re
+
 import pytest
 
 
@@ -14,30 +16,30 @@ def _fetch_inline_and_external_css(client, page_path: str) -> str:
     """
     resp = client.get(page_path)
     if resp.status_code != 200:
-        return resp.data.decode('utf-8', errors='replace')
-    html = resp.data.decode('utf-8', errors='replace')
+        return resp.data.decode("utf-8", errors="replace")
+    html = resp.data.decode("utf-8", errors="replace")
     pieces = [html]
     for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
         # Normalise to a path the test client can fetch
-        if href.startswith('http'):
+        if href.startswith("http"):
             continue
-        path = href if href.startswith('/') else '/' + href.lstrip('./')
+        path = href if href.startswith("/") else "/" + href.lstrip("./")
         try:
             css_resp = client.get(path)
             if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode('utf-8', errors='replace'))
+                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
         except (OSError, ValueError):
             continue
-    return '\n'.join(pieces)
+    return "\n".join(pieces)
 
 
 @pytest.mark.xfail(reason="Implementation pending")
 def test_status_html_has_desktop_layout(client):
     """Verify status.html contains desktop-layout wrapper and sidebar elements."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
+    html = response.data.decode("utf-8")
+
     # Check for main layout structure
     assert 'class="desktop-layout"' in html
     assert 'class="weather-sidebar"' in html
@@ -50,12 +52,12 @@ def test_status_html_has_desktop_layout(client):
 @pytest.mark.xfail(reason="Implementation pending")
 def test_status_html_has_active_zone_indicator(client):
     """Verify status.html contains active zone indicator in sidebar."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
+    html = response.data.decode("utf-8")
+
     assert 'id="sidebar-active-zone"' in html
-    assert 'active-zone-header' in html
+    assert "active-zone-header" in html
     assert 'id="active-zone-name"' in html
     assert 'id="active-zone-timer"' in html
     assert 'id="active-zone-progress"' in html
@@ -65,27 +67,27 @@ def test_status_html_has_active_zone_indicator(client):
 @pytest.mark.xfail(reason="Implementation pending")
 def test_status_html_has_water_meter(client):
     """Verify status.html contains water meter widget in sidebar."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
+    html = response.data.decode("utf-8")
+
     assert 'id="sidebar-water-meter"' in html
-    assert 'water-meter-header' in html
+    assert "water-meter-header" in html
     assert 'id="water-meter-value"' in html
     assert 'id="water-meter-detail"' in html
 
 
 def test_weather_widget_in_sidebar(client):
     """Verify weather-widget is inside weather-sidebar."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
+    html = response.data.decode("utf-8")
+
     # Find positions in HTML
     sidebar_start = html.find('class="weather-sidebar"')
-    sidebar_end = html.find('</aside>', sidebar_start)
+    sidebar_end = html.find("</aside>", sidebar_start)
     weather_widget_pos = html.find('id="weather-widget"')
-    
+
     assert sidebar_start != -1, "weather-sidebar not found"
     assert weather_widget_pos != -1, "weather-widget not found"
     assert sidebar_start < weather_widget_pos < sidebar_end, "weather-widget not inside weather-sidebar"
@@ -94,41 +96,41 @@ def test_weather_widget_in_sidebar(client):
 @pytest.mark.xfail(reason="Implementation pending")
 def test_24h_grid_exists(client):
     """Verify CSS contains weather-24h-grid styles."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
-    assert 'weather-24h-grid' in html
+    html = response.data.decode("utf-8")
+
+    assert "weather-24h-grid" in html
     # Check CSS definition
-    assert 'grid-template-columns: repeat(3, 1fr)' in html or 'grid-template-columns:repeat(3,1fr)' in html
+    assert "grid-template-columns: repeat(3, 1fr)" in html or "grid-template-columns:repeat(3,1fr)" in html
 
 
 @pytest.mark.xfail(reason="Implementation pending")
 def test_sidebar_collapsed_css(client):
     """Verify CSS contains sidebar-collapsed styles."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
-    assert 'sidebar-collapsed' in html
+    html = response.data.decode("utf-8")
+
+    assert "sidebar-collapsed" in html
 
 
 @pytest.mark.xfail(reason="Implementation pending")
 def test_mobile_media_query(client):
     """Verify mobile responsive media query exists."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
-    assert '@media (max-width: 1023px)' in html or '@media(max-width:1023px)' in html
+    html = response.data.decode("utf-8")
+
+    assert "@media (max-width: 1023px)" in html or "@media(max-width:1023px)" in html
 
 
 def test_mobile_zones_cards_class(client):
     """Verify HTML contains zone list container for mobile view (v2: Hunter-style)."""
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    html = response.data.decode('utf-8')
-    
+    html = response.data.decode("utf-8")
+
     # v2: zone-list replaces zones-cards
     assert 'id="zoneList"' in html or 'id="zones-cards"' in html
 
@@ -140,15 +142,15 @@ def test_mobile_buttons_responsive(client):
     /static/css/status.css, not inline.  Fetch the linked stylesheets and grep
     the combined content.
     """
-    response = client.get('/status')
+    response = client.get("/status")
     assert response.status_code == 200
-    combined = _fetch_inline_and_external_css(client, '/status')
+    combined = _fetch_inline_and_external_css(client, "/status")
     # v2: breakpoint raised to 1023px
-    assert ('@media (max-width: 1023px)' in combined
-            or '@media(max-width:1023px)' in combined
-            or '@media (max-width: 767px)' in combined), (
-        f"No expected @media query found in HTML or linked CSS"
-    )
+    assert (
+        "@media (max-width: 1023px)" in combined
+        or "@media(max-width:1023px)" in combined
+        or "@media (max-width: 767px)" in combined
+    ), "No expected @media query found in HTML or linked CSS"
 
 
 def test_bottom_sheet_hidden_by_default(client):
@@ -160,28 +162,18 @@ def test_bottom_sheet_hidden_by_default(client):
     overrides both, with a delayed visibility transition so slide-down animates
     out before the sheet becomes non-interactive.
     """
-    combined = _fetch_inline_and_external_css(client, '/status')
+    combined = _fetch_inline_and_external_css(client, "/status")
     # Locate the base .bottom-sheet block (the one before the @media query).
-    base_match = re.search(
-        r'\.bottom-sheet\s*\{[^}]*\}', combined, re.DOTALL
-    )
+    base_match = re.search(r"\.bottom-sheet\s*\{[^}]*\}", combined, re.DOTALL)
     assert base_match, ".bottom-sheet base rule not found in CSS"
     base_block = base_match.group(0)
-    assert 'visibility:hidden' in base_block.replace(' ', ''), (
+    assert "visibility:hidden" in base_block.replace(" ", ""), (
         "base .bottom-sheet must set visibility:hidden so it cannot capture clicks"
     )
-    assert 'pointer-events:none' in base_block.replace(' ', ''), (
-        "base .bottom-sheet must set pointer-events:none"
-    )
+    assert "pointer-events:none" in base_block.replace(" ", ""), "base .bottom-sheet must set pointer-events:none"
 
-    show_match = re.search(
-        r'\.bottom-sheet\.show\s*\{[^}]*\}', combined, re.DOTALL
-    )
+    show_match = re.search(r"\.bottom-sheet\.show\s*\{[^}]*\}", combined, re.DOTALL)
     assert show_match, ".bottom-sheet.show rule not found in CSS"
     show_block = show_match.group(0)
-    assert 'visibility:visible' in show_block.replace(' ', ''), (
-        ".bottom-sheet.show must restore visibility:visible"
-    )
-    assert 'pointer-events:auto' in show_block.replace(' ', ''), (
-        ".bottom-sheet.show must restore pointer-events:auto"
-    )
+    assert "visibility:visible" in show_block.replace(" ", ""), ".bottom-sheet.show must restore visibility:visible"
+    assert "pointer-events:auto" in show_block.replace(" ", ""), ".bottom-sheet.show must restore pointer-events:auto"

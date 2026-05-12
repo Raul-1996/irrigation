@@ -6,17 +6,17 @@ IrrigationDB class with the same public API so that every existing call like
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Any
 
-from db.zones import ZoneRepository
-from db.programs import ProgramRepository
+from db.audit import AuditRepository
 from db.groups import GroupRepository
+from db.logs import LogRepository
+from db.migrations import MigrationRunner
 from db.mqtt import MqttRepository
+from db.programs import ProgramRepository
 from db.settings import SettingsRepository
 from db.telegram import TelegramRepository
-from db.logs import LogRepository
-from db.audit import AuditRepository
-from db.migrations import MigrationRunner
+from db.zones import ZoneRepository
 
 # Логирование: не вызываем logging.basicConfig() на import-time (CQ-012 / MASTER-C2).
 # До фикса этот вызов перебивал уровень root-логгера ДО того, как
@@ -24,9 +24,10 @@ from db.migrations import MigrationRunner
 # в результате `backups/app.log` оставался пустым 13+ дней на проде.
 logger = logging.getLogger(__name__)
 import os as _os
+
 # В тестах отключаем propagate, чтобы не писать в закрытый stdout из фоновых потоков.
 try:
-    if 'PYTEST_CURRENT_TEST' in _os.environ:
+    if "PYTEST_CURRENT_TEST" in _os.environ:
         logger.propagate = False
 except (KeyError, TypeError):
     pass
@@ -35,9 +36,9 @@ except (KeyError, TypeError):
 class IrrigationDB:
     """Backward-compatible facade over decomposed db/ repositories."""
 
-    def __init__(self, db_path: str = 'irrigation.db'):
+    def __init__(self, db_path: str = "irrigation.db"):
         self.db_path = db_path
-        self.backup_dir = 'backups'
+        self.backup_dir = "backups"
 
         # Repositories
         self.zones = ZoneRepository(db_path)
@@ -62,19 +63,19 @@ class IrrigationDB:
     # =====================================================================
 
     # --- Zones ---
-    def get_zones(self, **kw) -> List[Dict[str, Any]]:
+    def get_zones(self, **kw) -> list[dict[str, Any]]:
         return self.zones.get_zones(**kw)
 
-    def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
+    def get_zone(self, zone_id: int) -> dict[str, Any] | None:
         return self.zones.get_zone(zone_id)
 
-    def create_zone(self, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def create_zone(self, zone_data: dict[str, Any]) -> dict[str, Any] | None:
         return self.zones.create_zone(zone_data)
 
-    def update_zone(self, zone_id: int, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def update_zone(self, zone_id: int, zone_data: dict[str, Any]) -> dict[str, Any] | None:
         return self.zones.update_zone(zone_id, zone_data)
 
-    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> tuple:
+    def update_zone_versioned(self, zone_id: int, updates: dict[str, Any]) -> tuple:
         """Versioned zone update — see db.zones.update_zone_versioned for contract.
 
         Returns ``(ok: bool, prev_zone: dict | None)`` since the audit-logging
@@ -83,80 +84,101 @@ class IrrigationDB:
         """
         return self.zones.update_zone_versioned(zone_id, updates)
 
-    def bulk_update_zones(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def bulk_update_zones(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         return self.zones.bulk_update_zones(updates)
 
-    def bulk_upsert_zones(self, zones: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def bulk_upsert_zones(self, zones: list[dict[str, Any]]) -> dict[str, Any]:
         return self.zones.bulk_upsert_zones(zones)
 
     def delete_zone(self, zone_id: int) -> bool:
         return self.zones.delete_zone(zone_id)
 
-    def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
+    def get_zones_by_group(self, group_id: int) -> list[dict[str, Any]]:
         return self.zones.get_zones_by_group(group_id)
 
     def clear_group_scheduled_starts(self, group_id: int) -> None:
         return self.zones.clear_group_scheduled_starts(group_id)
 
-    def set_group_scheduled_starts(self, group_id: int, schedule: Dict[int, str]) -> None:
+    def set_group_scheduled_starts(self, group_id: int, schedule: dict[int, str]) -> None:
         return self.zones.set_group_scheduled_starts(group_id, schedule)
 
     def clear_scheduled_for_zone_group_peers(self, zone_id: int, group_id: int) -> None:
         return self.zones.clear_scheduled_for_zone_group_peers(zone_id, group_id)
 
-    def update_zone_postpone(self, zone_id: int, postpone_until: str = None, reason: str = None) -> bool:
+    def update_zone_postpone(self, zone_id: int, postpone_until: str | None = None, reason: str | None = None) -> bool:
         return self.zones.update_zone_postpone(zone_id, postpone_until, reason)
 
-    def update_zone_photo(self, zone_id: int, photo_path: Optional[str],
-                          photo_thumb: Optional[str] = None,
-                          update_thumb: bool = False) -> bool:
+    def update_zone_photo(
+        self, zone_id: int, photo_path: str | None, photo_thumb: str | None = None, update_thumb: bool = False
+    ) -> bool:
         return self.zones.update_zone_photo(
-            zone_id, photo_path, photo_thumb=photo_thumb, update_thumb=update_thumb,
+            zone_id,
+            photo_path,
+            photo_thumb=photo_thumb,
+            update_thumb=update_thumb,
         )
 
     def get_zone_duration(self, zone_id: int) -> int:
         return self.zones.get_zone_duration(zone_id)
 
-    def create_zone_run(self, zone_id, group_id, start_utc, start_monotonic,
-                        start_raw_pulses, pulse_liters_at_start, base_m3_at_start=None,
-                        *, source=None):
-        return self.zones.create_zone_run(zone_id, group_id, start_utc, start_monotonic,
-                                          start_raw_pulses, pulse_liters_at_start, base_m3_at_start,
-                                          source=source)
+    def create_zone_run(
+        self,
+        zone_id,
+        group_id,
+        start_utc,
+        start_monotonic,
+        start_raw_pulses,
+        pulse_liters_at_start,
+        base_m3_at_start=None,
+        *,
+        source=None,
+    ):
+        return self.zones.create_zone_run(
+            zone_id,
+            group_id,
+            start_utc,
+            start_monotonic,
+            start_raw_pulses,
+            pulse_liters_at_start,
+            base_m3_at_start,
+            source=source,
+        )
 
     def get_open_zone_run(self, zone_id: int):
         return self.zones.get_open_zone_run(zone_id)
 
-    def finish_zone_run(self, run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status='ok'):
-        return self.zones.finish_zone_run(run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status)
+    def finish_zone_run(self, run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status="ok"):
+        return self.zones.finish_zone_run(
+            run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status
+        )
 
-    def get_last_watering_time(self, zone_id: int) -> Optional[str]:
+    def get_last_watering_time(self, zone_id: int) -> str | None:
         """Most recent successful watering end-time for a zone (from zone_runs)."""
         return self.zones.get_last_watering_time(zone_id)
 
-    def compute_next_run_for_zone(self, zone_id: int) -> Optional[str]:
+    def compute_next_run_for_zone(self, zone_id: int) -> str | None:
         return self.zones.compute_next_run_for_zone(zone_id, programs_getter=self.programs.get_programs)
 
     def reschedule_group_to_next_program(self, group_id: int) -> None:
         return self.zones.reschedule_group_to_next_program(group_id, programs_getter=self.programs.get_programs)
 
     # --- Programs ---
-    def get_programs(self) -> List[Dict[str, Any]]:
+    def get_programs(self) -> list[dict[str, Any]]:
         return self.programs.get_programs()
 
-    def get_program(self, program_id: int) -> Optional[Dict[str, Any]]:
+    def get_program(self, program_id: int) -> dict[str, Any] | None:
         return self.programs.get_program(program_id)
 
-    def create_program(self, program_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def create_program(self, program_data: dict[str, Any]) -> dict[str, Any] | None:
         return self.programs.create_program(program_data)
 
-    def update_program(self, program_id: int, program_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def update_program(self, program_id: int, program_data: dict[str, Any]) -> dict[str, Any] | None:
         return self.programs.update_program(program_id, program_data)
 
     def delete_program(self, program_id: int) -> bool:
         return self.programs.delete_program(program_id)
 
-    def duplicate_program(self, program_id: int) -> Optional[Dict[str, Any]]:
+    def duplicate_program(self, program_id: int) -> dict[str, Any] | None:
         return self.programs.duplicate_program(program_id)
 
     def check_program_conflicts(self, program_id=None, time=None, zones=None, days=None):
@@ -172,10 +194,10 @@ class IrrigationDB:
         return self.programs.clear_program_cancellations_for_group_on_date(group_id, run_date)
 
     # --- Groups ---
-    def get_groups(self) -> List[Dict[str, Any]]:
+    def get_groups(self) -> list[dict[str, Any]]:
         return self.groups.get_groups()
 
-    def create_group(self, name: str) -> Optional[Dict[str, Any]]:
+    def create_group(self, name: str) -> dict[str, Any] | None:
         return self.groups.create_group(name)
 
     def delete_group(self, group_id: int) -> bool:
@@ -184,7 +206,7 @@ class IrrigationDB:
     def update_group(self, group_id: int, name: str) -> bool:
         return self.groups.update_group(group_id, name)
 
-    def update_group_fields(self, group_id: int, updates: Dict[str, Any]) -> bool:
+    def update_group_fields(self, group_id: int, updates: dict[str, Any]) -> bool:
         return self.groups.update_group_fields(group_id, updates)
 
     def get_group_use_rain(self, group_id: int) -> bool:
@@ -193,37 +215,37 @@ class IrrigationDB:
     def set_group_use_rain(self, group_id: int, enabled: bool) -> bool:
         return self.groups.set_group_use_rain(group_id, enabled)
 
-    def list_groups_min(self) -> List[Dict[str, Any]]:
+    def list_groups_min(self) -> list[dict[str, Any]]:
         return self.groups.list_groups_min()
 
-    def list_zones_by_group_min(self, group_id: int) -> List[Dict[str, Any]]:
+    def list_zones_by_group_min(self, group_id: int) -> list[dict[str, Any]]:
         return self.groups.list_zones_by_group_min(group_id)
 
     # --- MQTT ---
-    def get_mqtt_servers(self) -> List[Dict[str, Any]]:
+    def get_mqtt_servers(self) -> list[dict[str, Any]]:
         return self.mqtt.get_mqtt_servers()
 
-    def get_mqtt_server(self, server_id: int) -> Optional[Dict[str, Any]]:
+    def get_mqtt_server(self, server_id: int) -> dict[str, Any] | None:
         return self.mqtt.get_mqtt_server(server_id)
 
-    def create_mqtt_server(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def create_mqtt_server(self, data: dict[str, Any]) -> dict[str, Any] | None:
         return self.mqtt.create_mqtt_server(data)
 
-    def update_mqtt_server(self, server_id: int, data: Dict[str, Any]) -> bool:
+    def update_mqtt_server(self, server_id: int, data: dict[str, Any]) -> bool:
         return self.mqtt.update_mqtt_server(server_id, data)
 
     def delete_mqtt_server(self, server_id: int) -> bool:
         return self.mqtt.delete_mqtt_server(server_id)
 
     @staticmethod
-    def _decrypt_mqtt_password(server: Dict[str, Any]) -> Dict[str, Any]:
+    def _decrypt_mqtt_password(server: dict[str, Any]) -> dict[str, Any]:
         return MqttRepository._decrypt_mqtt_password(server)
 
     # --- Settings ---
-    def get_setting_value(self, key: str) -> Optional[str]:
+    def get_setting_value(self, key: str) -> str | None:
         return self.settings.get_setting_value(key)
 
-    def set_setting_value(self, key: str, value: Optional[str]) -> bool:
+    def set_setting_value(self, key: str, value: str | None) -> bool:
         return self.settings.set_setting_value(key, value)
 
     def ensure_password_change_required(self) -> None:
@@ -235,25 +257,25 @@ class IrrigationDB:
     def set_logging_debug(self, enabled: bool) -> bool:
         return self.settings.set_logging_debug(enabled)
 
-    def get_rain_config(self) -> Dict[str, Any]:
+    def get_rain_config(self) -> dict[str, Any]:
         return self.settings.get_rain_config()
 
-    def set_rain_config(self, cfg: Dict[str, Any]) -> bool:
+    def set_rain_config(self, cfg: dict[str, Any]) -> bool:
         return self.settings.set_rain_config(cfg)
 
-    def get_master_config(self) -> Dict[str, Any]:
+    def get_master_config(self) -> dict[str, Any]:
         return self.settings.get_master_config()
 
-    def set_master_config(self, cfg: Dict[str, Any]) -> bool:
+    def set_master_config(self, cfg: dict[str, Any]) -> bool:
         return self.settings.set_master_config(cfg)
 
-    def get_env_config(self) -> Dict[str, Any]:
+    def get_env_config(self) -> dict[str, Any]:
         return self.settings.get_env_config()
 
-    def set_env_config(self, cfg: Dict[str, Any]) -> bool:
+    def set_env_config(self, cfg: dict[str, Any]) -> bool:
         return self.settings.set_env_config(cfg)
 
-    def get_password_hash(self) -> Optional[str]:
+    def get_password_hash(self) -> str | None:
         return self.settings.get_password_hash()
 
     def set_password(self, new_password: str) -> bool:
@@ -272,7 +294,7 @@ class IrrigationDB:
     def upsert_bot_user(self, chat_id, username, first_name):
         return self.telegram.upsert_bot_user(chat_id, username, first_name)
 
-    def set_bot_user_authorized(self, chat_id, role='user'):
+    def set_bot_user_authorized(self, chat_id, role="user"):
         return self.telegram.set_bot_user_authorized(chat_id, role)
 
     def inc_bot_user_failed(self, chat_id):
@@ -322,13 +344,28 @@ class IrrigationDB:
         return self.logs.create_backup()
 
     # --- Audit log ---
-    def add_audit(self, action_type, source='api', target=None, payload=None,
-                  result='success', error=None, ip=None, duration_ms=None,
-                  actor=None):
+    def add_audit(
+        self,
+        action_type,
+        source="api",
+        target=None,
+        payload=None,
+        result="success",
+        error=None,
+        ip=None,
+        duration_ms=None,
+        actor=None,
+    ):
         return self.audit.add_audit(
-            action_type=action_type, source=source, target=target,
-            payload=payload, result=result, error=error, ip=ip,
-            duration_ms=duration_ms, actor=actor
+            action_type=action_type,
+            source=source,
+            target=target,
+            payload=payload,
+            result=result,
+            error=error,
+            ip=ip,
+            duration_ms=duration_ms,
+            actor=actor,
         )
 
     def get_audit_logs(self, **kwargs):

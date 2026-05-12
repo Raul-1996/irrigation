@@ -1,8 +1,10 @@
 """Tests for services/app_init.py."""
-import pytest
+
 import os
 
-os.environ['TESTING'] = '1'
+import pytest
+
+os.environ["TESTING"] = "1"
 
 
 class TestAppInit:

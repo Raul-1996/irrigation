@@ -1,15 +1,14 @@
+import logging
 import os
 import secrets
 import stat
-import logging
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 
 load_dotenv()
 
 
-def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
-                              file_path: str = '.secret_key') -> str:
+def _load_or_generate_secret(env_var: str = "SECRET_KEY", file_path: str = ".secret_key") -> str:
     """Load SECRET_KEY from env, file, or generate a new one.
 
     Priority:
@@ -17,13 +16,13 @@ def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
     2. File on disk (.secret_key)
     3. Generate new random key, persist to file
     """
-    env_val = os.environ.get(env_var, '').strip()
-    if env_val and env_val != 'wb-irrigation-secret':
+    env_val = os.environ.get(env_var, "").strip()
+    if env_val and env_val != "wb-irrigation-secret":
         return env_val
 
     # Try reading from file
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path) as f:
             key = f.read().strip()
         if key:
             return key
@@ -32,7 +31,7 @@ def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
 
     # Generate new key and persist
     key = secrets.token_hex(32)
-    with open(file_path, 'w') as f:
+    with open(file_path, "w") as f:
         f.write(key)
     os.chmod(file_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
     return key
@@ -45,7 +44,7 @@ def _load_or_generate_secret(env_var: str = 'SECRET_KEY',
 # subtle behavioural drift between modules).  Tests that need to flip
 # TESTING after import time should use ``monkeypatch.setattr('config.TESTING',
 # True)`` — that is what tests/conftest.py does.
-TESTING: bool = os.environ.get('TESTING') == '1'
+TESTING: bool = os.environ.get("TESTING") == "1"
 
 
 class Config:
@@ -61,5 +60,3 @@ class Config:
 class TestConfig(Config):
     TESTING = True
     WTF_CSRF_ENABLED = False
-
-

@@ -4,33 +4,29 @@ Covers: lookup_et_base, calc_kt, calc_k_precip, calc_et_corrected,
         calc_irrigation_need, calc_zone_runtime, calc_cycle_soak.
 Python 3.9 compatible.
 """
-import os
-import pytest
 
-os.environ['TESTING'] = '1'
+import os
+
+os.environ["TESTING"] = "1"
 
 from services.et_calculator import (
-    ALTITUDE_CORRECTION,
-    LAKE_HUMIDITY_FACTOR,
-    MIN_ZONE_RUNTIME_MIN,
-    MAX_ZONE_RUNTIME_MIN,
-    MIN_IRRIGATION_MM,
-    DEFAULT_MAX_INFILTRATION_MM_H,
     CYCLE_SOAK_MAX_RUN_MIN,
     CYCLE_SOAK_PAUSE_MIN,
-    lookup_et_base,
-    calc_kt,
-    calc_k_precip,
+    MAX_ZONE_RUNTIME_MIN,
+    MIN_ZONE_RUNTIME_MIN,
+    calc_cycle_soak,
     calc_et_corrected,
     calc_irrigation_need,
+    calc_k_precip,
+    calc_kt,
     calc_zone_runtime,
-    calc_cycle_soak,
+    lookup_et_base,
 )
-
 
 # ---------------------------------------------------------------------------
 # lookup_et_base
 # ---------------------------------------------------------------------------
+
 
 class TestLookupEtBase:
     def test_below_5(self):
@@ -81,6 +77,7 @@ class TestLookupEtBase:
 # calc_kt
 # ---------------------------------------------------------------------------
 
+
 class TestCalcKt:
     def test_below_5(self):
         assert calc_kt(4.9) == 0.0
@@ -124,6 +121,7 @@ class TestCalcKt:
 # ---------------------------------------------------------------------------
 # calc_k_precip
 # ---------------------------------------------------------------------------
+
 
 class TestCalcKPrecip:
     def test_no_rain(self):
@@ -172,12 +170,13 @@ class TestCalcKPrecip:
 # calc_et_corrected
 # ---------------------------------------------------------------------------
 
+
 class TestCalcEtCorrected:
     def test_orsk_no_correction(self):
         """Orsk: K_alt=1.0, K_lake=1.0 -> ET_base * Kt."""
         result = calc_et_corrected(22.0, "orsk")
         et_base = lookup_et_base(22.0)  # 4.0
-        kt = calc_kt(22.0)              # 1.0
+        kt = calc_kt(22.0)  # 1.0
         expected = et_base * kt * 1.0 * 1.0
         assert abs(result - expected) < 0.01
         assert abs(result - 4.0) < 0.01
@@ -186,7 +185,7 @@ class TestCalcEtCorrected:
         """Cholpon-Ata: K_alt=1.12, K_lake=0.92 -> ~1.0304 multiplier."""
         result = calc_et_corrected(22.0, "cholpon_ata")
         et_base = lookup_et_base(22.0)  # 4.0
-        kt = calc_kt(22.0)              # 1.0
+        kt = calc_kt(22.0)  # 1.0
         expected = et_base * kt * 1.12 * 0.92
         assert abs(result - expected) < 0.01
 
@@ -212,6 +211,7 @@ class TestCalcEtCorrected:
 # calc_irrigation_need
 # ---------------------------------------------------------------------------
 
+
 class TestCalcIrrigationNeed:
     def test_no_rain(self):
         """No rain -> full ET corrected need."""
@@ -236,6 +236,7 @@ class TestCalcIrrigationNeed:
 # ---------------------------------------------------------------------------
 # calc_zone_runtime
 # ---------------------------------------------------------------------------
+
 
 class TestCalcZoneRuntime:
     def test_standard_calculation(self):
@@ -286,6 +287,7 @@ class TestCalcZoneRuntime:
 # ---------------------------------------------------------------------------
 # calc_cycle_soak
 # ---------------------------------------------------------------------------
+
 
 class TestCalcCycleSoak:
     def test_not_needed_low_pr(self):

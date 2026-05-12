@@ -1,9 +1,9 @@
-import sqlite3
+import logging
 import os
 import shutil
-import logging
-from typing import List, Dict, Any, Optional
+import sqlite3
 from datetime import datetime
+from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
 
@@ -13,11 +13,13 @@ logger = logging.getLogger(__name__)
 class LogRepository(BaseRepository):
     """Repository for logs, water_usage, water_stats, and backups."""
 
-    def __init__(self, db_path: str, backup_dir: str = 'backups'):
+    def __init__(self, db_path: str, backup_dir: str = "backups"):
         super().__init__(db_path)
         self.backup_dir = backup_dir
 
-    def get_logs(self, event_type: str = None, from_date: str = None, to_date: str = None) -> List[Dict[str, Any]]:
+    def get_logs(
+        self, event_type: str | None = None, from_date: str | None = None, to_date: str | None = None
+    ) -> list[dict[str, Any]]:
         """Получить логи с фильтрацией."""
         try:
             with self._connect() as conn:
@@ -30,16 +32,16 @@ class LogRepository(BaseRepository):
                 params = []
 
                 if event_type:
-                    query += ' AND type = ?'
+                    query += " AND type = ?"
                     params.append(event_type)
                 if from_date:
-                    query += ' AND timestamp >= ?'
+                    query += " AND timestamp >= ?"
                     params.append(from_date)
                 if to_date:
-                    query += ' AND timestamp <= ?'
+                    query += " AND timestamp <= ?"
                     params.append(f"{to_date} 23:59:59")
 
-                query += ' ORDER BY timestamp DESC LIMIT 1000'
+                query += " ORDER BY timestamp DESC LIMIT 1000"
                 cursor = conn.execute(query, params)
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
@@ -47,14 +49,17 @@ class LogRepository(BaseRepository):
             return []
 
     @retry_on_busy()
-    def add_log(self, log_type: str, details: str = None) -> Optional[int]:
+    def add_log(self, log_type: str, details: str | None = None) -> int | None:
         """Добавить запись в лог."""
         try:
             with self._connect() as conn:
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     INSERT INTO logs (type, details)
                     VALUES (?, ?)
-                ''', (log_type, details))
+                """,
+                    (log_type, details),
+                )
                 log_id = cursor.lastrowid
                 conn.commit()
                 return log_id
@@ -62,29 +67,35 @@ class LogRepository(BaseRepository):
             logger.error("Ошибка добавления лога: %s", e)
             return None
 
-    def get_water_usage(self, days: int = 7, zone_id: int = None) -> List[Dict[str, Any]]:
+    def get_water_usage(self, days: int = 7, zone_id: int | None = None) -> list[dict[str, Any]]:
         """Получить данные расхода воды."""
         try:
             days = int(days)
-            day_modifier = f'-{days} days'
+            day_modifier = f"-{days} days"
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 if zone_id:
-                    cursor = conn.execute('''
+                    cursor = conn.execute(
+                        """
                         SELECT w.*, z.name as zone_name
                         FROM water_usage w
                         LEFT JOIN zones z ON w.zone_id = z.id
                         WHERE w.zone_id = ? AND w.timestamp >= datetime('now', ?)
                         ORDER BY w.timestamp DESC
-                    ''', (zone_id, day_modifier))
+                    """,
+                        (zone_id, day_modifier),
+                    )
                 else:
-                    cursor = conn.execute('''
+                    cursor = conn.execute(
+                        """
                         SELECT w.*, z.name as zone_name
                         FROM water_usage w
                         LEFT JOIN zones z ON w.zone_id = z.id
                         WHERE w.timestamp >= datetime('now', ?)
                         ORDER BY w.timestamp DESC
-                    ''', (day_modifier,))
+                    """,
+                        (day_modifier,),
+                    )
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             logger.error("Ошибка получения данных расхода воды: %s", e)
@@ -95,40 +106,50 @@ class LogRepository(BaseRepository):
         """Добавить запись о расходе воды."""
         try:
             with self._connect() as conn:
-                conn.execute('''
+                conn.execute(
+                    """
                     INSERT INTO water_usage (zone_id, liters)
                     VALUES (?, ?)
-                ''', (zone_id, liters))
+                """,
+                    (zone_id, liters),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
             logger.error("Ошибка добавления записи расхода воды: %s", e)
             return False
 
-    def get_water_statistics(self, days: int = 30) -> Dict[str, Any]:
+    def get_water_statistics(self, days: int = 30) -> dict[str, Any]:
         """Получить статистику расхода воды."""
         try:
             days = int(days)
-            day_modifier = f'-{days} days'
+            day_modifier = f"-{days} days"
             with self._connect() as conn:
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     SELECT SUM(liters) as total_liters
                     FROM water_usage
                     WHERE timestamp >= datetime('now', ?)
-                ''', (day_modifier,))
+                """,
+                    (day_modifier,),
+                )
                 total_liters = cursor.fetchone()[0] or 0
 
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     SELECT z.name, SUM(w.liters) as liters
                     FROM water_usage w
                     LEFT JOIN zones z ON w.zone_id = z.id
                     WHERE w.timestamp >= datetime('now', ?)
                     GROUP BY w.zone_id, z.name
                     ORDER BY liters DESC
-                ''', (day_modifier,))
+                """,
+                    (day_modifier,),
+                )
                 zone_usage = [dict(row) for row in cursor.fetchall()]
 
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     SELECT AVG(daily_liters) as avg_daily
                     FROM (
                         SELECT DATE(timestamp) as date, SUM(liters) as daily_liters
@@ -136,32 +157,29 @@ class LogRepository(BaseRepository):
                         WHERE timestamp >= datetime('now', ?)
                         GROUP BY DATE(timestamp)
                     )
-                ''', (day_modifier,))
+                """,
+                    (day_modifier,),
+                )
                 avg_daily = cursor.fetchone()[0] or 0
 
                 return {
-                    'total_liters': round(total_liters, 2),
-                    'avg_daily': round(avg_daily, 2),
-                    'zone_usage': zone_usage,
-                    'period_days': days
+                    "total_liters": round(total_liters, 2),
+                    "avg_daily": round(avg_daily, 2),
+                    "zone_usage": zone_usage,
+                    "period_days": days,
                 }
         except sqlite3.Error as e:
             logger.error("Ошибка получения статистики воды: %s", e)
-            return {
-                'total_liters': 0,
-                'avg_daily': 0,
-                'zone_usage': [],
-                'period_days': days
-            }
+            return {"total_liters": 0, "avg_daily": 0, "zone_usage": [], "period_days": days}
 
-    def create_backup(self) -> Optional[str]:
+    def create_backup(self) -> str | None:
         """Создать резервную копию базы данных."""
         try:
             if not os.path.exists(self.backup_dir):
                 os.makedirs(self.backup_dir)
 
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            backup_path = os.path.join(self.backup_dir, f'irrigation_backup_{timestamp}.db')
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = os.path.join(self.backup_dir, f"irrigation_backup_{timestamp}.db")
 
             try:
                 with sqlite3.connect(self.db_path) as src_conn:
@@ -186,7 +204,8 @@ class LogRepository(BaseRepository):
             if bak_size < prod_size * 0.5:
                 logger.error(
                     "Backup too small: %d bytes < 50%% of %d — removing",
-                    bak_size, prod_size,
+                    bak_size,
+                    prod_size,
                 )
                 try:
                     os.remove(backup_path)
@@ -197,7 +216,7 @@ class LogRepository(BaseRepository):
             self._cleanup_old_backups()
             logger.info("Резервная копия создана: %s", backup_path)
             return backup_path
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.error("Ошибка создания резервной копии: %s", e)
             return None
 
@@ -206,7 +225,7 @@ class LogRepository(BaseRepository):
         try:
             backup_files = []
             for file in os.listdir(self.backup_dir):
-                if file.startswith('irrigation_backup_') and file.endswith('.db'):
+                if file.startswith("irrigation_backup_") and file.endswith(".db"):
                     file_path = os.path.join(self.backup_dir, file)
                     backup_files.append((file_path, os.path.getmtime(file_path)))
 
@@ -215,5 +234,5 @@ class LogRepository(BaseRepository):
             for file_path, _ in backup_files[:-keep_count]:
                 os.remove(file_path)
                 logger.info("Удалена старая резервная копия: %s", file_path)
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.error("Ошибка очистки старых резервных копий: %s", e)

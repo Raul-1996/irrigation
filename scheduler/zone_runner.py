@@ -2,17 +2,15 @@
 """
 Zone runner mixin: zone start/stop, zone job scheduling, master valve caps.
 """
-import sqlite3
-import json
+
 import logging
-import os
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional
 
 from apscheduler.triggers.date import DateTrigger
 
 from config import TESTING
-from scheduler.jobs import job_stop_zone, job_close_master_valve
+from scheduler.jobs import job_close_master_valve, job_stop_zone
 
 logger = logging.getLogger(__name__)
 
@@ -26,39 +24,46 @@ class ZoneRunnerMixin:
             # zone_runs.end_utc which is closed by zone_control.stop_zone.
             try:
                 from services.zone_control import stop_zone as _stop_zone_central
-                _stop_zone_central(zone_id, reason='auto_stop')
+
+                _stop_zone_central(zone_id, reason="auto_stop")
             except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                 logger.debug("Exception in _stop_zone: %s", e)
                 # Fallback path: write through the audited helper so triage
                 # still sees zone_state_change=off when zone_control fails.
                 try:
                     from services.zones_state import update_zone_state as _uzs
-                    _uzs(zone_id, {'state': 'off', 'watering_start_time': None},
-                         audit_reason='auto_stop_zone_runner', db=self.db)
+
+                    _uzs(
+                        zone_id,
+                        {"state": "off", "watering_start_time": None},
+                        audit_reason="auto_stop_zone_runner",
+                        db=self.db,
+                    )
                 except (sqlite3.Error, OSError, ImportError):
                     logger.exception(
                         "scheduler.zone_runner._stop_zone: audited fallback failed zone=%s",
                         zone_id,
                     )
-                    self.db.update_zone(zone_id, {'state': 'off', 'watering_start_time': None})
+                    self.db.update_zone(zone_id, {"state": "off", "watering_start_time": None})
             try:
                 logger.debug("auto-stop zone=%s", zone_id)
             except (ValueError, KeyError, RuntimeError) as e:
                 logger.debug("Handled exception in _stop_zone: %s", e)
             zone = self.db.get_zone(zone_id)
             if zone:
-                self.db.add_log('zone_auto_stop', f'Зона {zone_id} ({zone["name"]}) автоматически остановлена')
+                self.db.add_log("zone_auto_stop", f"Зона {zone_id} ({zone['name']}) автоматически остановлена")
             logger.info(f"Зона {zone_id} остановлена")
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
             logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
 
-    def schedule_zone_stop(self, zone_id: int, duration_minutes: int, command_id: Optional[str] = None):
+    def schedule_zone_stop(self, zone_id: int, duration_minutes: int, command_id: str | None = None):
         """Запланировать автоматическую остановку зоны через duration_minutes минут (для ручных запусков)."""
         try:
             if duration_minutes is None:
                 return
             try:
                 from database import db as _db
+
                 early = int(_db.get_early_off_seconds())
             except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                 logger.debug("Exception in schedule_zone_stop: %s", e)
@@ -78,12 +83,16 @@ class ZoneRunnerMixin:
                 run_at = now + timedelta(seconds=1)
             _kwargs = dict(
                 args=[zone_id],
-                id=(f"zone_stop:{int(zone_id)}:{str(command_id)}" if command_id else f"zone_stop:{int(zone_id)}:{int(run_at.timestamp())}"),
+                id=(
+                    f"zone_stop:{int(zone_id)}:{command_id!s}"
+                    if command_id
+                    else f"zone_stop:{int(zone_id)}:{int(run_at.timestamp())}"
+                ),
                 replace_existing=False,
                 misfire_grace_time=120,
             )
-            if getattr(self, 'has_volatile_jobstore', False):
-                _kwargs['jobstore'] = 'volatile'
+            if getattr(self, "has_volatile_jobstore", False):
+                _kwargs["jobstore"] = "volatile"
             self.scheduler.add_job(
                 job_stop_zone,
                 DateTrigger(run_date=run_at),
@@ -108,8 +117,8 @@ class ZoneRunnerMixin:
                 coalesce=False,
                 max_instances=1,
             )
-            if getattr(self, 'has_volatile_jobstore', False):
-                _kwargs['jobstore'] = 'volatile'
+            if getattr(self, "has_volatile_jobstore", False):
+                _kwargs["jobstore"] = "volatile"
             self.scheduler.add_job(
                 job_stop_zone,
                 DateTrigger(run_date=run_at),
@@ -132,8 +141,8 @@ class ZoneRunnerMixin:
                 coalesce=False,
                 max_instances=1,
             )
-            if getattr(self, 'has_volatile_jobstore', False):
-                _kwargs['jobstore'] = 'volatile'
+            if getattr(self, "has_volatile_jobstore", False):
+                _kwargs["jobstore"] = "volatile"
             self.scheduler.add_job(job_stop_zone, DateTrigger(run_date=run_at), **_kwargs)
             logger.info(f"Zone cap: zone {zone_id} hard-stop at {run_at} (cap {cap_minutes}m)")
         except (ValueError, TypeError, KeyError) as e:
@@ -181,8 +190,8 @@ class ZoneRunnerMixin:
                 coalesce=False,
                 max_instances=1,
             )
-            if getattr(self, 'has_volatile_jobstore', False):
-                _kwargs['jobstore'] = 'volatile'
+            if getattr(self, "has_volatile_jobstore", False):
+                _kwargs["jobstore"] = "volatile"
             self.scheduler.add_job(job_close_master_valve, DateTrigger(run_date=run_at), **_kwargs)
             logger.info(f"Master valve cap: group {group_id} close at {run_at} (cap {hours}h)")
         except (ValueError, TypeError, KeyError) as e:

@@ -1,14 +1,16 @@
 """Flask test app and client fixtures."""
+
 import os
 import sys
+
 import pytest
 
 
 @pytest.fixture
 def app(test_db_path):
     """Create a Flask test app with isolated DB."""
-    os.environ['TESTING'] = '1'
-    os.environ['SECRET_KEY'] = 'test-secret-key-for-testing-only'
+    os.environ["TESTING"] = "1"
+    os.environ["SECRET_KEY"] = "test-secret-key-for-testing-only"
 
     # We need to reload the database module with the test DB path
     # The simplest approach: patch the db_path before importing app
@@ -34,13 +36,15 @@ def app(test_db_path):
     #   imported references pointing at one consistent module object.
     saved_modules = {}
     for mod_name in list(sys.modules.keys()):
-        if mod_name in ('database', 'app'):
+        if mod_name in ("database", "app"):
             saved_modules[mod_name] = sys.modules.pop(mod_name)
 
     # Patch database path
     import database as db_mod
+
     # Create a test-specific DB instance
     from database import IrrigationDB
+
     test_db = IrrigationDB(db_path=test_db_path)
 
     # Monkey-patch the module-level db
@@ -61,9 +65,17 @@ def app(test_db_path):
     #   project modules (database, services.*, routes.*, irrigation_scheduler,
     #   scheduler.*, db.*) to avoid touching unrelated third-party modules.
     _PROJECT_PREFIXES = (
-        'database', 'irrigation_scheduler', 'app',
-        'services', 'services.', 'routes', 'routes.',
-        'scheduler', 'scheduler.', 'db', 'db.',
+        "database",
+        "irrigation_scheduler",
+        "app",
+        "services",
+        "services.",
+        "routes",
+        "routes.",
+        "scheduler",
+        "scheduler.",
+        "db",
+        "db.",
     )
     # NOTE: we cannot use isinstance(cur_db, IrrigationDB) because the previous
     # test loaded a DIFFERENT IrrigationDB class (we popped+reloaded `database`
@@ -74,35 +86,37 @@ def app(test_db_path):
     for mod_name, mod in list(sys.modules.items()):
         if not isinstance(mod_name, str):
             continue
-        if not (mod_name in _PROJECT_PREFIXES or mod_name.startswith(('services.', 'routes.', 'scheduler.', 'db.'))):
+        if not (mod_name in _PROJECT_PREFIXES or mod_name.startswith(("services.", "routes.", "scheduler.", "db."))):
             continue
         try:
-            cur_db = getattr(mod, 'db', None)
+            cur_db = getattr(mod, "db", None)
             if cur_db is None or cur_db is test_db:
                 continue
             # Duck-type IrrigationDB: has db_path str attribute and get_zone callable.
-            if hasattr(cur_db, 'db_path') and callable(getattr(cur_db, 'get_zone', None)):
+            if hasattr(cur_db, "db_path") and callable(getattr(cur_db, "get_zone", None)):
                 mod.db = test_db
                 _rebound.append(mod_name)
         except (AttributeError, TypeError):
             continue
-    if os.environ.get('DEBUG_FIXTURE'):
+    if os.environ.get("DEBUG_FIXTURE"):
         print(f"[FIXTURE] rebound {len(_rebound)} modules")
 
     # Now import and configure app
     try:
         import app as app_mod
+
         importlib.reload(app_mod)
         flask_app = app_mod.app
     except (ImportError, AttributeError, RuntimeError):
         # If app import fails, create a minimal Flask app
         from flask import Flask
-        flask_app = Flask(__name__)
-        flask_app.config['TESTING'] = True
 
-    flask_app.config['TESTING'] = True
-    flask_app.config['WTF_CSRF_ENABLED'] = False
-    flask_app.config['SECRET_KEY'] = 'test-secret-key-for-testing-only'
+        flask_app = Flask(__name__)
+        flask_app.config["TESTING"] = True
+
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    flask_app.config["SECRET_KEY"] = "test-secret-key-for-testing-only"
     flask_app.db = test_db
 
     # Reset the scheduler singleton so this test's view of `irrigation_scheduler.scheduler`
@@ -113,10 +127,11 @@ def app(test_db_path):
     # (e.g. test_group_stop → test_group_start_with_zones).
     try:
         import irrigation_scheduler as _is_mod
-        prev_scheduler = getattr(_is_mod, 'scheduler', None)
+
+        prev_scheduler = getattr(_is_mod, "scheduler", None)
         if prev_scheduler is not None:
             try:
-                if hasattr(prev_scheduler, 'scheduler') and prev_scheduler.scheduler:
+                if hasattr(prev_scheduler, "scheduler") and prev_scheduler.scheduler:
                     prev_scheduler.scheduler.shutdown(wait=False)
             except Exception:
                 pass
@@ -129,10 +144,11 @@ def app(test_db_path):
     # Reset scheduler again on teardown so the next test starts clean.
     try:
         import irrigation_scheduler as _is_mod
-        cur = getattr(_is_mod, 'scheduler', None)
+
+        cur = getattr(_is_mod, "scheduler", None)
         if cur is not None:
             try:
-                if hasattr(cur, 'scheduler') and cur.scheduler:
+                if hasattr(cur, "scheduler") and cur.scheduler:
                     cur.scheduler.shutdown(wait=False)
             except Exception:
                 pass
@@ -156,8 +172,8 @@ def admin_client(app):
     """Flask test client logged in as admin."""
     client = app.test_client()
     with client.session_transaction() as sess:
-        sess['logged_in'] = True
-        sess['role'] = 'admin'
+        sess["logged_in"] = True
+        sess["role"] = "admin"
     return client
 
 
@@ -166,8 +182,8 @@ def viewer_client(app):
     """Flask test client logged in as viewer (read-only)."""
     client = app.test_client()
     with client.session_transaction() as sess:
-        sess['logged_in'] = True
-        sess['role'] = 'viewer'
+        sess["logged_in"] = True
+        sess["role"] = "viewer"
     return client
 
 
@@ -176,5 +192,5 @@ def guest_client(app):
     """Flask test client with guest role."""
     client = app.test_client()
     with client.session_transaction() as sess:
-        sess['role'] = 'guest'
+        sess["role"] = "guest"
     return client

@@ -12,10 +12,11 @@ All ``_merge_*`` / ``_build_*`` / ``_get_*`` helpers remain module-level
 and ``tests/unit/test_weather_merged.py`` patch them by fully-qualified
 name at the package level.
 """
-from datetime import datetime
+
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any
 
 from services.weather.models import SENSOR_STALE_TIMEOUT
 from services.weather.singletons import get_weather_service
@@ -23,7 +24,7 @@ from services.weather.singletons import get_weather_service
 logger = logging.getLogger(__name__)
 
 
-def get_merged_weather(db_path: str) -> Dict[str, Any]:
+def get_merged_weather(db_path: str) -> dict[str, Any]:
     """Merge local sensor data with Open-Meteo API data.
 
     Local sensors (EnvMonitor temp/hum, RainMonitor) take priority when
@@ -85,6 +86,7 @@ def get_merged_weather(db_path: str) -> Dict[str, Any]:
 # Merged weather internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_api_weather(db_path):
     # type: (str) -> Optional[Any]
     """Get weather data from the WeatherService."""
@@ -101,6 +103,7 @@ def _get_env_state(now):
     """Get current EnvMonitor state."""
     try:
         from services.monitors import env_monitor
+
         cfg = env_monitor.cfg or {}
         temp_cfg = cfg.get("temp") or {}
         hum_cfg = cfg.get("hum") or {}
@@ -126,9 +129,13 @@ def _get_env_state(now):
     except (ImportError, Exception) as e:
         logger.debug("EnvMonitor state unavailable: %s", e)
         return {
-            "temp_enabled": False, "temp_value": None, "temp_last_rx": 0,
+            "temp_enabled": False,
+            "temp_value": None,
+            "temp_last_rx": 0,
             "temp_online": False,
-            "hum_enabled": False, "hum_value": None, "hum_last_rx": 0,
+            "hum_enabled": False,
+            "hum_value": None,
+            "hum_last_rx": 0,
             "hum_online": False,
         }
 
@@ -138,6 +145,7 @@ def _get_rain_state():
     """Get current RainMonitor state."""
     try:
         from services.monitors import rain_monitor
+
         cfg = rain_monitor._cfg or {}
         return {
             "enabled": bool(cfg.get("enabled", False)),
@@ -346,7 +354,7 @@ def _build_astronomy(api_weather):
         sunsets = daily.get("sunset", [])
 
         sunrise = None  # type: Optional[str]
-        sunset = None   # type: Optional[str]
+        sunset = None  # type: Optional[str]
 
         if sunrises and sunrises[0]:
             sr = str(sunrises[0])

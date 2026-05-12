@@ -3,15 +3,14 @@
 Used by both backend (API responses) and can be referenced by frontend.
 Python 3.9 compatible.
 """
-from typing import Optional
 
 # WMO Weather Interpretation Codes (WW)
 # https://open-meteo.com/en/docs — "WMO Weather interpretation codes"
 WEATHER_CODES = {
-    0:  ("☀️", "Ясно"),
-    1:  ("🌤️", "Малооблачно"),
-    2:  ("⛅", "Переменная облачность"),
-    3:  ("☁️", "Пасмурно"),
+    0: ("☀️", "Ясно"),
+    1: ("🌤️", "Малооблачно"),
+    2: ("⛅", "Переменная облачность"),
+    3: ("☁️", "Пасмурно"),
     45: ("🌫️", "Туман"),
     48: ("🌫️", "Изморозь"),
     51: ("🌦️", "Слабая морось"),

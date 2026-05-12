@@ -5,23 +5,22 @@ Tests verify thread safety, lock ordering, and graceful shutdown.
 
 All tests will be RED until services/program_queue.py is implemented.
 """
+
 import os
-import time
 import threading
+import time
 from datetime import datetime
-from typing import List
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
+
+import contextlib
 
 from services.program_queue import (
-    ProgramQueueManager,
-    QueueEntry,
-    QueueEntryState,
-    GroupQueue,
     MAX_QUEUE_SIZE,
+    ProgramQueueManager,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,10 +60,11 @@ def wait_all_idle(qm: ProgramQueueManager, timeout: float = 5.0) -> bool:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def mock_db(tmp_path):
     db = MagicMock()
-    db.path = str(tmp_path / 'test.db')
+    db.path = str(tmp_path / "test.db")
     return db
 
 
@@ -93,15 +93,14 @@ def queue_manager(mock_db, shutdown_event, mock_float_monitor):
         telegram_notify=MagicMock(),
     )
     yield qm
-    try:
+    with contextlib.suppress(Exception):
         qm.shutdown()
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
 # Concurrency tests (10 tests)
 # ---------------------------------------------------------------------------
+
 
 class TestConcurrency:
     """Real-thread concurrency tests for ProgramQueueManager."""
@@ -120,7 +119,8 @@ class TestConcurrency:
                 order.append(entry.program_id)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=tracking_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=tracking_run):
+
             def enqueue_worker(idx):
                 barrier.wait()
                 results[idx] = queue_manager.enqueue(
@@ -131,10 +131,7 @@ class TestConcurrency:
                     scheduled_time=datetime.now(),
                 )
 
-            threads = [
-                threading.Thread(target=enqueue_worker, args=(i,))
-                for i in range(5)
-            ]
+            threads = [threading.Thread(target=enqueue_worker, args=(i,)) for i in range(5)]
             for t in threads:
                 t.start()
             for t in threads:
@@ -162,7 +159,7 @@ class TestConcurrency:
         cancel_result = [None]
         errors = []  # type: List[Exception]
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             # Enqueue a few entries first
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.05)
@@ -171,7 +168,11 @@ class TestConcurrency:
                 try:
                     for i in range(10):
                         queue_manager.enqueue(
-                            i + 10, "P%d" % i, 1, [i + 2], datetime.now(),
+                            i + 10,
+                            "P%d" % i,
+                            1,
+                            [i + 2],
+                            datetime.now(),
                         )
                         time.sleep(0.01)
                 except Exception as e:
@@ -192,7 +193,7 @@ class TestConcurrency:
             t1.join(timeout=5)
             t2.join(timeout=5)
 
-        assert not errors, "Errors: %s" % errors
+        assert not errors, f"Errors: {errors}"
         assert not t1.is_alive(), "enqueue thread hung"
         assert not t2.is_alive(), "cancel thread hung"
 
@@ -208,12 +209,15 @@ class TestConcurrency:
             with completed_lock:
                 completed.append("%d-%d" % (entry.group_id, entry.program_id))
 
-        with patch.object(queue_manager, '_run_entry', side_effect=tracking_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=tracking_run):
             for g in [1, 2, 3]:
                 for p in range(3):
                     queue_manager.enqueue(
-                        g * 10 + p, "G%dP%d" % (g, p), g,
-                        [g * 10 + p], datetime.now(),
+                        g * 10 + p,
+                        "G%dP%d" % (g, p),
+                        g,
+                        [g * 10 + p],
+                        datetime.now(),
                     )
 
             assert wait_all_idle(queue_manager, timeout=8)
@@ -229,7 +233,7 @@ class TestConcurrency:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             for g in [1, 2, 3]:
                 queue_manager.enqueue(g, "P%d" % g, g, [g], datetime.now())
             time.sleep(0.1)
@@ -240,7 +244,7 @@ class TestConcurrency:
             queue_manager.shutdown()
             elapsed = time.monotonic() - start_t
 
-        assert elapsed < 5.0, "shutdown took %.1f sec" % elapsed
+        assert elapsed < 5.0, f"shutdown took {elapsed:.1f} sec"
 
         for gq in queue_manager._queues.values():
             if gq.worker_thread:
@@ -261,7 +265,11 @@ class TestConcurrency:
                         counter[0] += 1
                         n = counter[0]
                     queue_manager.enqueue(
-                        n, "P%d" % n, (n % 3) + 1, [n], datetime.now(),
+                        n,
+                        "P%d" % n,
+                        (n % 3) + 1,
+                        [n],
+                        datetime.now(),
                     )
                     time.sleep(0.01)
             except Exception as e:
@@ -276,9 +284,9 @@ class TestConcurrency:
                 errors.append(e)
 
         threads = []
-        for i in range(5):
+        for _i in range(5):
             threads.append(threading.Thread(target=enqueue_loop, daemon=True))
-        for i in range(5):
+        for _i in range(5):
             threads.append(threading.Thread(target=state_loop, daemon=True))
 
         for t in threads:
@@ -291,7 +299,7 @@ class TestConcurrency:
             t.join(timeout=3)
             assert not t.is_alive(), "Thread hung — possible deadlock"
 
-        assert not errors, "Errors: %s" % errors
+        assert not errors, f"Errors: {errors}"
 
     @pytest.mark.timeout(10)
     def test_100_enqueue_burst_maxlen(self, queue_manager):
@@ -302,11 +310,15 @@ class TestConcurrency:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=10)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             results = []
             for i in range(100):
                 r = queue_manager.enqueue(
-                    i, "P%d" % i, 1, [1], datetime.now(),
+                    i,
+                    "P%d" % i,
+                    1,
+                    [1],
+                    datetime.now(),
                 )
                 results.append(r)
 
@@ -331,7 +343,7 @@ class TestConcurrency:
             cancel_done.wait(timeout=5)
             time.sleep(0.1)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             entry = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             processing.wait(timeout=3)
 
@@ -349,7 +361,7 @@ class TestConcurrency:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             for g in [1, 2, 3]:
                 queue_manager.enqueue(42, "P", g, [g * 10], datetime.now())
             time.sleep(0.1)
@@ -391,7 +403,7 @@ class TestConcurrency:
                 time.sleep(0.2)  # Simulate finishing work
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             finishing.wait(timeout=3)
             # Enqueue while worker is finishing A
@@ -413,7 +425,7 @@ class TestConcurrency:
         snapshots = []  # type: List[dict]
         errors = []  # type: List[Exception]
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             # Enqueue several entries
             for i in range(5):
                 queue_manager.enqueue(i, "P%d" % i, 1, [i + 1], datetime.now())
@@ -432,7 +444,11 @@ class TestConcurrency:
                 try:
                     for i in range(5, 10):
                         queue_manager.enqueue(
-                            i, "P%d" % i, 1, [i + 1], datetime.now(),
+                            i,
+                            "P%d" % i,
+                            1,
+                            [i + 1],
+                            datetime.now(),
                         )
                         time.sleep(0.02)
                 except Exception as e:
@@ -449,7 +465,7 @@ class TestConcurrency:
         assert not errors
         # Each snapshot should be internally consistent
         for s in snapshots:
-            assert 'current' in s
-            assert 'queue' in s
-            assert 'queue_length' in s
-            assert s['queue_length'] == len(s['queue'])
+            assert "current" in s
+            assert "queue" in s
+            assert "queue_length" in s
+            assert s["queue_length"] == len(s["queue"])

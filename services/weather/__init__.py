@@ -23,37 +23,38 @@ from ``merge`` for backward compatibility with the ``services.weather_merged``
 shim and the ``tests/unit/test_weather_*`` test suite which patches these
 names at the package level.
 """
-from services.weather.models import (  # noqa: F401
-    WeatherData,
-    SENSOR_STALE_TIMEOUT,
-)
-from services.weather.service import WeatherService  # noqa: F401
-from services.weather.adjustment import WeatherAdjustment  # noqa: F401
-from services.weather.singletons import (  # noqa: F401
-    get_weather_service,
-    get_weather_adjustment,
-)
-from services.weather.merge import (  # noqa: F401
-    get_merged_weather,
-    _merge_temperature,
+
+from services.weather.adjustment import WeatherAdjustment
+from services.weather.merge import (
+    _build_astronomy,
+    _build_forecast_3d,
+    _build_forecast_24h,
+    _build_sensor_status,
+    _get_api_weather,
+    _get_env_state,
+    _get_rain_state,
+    _get_weather_code,
     _merge_humidity,
     _merge_rain,
-    _build_sensor_status,
-    _build_forecast_24h,
-    _build_forecast_3d,
-    _build_astronomy,
-    _get_weather_code,
-    _get_rain_state,
-    _get_env_state,
-    _get_api_weather,
+    _merge_temperature,
+    get_merged_weather,
+)
+from services.weather.models import (
+    SENSOR_STALE_TIMEOUT,
+    WeatherData,
+)
+from services.weather.service import WeatherService
+from services.weather.singletons import (
+    get_weather_adjustment,
+    get_weather_service,
 )
 
 __all__ = [
-    'WeatherData',
-    'WeatherService',
-    'WeatherAdjustment',
-    'get_weather_service',
-    'get_weather_adjustment',
-    'get_merged_weather',
-    'SENSOR_STALE_TIMEOUT',
+    "SENSOR_STALE_TIMEOUT",
+    "WeatherAdjustment",
+    "WeatherData",
+    "WeatherService",
+    "get_merged_weather",
+    "get_weather_adjustment",
+    "get_weather_service",
 ]

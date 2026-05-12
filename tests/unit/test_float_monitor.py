@@ -7,12 +7,12 @@ Spec refs:
 - program-queue-tests-spec.md §3.3
 - program-queue-spec.md §3 (float valve)
 """
+
+import contextlib
 import sqlite3
 import threading
 import time
-from datetime import datetime
-from typing import Dict, Any, Optional, Callable
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,6 +23,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers & Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _create_db_tables(db_path):
     """Create minimal DB schema needed for FloatMonitor tests."""
@@ -75,31 +76,47 @@ def _create_db_tables(db_path):
     return db_path
 
 
-def _insert_group(db_path, group_id, name="Test Group", float_enabled=1,
-                  float_mqtt_topic="/devices/wb-gpio/controls/A1_IN",
-                  float_mqtt_server_id=1, float_mode='NO',
-                  float_timeout_minutes=30, float_debounce_seconds=5):
+def _insert_group(
+    db_path,
+    group_id,
+    name="Test Group",
+    float_enabled=1,
+    float_mqtt_topic="/devices/wb-gpio/controls/A1_IN",
+    float_mqtt_server_id=1,
+    float_mode="NO",
+    float_timeout_minutes=30,
+    float_debounce_seconds=5,
+):
     """Insert a test group into the DB."""
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO groups (id, name, float_enabled, float_mqtt_topic, "
         "float_mqtt_server_id, float_mode, float_timeout_minutes, float_debounce_seconds) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (group_id, name, float_enabled, float_mqtt_topic,
-         float_mqtt_server_id, float_mode, float_timeout_minutes, float_debounce_seconds)
+        (
+            group_id,
+            name,
+            float_enabled,
+            float_mqtt_topic,
+            float_mqtt_server_id,
+            float_mode,
+            float_timeout_minutes,
+            float_debounce_seconds,
+        ),
     )
     conn.commit()
     conn.close()
 
 
-def _insert_zone(db_path, zone_id, group_id, name="Zone", state='off',
-                 duration=600, pause_reason=None, pause_remaining_seconds=None):
+def _insert_zone(
+    db_path, zone_id, group_id, name="Zone", state="off", duration=600, pause_reason=None, pause_remaining_seconds=None
+):
     """Insert a test zone into the DB."""
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO zones (id, name, group_id, duration, state, pause_reason, pause_remaining_seconds) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (zone_id, name, group_id, duration, state, pause_reason, pause_remaining_seconds)
+        (zone_id, name, group_id, duration, state, pause_reason, pause_remaining_seconds),
     )
     conn.commit()
     conn.close()
@@ -110,7 +127,7 @@ def _insert_mqtt_server(db_path, server_id=1):
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO mqtt_servers (id, name, host, port) VALUES (?, ?, ?, ?)",
-        (server_id, "Test MQTT", "127.0.0.1", 1883)
+        (server_id, "Test MQTT", "127.0.0.1", 1883),
     )
     conn.commit()
     conn.close()
@@ -155,6 +172,7 @@ def mock_telegram():
 def float_monitor(mock_db_path, mock_mqtt_clients, mock_queue_manager, mock_telegram):
     """Create FloatMonitor instance with mocked dependencies."""
     from services.float_monitor import FloatMonitor
+
     fm = FloatMonitor(
         db_path=mock_db_path,
         mqtt_clients=mock_mqtt_clients,
@@ -163,10 +181,8 @@ def float_monitor(mock_db_path, mock_mqtt_clients, mock_queue_manager, mock_tele
     )
     yield fm
     # Cleanup
-    try:
+    with contextlib.suppress(Exception):
         fm.stop()
-    except Exception:
-        pass
 
 
 def simulate_float_message(float_monitor, group_id, payload):
@@ -182,12 +198,13 @@ def simulate_float_message(float_monitor, group_id, payload):
 # 3.3.1  Basic tests (5)
 # ---------------------------------------------------------------------------
 
+
 class TestFloatMonitorBasic:
     """Basic float monitor functionality."""
 
     def test_float_off_is_paused_true(self, float_monitor, mock_db_path):
         """#1: Float OFF (level_ok=False) → is_paused(group_id) == True."""
-        _insert_group(mock_db_path, 1, float_mode='NO', float_debounce_seconds=0)
+        _insert_group(mock_db_path, 1, float_mode="NO", float_debounce_seconds=0)
         float_monitor.start()
         # Payload "0" in NO mode means level_ok=False
         simulate_float_message(float_monitor, 1, "0")
@@ -195,7 +212,7 @@ class TestFloatMonitorBasic:
 
     def test_float_on_is_paused_false(self, float_monitor, mock_db_path):
         """#2: Float ON (level_ok=True) → is_paused(group_id) == False."""
-        _insert_group(mock_db_path, 1, float_mode='NO', float_debounce_seconds=0)
+        _insert_group(mock_db_path, 1, float_mode="NO", float_debounce_seconds=0)
         float_monitor.start()
         # Payload "1" in NO mode means level_ok=True
         simulate_float_message(float_monitor, 1, "1")
@@ -203,7 +220,7 @@ class TestFloatMonitorBasic:
 
     def test_no_mode_payload_mapping(self, float_monitor, mock_db_path):
         """#3: NO mode: "0" → level_ok=False, "1" → level_ok=True."""
-        _insert_group(mock_db_path, 1, float_mode='NO', float_debounce_seconds=0)
+        _insert_group(mock_db_path, 1, float_mode="NO", float_debounce_seconds=0)
         float_monitor.start()
 
         simulate_float_message(float_monitor, 1, "0")
@@ -214,7 +231,7 @@ class TestFloatMonitorBasic:
 
     def test_nc_mode_payload_inverted(self, float_monitor, mock_db_path):
         """#4: NC mode: "1" → level_ok=False (inverted), "0" → level_ok=True."""
-        _insert_group(mock_db_path, 1, float_mode='NC', float_debounce_seconds=0)
+        _insert_group(mock_db_path, 1, float_mode="NC", float_debounce_seconds=0)
         float_monitor.start()
 
         # NC: "1" means contact closed = water LOW
@@ -228,33 +245,34 @@ class TestFloatMonitorBasic:
     def test_get_state_structure(self, float_monitor, mock_db_path):
         """#5: get_state returns dict matching FloatStateResponse spec §6.3."""
         _insert_group(mock_db_path, 1, float_debounce_seconds=0)
-        _insert_zone(mock_db_path, 1, group_id=1, name="Lawn", state='on')
+        _insert_zone(mock_db_path, 1, group_id=1, name="Lawn", state="on")
         float_monitor.start()
         simulate_float_message(float_monitor, 1, "0")  # trigger pause
 
         state = float_monitor.get_state(1)
         assert isinstance(state, dict)
         # Required keys from spec §6.3
-        assert 'group_id' in state
-        assert 'level_ok' in state
-        assert 'paused' in state
-        assert 'paused_since' in state
-        assert 'timeout_at' in state
-        assert 'paused_zones' in state
-        assert state['group_id'] == 1
-        assert state['paused'] is True
-        assert state['level_ok'] is False
+        assert "group_id" in state
+        assert "level_ok" in state
+        assert "paused" in state
+        assert "paused_since" in state
+        assert "timeout_at" in state
+        assert "paused_zones" in state
+        assert state["group_id"] == 1
+        assert state["paused"] is True
+        assert state["level_ok"] is False
         # paused_since should be a string (ISO datetime) when paused
-        assert state['paused_since'] is not None
+        assert state["paused_since"] is not None
         # hysteresis section
-        assert 'hysteresis' in state
-        assert 'trip_count' in state['hysteresis']
-        assert 'emergency_stopped' in state['hysteresis']
+        assert "hysteresis" in state
+        assert "trip_count" in state["hysteresis"]
+        assert "emergency_stopped" in state["hysteresis"]
 
 
 # ---------------------------------------------------------------------------
 # 3.3.2  Debounce tests (4)
 # ---------------------------------------------------------------------------
+
 
 class TestFloatMonitorDebounce:
     """Debounce logic: short signals are ignored, stable signals processed."""
@@ -266,7 +284,7 @@ class TestFloatMonitorDebounce:
 
         # Mock time to control debounce
         fake_time = [100.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Float goes OFF
         simulate_float_message(float_monitor, 1, "0")
@@ -283,7 +301,7 @@ class TestFloatMonitorDebounce:
         float_monitor.start()
 
         fake_time = [100.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Float goes OFF and stays OFF past debounce
         simulate_float_message(float_monitor, 1, "0")
@@ -301,7 +319,7 @@ class TestFloatMonitorDebounce:
         float_monitor.start()
 
         fake_time = [100.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Bounce pattern: none of the OFF intervals >= 5s
         simulate_float_message(float_monitor, 1, "0")  # OFF at t=100
@@ -321,7 +339,7 @@ class TestFloatMonitorDebounce:
         float_monitor.start()
 
         fake_time = [100.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         simulate_float_message(float_monitor, 1, "0")
         # Advance time past debounce
@@ -335,6 +353,7 @@ class TestFloatMonitorDebounce:
 # ---------------------------------------------------------------------------
 # 3.3.3  Pause / Resume tests (6)
 # ---------------------------------------------------------------------------
+
 
 class TestFloatMonitorPauseResume:
     """Pause/resume event-based mechanics (NOT exclusive_start)."""
@@ -369,41 +388,37 @@ class TestFloatMonitorPauseResume:
     def test_pause_saves_remaining_to_db(self, float_monitor, mock_db_path):
         """#12: When paused, remaining_seconds saved to DB zones table."""
         _insert_group(mock_db_path, 1, float_debounce_seconds=0)
-        _insert_zone(mock_db_path, 1, group_id=1, name="Zone 3", state='on', duration=600)
+        _insert_zone(mock_db_path, 1, group_id=1, name="Zone 3", state="on", duration=600)
         float_monitor.start()
 
         simulate_float_message(float_monitor, 1, "0")
 
         # Check DB: zone should be paused with remaining saved
         conn = sqlite3.connect(mock_db_path)
-        row = conn.execute(
-            "SELECT state, pause_reason, pause_remaining_seconds FROM zones WHERE id=1"
-        ).fetchone()
+        row = conn.execute("SELECT state, pause_reason, pause_remaining_seconds FROM zones WHERE id=1").fetchone()
         conn.close()
         # Zone state should be 'paused' with reason 'float'
         assert row is not None
-        assert row[0] == 'paused'
-        assert row[1] == 'float'
+        assert row[0] == "paused"
+        assert row[1] == "float"
         # pause_remaining_seconds should be set (>0)
         assert row[2] is not None and row[2] > 0
 
     def test_resume_after_5min_remaining_unchanged(self, float_monitor, mock_db_path, monkeypatch):
         """#13: After 5 min pause, remaining is preserved (worker sleeps, time doesn't tick)."""
         _insert_group(mock_db_path, 1, float_debounce_seconds=0)
-        _insert_zone(mock_db_path, 1, group_id=1, name="Zone 3", state='on', duration=600)
+        _insert_zone(mock_db_path, 1, group_id=1, name="Zone 3", state="on", duration=600)
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Pause
         simulate_float_message(float_monitor, 1, "0")
 
         # Read saved remaining
         conn = sqlite3.connect(mock_db_path)
-        row = conn.execute(
-            "SELECT pause_remaining_seconds FROM zones WHERE id=1"
-        ).fetchone()
+        row = conn.execute("SELECT pause_remaining_seconds FROM zones WHERE id=1").fetchone()
         conn.close()
         saved_remaining = row[0]
 
@@ -417,9 +432,7 @@ class TestFloatMonitorPauseResume:
         state = float_monitor.get_state(1)
         # The saved remaining in DB should not have decreased during pause
         conn = sqlite3.connect(mock_db_path)
-        row = conn.execute(
-            "SELECT pause_remaining_seconds FROM zones WHERE id=1"
-        ).fetchone()
+        row = conn.execute("SELECT pause_remaining_seconds FROM zones WHERE id=1").fetchone()
         conn.close()
         # After resume the value may be cleared, but during pause it was preserved
         # The key assertion is that remaining was NOT ticked down during pause
@@ -429,8 +442,8 @@ class TestFloatMonitorPauseResume:
         """#14: Float OFF but no active zones → is_paused=True, no zones affected."""
         _insert_group(mock_db_path, 1, float_debounce_seconds=0)
         # All zones are OFF
-        _insert_zone(mock_db_path, 1, group_id=1, name="Zone 1", state='off')
-        _insert_zone(mock_db_path, 2, group_id=1, name="Zone 2", state='off')
+        _insert_zone(mock_db_path, 1, group_id=1, name="Zone 1", state="off")
+        _insert_zone(mock_db_path, 2, group_id=1, name="Zone 2", state="off")
         float_monitor.start()
 
         simulate_float_message(float_monitor, 1, "0")
@@ -438,9 +451,7 @@ class TestFloatMonitorPauseResume:
         # State recorded but no zones paused
         assert float_monitor.is_paused(1) is True
         conn = sqlite3.connect(mock_db_path)
-        rows = conn.execute(
-            "SELECT state FROM zones WHERE group_id=1 AND state='paused'"
-        ).fetchall()
+        rows = conn.execute("SELECT state FROM zones WHERE group_id=1 AND state='paused'").fetchall()
         conn.close()
         assert len(rows) == 0  # No zones were paused (they were already off)
 
@@ -460,18 +471,18 @@ class TestFloatMonitorPauseResume:
 # 3.3.4  Timeout tests (4)
 # ---------------------------------------------------------------------------
 
+
 class TestFloatMonitorTimeout:
     """Timeout: if level not restored → emergency stop."""
 
-    def test_float_timeout_emergency_stop(self, float_monitor, mock_db_path,
-                                          mock_queue_manager, monkeypatch):
+    def test_float_timeout_emergency_stop(self, float_monitor, mock_db_path, mock_queue_manager, monkeypatch):
         """#16: Float OFF > timeout → _on_timeout → cancel_group."""
         _insert_group(mock_db_path, 1, float_timeout_minutes=30, float_debounce_seconds=0)
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
-        monkeypatch.setattr(time, 'time', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
+        monkeypatch.setattr(time, "time", lambda: fake_time[0])
 
         # Float goes OFF
         simulate_float_message(float_monitor, 1, "0")
@@ -485,15 +496,14 @@ class TestFloatMonitorTimeout:
         # cancel_group should be called
         mock_queue_manager.cancel_group.assert_called_with(1)
 
-    def test_float_restored_before_timeout(self, float_monitor, mock_db_path,
-                                           mock_queue_manager, monkeypatch):
+    def test_float_restored_before_timeout(self, float_monitor, mock_db_path, mock_queue_manager, monkeypatch):
         """#17: Float restored before timeout → no emergency stop."""
         _insert_group(mock_db_path, 1, float_timeout_minutes=30, float_debounce_seconds=0)
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
-        monkeypatch.setattr(time, 'time', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
+        monkeypatch.setattr(time, "time", lambda: fake_time[0])
 
         # Float goes OFF
         simulate_float_message(float_monitor, 1, "0")
@@ -513,15 +523,14 @@ class TestFloatMonitorTimeout:
 
         mock_queue_manager.cancel_group.assert_not_called()
 
-    def test_timeout_calls_cancel_group(self, float_monitor, mock_db_path,
-                                        mock_queue_manager, monkeypatch):
+    def test_timeout_calls_cancel_group(self, float_monitor, mock_db_path, mock_queue_manager, monkeypatch):
         """#18: On timeout, queue_manager.cancel_group(group_id) is called."""
         _insert_group(mock_db_path, 1, float_timeout_minutes=1, float_debounce_seconds=0)
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
-        monkeypatch.setattr(time, 'time', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
+        monkeypatch.setattr(time, "time", lambda: fake_time[0])
 
         simulate_float_message(float_monitor, 1, "0")
 
@@ -531,16 +540,14 @@ class TestFloatMonitorTimeout:
 
         mock_queue_manager.cancel_group.assert_called_once_with(1)
 
-    def test_timeout_sends_telegram(self, float_monitor, mock_db_path,
-                                    mock_telegram, monkeypatch):
+    def test_timeout_sends_telegram(self, float_monitor, mock_db_path, mock_telegram, monkeypatch):
         """#19: On timeout, telegram_notify called with 'АВАРИЙНЫЙ СТОП'."""
-        _insert_group(mock_db_path, 1, name="Насос-1",
-                      float_timeout_minutes=1, float_debounce_seconds=0)
+        _insert_group(mock_db_path, 1, name="Насос-1", float_timeout_minutes=1, float_debounce_seconds=0)
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
-        monkeypatch.setattr(time, 'time', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
+        monkeypatch.setattr(time, "time", lambda: fake_time[0])
 
         simulate_float_message(float_monitor, 1, "0")
 
@@ -559,6 +566,7 @@ class TestFloatMonitorTimeout:
 # 3.3.5  Hysteresis tests (3)
 # ---------------------------------------------------------------------------
 
+
 class TestFloatMonitorHysteresis:
     """Hysteresis: min_run_time, cooldown, max_trips emergency stop."""
 
@@ -569,7 +577,7 @@ class TestFloatMonitorHysteresis:
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Initial pause
         simulate_float_message(float_monitor, 1, "0")
@@ -590,7 +598,7 @@ class TestFloatMonitorHysteresis:
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Pause
         simulate_float_message(float_monitor, 1, "0")
@@ -604,15 +612,15 @@ class TestFloatMonitorHysteresis:
 
         assert float_monitor.is_paused(1) is True
 
-    def test_hysteresis_max_trips_emergency_stop(self, float_monitor, mock_db_path,
-                                                  mock_queue_manager, mock_telegram,
-                                                  monkeypatch):
+    def test_hysteresis_max_trips_emergency_stop(
+        self, float_monitor, mock_db_path, mock_queue_manager, mock_telegram, monkeypatch
+    ):
         """#22: 3 trips within FLOAT_TRIP_WINDOW=300s → emergency stop."""
         _insert_group(mock_db_path, 1, name="Насос-1", float_debounce_seconds=0)
         float_monitor.start()
 
         fake_time = [1000.0]
-        monkeypatch.setattr(time, 'monotonic', lambda: fake_time[0])
+        monkeypatch.setattr(time, "monotonic", lambda: fake_time[0])
 
         # Trip 1: OFF → ON
         simulate_float_message(float_monitor, 1, "0")
@@ -641,15 +649,14 @@ class TestFloatMonitorHysteresis:
 # 3.3.6  Per-group isolation tests (3)
 # ---------------------------------------------------------------------------
 
+
 class TestFloatMonitorPerGroup:
     """Per-group isolation: float events in one group don't affect others."""
 
     def test_float_pause_group1_not_affects_group2(self, float_monitor, mock_db_path):
         """#23: Group 1 paused → group 2 unaffected."""
-        _insert_group(mock_db_path, 1, name="Group 1", float_debounce_seconds=0,
-                      float_mqtt_topic="/dev/gpio/A1_IN")
-        _insert_group(mock_db_path, 2, name="Group 2", float_debounce_seconds=0,
-                      float_mqtt_topic="/dev/gpio/A2_IN")
+        _insert_group(mock_db_path, 1, name="Group 1", float_debounce_seconds=0, float_mqtt_topic="/dev/gpio/A1_IN")
+        _insert_group(mock_db_path, 2, name="Group 2", float_debounce_seconds=0, float_mqtt_topic="/dev/gpio/A2_IN")
         float_monitor.start()
 
         # Pause group 1 only
@@ -660,10 +667,8 @@ class TestFloatMonitorPerGroup:
 
     def test_both_groups_paused_independently(self, float_monitor, mock_db_path):
         """#24: Both groups paused → separate timers, separate events."""
-        _insert_group(mock_db_path, 1, name="Group 1", float_debounce_seconds=0,
-                      float_mqtt_topic="/dev/gpio/A1_IN")
-        _insert_group(mock_db_path, 2, name="Group 2", float_debounce_seconds=0,
-                      float_mqtt_topic="/dev/gpio/A2_IN")
+        _insert_group(mock_db_path, 1, name="Group 1", float_debounce_seconds=0, float_mqtt_topic="/dev/gpio/A1_IN")
+        _insert_group(mock_db_path, 2, name="Group 2", float_debounce_seconds=0, float_mqtt_topic="/dev/gpio/A2_IN")
         float_monitor.start()
 
         simulate_float_message(float_monitor, 1, "0")
@@ -675,18 +680,16 @@ class TestFloatMonitorPerGroup:
         # They should have separate state objects
         state1 = float_monitor.get_state(1)
         state2 = float_monitor.get_state(2)
-        assert state1['group_id'] == 1
-        assert state2['group_id'] == 2
+        assert state1["group_id"] == 1
+        assert state2["group_id"] == 2
         # paused_since should be different or at least independently managed
-        assert state1['paused_since'] is not None
-        assert state2['paused_since'] is not None
+        assert state1["paused_since"] is not None
+        assert state2["paused_since"] is not None
 
     def test_resume_group1_group2_still_paused(self, float_monitor, mock_db_path):
         """#25: Both paused → resume group 1 → group 2 still paused."""
-        _insert_group(mock_db_path, 1, name="Group 1", float_debounce_seconds=0,
-                      float_mqtt_topic="/dev/gpio/A1_IN")
-        _insert_group(mock_db_path, 2, name="Group 2", float_debounce_seconds=0,
-                      float_mqtt_topic="/dev/gpio/A2_IN")
+        _insert_group(mock_db_path, 1, name="Group 1", float_debounce_seconds=0, float_mqtt_topic="/dev/gpio/A1_IN")
+        _insert_group(mock_db_path, 2, name="Group 2", float_debounce_seconds=0, float_mqtt_topic="/dev/gpio/A2_IN")
         float_monitor.start()
 
         # Pause both

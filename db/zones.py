@@ -1,8 +1,9 @@
-import sqlite3
+import contextlib
 import json
 import logging
-from typing import List, Dict, Any, Optional
+import sqlite3
 from datetime import datetime, timedelta
+from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 class ZoneRepository(BaseRepository):
     """Repository for zone CRUD, bulk operations, and zone_runs."""
 
-    def get_zones(self) -> List[Dict[str, Any]]:
+    def get_zones(self) -> list[dict[str, Any]]:
         """Получить все зоны.
 
         Injects ``last_watering_time`` (derived from ``zone_runs.end_utc``)
@@ -22,16 +23,16 @@ class ZoneRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute('''
+                cursor = conn.execute("""
                     SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     ORDER BY z.id
-                ''')
+                """)
                 zones = []
                 for row in cursor.fetchall():
                     zone = dict(row)
-                    zone['group'] = zone['group_id']
+                    zone["group"] = zone["group_id"]
                     zones.append(zone)
                 # Single batched query — derive last_watering_time from
                 # zone_runs (idx_zone_runs_active covers it). Done after
@@ -48,13 +49,13 @@ class ZoneRepository(BaseRepository):
                     logger.debug("get_zones: zone_runs aggregation failed: %s", e)
                     last_map = {}
                 for z in zones:
-                    z['last_watering_time'] = last_map.get(int(z['id']))
+                    z["last_watering_time"] = last_map.get(int(z["id"]))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон: %s", e)
             return []
 
-    def get_zone(self, zone_id: int) -> Optional[Dict[str, Any]]:
+    def get_zone(self, zone_id: int) -> dict[str, Any] | None:
         """Получить зону по ID.
 
         Injects ``last_watering_time`` derived from ``zone_runs.end_utc``
@@ -64,19 +65,20 @@ class ZoneRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     SELECT z.*, g.name as group_name
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.id = ?
-                ''', (zone_id,))
+                """,
+                    (zone_id,),
+                )
                 row = cursor.fetchone()
                 if row:
                     zone = dict(row)
-                    zone['group'] = zone['group_id']
-                    zone['last_watering_time'] = self.get_last_watering_time(
-                        int(zone_id)
-                    )
+                    zone["group"] = zone["group_id"]
+                    zone["last_watering_time"] = self.get_last_watering_time(int(zone_id))
                     return zone
                 return None
         except sqlite3.Error as e:
@@ -84,16 +86,18 @@ class ZoneRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def create_zone(self, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def create_zone(self, zone_data: dict[str, Any]) -> dict[str, Any] | None:
         """Создать новую зону."""
         try:
             with self._connect() as conn:
-                topic = (zone_data.get('topic') or '').strip()
-                mqtt_sid = zone_data.get('mqtt_server_id')
+                topic = (zone_data.get("topic") or "").strip()
+                mqtt_sid = zone_data.get("mqtt_server_id")
                 if mqtt_sid is None:
                     # Auto-select only when exactly one enabled server exists
                     try:
-                        rows = conn.execute('SELECT id FROM mqtt_servers WHERE enabled=1 ORDER BY id LIMIT 2').fetchall()
+                        rows = conn.execute(
+                            "SELECT id FROM mqtt_servers WHERE enabled=1 ORDER BY id LIMIT 2"
+                        ).fetchall()
                         if len(rows) == 1:
                             mqtt_sid = rows[0][0]
                         # 0 or >1 servers: leave mqtt_sid as None, API layer should validate
@@ -101,41 +105,47 @@ class ZoneRepository(BaseRepository):
                         pass
                 zid_explicit = None
                 try:
-                    zid_explicit = int(zone_data.get('id')) if zone_data.get('id') is not None else None
+                    zid_explicit = int(zone_data.get("id")) if zone_data.get("id") is not None else None
                 except (TypeError, ValueError) as e:
                     logger.debug("create_zone explicit id parse: %s", e)
                     zid_explicit = None
 
                 if zid_explicit is not None:
                     try:
-                        conn.execute('''
+                        conn.execute(
+                            """
                             INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ''', (
-                            zid_explicit,
-                            zone_data.get('name') or 'Зона',
-                            zone_data.get('icon') or '🌿',
-                            int(zone_data.get('duration') or 10),
-                            int(zone_data.get('group_id', zone_data.get('group', 1))),
-                            topic,
-                            mqtt_sid
-                        ))
+                        """,
+                            (
+                                zid_explicit,
+                                zone_data.get("name") or "Зона",
+                                zone_data.get("icon") or "🌿",
+                                int(zone_data.get("duration") or 10),
+                                int(zone_data.get("group_id", zone_data.get("group", 1))),
+                                topic,
+                                mqtt_sid,
+                            ),
+                        )
                         conn.commit()
                         return self.get_zone(zid_explicit)
                     except sqlite3.Error:
                         logger.warning("Не удалось вставить зону с явным id=%s, пробуем без id", zid_explicit)
 
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    zone_data.get('name') or 'Зона',
-                    zone_data.get('icon') or '🌿',
-                    int(zone_data.get('duration') or 10),
-                    int(zone_data.get('group_id', zone_data.get('group', 1))),
-                    topic,
-                    mqtt_sid
-                ))
+                """,
+                    (
+                        zone_data.get("name") or "Зона",
+                        zone_data.get("icon") or "🌿",
+                        int(zone_data.get("duration") or 10),
+                        int(zone_data.get("group_id", zone_data.get("group", 1))),
+                        topic,
+                        mqtt_sid,
+                    ),
+                )
                 zone_id = cursor.lastrowid
                 conn.commit()
                 return self.get_zone(zone_id)
@@ -144,7 +154,7 @@ class ZoneRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def update_zone(self, zone_id: int, zone_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def update_zone(self, zone_id: int, zone_data: dict[str, Any]) -> dict[str, Any] | None:
         """Обновить зону."""
         try:
             with self._connect() as conn:
@@ -158,85 +168,85 @@ class ZoneRepository(BaseRepository):
                 sql_fields = []
                 params = []
 
-                if 'name' in updated_data:
-                    sql_fields.append('name = ?')
-                    params.append(updated_data['name'])
-                if 'icon' in updated_data:
-                    sql_fields.append('icon = ?')
-                    params.append(updated_data['icon'])
-                if 'duration' in updated_data:
-                    sql_fields.append('duration = ?')
-                    params.append(updated_data['duration'])
-                if 'group_id' in updated_data or 'group' in updated_data:
-                    sql_fields.append('group_id = ?')
-                    params.append(updated_data.get('group_id', updated_data.get('group', 1)))
-                if 'topic' in updated_data:
-                    sql_fields.append('topic = ?')
-                    params.append((updated_data.get('topic') or '').strip())
-                if 'state' in updated_data:
-                    sql_fields.append('state = ?')
-                    params.append(updated_data['state'])
-                if 'postpone_until' in updated_data:
-                    sql_fields.append('postpone_until = ?')
-                    params.append(updated_data['postpone_until'])
-                if 'photo_path' in updated_data:
-                    sql_fields.append('photo_path = ?')
-                    params.append(updated_data['photo_path'])
-                if 'watering_start_time' in updated_data:
-                    sql_fields.append('watering_start_time = ?')
-                    params.append(updated_data['watering_start_time'])
-                if 'scheduled_start_time' in updated_data:
-                    sql_fields.append('scheduled_start_time = ?')
-                    params.append(updated_data['scheduled_start_time'])
+                if "name" in updated_data:
+                    sql_fields.append("name = ?")
+                    params.append(updated_data["name"])
+                if "icon" in updated_data:
+                    sql_fields.append("icon = ?")
+                    params.append(updated_data["icon"])
+                if "duration" in updated_data:
+                    sql_fields.append("duration = ?")
+                    params.append(updated_data["duration"])
+                if "group_id" in updated_data or "group" in updated_data:
+                    sql_fields.append("group_id = ?")
+                    params.append(updated_data.get("group_id", updated_data.get("group", 1)))
+                if "topic" in updated_data:
+                    sql_fields.append("topic = ?")
+                    params.append((updated_data.get("topic") or "").strip())
+                if "state" in updated_data:
+                    sql_fields.append("state = ?")
+                    params.append(updated_data["state"])
+                if "postpone_until" in updated_data:
+                    sql_fields.append("postpone_until = ?")
+                    params.append(updated_data["postpone_until"])
+                if "photo_path" in updated_data:
+                    sql_fields.append("photo_path = ?")
+                    params.append(updated_data["photo_path"])
+                if "watering_start_time" in updated_data:
+                    sql_fields.append("watering_start_time = ?")
+                    params.append(updated_data["watering_start_time"])
+                if "scheduled_start_time" in updated_data:
+                    sql_fields.append("scheduled_start_time = ?")
+                    params.append(updated_data["scheduled_start_time"])
                 # 'last_watering_time' is no longer a column on zones —
                 # it is derived from zone_runs.end_utc and injected at
                 # read time. Silently ignore the key in the update payload
                 # so legacy callers that still pass it don't crash.
-                if 'last_avg_flow_lpm' in updated_data:
-                    sql_fields.append('last_avg_flow_lpm = ?')
-                    params.append(updated_data['last_avg_flow_lpm'])
-                if 'last_total_liters' in updated_data:
-                    sql_fields.append('last_total_liters = ?')
-                    params.append(updated_data['last_total_liters'])
-                if 'mqtt_server_id' in updated_data:
-                    sql_fields.append('mqtt_server_id = ?')
-                    params.append(updated_data.get('mqtt_server_id'))
-                if 'planned_end_time' in zone_data:
-                    sql_fields.append('planned_end_time = ?')
-                    params.append(zone_data['planned_end_time'])
-                if 'watering_start_source' in zone_data:
-                    sql_fields.append('watering_start_source = ?')
-                    params.append(zone_data['watering_start_source'])
-                if 'commanded_state' in zone_data:
-                    sql_fields.append('commanded_state = ?')
-                    params.append(zone_data['commanded_state'])
+                if "last_avg_flow_lpm" in updated_data:
+                    sql_fields.append("last_avg_flow_lpm = ?")
+                    params.append(updated_data["last_avg_flow_lpm"])
+                if "last_total_liters" in updated_data:
+                    sql_fields.append("last_total_liters = ?")
+                    params.append(updated_data["last_total_liters"])
+                if "mqtt_server_id" in updated_data:
+                    sql_fields.append("mqtt_server_id = ?")
+                    params.append(updated_data.get("mqtt_server_id"))
+                if "planned_end_time" in zone_data:
+                    sql_fields.append("planned_end_time = ?")
+                    params.append(zone_data["planned_end_time"])
+                if "watering_start_source" in zone_data:
+                    sql_fields.append("watering_start_source = ?")
+                    params.append(zone_data["watering_start_source"])
+                if "commanded_state" in zone_data:
+                    sql_fields.append("commanded_state = ?")
+                    params.append(zone_data["commanded_state"])
                 # PHYS-1 / MASTER-C1: allow StateVerifier._record_fault() to
                 # persist observed_state/fault_count/last_fault so zones can
                 # be pinned to state='fault' after N MQTT-observation retries.
-                if 'observed_state' in zone_data:
-                    sql_fields.append('observed_state = ?')
-                    params.append(zone_data['observed_state'])
-                if 'fault_count' in zone_data:
-                    sql_fields.append('fault_count = ?')
-                    params.append(zone_data['fault_count'])
-                if 'last_fault' in zone_data:
-                    sql_fields.append('last_fault = ?')
-                    params.append(zone_data['last_fault'])
+                if "observed_state" in zone_data:
+                    sql_fields.append("observed_state = ?")
+                    params.append(zone_data["observed_state"])
+                if "fault_count" in zone_data:
+                    sql_fields.append("fault_count = ?")
+                    params.append(zone_data["fault_count"])
+                if "last_fault" in zone_data:
+                    sql_fields.append("last_fault = ?")
+                    params.append(zone_data["last_fault"])
 
-                sql_fields.append('updated_at = CURRENT_TIMESTAMP')
+                sql_fields.append("updated_at = CURRENT_TIMESTAMP")
                 params.append(zone_id)
 
-                sql = f'''
-                    UPDATE zones 
-                    SET {', '.join(sql_fields)}
+                sql = f"""
+                    UPDATE zones
+                    SET {", ".join(sql_fields)}
                     WHERE id = ?
-                '''
+                """
                 conn.execute(sql, params)
 
                 # Если зону переводят в группу 999 — исключаем из всех программ
-                target_group_id = updated_data.get('group_id', updated_data.get('group'))
+                target_group_id = updated_data.get("group_id", updated_data.get("group"))
                 if target_group_id == 999:
-                    cursor = conn.execute('SELECT id, zones FROM programs')
+                    cursor = conn.execute("SELECT id, zones FROM programs")
                     for row in cursor.fetchall():
                         try:
                             zones_list = json.loads(row[1])
@@ -245,8 +255,10 @@ class ZoneRepository(BaseRepository):
                             continue
                         if zone_id in zones_list:
                             zones_list = [z for z in zones_list if z != zone_id]
-                            conn.execute('UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-                                         (json.dumps(zones_list), row[0]))
+                            conn.execute(
+                                "UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (json.dumps(zones_list), row[0]),
+                            )
 
                 conn.commit()
                 return self.get_zone(zone_id)
@@ -255,7 +267,7 @@ class ZoneRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def update_zone_versioned(self, zone_id: int, updates: Dict[str, Any]) -> tuple:
+    def update_zone_versioned(self, zone_id: int, updates: dict[str, Any]) -> tuple:
         """Обновить зону с инкрементом version (optimistic lock).
 
         Returns tuple ``(ok: bool, prev_zone: dict | None)`` where ``prev_zone``
@@ -282,29 +294,29 @@ class ZoneRepository(BaseRepository):
                 # observe the same prev_state and emit duplicate / wrong
                 # zone_state_change audit rows.
                 try:
-                    conn.execute('BEGIN IMMEDIATE')
+                    conn.execute("BEGIN IMMEDIATE")
                 except sqlite3.Error:
                     # Already in a transaction (e.g. nested) — fall through
                     # and rely on the implicit one.
                     pass
-                cur = conn.execute('SELECT * FROM zones WHERE id = ?', (zone_id,))
+                cur = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,))
                 row = cur.fetchone()
                 if not row:
-                    try:
+                    with contextlib.suppress(sqlite3.Error):
                         conn.commit()
-                    except sqlite3.Error:
-                        pass
                     return (False, None)
                 prev_zone = dict(row)
-                old_version = int(prev_zone.get('version') or 0)
+                old_version = int(prev_zone.get("version") or 0)
                 fields = []
                 params = []
                 for k, v in updates.items():
                     fields.append(f"{k} = ?")
                     params.append(v)
-                fields.append('version = version + 1')
+                fields.append("version = version + 1")
                 params.extend([zone_id, old_version])
-                sql = f"UPDATE zones SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?"
+                sql = (
+                    f"UPDATE zones SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?"
+                )
                 cur2 = conn.execute(sql, params)
                 conn.commit()
                 return (cur2.rowcount == 1, prev_zone)
@@ -313,21 +325,21 @@ class ZoneRepository(BaseRepository):
             return (False, None)
 
     @retry_on_busy()
-    def bulk_update_zones(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def bulk_update_zones(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         """Пакетное обновление зон в одной транзакции."""
         updated = 0
-        failed: List[int] = []
+        failed: list[int] = []
         if not updates:
-            return {'updated': 0, 'failed': []}
+            return {"updated": 0, "failed": []}
         try:
             with self._connect() as conn:
                 for upd in updates:
                     try:
-                        zone_id = int(upd.get('id'))
+                        zone_id = int(upd.get("id"))
                     except (TypeError, ValueError) as e:
                         logger.debug("batch_update zone id parse: %s", e)
                         continue
-                    cur = conn.execute('SELECT * FROM zones WHERE id = ?', (zone_id,))
+                    cur = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,))
                     row = cur.fetchone()
                     if not row:
                         failed.append(zone_id)
@@ -342,23 +354,36 @@ class ZoneRepository(BaseRepository):
                         fields.append(f"{field} = ?")
                         params.append(value)
 
-                    if 'name' in merged: add('name', merged['name'])
-                    if 'icon' in merged: add('icon', merged['icon'])
-                    if 'duration' in merged: add('duration', int(merged['duration']))
-                    if ('group_id' in merged) or ('group' in merged):
-                        add('group_id', int(merged.get('group_id', merged.get('group', 1))))
-                    if 'topic' in merged: add('topic', (merged.get('topic') or '').strip())
-                    if 'state' in merged: add('state', merged['state'])
-                    if 'postpone_until' in merged: add('postpone_until', merged['postpone_until'])
-                    if 'postpone_reason' in merged: add('postpone_reason', merged['postpone_reason'])
-                    if 'photo_path' in merged: add('photo_path', merged['photo_path'])
-                    if 'watering_start_time' in merged: add('watering_start_time', merged['watering_start_time'])
-                    if 'scheduled_start_time' in merged: add('scheduled_start_time', merged['scheduled_start_time'])
+                    if "name" in merged:
+                        add("name", merged["name"])
+                    if "icon" in merged:
+                        add("icon", merged["icon"])
+                    if "duration" in merged:
+                        add("duration", int(merged["duration"]))
+                    if ("group_id" in merged) or ("group" in merged):
+                        add("group_id", int(merged.get("group_id", merged.get("group", 1))))
+                    if "topic" in merged:
+                        add("topic", (merged.get("topic") or "").strip())
+                    if "state" in merged:
+                        add("state", merged["state"])
+                    if "postpone_until" in merged:
+                        add("postpone_until", merged["postpone_until"])
+                    if "postpone_reason" in merged:
+                        add("postpone_reason", merged["postpone_reason"])
+                    if "photo_path" in merged:
+                        add("photo_path", merged["photo_path"])
+                    if "watering_start_time" in merged:
+                        add("watering_start_time", merged["watering_start_time"])
+                    if "scheduled_start_time" in merged:
+                        add("scheduled_start_time", merged["scheduled_start_time"])
                     # 'last_watering_time' was dropped — derived from zone_runs now.
-                    if 'last_avg_flow_lpm' in merged: add('last_avg_flow_lpm', merged['last_avg_flow_lpm'])
-                    if 'last_total_liters' in merged: add('last_total_liters', merged['last_total_liters'])
-                    if 'mqtt_server_id' in merged: add('mqtt_server_id', merged.get('mqtt_server_id'))
-                    fields.append('updated_at = CURRENT_TIMESTAMP')
+                    if "last_avg_flow_lpm" in merged:
+                        add("last_avg_flow_lpm", merged["last_avg_flow_lpm"])
+                    if "last_total_liters" in merged:
+                        add("last_total_liters", merged["last_total_liters"])
+                    if "mqtt_server_id" in merged:
+                        add("mqtt_server_id", merged.get("mqtt_server_id"))
+                    fields.append("updated_at = CURRENT_TIMESTAMP")
                     params.append(zone_id)
                     sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ?"
                     try:
@@ -368,30 +393,30 @@ class ZoneRepository(BaseRepository):
                         logger.warning("Ошибка обновления зоны %s в bulk: %s", zone_id, e)
                         failed.append(zone_id)
                 conn.commit()
-            return {'updated': updated, 'failed': failed}
+            return {"updated": updated, "failed": failed}
         except sqlite3.Error as e:
             logger.error("Ошибка bulk-обновления зон: %s", e)
-            return {'updated': updated, 'failed': failed or []}
+            return {"updated": updated, "failed": failed or []}
 
     @retry_on_busy()
-    def bulk_upsert_zones(self, zones: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def bulk_upsert_zones(self, zones: list[dict[str, Any]]) -> dict[str, Any]:
         """Импорт зон: upsert множества зон в одной транзакции."""
         created = 0
         updated = 0
         failed = 0
         if not zones:
-            return {'created': 0, 'updated': 0, 'failed': 0}
+            return {"created": 0, "updated": 0, "failed": 0}
         try:
             with self._connect() as conn:
                 for z in zones:
                     try:
-                        zid = int(z['id']) if z.get('id') is not None else None
+                        zid = int(z["id"]) if z.get("id") is not None else None
                     except (TypeError, ValueError) as e:
                         logger.debug("import_zones id parse: %s", e)
                         zid = None
                     try:
                         if zid is not None:
-                            cur = conn.execute('SELECT id FROM zones WHERE id = ?', (zid,))
+                            cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
                             row = cur.fetchone()
                             if row:
                                 # SEC-004: build UPDATE via a strict column
@@ -412,8 +437,12 @@ class ZoneRepository(BaseRepository):
                                 # so a zone_state_change audit row is
                                 # emitted.
                                 _ALLOWED_UPDATE_COLUMNS = {
-                                    'name', 'icon', 'duration', 'group_id',
-                                    'topic', 'mqtt_server_id',
+                                    "name",
+                                    "icon",
+                                    "duration",
+                                    "group_id",
+                                    "topic",
+                                    "mqtt_server_id",
                                 }
 
                                 assignments = []
@@ -424,25 +453,28 @@ class ZoneRepository(BaseRepository):
                                         # Defensive: this branch is only
                                         # reachable if someone edits this
                                         # function and passes a bad name.
-                                        raise ValueError(
-                                            f"refusing to UPDATE unknown zones column: {column!r}"
-                                        )
+                                        raise ValueError(f"refusing to UPDATE unknown zones column: {column!r}")
                                     assignments.append(f"{column} = ?")
                                     params.append(value)
 
-                                if 'name' in z: _set('name', z['name'])
-                                if 'icon' in z: _set('icon', z['icon'])
-                                if 'duration' in z: _set('duration', int(z['duration']))
-                                if ('group_id' in z) or ('group' in z):
-                                    _set('group_id', int(z.get('group_id', z.get('group', 1))))
-                                if 'topic' in z: _set('topic', (z.get('topic') or '').strip())
+                                if "name" in z:
+                                    _set("name", z["name"])
+                                if "icon" in z:
+                                    _set("icon", z["icon"])
+                                if "duration" in z:
+                                    _set("duration", int(z["duration"]))
+                                if ("group_id" in z) or ("group" in z):
+                                    _set("group_id", int(z.get("group_id", z.get("group", 1))))
+                                if "topic" in z:
+                                    _set("topic", (z.get("topic") or "").strip())
                                 # B1 FIX: 'state' deliberately not handled — see
                                 # _ALLOWED_UPDATE_COLUMNS comment above.
-                                if 'mqtt_server_id' in z: _set('mqtt_server_id', z.get('mqtt_server_id'))
+                                if "mqtt_server_id" in z:
+                                    _set("mqtt_server_id", z.get("mqtt_server_id"))
                                 # updated_at is always set but uses SQL
                                 # CURRENT_TIMESTAMP — not a parameter, and
                                 # not user-controllable.
-                                assignments.append('updated_at = CURRENT_TIMESTAMP')
+                                assignments.append("updated_at = CURRENT_TIMESTAMP")
                                 params.append(zid)
                                 if assignments:
                                     conn.execute(
@@ -451,54 +483,60 @@ class ZoneRepository(BaseRepository):
                                     )
                                     updated += 1
                             else:
-                                conn.execute('''
+                                conn.execute(
+                                    """
                                     INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
                                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                                ''', (
-                                    zid,
-                                    z.get('name') or 'Зона',
-                                    z.get('icon') or '🌿',
-                                    int(z.get('duration') or 10),
-                                    int(z.get('group_id', z.get('group', 1))),
-                                    (z.get('topic') or '').strip(),
-                                    z.get('mqtt_server_id')
-                                ))
+                                """,
+                                    (
+                                        zid,
+                                        z.get("name") or "Зона",
+                                        z.get("icon") or "🌿",
+                                        int(z.get("duration") or 10),
+                                        int(z.get("group_id", z.get("group", 1))),
+                                        (z.get("topic") or "").strip(),
+                                        z.get("mqtt_server_id"),
+                                    ),
+                                )
                                 created += 1
                         else:
-                            conn.execute('''
+                            conn.execute(
+                                """
                                 INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
                                 VALUES (?, ?, ?, ?, ?, ?)
-                            ''', (
-                                z.get('name') or 'Зона',
-                                z.get('icon') or '🌿',
-                                int(z.get('duration') or 10),
-                                int(z.get('group_id', z.get('group', 1))),
-                                (z.get('topic') or '').strip(),
-                                z.get('mqtt_server_id')
-                            ))
+                            """,
+                                (
+                                    z.get("name") or "Зона",
+                                    z.get("icon") or "🌿",
+                                    int(z.get("duration") or 10),
+                                    int(z.get("group_id", z.get("group", 1))),
+                                    (z.get("topic") or "").strip(),
+                                    z.get("mqtt_server_id"),
+                                ),
+                            )
                             created += 1
                     except sqlite3.Error as e:
                         logger.warning("Ошибка upsert зоны: %s", e)
                         failed += 1
                 conn.commit()
-            return {'created': created, 'updated': updated, 'failed': failed}
+            return {"created": created, "updated": updated, "failed": failed}
         except sqlite3.Error as e:
             logger.error("Ошибка bulk-импорта зон: %s", e)
-            return {'created': created, 'updated': updated, 'failed': (failed or 0)}
+            return {"created": created, "updated": updated, "failed": (failed or 0)}
 
     @retry_on_busy()
     def delete_zone(self, zone_id: int) -> bool:
         """Удалить зону."""
         try:
             with self._connect() as conn:
-                conn.execute('DELETE FROM zones WHERE id = ?', (zone_id,))
+                conn.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
                 conn.commit()
                 return True
         except sqlite3.Error as e:
             logger.error("Ошибка удаления зоны %s: %s", zone_id, e)
             return False
 
-    def get_zones_by_group(self, group_id: int) -> List[Dict[str, Any]]:
+    def get_zones_by_group(self, group_id: int) -> list[dict[str, Any]]:
         """Получить зоны по группе.
 
         Injects ``last_watering_time`` from ``zone_runs`` so callers get the
@@ -507,17 +545,20 @@ class ZoneRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute('''
+                cursor = conn.execute(
+                    """
                     SELECT z.*, g.name as group_name
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.group_id = ?
                     ORDER BY z.id
-                ''', (group_id,))
+                """,
+                    (group_id,),
+                )
                 zones = []
                 for row in cursor.fetchall():
                     zone = dict(row)
-                    zone['group'] = zone['group_id']
+                    zone["group"] = zone["group_id"]
                     zones.append(zone)
                 try:
                     cur2 = conn.execute(
@@ -530,7 +571,7 @@ class ZoneRepository(BaseRepository):
                     logger.debug("get_zones_by_group: zone_runs aggregation failed: %s", e)
                     last_map = {}
                 for z in zones:
-                    z['last_watering_time'] = last_map.get(int(z['id']))
+                    z["last_watering_time"] = last_map.get(int(z["id"]))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон группы %s: %s", group_id, e)
@@ -541,26 +582,32 @@ class ZoneRepository(BaseRepository):
         """Очистить плановые времена старта у всех зон в группе."""
         try:
             with self._connect() as conn:
-                conn.execute('''
+                conn.execute(
+                    """
                     UPDATE zones
                     SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
                     WHERE group_id = ?
-                ''', (group_id,))
+                """,
+                    (group_id,),
+                )
                 conn.commit()
         except sqlite3.Error as e:
             logger.error("Ошибка очистки scheduled_start_time в группе %s: %s", group_id, e)
 
     @retry_on_busy()
-    def set_group_scheduled_starts(self, group_id: int, schedule: Dict[int, str]) -> None:
+    def set_group_scheduled_starts(self, group_id: int, schedule: dict[int, str]) -> None:
         """Установить плановые времена старта по зоне в группе."""
         try:
             with self._connect() as conn:
                 for zone_id, ts in schedule.items():
-                    conn.execute('''
+                    conn.execute(
+                        """
                         UPDATE zones
                         SET scheduled_start_time = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE id = ? AND group_id = ?
-                    ''', (ts, zone_id, group_id))
+                    """,
+                        (ts, zone_id, group_id),
+                    )
                 conn.commit()
         except sqlite3.Error as e:
             logger.error("Ошибка установки расписания scheduled_start_time для группы %s: %s", group_id, e)
@@ -570,25 +617,31 @@ class ZoneRepository(BaseRepository):
         """Очистить scheduled_start_time у всех зон группы, кроме указанной."""
         try:
             with self._connect() as conn:
-                conn.execute('''
+                conn.execute(
+                    """
                     UPDATE zones
                     SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
                     WHERE group_id = ? AND id != ?
-                ''', (group_id, zone_id))
+                """,
+                    (group_id, zone_id),
+                )
                 conn.commit()
         except sqlite3.Error as e:
             logger.error("Ошибка очистки расписания у одногруппных зон для зоны %s: %s", zone_id, e)
 
     @retry_on_busy()
-    def update_zone_postpone(self, zone_id: int, postpone_until: str = None, reason: str = None) -> bool:
+    def update_zone_postpone(self, zone_id: int, postpone_until: str | None = None, reason: str | None = None) -> bool:
         """Обновить отложенный полив зоны с указанием причины."""
         try:
             with self._connect() as conn:
-                conn.execute('''
-                    UPDATE zones 
+                conn.execute(
+                    """
+                    UPDATE zones
                     SET postpone_until = ?, postpone_reason = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (postpone_until, reason, zone_id))
+                """,
+                    (postpone_until, reason, zone_id),
+                )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -596,9 +649,9 @@ class ZoneRepository(BaseRepository):
             return False
 
     @retry_on_busy()
-    def update_zone_photo(self, zone_id: int, photo_path: Optional[str],
-                          photo_thumb: Optional[str] = None,
-                          update_thumb: bool = False) -> bool:
+    def update_zone_photo(
+        self, zone_id: int, photo_path: str | None, photo_thumb: str | None = None, update_thumb: bool = False
+    ) -> bool:
         """Обновить фотографию зоны.
 
         Issue #11: optional ``photo_thumb`` (relative path to 400x400 file).
@@ -610,17 +663,23 @@ class ZoneRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 if update_thumb:
-                    conn.execute('''
+                    conn.execute(
+                        """
                         UPDATE zones
                         SET photo_path = ?, photo_thumb = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?
-                    ''', (photo_path, photo_thumb, zone_id))
+                    """,
+                        (photo_path, photo_thumb, zone_id),
+                    )
                 else:
-                    conn.execute('''
+                    conn.execute(
+                        """
                         UPDATE zones
                         SET photo_path = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?
-                    ''', (photo_path, zone_id))
+                    """,
+                        (photo_path, zone_id),
+                    )
                 conn.commit()
                 return True
         except sqlite3.Error as e:
@@ -631,7 +690,7 @@ class ZoneRepository(BaseRepository):
         """Получить продолжительность полива зоны."""
         try:
             with self._connect() as conn:
-                cursor = conn.execute('SELECT duration FROM zones WHERE id = ?', (zone_id,))
+                cursor = conn.execute("SELECT duration FROM zones WHERE id = ?", (zone_id,))
                 result = cursor.fetchone()
                 return result[0] if result else 0
         except sqlite3.Error as e:
@@ -640,10 +699,18 @@ class ZoneRepository(BaseRepository):
 
     # --- Zone runs ---
     @retry_on_busy()
-    def create_zone_run(self, zone_id: int, group_id: int, start_utc: str, start_monotonic: float,
-                        start_raw_pulses: Optional[int], pulse_liters_at_start: int,
-                        base_m3_at_start: Optional[float] = None,
-                        *, source: Optional[str] = None) -> Optional[int]:
+    def create_zone_run(
+        self,
+        zone_id: int,
+        group_id: int,
+        start_utc: str,
+        start_monotonic: float,
+        start_raw_pulses: int | None,
+        pulse_liters_at_start: int,
+        base_m3_at_start: float | None = None,
+        *,
+        source: str | None = None,
+    ) -> int | None:
         """Open a new zone_runs row.
 
         ``source`` (issue #35) is a keyword-only argument so existing positional
@@ -652,13 +719,22 @@ class ZoneRepository(BaseRepository):
         """
         try:
             with self._connect() as conn:
-                cur = conn.execute('''
+                cur = conn.execute(
+                    """
                     INSERT INTO zone_runs(zone_id, group_id, start_utc, start_monotonic, start_raw_pulses, pulse_liters_at_start, base_m3_at_start, source)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (int(zone_id), int(group_id), str(start_utc), float(start_monotonic),
-                      None if start_raw_pulses is None else int(start_raw_pulses), int(pulse_liters_at_start),
-                      None if base_m3_at_start is None else float(base_m3_at_start),
-                      None if source is None else str(source)))
+                """,
+                    (
+                        int(zone_id),
+                        int(group_id),
+                        str(start_utc),
+                        float(start_monotonic),
+                        None if start_raw_pulses is None else int(start_raw_pulses),
+                        int(pulse_liters_at_start),
+                        None if base_m3_at_start is None else float(base_m3_at_start),
+                        None if source is None else str(source),
+                    ),
+                )
                 run_id = cur.lastrowid
                 conn.commit()
                 return int(run_id)
@@ -666,13 +742,16 @@ class ZoneRepository(BaseRepository):
             logger.error("Ошибка создания zone_run для зоны %s: %s", zone_id, e)
             return None
 
-    def get_open_zone_run(self, zone_id: int) -> Optional[Dict[str, Any]]:
+    def get_open_zone_run(self, zone_id: int) -> dict[str, Any] | None:
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cur = conn.execute('''
+                cur = conn.execute(
+                    """
                     SELECT * FROM zone_runs WHERE zone_id = ? AND end_utc IS NULL ORDER BY id DESC LIMIT 1
-                ''', (int(zone_id),))
+                """,
+                    (int(zone_id),),
+                )
                 row = cur.fetchone()
                 return dict(row) if row else None
         except sqlite3.Error as e:
@@ -680,20 +759,28 @@ class ZoneRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def finish_zone_run(self, run_id: int, end_utc: str, end_monotonic: float, end_raw_pulses: Optional[int],
-                        total_liters: Optional[float], avg_flow_lpm: Optional[float], status: str = 'ok') -> bool:
+    def finish_zone_run(
+        self,
+        run_id: int,
+        end_utc: str,
+        end_monotonic: float,
+        end_raw_pulses: int | None,
+        total_liters: float | None,
+        avg_flow_lpm: float | None,
+        status: str = "ok",
+    ) -> bool:
         try:
             with self._connect() as conn:
-                fields = ['end_utc = ?', 'end_monotonic = ?', 'status = ?', 'updated_at = CURRENT_TIMESTAMP']
+                fields = ["end_utc = ?", "end_monotonic = ?", "status = ?", "updated_at = CURRENT_TIMESTAMP"]
                 params: list = [str(end_utc), float(end_monotonic), str(status)]
                 if end_raw_pulses is not None:
-                    fields.append('end_raw_pulses = ?')
+                    fields.append("end_raw_pulses = ?")
                     params.append(int(end_raw_pulses))
                 if total_liters is not None:
-                    fields.append('total_liters = ?')
+                    fields.append("total_liters = ?")
                     params.append(float(total_liters))
                 if avg_flow_lpm is not None:
-                    fields.append('avg_flow_lpm = ?')
+                    fields.append("avg_flow_lpm = ?")
                     params.append(float(avg_flow_lpm))
                 params.append(int(run_id))
                 sql = f"UPDATE zone_runs SET {', '.join(fields)} WHERE id = ?"
@@ -704,7 +791,7 @@ class ZoneRepository(BaseRepository):
             logger.error("Ошибка завершения zone_run %s: %s", run_id, e)
             return False
 
-    def get_last_watering_time(self, zone_id: int) -> Optional[str]:
+    def get_last_watering_time(self, zone_id: int) -> str | None:
         """Return the most recent successful watering end-time for a zone.
 
         Single source of truth = ``zone_runs``. The denormalised
@@ -720,9 +807,9 @@ class ZoneRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 cur = conn.execute(
-                    "SELECT MAX(end_utc) FROM zone_runs "
-                    "WHERE zone_id = ? AND status = 'ok' AND end_utc IS NOT NULL",
-                    (int(zone_id),))
+                    "SELECT MAX(end_utc) FROM zone_runs WHERE zone_id = ? AND status = 'ok' AND end_utc IS NOT NULL",
+                    (int(zone_id),),
+                )
                 row = cur.fetchone()
                 return row[0] if row and row[0] else None
         except sqlite3.Error as e:
@@ -730,7 +817,7 @@ class ZoneRepository(BaseRepository):
             return None
 
     @staticmethod
-    def _parse_postpone_dt(s: Optional[str]) -> Optional[datetime]:
+    def _parse_postpone_dt(s: str | None) -> datetime | None:
         """Local datetime parser mirroring irrigation_scheduler._parse_dt.
 
         Duplicated (instead of imported from services.helpers) to avoid a
@@ -738,14 +825,14 @@ class ZoneRepository(BaseRepository):
         """
         if not s:
             return None
-        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
             try:
                 return datetime.strptime(s, fmt)
             except (ValueError, TypeError, KeyError):
                 continue
         return None
 
-    def compute_next_run_for_zone(self, zone_id: int, programs_getter=None) -> Optional[str]:
+    def compute_next_run_for_zone(self, zone_id: int, programs_getter=None) -> str | None:
         """Рассчитать ближайшее будущее время запуска зоны по всем программам.
         programs_getter: callable that returns list of programs (injected from facade).
 
@@ -762,22 +849,22 @@ class ZoneRepository(BaseRepository):
             if not programs:
                 return None
             now = datetime.now()
-            postpone_dt = self._parse_postpone_dt(zone.get('postpone_until'))
+            postpone_dt = self._parse_postpone_dt(zone.get("postpone_until"))
             if postpone_dt and postpone_dt > now:
                 now = postpone_dt
-            best_dt: Optional[datetime] = None
+            best_dt: datetime | None = None
             for prog in programs:
-                if zone_id not in prog.get('zones', []):
+                if zone_id not in prog.get("zones", []):
                     continue
                 for offset in range(0, 14):
                     dt_candidate = now + timedelta(days=offset)
-                    if dt_candidate.weekday() in prog['days']:
-                        hour, minute = map(int, prog['time'].split(':'))
+                    if dt_candidate.weekday() in prog["days"]:
+                        hour, minute = map(int, prog["time"].split(":"))
                         start_dt = dt_candidate.replace(hour=hour, minute=minute, second=0, microsecond=0)
                         if start_dt <= now:
                             continue
                         cum = 0
-                        for zid in sorted(prog['zones']):
+                        for zid in sorted(prog["zones"]):
                             dur = self.get_zone_duration(zid)
                             if zid == zone_id:
                                 candidate = start_dt + timedelta(minutes=cum)
@@ -787,7 +874,7 @@ class ZoneRepository(BaseRepository):
                             cum += dur
                         break
             if best_dt:
-                return best_dt.strftime('%Y-%m-%d %H:%M:%S')
+                return best_dt.strftime("%Y-%m-%d %H:%M:%S")
             return None
         except (sqlite3.Error, OSError) as e:
             logger.exception("Ошибка расчета следующего запуска для зоны %s: %s", zone_id, e)
@@ -797,11 +884,11 @@ class ZoneRepository(BaseRepository):
         """Пересчитать и записать scheduled_start_time всем зонам группы."""
         try:
             zones = self.get_zones_by_group(group_id)
-            schedule: Dict[int, str] = {}
+            schedule: dict[int, str] = {}
             for z in zones:
-                nxt = self.compute_next_run_for_zone(z['id'], programs_getter=programs_getter)
+                nxt = self.compute_next_run_for_zone(z["id"], programs_getter=programs_getter)
                 if nxt:
-                    schedule[z['id']] = nxt
+                    schedule[z["id"]] = nxt
             self.clear_group_scheduled_starts(group_id)
             if schedule:
                 self.set_group_scheduled_starts(group_id, schedule)

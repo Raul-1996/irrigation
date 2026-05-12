@@ -4,30 +4,30 @@ Covers: sensor priority, stale fallback, source annotation, offline handling.
 Uses mocks to isolate from real MQTT monitors and weather API.
 Python 3.9 compatible.
 """
+
 import os
 import time
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
 
 from services.weather_merged import (
     SENSOR_STALE_TIMEOUT,
-    get_merged_weather,
-    _merge_temperature,
+    _build_astronomy,
+    _build_forecast_3d,
+    _build_forecast_24h,
+    _build_sensor_status,
+    _get_weather_code,
     _merge_humidity,
     _merge_rain,
-    _build_sensor_status,
-    _build_forecast_24h,
-    _build_forecast_3d,
-    _build_astronomy,
-    _get_weather_code,
+    _merge_temperature,
+    get_merged_weather,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_api_weather(**overrides):
     """Create a mock WeatherData object."""
@@ -80,6 +80,7 @@ def _make_rain_state(enabled=True, is_rain=False):
 # _merge_temperature
 # ---------------------------------------------------------------------------
 
+
 class TestMergeTemperature:
     def test_local_priority_fresh(self):
         """Local sensor online and fresh -> source='local'."""
@@ -125,6 +126,7 @@ class TestMergeTemperature:
 # _merge_humidity
 # ---------------------------------------------------------------------------
 
+
 class TestMergeHumidity:
     def test_local_priority(self):
         api = _make_api_weather(humidity=55)
@@ -151,6 +153,7 @@ class TestMergeHumidity:
 # ---------------------------------------------------------------------------
 # _merge_rain
 # ---------------------------------------------------------------------------
+
 
 class TestMergeRain:
     def test_local_rain_true(self):
@@ -193,6 +196,7 @@ class TestMergeRain:
 # Wind (always API)
 # ---------------------------------------------------------------------------
 
+
 class TestWindAlwaysApi:
     @patch("services.weather_merged._get_api_weather")
     @patch("services.weather_merged._get_env_state")
@@ -210,6 +214,7 @@ class TestWindAlwaysApi:
 # ---------------------------------------------------------------------------
 # Full get_merged_weather
 # ---------------------------------------------------------------------------
+
 
 class TestGetMergedWeather:
     @patch("services.weather_merged._get_api_weather")
@@ -267,6 +272,7 @@ class TestGetMergedWeather:
 # Sensor status
 # ---------------------------------------------------------------------------
 
+
 class TestBuildSensorStatus:
     def test_all_online(self):
         env = _make_env_state(temp_online=True, hum_online=True)
@@ -278,8 +284,10 @@ class TestBuildSensorStatus:
 
     def test_all_offline(self):
         env = _make_env_state(
-            temp_enabled=False, temp_online=False,
-            hum_enabled=False, hum_online=False,
+            temp_enabled=False,
+            temp_online=False,
+            hum_enabled=False,
+            hum_online=False,
         )
         rain = _make_rain_state(enabled=False)
         result = _build_sensor_status(env, rain)
@@ -291,6 +299,7 @@ class TestBuildSensorStatus:
 # ---------------------------------------------------------------------------
 # Forecast builders
 # ---------------------------------------------------------------------------
+
 
 class TestForecast24h:
     def test_empty_raw(self):
@@ -306,6 +315,7 @@ class TestForecast24h:
     def test_with_data(self):
         """Build forecast from hourly data."""
         from datetime import datetime, timedelta
+
         now = datetime.now()
         times = []
         temps = []
@@ -369,6 +379,7 @@ class TestForecast3d:
 # Astronomy
 # ---------------------------------------------------------------------------
 
+
 class TestAstronomy:
     def test_empty_raw(self):
         api = _make_api_weather(raw={})
@@ -405,6 +416,7 @@ class TestAstronomy:
 # Weather code extraction
 # ---------------------------------------------------------------------------
 
+
 class TestGetWeatherCode:
     def test_no_raw(self):
         api = _make_api_weather(raw={})
@@ -413,6 +425,7 @@ class TestGetWeatherCode:
 
     def test_with_code(self):
         from datetime import datetime
+
         current_hour = datetime.now().strftime("%Y-%m-%dT%H:00")
         raw = {
             "hourly": {
@@ -452,6 +465,7 @@ class TestGetWeatherCode:
 # ---------------------------------------------------------------------------
 # SENSOR_STALE_TIMEOUT constant
 # ---------------------------------------------------------------------------
+
 
 class TestConstants:
     def test_stale_timeout(self):

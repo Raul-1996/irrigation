@@ -1,9 +1,10 @@
 """Tests for scheduler Event.wait (interruptible sleep)."""
+
 import threading
 import time
+
 import pytest
-from unittest.mock import patch, MagicMock
-from database import IrrigationDB
+
 from irrigation_scheduler import IrrigationScheduler
 
 
@@ -20,7 +21,7 @@ class TestSchedulerShutdownEvent:
 
     def test_shutdown_event_exists(self, scheduler):
         """Scheduler should have a _shutdown_event."""
-        assert hasattr(scheduler, '_shutdown_event')
+        assert hasattr(scheduler, "_shutdown_event")
         assert isinstance(scheduler._shutdown_event, threading.Event)
 
     def test_shutdown_event_not_set_initially(self, scheduler):
@@ -35,18 +36,18 @@ class TestSchedulerShutdownEvent:
 
     def test_shutdown_event_interrupts_wait(self, scheduler):
         """Setting _shutdown_event should interrupt Event.wait() calls."""
-        result = {'interrupted': False}
+        result = {"interrupted": False}
 
         def waiter():
             if scheduler._shutdown_event.wait(timeout=30):
-                result['interrupted'] = True
+                result["interrupted"] = True
 
         t = threading.Thread(target=waiter)
         t.start()
         time.sleep(0.05)  # Let thread start
         scheduler._shutdown_event.set()
         t.join(timeout=2)
-        assert result['interrupted'] is True
+        assert result["interrupted"] is True
 
     def test_start_stop_cycle(self, scheduler):
         """Multiple start/stop cycles should work."""
@@ -67,30 +68,30 @@ class TestSchedulerClearPostpones:
 
     def test_clear_expired_postpones_with_expired(self, test_db):
         """Should clear zones with expired postpone_until."""
-        test_db.create_zone({'name': 'Z1', 'duration': 10, 'group_id': 1})
+        test_db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         zones = test_db.get_zones()
-        zid = zones[0]['id']
+        zid = zones[0]["id"]
         # Set postpone in the past
-        test_db.update_zone(zid, {'postpone_until': '2020-01-01 00:00:00', 'postpone_reason': 'test'})
+        test_db.update_zone(zid, {"postpone_until": "2020-01-01 00:00:00", "postpone_reason": "test"})
 
         sched = IrrigationScheduler(test_db)
         sched.clear_expired_postpones()
 
         zone = test_db.get_zone(zid)
-        assert zone.get('postpone_until') is None
+        assert zone.get("postpone_until") is None
 
     def test_clear_postpones_future_not_cleared(self, test_db):
         """Should NOT clear zones with future postpone_until."""
-        test_db.create_zone({'name': 'Z1', 'duration': 10, 'group_id': 1})
+        test_db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         zones = test_db.get_zones()
-        zid = zones[0]['id']
-        test_db.update_zone(zid, {'postpone_until': '2099-01-01 00:00:00', 'postpone_reason': 'test'})
+        zid = zones[0]["id"]
+        test_db.update_zone(zid, {"postpone_until": "2099-01-01 00:00:00", "postpone_reason": "test"})
 
         sched = IrrigationScheduler(test_db)
         sched.clear_expired_postpones()
 
         zone = test_db.get_zone(zid)
-        assert zone.get('postpone_until') is not None
+        assert zone.get("postpone_until") is not None
 
 
 class TestSchedulerPrograms:
@@ -98,17 +99,20 @@ class TestSchedulerPrograms:
 
     def test_schedule_program(self, test_db):
         """Should schedule a program."""
-        test_db.create_zone({'name': 'Z1', 'duration': 10, 'group_id': 1})
+        test_db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         zones = test_db.get_zones()
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
-            sched.schedule_program(1, {
-                'name': 'Morning',
-                'time': '06:00',
-                'days': [0, 2, 4],
-                'zones': [zones[0]['id']],
-            })
+            sched.schedule_program(
+                1,
+                {
+                    "name": "Morning",
+                    "time": "06:00",
+                    "days": [0, 2, 4],
+                    "zones": [zones[0]["id"]],
+                },
+            )
             assert 1 in sched.program_jobs
             assert len(sched.program_jobs[1]) == 3  # 3 days
         finally:
@@ -116,17 +120,20 @@ class TestSchedulerPrograms:
 
     def test_cancel_program(self, test_db):
         """Should cancel a scheduled program."""
-        test_db.create_zone({'name': 'Z1', 'duration': 10, 'group_id': 1})
+        test_db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         zones = test_db.get_zones()
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
-            sched.schedule_program(1, {
-                'name': 'Morning',
-                'time': '06:00',
-                'days': [0],
-                'zones': [zones[0]['id']],
-            })
+            sched.schedule_program(
+                1,
+                {
+                    "name": "Morning",
+                    "time": "06:00",
+                    "days": [0],
+                    "zones": [zones[0]["id"]],
+                },
+            )
             sched.cancel_program(1)
             assert sched.program_jobs.get(1) == []
         finally:
@@ -134,14 +141,16 @@ class TestSchedulerPrograms:
 
     def test_load_programs(self, test_db):
         """Should load all programs from DB."""
-        test_db.create_zone({'name': 'Z1', 'duration': 10, 'group_id': 1})
+        test_db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         zones = test_db.get_zones()
-        test_db.create_program({
-            'name': 'Morning',
-            'time': '06:00',
-            'days': [0, 2, 4],
-            'zones': [zones[0]['id']],
-        })
+        test_db.create_program(
+            {
+                "name": "Morning",
+                "time": "06:00",
+                "days": [0, 2, 4],
+                "zones": [zones[0]["id"]],
+            }
+        )
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:

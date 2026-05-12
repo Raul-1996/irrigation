@@ -5,36 +5,35 @@ All tests will be RED until services/program_queue.py is implemented.
 
 Covers: basic ops, FIFO, cancel, max_wait, weather, errors, completion tracking.
 """
+
 import os
 import re
-import time
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Optional
-from unittest.mock import MagicMock, patch, PropertyMock, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-os.environ['TESTING'] = '1'
+os.environ["TESTING"] = "1"
 
 # These imports will fail until the module is created — that's TDD.
+import contextlib
+
 from services.program_queue import (
+    MAX_QUEUE_SIZE,
+    ProgramCompletionTracker,
     ProgramQueueManager,
     QueueEntry,
     QueueEntryState,
-    GroupQueue,
-    ProgramCompletionTracker,
-    MAX_QUEUE_SIZE,
 )
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-UUID4_RE = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-)
+UUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
 def wait_for_state(
@@ -70,11 +69,12 @@ def wait_for_worker_idle(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def mock_db(tmp_path):
     """In-memory IrrigationDB mock with essential helpers."""
     db = MagicMock()
-    db.path = str(tmp_path / 'test.db')
+    db.path = str(tmp_path / "test.db")
     return db
 
 
@@ -132,15 +132,14 @@ def queue_manager(
     )
     yield qm
     # Cleanup: ensure all workers stop
-    try:
+    with contextlib.suppress(Exception):
         qm.shutdown()
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
 # 1. Basic operations (8 tests)
 # ---------------------------------------------------------------------------
+
 
 class TestBasicOperations:
     """Tests #1-#8: creation, enqueue, state, shutdown."""
@@ -186,7 +185,7 @@ class TestBasicOperations:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             entry_a = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.1)  # let worker pick up A
             entry_b = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
@@ -205,21 +204,21 @@ class TestBasicOperations:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.1)
             queue_manager.enqueue(2, "B", 1, [2], datetime.now())
             queue_manager.enqueue(3, "C", 1, [3], datetime.now())
 
             state = queue_manager.get_queue_state(1)
-            assert 'group_id' in state
-            assert 'current' in state
-            assert 'queue' in state
-            assert 'queue_length' in state
-            assert state['group_id'] == 1
-            assert state['current'] is not None
-            assert isinstance(state['queue'], list)
-            assert state['queue_length'] == 2
+            assert "group_id" in state
+            assert "current" in state
+            assert "queue" in state
+            assert "queue_length" in state
+            assert state["group_id"] == 1
+            assert state["current"] is not None
+            assert isinstance(state["queue"], list)
+            assert state["queue_length"] == 2
             block.set()
 
     def test_get_all_queues_state_all_groups(self, queue_manager):
@@ -231,18 +230,18 @@ class TestBasicOperations:
             block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             queue_manager.enqueue(2, "B", 2, [10], datetime.now())
             time.sleep(0.1)
 
             state = queue_manager.get_all_queues_state()
-            assert 'queues' in state
-            assert 'total_entries' in state
-            assert 'active_workers' in state
-            assert 1 in state['queues']
-            assert 2 in state['queues']
-            assert state['active_workers'] == 2
+            assert "queues" in state
+            assert "total_entries" in state
+            assert "active_workers" in state
+            assert 1 in state["queues"]
+            assert 2 in state["queues"]
+            assert state["active_workers"] == 2
             block.set()
 
     def test_entry_id_is_unique_uuid4(self, queue_manager):
@@ -253,7 +252,7 @@ class TestBasicOperations:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             e1 = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             e2 = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
 
@@ -270,7 +269,7 @@ class TestBasicOperations:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             entries = []
             for i in range(MAX_QUEUE_SIZE + 1):
                 e = queue_manager.enqueue(
@@ -297,7 +296,7 @@ class TestBasicOperations:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             queue_manager.enqueue(2, "B", 2, [10], datetime.now())
             queue_manager.enqueue(3, "C", 3, [20], datetime.now())
@@ -305,8 +304,7 @@ class TestBasicOperations:
 
             # Verify workers are alive
             alive_before = sum(
-                1 for gq in queue_manager._queues.values()
-                if gq.worker_thread and gq.worker_thread.is_alive()
+                1 for gq in queue_manager._queues.values() if gq.worker_thread and gq.worker_thread.is_alive()
             )
             assert alive_before == 3
 
@@ -322,6 +320,7 @@ class TestBasicOperations:
 # 2. FIFO queue (6 tests)
 # ---------------------------------------------------------------------------
 
+
 class TestFIFO:
     """Tests #9-#14: FIFO ordering, parallel groups, worker lifecycle."""
 
@@ -331,11 +330,11 @@ class TestFIFO:
         original_run = queue_manager._run_entry
 
         def tracking_run(entry, *a, **kw):
-            order.append("start_%s" % entry.program_name)
+            order.append(f"start_{entry.program_name}")
             original_run(entry, *a, **kw)
-            order.append("end_%s" % entry.program_name)
+            order.append(f"end_{entry.program_name}")
 
-        with patch.object(queue_manager, '_run_entry', side_effect=tracking_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=tracking_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             queue_manager.enqueue(2, "B", 1, [2], datetime.now())
             assert wait_for_worker_idle(queue_manager, 1)
@@ -352,7 +351,7 @@ class TestFIFO:
             started.append(entry.program_name)
             original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=tracking_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=tracking_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             queue_manager.enqueue(2, "B", 1, [2], datetime.now())
             queue_manager.enqueue(3, "C", 1, [3], datetime.now())
@@ -368,13 +367,11 @@ class TestFIFO:
 
         def tracking_run(entry, *a, **kw):
             started_at[entry.group_id] = time.monotonic()
-            try:
+            with contextlib.suppress(threading.BrokenBarrierError):
                 barrier.wait()
-            except threading.BrokenBarrierError:
-                pass
             original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=tracking_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=tracking_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             queue_manager.enqueue(2, "B", 2, [10], datetime.now())
             wait_for_worker_idle(queue_manager, 1)
@@ -386,10 +383,20 @@ class TestFIFO:
         """#12 — multi-group program creates entries in both groups."""
         run_id = str(uuid.uuid4())
         e1 = queue_manager.enqueue(
-            5, "Утро", 1, [1, 2], datetime.now(), program_run_id=run_id,
+            5,
+            "Утро",
+            1,
+            [1, 2],
+            datetime.now(),
+            program_run_id=run_id,
         )
         e2 = queue_manager.enqueue(
-            5, "Утро", 2, [10], datetime.now(), program_run_id=run_id,
+            5,
+            "Утро",
+            2,
+            [10],
+            datetime.now(),
+            program_run_id=run_id,
         )
         assert e1 is not None
         assert e2 is not None
@@ -414,7 +421,7 @@ class TestFIFO:
             order.append(entry.program_id)
             original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=tracking_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=tracking_run):
             queue_manager.enqueue(10, "Morning", 1, [1], datetime.now())
             queue_manager.enqueue(20, "Evening", 1, [2], datetime.now())
             assert wait_for_worker_idle(queue_manager, 1)
@@ -425,6 +432,7 @@ class TestFIFO:
 # ---------------------------------------------------------------------------
 # 3. Cancel (5 tests)
 # ---------------------------------------------------------------------------
+
 
 class TestCancel:
     """Tests #15-#19: cancel entry, program, group."""
@@ -439,7 +447,7 @@ class TestCancel:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             entry_a = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.1)
             entry_b = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
@@ -459,7 +467,7 @@ class TestCancel:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             entry_a = queue_manager.enqueue(1, "A", 1, [3], datetime.now())
             time.sleep(0.1)
             assert wait_for_state(entry_a, QueueEntryState.RUNNING, timeout=2)
@@ -478,7 +486,7 @@ class TestCancel:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             e1 = queue_manager.enqueue(5, "P", 1, [1], datetime.now())
             time.sleep(0.05)
             e2 = queue_manager.enqueue(5, "P", 1, [2], datetime.now())
@@ -500,7 +508,7 @@ class TestCancel:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             e1 = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             e2 = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
             time.sleep(0.1)
@@ -532,6 +540,7 @@ class TestCancel:
 # 4. max_wait_time (4 tests)
 # ---------------------------------------------------------------------------
 
+
 class TestMaxWaitTime:
     """Tests #20-#23: entry expiration based on wait time."""
 
@@ -548,7 +557,7 @@ class TestMaxWaitTime:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_then_fast):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_then_fast):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.05)
             # Enqueue B with enqueued_at 130 min ago
@@ -575,7 +584,7 @@ class TestMaxWaitTime:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_then_fast):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_then_fast):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.05)
             entry_b = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
@@ -602,7 +611,7 @@ class TestMaxWaitTime:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_then_fast):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_then_fast):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.05)
             entry_b = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
@@ -617,9 +626,9 @@ class TestMaxWaitTime:
         if entry_b:
             assert entry_b.state != QueueEntryState.EXPIRED
 
-    def test_max_wait_zero_means_no_limit(self, mock_db, shutdown_event,
-                                          mock_float_monitor, mock_telegram,
-                                          mock_weather_coefficient):
+    def test_max_wait_zero_means_no_limit(
+        self, mock_db, shutdown_event, mock_float_monitor, mock_telegram, mock_weather_coefficient
+    ):
         """#23 — max_wait=0 disables expiration."""
         # Create QM with max_wait_minutes=0  (no limit)
         qm = ProgramQueueManager(
@@ -641,7 +650,7 @@ class TestMaxWaitTime:
                 block.wait(timeout=5)
             return original_run(entry, *a, **kw)
 
-        with patch.object(qm, '_run_entry', side_effect=slow_then_fast):
+        with patch.object(qm, "_run_entry", side_effect=slow_then_fast):
             qm.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.05)
             entry_b = qm.enqueue(2, "B", 1, [2], datetime.now())
@@ -653,21 +662,22 @@ class TestMaxWaitTime:
 
         if entry_b:
             assert entry_b.state != QueueEntryState.EXPIRED
-        try:
+        with contextlib.suppress(Exception):
             qm.shutdown()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
 # 5. Weather adjustment (3 tests)
 # ---------------------------------------------------------------------------
 
+
 class TestWeatherAdjustment:
     """Tests #24-#26: weather coefficient applied at zone start."""
 
     def test_weather_coefficient_applied_at_zone_start(
-        self, queue_manager, mock_weather_coefficient,
+        self,
+        queue_manager,
+        mock_weather_coefficient,
     ):
         """#24 — coefficient is applied when zone actually starts, not at enqueue."""
         mock_weather_coefficient.return_value = 150
@@ -677,7 +687,9 @@ class TestWeatherAdjustment:
         assert mock_weather_coefficient.called
 
     def test_weather_coefficient_changes_while_in_queue(
-        self, queue_manager, mock_weather_coefficient,
+        self,
+        queue_manager,
+        mock_weather_coefficient,
     ):
         """#25 — uses coefficient at time of zone start, not enqueue time."""
         mock_weather_coefficient.return_value = 150
@@ -694,7 +706,7 @@ class TestWeatherAdjustment:
                 mock_weather_coefficient.return_value = 80
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_then_check):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_then_check):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.05)
             queue_manager.enqueue(2, "B", 1, [2], datetime.now())
@@ -710,12 +722,13 @@ class TestWeatherAdjustment:
         # enqueue is never called (caller responsibility).
         # We just verify the queue is unaffected.
         state = queue_manager.get_all_queues_state()
-        assert state['total_entries'] == 0
+        assert state["total_entries"] == 0
 
 
 # ---------------------------------------------------------------------------
 # 6. Error handling (4 tests)
 # ---------------------------------------------------------------------------
+
 
 class TestErrorHandling:
     """Tests #27-#30: exceptions, retries, worker resilience."""
@@ -732,7 +745,7 @@ class TestErrorHandling:
                 raise RuntimeError("zone hardware error")
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=failing_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=failing_run):
             entry_a = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             entry_b = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
             assert wait_for_worker_idle(queue_manager, 1)
@@ -748,7 +761,7 @@ class TestErrorHandling:
         def failing_run(entry, *a, **kw):
             raise TimeoutError("MQTT timeout")
 
-        with patch.object(queue_manager, '_run_entry', side_effect=failing_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=failing_run):
             entry = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             assert wait_for_worker_idle(queue_manager, 1)
 
@@ -757,6 +770,7 @@ class TestErrorHandling:
     def test_sqlite_locked_retries(self, queue_manager, mock_db):
         """#29 — SQLite locked error is retried via busy_timeout."""
         import sqlite3
+
         call_count = [0]
         original_method = mock_db.update_queue_log
 
@@ -788,7 +802,7 @@ class TestErrorHandling:
                 raise ValueError("unexpected")
             return original_run(entry, *a, **kw)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=bad_then_good):
+        with patch.object(queue_manager, "_run_entry", side_effect=bad_then_good):
             e1 = queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             e2 = queue_manager.enqueue(2, "B", 1, [2], datetime.now())
             assert wait_for_worker_idle(queue_manager, 1)
@@ -801,11 +815,14 @@ class TestErrorHandling:
 # 7. Additional / Completion tracking (3 tests)
 # ---------------------------------------------------------------------------
 
+
 class TestAdditional:
     """Tests #31-#33: overflow telegram, float-pause state, program_run_id."""
 
     def test_enqueue_returns_none_on_overflow_with_telegram(
-        self, queue_manager, mock_telegram,
+        self,
+        queue_manager,
+        mock_telegram,
     ):
         """#31 — overflow triggers telegram notification."""
         block = threading.Event()
@@ -813,23 +830,24 @@ class TestAdditional:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=10)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             for i in range(MAX_QUEUE_SIZE + 1):
                 queue_manager.enqueue(i, "P%d" % i, 1, [1], datetime.now())
 
             # At least one call to telegram about overflow
             overflow_calls = [
-                c for c in mock_telegram.call_args_list
-                if 'переполнена' in str(c) or 'overflow' in str(c).lower()
+                c for c in mock_telegram.call_args_list if "переполнена" in str(c) or "overflow" in str(c).lower()
             ]
             # Telegram should have been called at least once
             block.set()
 
         # Allow for implementation differences in notification text
-        assert mock_telegram.called or True  # telegram may or may not fire
+        assert True  # telegram may or may not fire
 
     def test_queue_state_during_float_pause(
-        self, queue_manager, mock_float_monitor,
+        self,
+        queue_manager,
+        mock_float_monitor,
     ):
         """#32 — get_queue_state reflects float pause status."""
         mock_float_monitor.is_paused.return_value = True
@@ -838,13 +856,13 @@ class TestAdditional:
         def slow_run(entry, *a, **kw):
             block.wait(timeout=5)
 
-        with patch.object(queue_manager, '_run_entry', side_effect=slow_run):
+        with patch.object(queue_manager, "_run_entry", side_effect=slow_run):
             queue_manager.enqueue(1, "A", 1, [1], datetime.now())
             time.sleep(0.1)
             state = queue_manager.get_queue_state(1)
 
-            assert state['current'] is not None
-            assert state.get('float_paused', False) is True
+            assert state["current"] is not None
+            assert state.get("float_paused", False) is True
             block.set()
 
     def test_program_run_id_propagated(self, queue_manager):
@@ -866,6 +884,7 @@ class TestAdditional:
 # ---------------------------------------------------------------------------
 # ProgramCompletionTracker (inline, 3 tests from spec 3.5)
 # ---------------------------------------------------------------------------
+
 
 class TestProgramCompletionTracker:
     """Integration-level tests for ProgramCompletionTracker within queue context."""
