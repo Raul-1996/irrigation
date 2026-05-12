@@ -592,7 +592,15 @@ def _not_found(e):
 
 @app.route('/sw.js')
 def service_worker():
-    return app.send_static_file('sw.js')
+    sw_path = os.path.join(app.static_folder, 'sw.js')
+    # Sanitize: CACHE_NAME is a JS string literal — strip anything that could
+    # break the quote or thrash cache between dev runs (e.g. spaces, '+dirty').
+    safe_version = _re.sub(r'[^A-Za-z0-9._-]', '-', APP_VERSION)
+    with open(sw_path, 'r', encoding='utf-8') as f:
+        body = f.read().replace('__APP_VERSION__', safe_version)
+    resp = app.response_class(body, mimetype='application/javascript')
+    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    return resp
 
 @app.route('/ws')
 def ws_stub():

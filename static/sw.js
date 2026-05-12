@@ -1,5 +1,5 @@
 // Service Worker for WB-Irrigation (network-first for HTML to avoid stale auth state)
-const CACHE_NAME = 'wb-irrigation-v10';
+const CACHE_NAME = 'wb-irrigation-__APP_VERSION__';
 const urlsToCache = [
     // PWA assets: tiny, constant, required for install + offline boot.
     // Do NOT pre-cache '/' — navigations stay network-first.

@@ -23,8 +23,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     
-    <link rel="stylesheet" href="/static/css/base.css">
-    <link rel="stylesheet" href="/static/css/history.css">
+    <link rel="stylesheet" href="{{ asset('/static/css/base.css') }}">
+    <link rel="stylesheet" href="{{ asset('/static/css/history.css') }}">
 
     {% block extra_css %}{% endblock %}
 </head>
@@ -79,7 +79,7 @@
 
     <script src="{{ asset('static/js/app.js') }}"></script>
     <script src="{{ asset('static/js/audit.js') }}" defer></script>
-    <script src="/static/vendor/chart.umd.min.js" defer></script>
+    <script src="{{ asset('/static/vendor/chart.umd.min.js') }}" defer></script>
     <script src="{{ asset('static/js/history.js') }}" defer></script>
 
     {% block extra_js %}{% endblock %}
