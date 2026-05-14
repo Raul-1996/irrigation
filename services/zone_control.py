@@ -262,8 +262,14 @@ def _is_valid_stop_state(state: str) -> bool:
     return s in ("on", "starting")
 
 
-def exclusive_start_zone(zone_id: int) -> bool:
-    """Start zone and stop others in its group. Returns True on success."""
+def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
+    """Start zone and stop others in its group. Returns True on success.
+
+    ``source`` propagates to ``zone_runs.source`` so the history UI can
+    distinguish program-triggered runs ('program') from manual API/UI
+    runs ('manual'). Default 'manual' preserves prior behaviour for
+    callers that don't pass it explicitly.
+    """
     try:
         z = db.get_zone(zone_id)
         if not z:
@@ -318,7 +324,7 @@ def exclusive_start_zone(zone_id: int) -> bool:
                             logger.exception("start meter snapshot failed (continuing without)")
                     try:
                         db.create_zone_run(
-                            int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3, source="manual"
+                            int(zone_id), gid, start_ts, time.monotonic(), raw, liters, base_m3, source=source
                         )
                     except (sqlite3.Error, OSError):
                         logger.exception("start: create_zone_run failed (zone=%s gid=%s)", zone_id, gid)

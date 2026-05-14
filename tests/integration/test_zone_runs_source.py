@@ -102,6 +102,52 @@ def test_manual_start_writes_source_manual(admin_client, app):
     assert rows[0][0] == "manual", f"expected source='manual', got {rows[0][0]!r}"
 
 
+def test_exclusive_start_zone_with_source_program(runner_db):
+    """exclusive_start_zone(zone_id, source='program') ⇒ zone_runs.source='program'.
+
+    Regression guard: scheduler paths (irrigation_scheduler._run_program_threaded
+    line 962) pass source='program' so program-triggered runs aren't mislabeled
+    as 'manual' in history UI.
+    """
+    from services.zone_control import exclusive_start_zone
+
+    with (
+        patch("services.mqtt_pub.publish_mqtt_value", return_value=True),
+        patch("services.zone_control.publish_mqtt_value", return_value=True),
+        patch("services.zone_control.db", runner_db),
+        patch("services.zone_control.state_verifier"),
+    ):
+        ok = exclusive_start_zone(1, source="program")
+    assert ok, "exclusive_start_zone returned False"
+
+    with sqlite3.connect(runner_db.db_path) as conn:
+        rows = conn.execute("SELECT source FROM zone_runs WHERE zone_id = 1").fetchall()
+    assert rows, "no zone_run row written"
+    assert rows[0][0] == "program", f"expected source='program', got {rows[0][0]!r}"
+
+
+def test_exclusive_start_zone_default_source_manual(runner_db):
+    """exclusive_start_zone(zone_id) without source kwarg ⇒ defaults to 'manual'.
+
+    Back-compat: existing manual API callers don't pass source explicitly.
+    """
+    from services.zone_control import exclusive_start_zone
+
+    with (
+        patch("services.mqtt_pub.publish_mqtt_value", return_value=True),
+        patch("services.zone_control.publish_mqtt_value", return_value=True),
+        patch("services.zone_control.db", runner_db),
+        patch("services.zone_control.state_verifier"),
+    ):
+        ok = exclusive_start_zone(1)
+    assert ok, "exclusive_start_zone returned False"
+
+    with sqlite3.connect(runner_db.db_path) as conn:
+        rows = conn.execute("SELECT source FROM zone_runs WHERE zone_id = 1").fetchall()
+    assert rows, "no zone_run row written"
+    assert rows[0][0] == "manual", f"expected source='manual', got {rows[0][0]!r}"
+
+
 def test_create_zone_run_without_source_keeps_null(test_db):
     """create_zone_run() without source= keyword ⇒ stays NULL (back-compat)."""
     test_db.create_zone(

@@ -959,7 +959,7 @@ class IrrigationScheduler:
                     try:
                         from services.zone_control import exclusive_start_zone as _start_central
 
-                        _start_central(int(zone_id))
+                        _start_central(int(zone_id), source="program")
                     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                         logger.debug("Handled exception in line_406: %s", e)
                     end_time = datetime.now() + timedelta(minutes=duration)
