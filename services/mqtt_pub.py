@@ -106,6 +106,110 @@ def get_or_create_mqtt_client(server: dict[str, Any]) -> Any | None:
         return cl
 
 
+def _publish_with_retries(cl: Any, topic: str, value: str, qos: int, retain: bool) -> bool:
+    """Publish ``value`` to ``topic`` with connect-rc retries (up to 10x)
+    and, for QoS≥1, broker-ack wait with backoff (up to 3x).
+
+    Returns True on confirmed delivery, False otherwise. Used for both the
+    base device topic and the Wirenboard ``/on`` command companion topic so
+    that BOTH channels get the same delivery guarantee — without this
+    symmetry the relay-command publish would silently drop on transient
+    broker hiccups while the report-channel publish would succeed (Issue
+    #38 root cause).
+    """
+    effective_qos = max(0, min(2, int(qos or 0)))
+    try:
+        attempts = 0
+        rc = 0
+        res = None
+        while attempts < 10:
+            attempts += 1
+            res = cl.publish(topic, payload=value, qos=effective_qos, retain=retain)
+            try:
+                rc = getattr(res, "rc", 0)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug("Exception reading publish rc: %s", e)
+                rc = 0
+            if rc == 0:
+                break
+            logger.warning(f"MQTT publish rc={rc}, retry {attempts} topic={topic}")
+            try:
+                cl.reconnect()
+            except (ConnectionError, TimeoutError, OSError) as e:
+                logger.debug("Handled reconnect exception: %s", e)
+            time.sleep(0.1)
+        if attempts >= 10 and rc != 0:
+            logger.error("MQTT publish failed after retries topic=%s", topic)
+            if effective_qos >= 1:
+                try:
+                    from services.audit import record_audit
+
+                    record_audit(
+                        action_type="mqtt_publish_failure",
+                        source="mqtt",
+                        target=topic,
+                        payload={
+                            "value": value,
+                            "qos": effective_qos,
+                            "retain": bool(retain),
+                            "rc": int(rc),
+                            "reason": "connect_rc_retries_exhausted",
+                            "attempts": attempts,
+                        },
+                        actor="system",
+                        result="failure",
+                        error=f"rc={rc} after {attempts} attempts",
+                    )
+                except Exception:
+                    logger.exception("mqtt_publish_failure: record_audit failed")
+            return False
+        if effective_qos >= 1 and res is not None:
+            backoff_delays = [1, 2, 4]
+            published = False
+            for retry_idx, delay in enumerate(backoff_delays):
+                try:
+                    res.wait_for_publish(timeout=5.0)
+                    published = True
+                    break
+                except (ValueError, RuntimeError, Exception) as wfp_err:
+                    logger.warning(
+                        f"MQTT wait_for_publish failed (attempt {retry_idx + 1}/3) topic={topic}: {wfp_err}"
+                    )
+                    time.sleep(delay)
+                    try:
+                        res = cl.publish(topic, payload=value, qos=effective_qos, retain=retain)
+                    except (ConnectionError, TimeoutError, OSError):
+                        logger.exception("MQTT publish (QoS>=1 retry republish) failed topic=%s", topic)
+            if not published:
+                logger.critical(
+                    f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={topic} value={value}"
+                )
+                try:
+                    from services.audit import record_audit
+
+                    record_audit(
+                        action_type="mqtt_publish_failure",
+                        source="mqtt",
+                        target=topic,
+                        payload={
+                            "value": value,
+                            "qos": effective_qos,
+                            "retain": bool(retain),
+                            "reason": "wait_for_publish_retries_exhausted",
+                        },
+                        actor="system",
+                        result="failure",
+                        error=f"QoS{effective_qos} delivery failed after 3 retries",
+                    )
+                except Exception:
+                    logger.exception("mqtt_publish_failure: record_audit failed")
+                return False
+        return True
+    except (ConnectionError, TimeoutError, OSError):
+        logger.exception("MQTT publish failed topic=%s", topic)
+        return False
+
+
 def publish_mqtt_value(
     server: dict,
     topic: str,
@@ -147,103 +251,9 @@ def publish_mqtt_value(
         if cl is None:
             logger.warning("MQTT publish: client unavailable, dropping message")
             return False
-        # Publish to base topic with retries to handle slow async connect
+        # Publish to base topic with retries + (QoS≥1) broker-ack wait.
         effective_qos = max(0, min(2, int(qos or 0)))
-        try:
-            attempts = 0
-            while attempts < 10:
-                attempts += 1
-                res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
-                try:
-                    rc = getattr(res, "rc", 0)
-                except (KeyError, TypeError, ValueError) as e:
-                    logger.debug("Exception in line_138: %s", e)
-                    rc = 0
-                if rc == 0:
-                    break
-                logger.warning(f"MQTT publish rc={rc}, retry {attempts}")
-                try:
-                    cl.reconnect()
-                except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.debug("Handled exception in line_146: %s", e)
-                time.sleep(0.1)
-            if attempts >= 10 and rc != 0:
-                logger.error("MQTT publish failed after retries")
-                # OQ2: only audit publish-failure for QoS>=1.  At QoS=0
-                # there is no broker ack by design — what we'd be
-                # recording is a *local* connect-rc problem on a
-                # fire-and-forget message.  Logging it as
-                # `mqtt_publish_failure` mis-leads triage (filtering by
-                # this action_type then drowns in noise from healthy QoS=0
-                # firehoses during a transient broker hiccup).  Operators
-                # who want connect-rc visibility have logger.error above.
-                if effective_qos >= 1:
-                    try:
-                        from services.audit import record_audit
-
-                        record_audit(
-                            action_type="mqtt_publish_failure",
-                            source="mqtt",
-                            target=t,
-                            payload={
-                                "value": value,
-                                "qos": effective_qos,
-                                "retain": bool(retain),
-                                "rc": int(rc),
-                                "reason": "connect_rc_retries_exhausted",
-                                "attempts": attempts,
-                            },
-                            actor="system",
-                            result="failure",
-                            error=f"rc={rc} after {attempts} attempts",
-                        )
-                    except Exception:
-                        logger.exception("mqtt_publish_failure: record_audit failed")
-                return False
-            # For QoS >= 1: wait for broker acknowledgement with retry + backoff
-            if effective_qos >= 1:
-                backoff_delays = [1, 2, 4]
-                published = False
-                for retry_idx, delay in enumerate(backoff_delays):
-                    try:
-                        res.wait_for_publish(timeout=5.0)
-                        published = True
-                        break
-                    except (ValueError, RuntimeError, Exception) as wfp_err:
-                        logger.warning(f"MQTT wait_for_publish failed (attempt {retry_idx + 1}/3) topic={t}: {wfp_err}")
-                        time.sleep(delay)
-                        # Re-publish on retry
-                        try:
-                            res = cl.publish(t, payload=value, qos=effective_qos, retain=retain)
-                        except (ConnectionError, TimeoutError, OSError):
-                            # Promoted to logger.exception — silent debug here
-                            # masked broker-down scenarios during MASTER-C2 audit.
-                            logger.exception("MQTT publish (QoS>=1 retry republish) failed topic=%s", t)
-                if not published:
-                    logger.critical(f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={t} value={value}")
-                    # Always-on audit: QoS≥1 delivery failure is principal-critical.
-                    try:
-                        from services.audit import record_audit
-
-                        record_audit(
-                            action_type="mqtt_publish_failure",
-                            source="mqtt",
-                            target=t,
-                            payload={
-                                "value": value,
-                                "qos": effective_qos,
-                                "retain": bool(retain),
-                                "reason": "wait_for_publish_retries_exhausted",
-                            },
-                            actor="system",
-                            result="failure",
-                            error=f"QoS{effective_qos} delivery failed after 3 retries",
-                        )
-                    except Exception:
-                        logger.exception("mqtt_publish_failure: record_audit failed")
-                    return False
-        except (ConnectionError, TimeoutError, OSError):
-            logger.exception("MQTT publish failed")
+        if not _publish_with_retries(cl, t, value, effective_qos, retain):
             return False
 
         # Debug-level audit: every successful publish. Volume is high
@@ -266,23 +276,26 @@ def publish_mqtt_value(
         except Exception:
             logger.debug("debug_audit(mqtt_publish) failed", exc_info=True)
 
-        # Also publish to the control topic '/on' for Wirenboard compatibility
-        try:
-            t_on = t + "/on"
-            on_key = (sid or 0, t_on)
-            now2 = time.time()
-            with _TOPIC_LOCK:
-                last2 = _TOPIC_LAST_SEND.get(on_key)
-                if last2 and last2[0] == value and (now2 - last2[1]) < min_interval_sec:
-                    return True
-                _TOPIC_LAST_SEND[on_key] = (value, now2)
-            logger.debug(f"MQTT publish topic={t_on} value={value}")
-            res_on = cl.publish(t_on, payload=value, qos=max(0, min(2, int(qos or 0))), retain=retain)
-            # Ignore rc here; some brokers may not acknowledge the duplicate fast
-        except (ConnectionError, TimeoutError, OSError) as e:
-            logger.debug("Exception in line_189: %s", e)
-            # Soft-fail for '/on' duplication
-            pass
+        # Also publish to the control topic '/on' for Wirenboard compatibility.
+        # Issue #38: the base topic is the *report* channel; the relay only
+        # reacts to '/on'. Previously this publish was fire-and-forget — a
+        # transient broker hiccup silently dropped the command, leaving the
+        # base topic (and the UI via SSE-hub) showing 'closed' while the
+        # relay stayed open. Now we use the same retry+ack guarantee as the
+        # base topic and propagate failure to the caller.
+        t_on = t + "/on"
+        on_key = (sid or 0, t_on)
+        now2 = time.time()
+        with _TOPIC_LOCK:
+            last2 = _TOPIC_LAST_SEND.get(on_key)
+            if last2 and last2[0] == value and (now2 - last2[1]) < min_interval_sec:
+                # Skipping the duplicate suppression — base already delivered.
+                return True
+            _TOPIC_LAST_SEND[on_key] = (value, now2)
+        logger.debug(f"MQTT publish topic={t_on} value={value}")
+        if not _publish_with_retries(cl, t_on, value, effective_qos, retain):
+            logger.error("MQTT publish to /on companion FAILED topic=%s", t_on)
+            return False
 
         # Optional: publish meta information to a side topic for diagnostics/idempotence
         try:
