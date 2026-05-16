@@ -308,9 +308,9 @@
 
 /* Trigger buttons in zone cards (admin / non-admin). */
 .zc-btn-history {
-  background: var(--background-color);
-  color: var(--primary-color);
-  border: 1px solid var(--primary-color);
+  background: #00838f;
+  color: white;
+  border: none;
   padding: 8px 12px;
   border-radius: 8px;
   cursor: pointer;
@@ -319,7 +319,7 @@
   flex: 1;
   min-height: 44px;
 }
-.zc-btn-history:hover { background: var(--border-color); }
+.zc-btn-history:hover { background: #006d77; }
 .zc-btn-half { flex: 1; min-height: 44px; }
 .zc-actions--primary { margin-top: 6px; }
 .zc-actions--primary button { flex: 1; }
