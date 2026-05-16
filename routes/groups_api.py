@@ -557,9 +557,16 @@ def api_master_valve_toggle(group_id, action):
                 ), 400
         val = ("0" if want_open else "1") if mode == "NO" else ("1" if want_open else "0")
         try:
-            _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0, qos=2, retain=True)
+            ok = _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0, qos=2, retain=True)
         except (ConnectionError, TimeoutError, OSError):
             logger.exception("master valve publish failed")
+            return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
+        # Issue #38: publish_mqtt_value returns False if the base topic or
+        # '/on' companion delivery is not confirmed. Don't lie to the UI/DB.
+        if not ok:
+            logger.warning(
+                "master valve publish returned False — gid=%s action=%s", group_id, action
+            )
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
         try:
             db.update_group_fields(int(group_id), {"master_valve_observed": ("open" if want_open else "closed")})
