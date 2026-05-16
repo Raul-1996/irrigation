@@ -1751,9 +1751,11 @@
     }
 
     function getFilteredZonesV2() {
-        var zones = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
+        var zones = (zonesData || []).slice();
         if (currentGroupFilter !== null) {
             zones = zones.filter(function(z) { return z.group_id === currentGroupFilter; });
+        } else {
+            zones = zones.filter(function(z) { return z.group_id !== 999; });
         }
         if (zoneSearchQuery) {
             var q = zoneSearchQuery.toLowerCase();
@@ -1773,8 +1775,10 @@
 
         var html = '<button class="group-tab ' + (currentGroupFilter === null ? 'active' : '') + '" onclick="selectZoneGroup(null)">Все<span class="tab-count">' + allZones.length + '</span></button>';
 
-        groups.filter(function(g) { return g.id !== 999; }).forEach(function(g) {
-            var gZones = allZones.filter(function(z) { return z.group_id === g.id; });
+        groups.forEach(function(g) {
+            var gZones = (g.id === 999)
+                ? (zonesData || []).filter(function(z) { return z.group_id === 999; })
+                : allZones.filter(function(z) { return z.group_id === g.id; });
             var gRunning = gZones.filter(function(z) { return z.state === 'on'; }).length;
             var gStatus = 'waiting';
             if (statusData && statusData.groups) {
