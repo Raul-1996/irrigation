@@ -9,8 +9,14 @@
 ## 🚀 Быстрый запуск
 
 ### Требования
-- Python 3.8+
+- **Python 3.11+** (минимум). Причины:
+  - В коде используется PEP 604 union-синтаксис (`X | None`) — требует 3.10+;
+  - Используется `datetime.UTC` — требует 3.11+.
+  - Не пытайтесь запустить на 3.9 или 3.10 — упадёт на импортах.
 - pip (менеджер пакетов Python)
+
+На Wirenboard (Debian 11, системный `python3.9`) изолированный Python 3.11
+ставится автоматически через `uv` — см. раздел [Wirenboard](#-wirenboard-установка-без-docker) ниже.
 
 ## 📋 Инструкции по установке и запуску
 
@@ -62,14 +68,34 @@ python tools/tests/tests.py
 
 ### 🧰 Wirenboard (установка без Docker)
 
-#### Быстрая установка как systemd-сервис
+Целевая платформа: Wirenboard на Debian 11/12, архитектура aarch64.
+Системный Python там — 3.9.2; его не трогаем. Изолированный Python 3.11
+ставится через [uv](https://docs.astral.sh/uv/) (Astral, prebuilt
+`python-build-standalone` — без компиляции).
+
+#### Свежий контроллер: полный bootstrap
 ```bash
 # На устройстве Wirenboard под root
-cd /opt && mkdir -p wb-irrigation && cd wb-irrigation
-if [ -d irrigation ]; then cd irrigation && git pull --rebase; else git clone https://github.com/Raul-1996/irrigation.git && cd irrigation; fi
-chmod +x install_wb.sh uninstall_wb.sh
-./install_wb.sh
+curl -fsSL https://raw.githubusercontent.com/Raul-1996/irrigation/main/install_wb.sh -o /tmp/install_wb.sh
+sudo bash /tmp/install_wb.sh --yes
 # Открыть http://<ip-wirenboard>:8080
+```
+
+Что делает `install_wb.sh`:
+1. Ставит системные пакеты: `curl git build-essential libssl-dev sqlite3 mosquitto`.
+2. Ставит `uv` и через него — Python 3.11 (prebuilt aarch64-бинарь, ~30 секунд).
+3. Клонирует репо в `/mnt/data/wb-irrigation` и делает симлинк
+   `/opt/wb-irrigation/irrigation` → `/mnt/data/wb-irrigation`
+   (корневой раздел WB маленький, `/mnt/data` большой).
+4. Создаёт venv на Python 3.11 в `venv/`, ставит `requirements.txt`.
+5. Копирует `wb-irrigation.service` в `/etc/systemd/system/`, включает и стартует.
+6. Smoke check: ждёт ответа `/readyz` до 30 секунд.
+
+Скрипт идемпотентен — безопасно перезапускать.
+
+#### Обновление существующей установки
+```bash
+sudo bash /opt/wb-irrigation/irrigation/update_server.sh --yes
 ```
 
 #### Быстрое удаление (чистое)
@@ -80,10 +106,12 @@ chmod +x uninstall_wb.sh
 ```
 
 Примечания:
-- Скрипт установки кладёт всё в каталог `/opt/wb-irrigation/irrigation`, создаёт `venv`, устанавливает зависимости (только `requirements.txt`), подготавливает БД и настраивает `systemd`-юнит `wb-irrigation`.
-- Удаление останавливает и отключает сервис, удаляет юнит и весь каталог `/opt/wb-irrigation` без остатка.
+- `uninstall_wb.sh` останавливает и отключает сервис, удаляет юнит и весь
+  каталог `/opt/wb-irrigation` без остатка.
 - На WB уровень логов по умолчанию WARNING; включить подробные логи можно через Настройки.
 - Для HTTPS куки выставьте `SESSION_COOKIE_SECURE=1` в окружении сервиса.
+- Docker на Wirenboard **не используется**. Скрипты `install_docker.sh` /
+  `update_docker.sh` были удалены как мёртвый код.
 
 ### 🪟 Windows
 

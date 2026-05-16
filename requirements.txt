@@ -1,3 +1,5 @@
+# Требуется Python 3.11+ (PEP 604 union types в коде, datetime.UTC).
+# На WB (Debian 11, системный python3.9) ставится через uv — см. install_wb.sh.
 Flask>=3.1.0
 Pillow>=10.3.0
 APScheduler==3.10.4

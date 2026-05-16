@@ -1,3 +1,11 @@
+[project]
+name = "wb-irrigation"
+# Минимум Python 3.11. Причины:
+# - используется PEP 604 union-синтаксис (`X | None`) везде в коде;
+# - используется `datetime.UTC` (появился в 3.11).
+# Не подменять на 3.10 — `datetime.UTC` отсутствует. См. CLAUDE.md → Python version.
+requires-python = ">=3.11"
+
 [tool.pytest.ini_options]
 timeout = 30
 timeout_method = "signal"
