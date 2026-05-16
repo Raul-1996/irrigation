@@ -1,6 +1,8 @@
 services:
   app:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: wb_irrigation_app
     environment:
       - TESTING=0
@@ -9,9 +11,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./static/media:/app/static/media
-      - ./backups:/app/backups
-      - ./irrigation.db:/app/irrigation.db
+      - ../static/media:/app/static/media
+      - ../backups:/app/backups
+      - ../irrigation.db:/app/irrigation.db
     depends_on:
       - mqtt
     restart: unless-stopped
@@ -22,11 +24,11 @@ services:
     ports:
       - "1884:1883" # host 1883 busy; use 1884 on host
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
-      - ./mosquitto/acl:/mosquitto/config/acl:ro
-      - ./mosquitto_data:/mosquitto/data
-      - ./mosquitto_log:/mosquitto/log
+      - ../mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ../mosquitto/acl:/mosquitto/config/acl:ro
+      - ../mosquitto_data:/mosquitto/data
+      - ../mosquitto_log:/mosquitto/log
     restart: unless-stopped
 
 volumes: {}
