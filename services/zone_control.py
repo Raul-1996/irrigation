@@ -162,9 +162,20 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                 except (ValueError, TypeError, KeyError):
                     mode = "NC"
                 close_val = "1" if mode == "NO" else "0"
-                publish_mqtt_value(
+                ok = publish_mqtt_value(
                     mserver, t_norm, close_val, min_interval_sec=0.0, qos=2, retain=True, meta={"cmd": "master_off"}
                 )
+                if not ok:
+                    # Issue #38: do NOT lie to the UI/DB. Without confirmed
+                    # publish (base topic ack + '/on' ack) the relay may still
+                    # be open. SSE-hub will write master_valve_observed='closed'
+                    # only when it sees the real relay echo on the base topic.
+                    logger.warning(
+                        "master close publish FAILED — leaving master_valve_observed unchanged gid=%s topic=%s",
+                        gid,
+                        t_norm,
+                    )
+                    return
                 logger.info("master close published: topic=%s val=%s mode=%s gid=%s", t_norm, close_val, mode, gid)
                 # Always-on audit: delayed/auto master-valve close.
                 # Important for triage of "why did watering stop early?" — links
@@ -991,7 +1002,7 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
             continue
         close_val = "1" if mode == "NO" else "0"
         try:
-            publish_mqtt_value(
+            ok = publish_mqtt_value(
                 mserver,
                 t_norm,
                 close_val,
@@ -1000,6 +1011,15 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
                 retain=True,
                 meta={"cmd": "master_off", "src": "emergency"},
             )
+            if not ok:
+                # Issue #38: publish reported failure (base topic or '/on'
+                # ack lost). Don't mark observed=closed — SSE-hub will heal
+                # from the real relay echo if/when the close lands later.
+                stats["masters_failed_publish"] += 1
+                logger.warning(
+                    "emergency_stop_all: master close publish FAILED — group=%s topic=%s", gid, t_norm
+                )
+                continue
             stats["masters_closed"] += 1
             logger.info(
                 "emergency_stop_all: master closed — group=%s topic=%s val=%s mode=%s", gid, t_norm, close_val, mode
