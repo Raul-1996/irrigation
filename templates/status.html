@@ -115,14 +115,14 @@
 
 <!-- Легенда убрана: статусы видны из текста/цвета/emoji карточек -->
 
-<div style="display:flex; gap:.5rem; justify-content:center; margin-bottom:.5rem;">
-    <button id="emergency-btn" class="emergency"
+<div style="display:flex; gap:.5rem; margin-bottom:.5rem;">
+    <button id="emergency-btn" class="emergency" style="flex:1; margin:0;"
             data-audit-action="emergency_stop_click"
             data-audit-target="system">Аварийная остановка</button>
-    <button id="resume-btn" class="emergency" style="background:#4caf50; display:none;"
+    <button id="resume-btn" class="emergency" style="background:#4caf50; display:none; flex:1; margin:0;"
             data-audit-action="emergency_resume_click"
             data-audit-target="system">Продолжить полив</button>
-    <button id="history-btn" type="button"
+    <button id="history-btn" type="button" style="flex:1;"
             onclick="window.historyModal && window.historyModal.openGlobal()"
             data-audit-action="history_open_click"
             data-audit-target="system">📊 История</button>
