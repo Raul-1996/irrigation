@@ -123,7 +123,7 @@ def _try_git_describe() -> str | None:
     if not sha:
         return None
 
-    return f"2.{count} ({sha})"
+    return f"2.{count}+{sha}"
 
 
 def _try_version_file() -> str | None:
