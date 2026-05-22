@@ -513,6 +513,11 @@
   box-shadow: 0 0 0 3px rgba(25, 118, 210, 0.1);
 }
 
+.form-input[aria-invalid="true"] {
+  border-color: #d32f2f;
+  box-shadow: 0 0 0 3px rgba(211, 47, 47, 0.15);
+}
+
 /* Radio cards */
 .radio-cards {
   display: grid;

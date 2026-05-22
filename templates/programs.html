@@ -382,8 +382,8 @@ function renderWizardStep() {
   html += `<div class="wizard-step ${wizardStep === 1 ? 'active' : ''}">
     <div class="form-group">
       <label class="form-label">Название программы</label>
-      <input type="text" class="form-input" placeholder="Например: Утренний полив" 
-        value="${escapeHtml(wizardData.name)}" onchange="wizardData.name = this.value">
+      <input type="text" id="wiz-name" class="form-input" placeholder="Например: Утренний полив"
+        value="${escapeHtml(wizardData.name)}" oninput="wizardData.name = this.value; this.removeAttribute('aria-invalid')">
     </div>
     
     <div class="form-group">
@@ -548,7 +548,38 @@ function updateWizardButtons() {
   }
 }
 
+function validateWizardStep(step) {
+  if (step === 1) {
+    if (!wizardData.name || !wizardData.name.trim()) {
+      const el = document.getElementById('wiz-name');
+      if (el) { el.setAttribute('aria-invalid', 'true'); el.focus(); }
+      showToast('Введите название программы');
+      return false;
+    }
+  } else if (step === 2) {
+    if (wizardData.schedule_type === 'weekdays' && wizardData.days.length === 0) {
+      showToast('Выберите хотя бы один день недели');
+      return false;
+    }
+    if (wizardData.schedule_type === 'interval' && (!wizardData.interval_days || wizardData.interval_days < 1)) {
+      showToast('Укажите интервал в днях (минимум 1)');
+      return false;
+    }
+    if (wizardData.schedule_type === 'even_odd' && wizardData.even_odd !== 'even' && wizardData.even_odd !== 'odd') {
+      showToast('Выберите чётные или нечётные дни');
+      return false;
+    }
+  } else if (step === 4) {
+    if (wizardData.zones.length === 0) {
+      showToast('Выберите хотя бы одну зону');
+      return false;
+    }
+  }
+  return true;
+}
+
 function wizardNext() {
+  if (!validateWizardStep(wizardStep)) return;
   if (wizardStep < 5) {
     wizardStep++;
     renderWizard();
