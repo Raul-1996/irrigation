@@ -343,6 +343,23 @@ def add_security_headers(resp):
     return resp
 
 
+@app.after_request
+def _strip_conditional_revalidation(resp):
+    """Workaround for hypercorn AsyncioWSGIMiddleware 304/HEAD bug.
+
+    Hypercorn's WSGI->ASGI bridge (0.14-0.18) raises
+    UnexpectedMessageError ("http.response.body given the state
+    ASGIHTTPState.REQUEST") whenever Werkzeug emits a no-body response
+    (304 Not Modified, or HEAD). Stripping ETag/Last-Modified prevents
+    browsers from issuing If-None-Match/If-Modified-Since, so 304 is
+    never returned. Cache-busting is already handled via ?v=<sha> in
+    asset URLs.
+    """
+    resp.headers.pop("ETag", None)
+    resp.headers.pop("Last-Modified", None)
+    return resp
+
+
 try:
     app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
