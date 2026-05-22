@@ -996,18 +996,18 @@
             const topicInput = row.querySelector('.zone-topic');
             const mqttSelect = row.querySelector('.zone-mqtt');
             
-            const updatedZone = {
-                ...zone,
+            const payload = {
                 name: nameInput.value,
                 duration: parseInt(durationInput.value),
-                group_id: parseInt(groupSelect.value)
+                group_id: parseInt(groupSelect.value),
+                icon: zone.icon
             };
             if (topicInput) {
-                updatedZone.topic = topicInput.value;
+                payload.topic = topicInput.value;
             }
             if (mqttSelect) {
                 const val = mqttSelect.value;
-                updatedZone.mqtt_server_id = val === '' ? null : parseInt(val);
+                payload.mqtt_server_id = val === '' ? null : parseInt(val);
             }
 
             // Проверка конфликтов (как было)
@@ -1015,7 +1015,7 @@
                 const r = await fetch('/api/zones/check-duration-conflicts-bulk', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ changes: [{ zone_id: zoneId, new_duration: updatedZone.duration }] })
+                    body: JSON.stringify({ changes: [{ zone_id: zoneId, new_duration: payload.duration }] })
                 });
                 const result = await r.json();
                 const zres = result && result.results && result.results[String(zoneId)];
@@ -1025,18 +1025,20 @@
                     return;
                 }
             } catch (err) {}
-            
-            const success = await api.put(`/api/zones/${zoneId}`, updatedZone);
-            if (success) {
-                const zoneIndex = zonesData.findIndex(z => z.id === zoneId);
-                if (zoneIndex !== -1) {
-                    zonesData[zoneIndex] = { ...zonesData[zoneIndex], ...updatedZone };
-                }
-                row.classList.remove('modified');
-                modifiedZones.delete(zoneId);
-                showNotification('Зона сохранена', 'success');
-                renderGroupsGrid();
+
+            const result = await api.put(`/api/zones/${zoneId}`, payload);
+            if (result && result.success === false) {
+                showNotification(result.message || 'Ошибка сохранения зоны', 'error');
+                return;
             }
+            const zoneIndex = zonesData.findIndex(z => z.id === zoneId);
+            if (zoneIndex !== -1) {
+                zonesData[zoneIndex] = { ...zonesData[zoneIndex], ...payload };
+            }
+            row.classList.remove('modified');
+            modifiedZones.delete(zoneId);
+            showNotification('Зона сохранена', 'success');
+            renderGroupsGrid();
         } catch (error) {
             showNotification('Ошибка автосохранения зоны', 'error');
         }
