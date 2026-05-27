@@ -67,10 +67,13 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 ARCH=$(uname -m)
-if [[ "$ARCH" != "aarch64" ]]; then
-  warn "Архитектура $ARCH (ожидалась aarch64 — Wirenboard)"
-  confirm "Продолжить всё равно?" || { err "Прервано пользователем"; exit 1; }
-fi
+case "$ARCH" in
+  aarch64|armv7l) ;;  # WB7 — armv7l, более новые модели — aarch64
+  *)
+    warn "Архитектура $ARCH (ожидались aarch64/armv7l — Wirenboard)"
+    confirm "Продолжить всё равно?" || { err "Прервано пользователем"; exit 1; }
+    ;;
+esac
 
 info "Архитектура: $ARCH, ОС: $(. /etc/os-release; echo "$PRETTY_NAME")"
 
@@ -79,8 +82,16 @@ info "Архитектура: $ARCH, ОС: $(. /etc/os-release; echo "$PRETTY_NA
 # -----------------------------------------------------------------------------
 info "Шаг 1/6 — установка системных пакетов"
 export DEBIAN_FRONTEND=noninteractive
+
+# На свежем WB dpkg иногда оставлен в прерванном состоянии (например, апгрейд
+# через UI был прерван). Без этого apt-get будет валиться с "dpkg was interrupted".
+# --force-confold сохраняет существующие конфиги пакетов (напр. mosquitto.conf),
+# чтобы не было интерактивных промптов на conffile-конфликте.
+APT_OPTS=(-o "Dpkg::Options::=--force-confold" -o "Dpkg::Options::=--force-confdef")
+dpkg --configure -a "${APT_OPTS[@]}" >/dev/null 2>&1 || true
+
 apt-get update -qq
-apt-get install -y \
+apt-get install -y "${APT_OPTS[@]}" \
   curl git build-essential libssl-dev \
   sqlite3 mosquitto
 ok "Системные пакеты установлены"
