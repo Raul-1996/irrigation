@@ -76,6 +76,7 @@ class PIIFilter(logging.Filter):
             if "Authorization" in msg:
                 msg = msg.replace("Authorization", "Authorization: ***")
             record.msg = msg
+            record.args = ()
         except (ValueError, TypeError, KeyError) as e:
             pass  # avoid recursion
         return True

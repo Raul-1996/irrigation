@@ -216,6 +216,36 @@ def test_pii_filter_still_active():
     assert "***" in out2, f"PIIFilter did not mask at all: {out2}"
 
 
+# ── 8b. PIIFilter must clear record.args after rewriting record.msg ────────
+def test_pii_filter_does_not_break_args_formatting():
+    """Regression for issue #46: PIIFilter must reset record.args after rewriting record.msg.
+
+    Otherwise WBJsonFormatter calls getMessage() a second time and crashes on
+    ``msg % args`` — record.msg has already been substituted (no %s placeholders
+    left), but record.args still holds the original tuple. This blocked
+    wb-irrigation boot_sync with TypeError in production.
+    """
+    pii = PIIFilter()
+    fmt = WBJsonFormatter()
+    rec = logging.LogRecord(
+        name="services.zone_control",
+        level=logging.INFO,
+        pathname="/x.py",
+        lineno=1,
+        msg="stop_zone called: zone_id=%s reason=%s force=%s",
+        args=(24, "boot_sync", True),
+        exc_info=None,
+        func="stop_zone",
+    )
+    # PIIFilter rewrites record.msg to the already-formatted string.
+    assert pii.filter(rec) is True
+    # After PIIFilter, the JSON formatter must not raise on its own getMessage() call.
+    out = fmt.format(rec)
+    entry = json.loads(out)
+    assert "zone_id=24" in entry["message"]
+    assert "boot_sync" in entry["message"]
+
+
 # ── 9. TimedRotatingFileHandler still attached ─────────────────────────────
 def test_timed_rotating_handler_still_attached(tmp_path, monkeypatch):
     # Run setup_logging from an isolated cwd so app.log lives under tmp_path.
