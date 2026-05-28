@@ -34,13 +34,21 @@ def _set_testing_env():
 
 @pytest.fixture(autouse=True)
 def _reset_login_rate_limiter():
-    """Reset the module-level IP login rate limiter between tests so a brute-force
-    test in one file does not poison /api/login in the next file."""
+    """Reset the module-level IP login rate limiter between tests so a
+    brute-force test in one file does not poison /api/login in the next."""
     try:
         from services import login_rate_limiter as _lrl
 
         _lrl.ip_login_limiter._buckets.clear()
         _lrl.ip_login_limiter._last_alert.clear()
+    except Exception:
+        pass
+    try:
+        from services.rate_limiter import login_limiter
+
+        with login_limiter._lock:
+            login_limiter._attempts.clear()
+            login_limiter._lockouts.clear()
     except Exception:
         pass
     yield
