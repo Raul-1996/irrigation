@@ -372,9 +372,11 @@ try:
         )
     # Issue #52: long-lived session so iPhone Safari doesn't drop the cookie
     # after a few hours of inactivity (the original Basic Auth pain point).
+    # Use direct assignment — Flask seeds PERMANENT_SESSION_LIFETIME on first
+    # access with its 31-day default, so setdefault would never overwrite it.
     from datetime import timedelta as _td
 
-    app.config.setdefault("PERMANENT_SESSION_LIFETIME", _td(days=365))
+    app.config["PERMANENT_SESSION_LIFETIME"] = _td(days=365)
 except (TypeError, KeyError) as e:
     logger.debug("Session cookie config: %s", e)
 
