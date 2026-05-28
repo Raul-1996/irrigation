@@ -208,6 +208,14 @@ try:
 except (TypeError, ValueError) as e:
     logger.debug("SEND_FILE_MAX_AGE_DEFAULT config: %s", e)
 
+# Issue #50: register image/webp MIME so Werkzeug serves *.webp with
+# Content-Type: image/webp. Python 3.11 stdlib already maps it, but the
+# WB-target Debian 11 base image and some minimal containers ship an older
+# /etc/mime.types — defensive registration keeps behaviour consistent.
+import mimetypes as _mimetypes
+
+_mimetypes.add_type("image/webp", ".webp")
+
 # ── App version ────────────────────────────────────────────────────────────
 # Resolution: git describe → VERSION file → 'unknown'. See services/version.py.
 from services.version import get_app_version as _get_app_version

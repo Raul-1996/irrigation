@@ -39,6 +39,18 @@ def test_static_second_request_no_set_cookie(client):
     assert "no-cache" not in cc, f"no-cache on 2nd /static/* request: {cc!r}"
 
 
+def test_static_webp_content_type(client):
+    """Acceptance #1: /static/*.webp must be served with Content-Type: image/webp.
+
+    Python 3.11 stdlib knows this mapping, but we register it explicitly
+    so the behaviour holds on minimal containers / older mime.types.
+    """
+    r = client.get("/static/media/zones/OLD/ZONE_1.webp")
+    assert r.status_code == 200
+    ct = r.headers.get("Content-Type", "")
+    assert "image/webp" in ct, f"expected image/webp, got: {ct!r}"
+
+
 def test_non_static_path_still_processed_by_auth_hook(client):
     """Regression guard: non-/static/ paths must still flow through auth hook.
 
