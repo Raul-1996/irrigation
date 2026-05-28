@@ -32,6 +32,23 @@ def _set_testing_env():
         os.environ["TESTING"] = old
 
 
+@pytest.fixture(autouse=True)
+def _reset_login_limiter():
+    """Issue #52: clear the module-level singleton login_limiter state
+    between tests so failed-attempt counters / lockouts don't leak."""
+    try:
+        from services.rate_limiter import login_limiter
+
+        with login_limiter._lock:
+            login_limiter._ip_attempts.clear()
+            login_limiter._ip_lockouts.clear()
+            login_limiter._user_attempts.clear()
+            login_limiter._user_lockouts.clear()
+    except Exception:
+        pass
+    yield
+
+
 @pytest.fixture
 def sample_zone_data():
     """Sample zone data for creating test zones."""

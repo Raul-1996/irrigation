@@ -31,5 +31,25 @@ LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SEC = 300
 LOGIN_LOCKOUT_SEC = 900
 
+# ── Multi-tier login rate limiting (Issue #52) ─────────────────────────────
+# Tier 1: 5 failures within 1 hour per IP → lockout until the hour window
+#         elapses.
+# Tier 2: if the IP keeps trying and accumulates 10 failures within 24h
+#         (i.e. another 5 after a tier-1 lockout), trigger another hour
+#         lockout.
+# Tier 3: 15+ failures within 24h → 24h lockout.
+LOGIN_TIER1_MAX = 5
+LOGIN_TIER1_WINDOW_SEC = 3600  # 1 hour
+LOGIN_TIER1_LOCKOUT_SEC = 3600  # lock until window end (~1h)
+LOGIN_TIER2_MAX = 10
+LOGIN_TIER3_MAX = 15
+LOGIN_DAY_WINDOW_SEC = 86400  # 24h
+LOGIN_TIER3_LOCKOUT_SEC = 86400  # 24h lockout
+
+# Per-username throttle (independent of IP — slows username enumeration
+# distributed across IPs).
+LOGIN_USERNAME_MAX = 10
+LOGIN_USERNAME_WINDOW_SEC = 3600
+
 # ── Upload ─────────────────────────────────────────────────────────────────
 MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024
