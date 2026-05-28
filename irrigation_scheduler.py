@@ -1102,6 +1102,49 @@ class IrrigationScheduler:
                     self.group_skip_current_events.pop(gid, None)
                 except (KeyError, TypeError, ValueError) as e:
                     logger.debug("_run_program_threaded skip-cleanup gid=%s: %s", gid, e)
+            # Issue #51: defence-in-depth master-valve close.
+            # The in-loop ``stop_zone`` already schedules ``_schedule_master_close``
+            # as a side-effect, but that path is fragile:
+            #   * unexpected exception types (RuntimeError, ConnectionError)
+            #     bubble past the in-loop try/except AND the outer one,
+            #     skipping the master-close entirely;
+            #   * the delayed-timer ``if any_on: return`` guard in
+            #     ``_schedule_master_close._do_close`` skips the close when
+            #     another group sharing the master topic has a transient
+            #     'on'/'starting' zone at the moment the timer fires;
+            #   * a zone with sid=None / topic="" never reaches the
+            #     ``if sid and topic`` block where the close is armed.
+            # All three paths are observed-or-plausible explanations for
+            # the boem-Губерля nightly incident where the relay stayed open.
+            # Here we re-arm an *immediate* master-close for every MV group
+            # the program touched, no matter how the loop exited. The
+            # operation is idempotent: ``_schedule_master_close`` cancels
+            # any pending timer for the same topic before scheduling, and
+            # ``_do_close`` still respects the ``any_on`` guard (so we
+            # don't yank the relay from a concurrent program).
+            for gid in program_gids:
+                try:
+                    g_finally = next(
+                        (gg for gg in (self.db.get_groups() or []) if int(gg.get("id")) == int(gid)),
+                        None,
+                    )
+                    if g_finally and int(g_finally.get("use_master_valve") or 0) == 1:
+                        from services.zone_control import _schedule_master_close as _smc
+
+                        _smc(g_finally, immediate=True)
+                        logger.info(
+                            "program_end master-close armed: gid=%s program=%s (%s)",
+                            gid,
+                            program_id,
+                            program_name,
+                        )
+                except (sqlite3.Error, OSError, ImportError, ValueError, TypeError, KeyError) as e:
+                    logger.exception(
+                        "program_end master-close failed: gid=%s program=%s: %s",
+                        gid,
+                        program_id,
+                        e,
+                    )
 
     def schedule_program(self, program_id: int, program_data: dict[str, Any]):
         try:
@@ -2038,6 +2081,24 @@ class IrrigationScheduler:
                 self.group_skip_current_events.pop(group_id, None)
             except (KeyError, TypeError, ValueError) as e:
                 logger.debug("group_skip_current_events cleanup: %s", e)
+            # Issue #51: defence-in-depth master-valve close for the manual
+            # group-sequence path. Mirrors the equivalent block in
+            # ``_run_program_threaded`` — see that comment for the full
+            # rationale. Same idempotency guarantees apply.
+            try:
+                g_finally = next(
+                    (gg for gg in (self.db.get_groups() or []) if int(gg.get("id")) == int(group_id)),
+                    None,
+                )
+                if g_finally and int(g_finally.get("use_master_valve") or 0) == 1:
+                    from services.zone_control import _schedule_master_close as _smc
+
+                    _smc(g_finally, immediate=True)
+                    logger.info("group_sequence_end master-close armed: gid=%s", group_id)
+            except (sqlite3.Error, OSError, ImportError, ValueError, TypeError, KeyError) as e:
+                logger.exception(
+                    "group_sequence_end master-close failed: gid=%s: %s", group_id, e
+                )
 
     def get_active_programs(self) -> dict[int, dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
