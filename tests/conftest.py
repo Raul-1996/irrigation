@@ -32,6 +32,21 @@ def _set_testing_env():
         os.environ["TESTING"] = old
 
 
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limiter():
+    """Reset the module-level IP login rate limiter between tests so a
+    brute-force test in one file does not poison /api/login in the next."""
+    try:
+        from services.rate_limiter import login_limiter
+
+        with login_limiter._lock:
+            login_limiter._attempts.clear()
+            login_limiter._lockouts.clear()
+    except Exception:
+        pass
+    yield
+
+
 @pytest.fixture
 def sample_zone_data():
     """Sample zone data for creating test zones."""
