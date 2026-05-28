@@ -1,0 +1,105 @@
+{% extends 'base.html' %}
+{% block title %}Пользователи — WB-Irrigation{% endblock %}
+{% block content %}
+<main class="page-content" style="max-width: 920px; margin: 0 auto; padding: 16px;">
+  <h1>Пользователи</h1>
+  <p class="muted">Управление учётками. Только для админов.</p>
+
+  <section style="margin-top: 16px;">
+    <h2>Создать пользователя</h2>
+    <form id="createForm" onsubmit="onCreate(event)" class="form-grid" style="display: grid; gap: 8px; max-width: 480px;">
+      <label>Логин <input id="newUsername" type="text" required autocomplete="off" /></label>
+      <label>Пароль <input id="newPassword" type="password" required minlength="8" autocomplete="new-password" /></label>
+      <label>Роль
+        <select id="newRole">
+          <option value="viewer">viewer (только чтение)</option>
+          <option value="admin">admin</option>
+        </select>
+      </label>
+      <button type="submit" class="btn btn-primary">Создать</button>
+      <div id="createMsg" role="status" aria-live="polite"></div>
+    </form>
+  </section>
+
+  <section style="margin-top: 24px;">
+    <h2>Список</h2>
+    <table id="usersTable" style="width: 100%; border-collapse: collapse;">
+      <thead>
+        <tr style="background:#f4f6fb;"><th align="left">id</th><th align="left">username</th><th align="left">role</th><th align="left">active</th><th align="left">last_login_at</th><th>actions</th></tr>
+      </thead>
+      <tbody id="usersTbody"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+function csrf() {
+  const m = document.querySelector('meta[name="csrf-token"]');
+  return m ? m.content : '';
+}
+async function api(path, body) {
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json().catch(() => ({}));
+}
+async function load() {
+  const r = await fetch('/api/admin/users');
+  const j = await r.json();
+  const tb = document.getElementById('usersTbody');
+  tb.innerHTML = '';
+  (j.users || []).forEach(u => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${u.id}</td>
+      <td>${u.username}</td>
+      <td>${u.role}</td>
+      <td>${u.is_active ? 'yes' : 'no'}</td>
+      <td>${u.last_login_at || '-'}</td>
+      <td>
+        <button onclick="changePassword(${u.id})">пароль</button>
+        <button onclick="changeRole(${u.id}, '${u.role === 'admin' ? 'viewer' : 'admin'}')">→ ${u.role === 'admin' ? 'viewer' : 'admin'}</button>
+        <button onclick="${u.is_active ? `deactivate(${u.id})` : `activate(${u.id})`}">${u.is_active ? 'деактивировать' : 'активировать'}</button>
+      </td>`;
+    tb.appendChild(tr);
+  });
+}
+async function onCreate(e) {
+  e.preventDefault();
+  const username = document.getElementById('newUsername').value.trim();
+  const password = document.getElementById('newPassword').value;
+  const role = document.getElementById('newRole').value;
+  const msg = document.getElementById('createMsg');
+  msg.textContent = '';
+  const j = await api('/api/admin/users', { username, password, role });
+  if (j.success) {
+    msg.textContent = 'Создано.';
+    document.getElementById('createForm').reset();
+    load();
+  } else {
+    msg.textContent = j.message || 'Ошибка';
+  }
+}
+async function changePassword(id) {
+  const newPw = prompt('Новый пароль (минимум 8 символов):');
+  if (!newPw) return;
+  const j = await api(`/api/admin/users/${id}/password`, { new_password: newPw });
+  alert(j.success ? 'Пароль обновлён' : (j.message || 'Ошибка'));
+}
+async function changeRole(id, role) {
+  if (!confirm(`Сменить роль на ${role}?`)) return;
+  const j = await api(`/api/admin/users/${id}/role`, { role });
+  if (j.success) load(); else alert(j.message || 'Ошибка');
+}
+async function deactivate(id) {
+  if (!confirm('Деактивировать?')) return;
+  const j = await api(`/api/admin/users/${id}/deactivate`);
+  if (j.success) load(); else alert(j.message || 'Ошибка');
+}
+async function activate(id) {
+  const j = await api(`/api/admin/users/${id}/activate`);
+  if (j.success) load(); else alert(j.message || 'Ошибка');
+}
+load();
+</script>
+{% endblock %}

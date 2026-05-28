@@ -52,6 +52,7 @@ import threading
 import time as _perf_time
 
 from config import Config
+from routes.admin_users import admin_users_bp
 from routes.auth import auth_bp
 from routes.files import files_bp
 from routes.groups import groups_bp
@@ -452,7 +453,9 @@ def _auth_before_request():
                     return None
                 pth = request.path or ""
                 if session.get("role") == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
-                    if pth != "/api/login":
+                    # /api/account/password: viewers may change their own password.
+                    # /api/login/escalate: viewers may escalate to admin.
+                    if pth not in ("/api/login", "/api/login/escalate", "/api/account/password"):
                         return jsonify(
                             {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
                         ), 403
@@ -473,7 +476,7 @@ def _auth_before_request():
 
 
 # ── Blueprint registration ─────────────────────────────────────────────────
-for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp):
+for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp, admin_users_bp):
     app.register_blueprint(bp)
 try:
     if telegram_bp:
@@ -522,13 +525,23 @@ def _require_admin_for_mutations():
         if not p.startswith("/api/") or request.method == "GET":
             return None
         role = session.get("role", "guest")
-        if role == "viewer" and request.method in ["POST", "PUT", "DELETE"] and p != "/api/login":
+        if (
+            role == "viewer"
+            and request.method in ["POST", "PUT", "DELETE"]
+            and p not in ("/api/login", "/api/login/escalate", "/api/account/password")
+        ):
             return jsonify(
                 {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
             ), 403
         if request.method in ["POST", "PUT", "DELETE"]:
             # SECURITY FIX (VULN-003): removed /api/mqtt/ from whitelist
-            if p == "/api/login" or p.startswith("/api/env") or p == "/api/password":
+            if (
+                p == "/api/login"
+                or p == "/api/login/escalate"
+                or p.startswith("/api/env")
+                or p == "/api/password"
+                or p == "/api/account/password"
+            ):
                 return None
             if role != "admin" and not _is_status_action(p):
                 return jsonify({"success": False, "message": "admin required", "error_code": "FORBIDDEN"}), 403

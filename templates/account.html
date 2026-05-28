@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% block title %}Профиль — WB-Irrigation{% endblock %}
+{% block content %}
+<main class="page-content" style="max-width: 480px; margin: 0 auto; padding: 16px;">
+  <h1>Мой профиль</h1>
+  <p class="muted">Смените пароль для своего аккаунта.</p>
+  <form id="pwForm" onsubmit="onSubmit(event)" style="display: grid; gap: 8px;">
+    <label>Старый пароль <input id="oldPw" type="password" required autocomplete="current-password" /></label>
+    <label>Новый пароль <input id="newPw" type="password" required minlength="8" autocomplete="new-password" /></label>
+    <label>Повторите новый <input id="newPw2" type="password" required minlength="8" autocomplete="new-password" /></label>
+    <button type="submit" class="btn btn-primary">Сменить пароль</button>
+    <div id="msg" role="status" aria-live="polite"></div>
+  </form>
+</main>
+<script>
+function csrf() {
+  const m = document.querySelector('meta[name="csrf-token"]');
+  return m ? m.content : '';
+}
+async function onSubmit(e) {
+  e.preventDefault();
+  const old_password = document.getElementById('oldPw').value;
+  const new_password = document.getElementById('newPw').value;
+  const new_password2 = document.getElementById('newPw2').value;
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  if (new_password !== new_password2) {
+    msg.textContent = 'Пароли не совпадают';
+    return;
+  }
+  const r = await fetch('/api/account/password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+    body: JSON.stringify({ old_password, new_password })
+  });
+  const j = await r.json().catch(() => ({}));
+  msg.textContent = j.success ? 'Пароль обновлён.' : (j.message || 'Ошибка');
+  if (j.success) document.getElementById('pwForm').reset();
+}
+</script>
+{% endblock %}
