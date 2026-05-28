@@ -396,52 +396,24 @@ def dlog(msg: str, *args) -> None:
             logger.debug("dlog format error: %s", e)
 
 
-# ── Shared helper: check if a path is a "status action" allowed without admin ──
-# Service runs behind nginx basic auth. Internal Flask auth for zone/group
-# control is unnecessary — gardeners need start/stop without admin password.
-import re as _re
+# Issue #52: guest access (nginx basic auth pass-through) removed.
+# _ALLOWED_PUBLIC_POSTS / _ALLOWED_PUBLIC_PATTERNS / _is_status_action() were
+# deleted — every mutating /api/* endpoint now requires an authenticated
+# session via the in-app login flow. Cloudflare Worker handles edge auth
+# for the bot; nothing inside Flask depends on the old whitelist anymore.
 
-_ALLOWED_PUBLIC_POSTS = {
-    "/api/login",
-    "/api/status",
-    "/health",
-    "/api/env",
-    "/api/emergency-stop",
-    "/api/emergency-resume",
-    "/api/postpone",
-    "/api/zones/next-watering-bulk",
-    "/api/audit/ui",
-}
-
-# Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
-_ALLOWED_PUBLIC_PATTERNS = [
-    _re.compile(r"^/api/zones/\d+/mqtt/start$"),
-    _re.compile(r"^/api/zones/\d+/mqtt/stop$"),
-    _re.compile(r"^/api/zones/\d+/start$"),
-    _re.compile(r"^/api/zones/\d+/stop$"),
-    _re.compile(r"^/api/groups/\d+/start-from-first$"),
-    _re.compile(r"^/api/groups/\d+/stop$"),
-    _re.compile(r"^/api/groups/\d+/master-valve/\w+$"),
-    _re.compile(r"^/api/groups/\d+/start-zone/\d+$"),
-    _re.compile(r"^/api/groups/\d+/run-selected$"),
-    _re.compile(r"^/api/groups/\d+/skip-current$"),
-]
-
-
-def _is_status_action(path):
-    if path in _ALLOWED_PUBLIC_POSTS:
-        return True
-    for pat in _ALLOWED_PUBLIC_PATTERNS:
-        if pat.match(path):
-            return True
-    return False
+import re as _re  # noqa: F401  (kept — other parts of the file use _re)
 
 
 # ── Auth before-request ────────────────────────────────────────────────────
+# Issue #52: guest access removed. Any /api/* request that isn't /api/login,
+# /api/login/escalate, /api/account/password (viewers) or /api/auth/status
+# now requires an authenticated session (viewer or admin).
+_PUBLIC_AUTH_PATHS = {"/api/login", "/api/login/escalate", "/api/auth/status"}
+
+
 @app.before_request
 def _auth_before_request():
-    if "role" not in session:
-        session["role"] = "guest"
     try:
         if not app.config.get("TESTING"):
             try:
@@ -449,20 +421,26 @@ def _auth_before_request():
             except (sqlite3.Error, OSError) as e:
                 logger.debug("ensure_password_change_required: %s", e)
             if request.path.startswith("/api/"):
+                pth = request.path or ""
+                # GET endpoints stay read-accessible to anyone (legacy callers
+                # like /api/status are scraped by the gardener LCD); harden
+                # later if needed.
                 if request.method == "GET":
                     return None
-                pth = request.path or ""
-                if session.get("role") == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
-                    # /api/account/password: viewers may change their own password.
-                    # /api/login/escalate: viewers may escalate to admin.
-                    if pth not in ("/api/login", "/api/login/escalate", "/api/account/password"):
+                role = session.get("role")
+                # Public POST endpoints (login/escalate) — no session required.
+                if pth in _PUBLIC_AUTH_PATHS:
+                    return None
+                # Anyone without a logged-in session is denied. No more guest fallback.
+                if role not in ("viewer", "admin"):
+                    return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
+                if role == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
+                    if pth != "/api/account/password":
                         return jsonify(
                             {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
                         ), 403
-                if session.get("role") != "admin" and not _is_status_action(pth):
-                    return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
-                if session.get("role") == "admin" and request.method in ["POST", "PUT", "DELETE"]:
-                    must = db.get_setting_value("password_must_change") if True else None
+                if role == "admin" and request.method in ["POST", "PUT", "DELETE"]:
+                    must = db.get_setting_value("password_must_change")
                     if str(must or "0") == "1" and request.path != "/api/password":
                         return jsonify(
                             {
@@ -516,6 +494,8 @@ app.register_blueprint(health_api_bp)
 
 
 # ── Mutation guard ─────────────────────────────────────────────────────────
+# Issue #52: guest access removed. Any non-GET /api/* request must be made by
+# an admin (the few viewer-allowed paths are handled in _auth_before_request).
 @app.before_request
 def _require_admin_for_mutations():
     try:
@@ -524,26 +504,15 @@ def _require_admin_for_mutations():
         p = request.path or ""
         if not p.startswith("/api/") or request.method == "GET":
             return None
-        role = session.get("role", "guest")
-        if (
-            role == "viewer"
-            and request.method in ["POST", "PUT", "DELETE"]
-            and p not in ("/api/login", "/api/login/escalate", "/api/account/password")
-        ):
-            return jsonify(
-                {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
-            ), 403
+        role = session.get("role")
         if request.method in ["POST", "PUT", "DELETE"]:
-            # SECURITY FIX (VULN-003): removed /api/mqtt/ from whitelist
-            if (
-                p == "/api/login"
-                or p == "/api/login/escalate"
-                or p.startswith("/api/env")
-                or p == "/api/password"
-                or p == "/api/account/password"
+            # Bypass list — same as _auth_before_request, plus /api/env and
+            # /api/password kept for back-compat with older clients.
+            if p in ("/api/login", "/api/login/escalate", "/api/account/password", "/api/password") or p.startswith(
+                "/api/env"
             ):
                 return None
-            if role != "admin" and not _is_status_action(p):
+            if role != "admin":
                 return jsonify({"success": False, "message": "admin required", "error_code": "FORBIDDEN"}), 403
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.warning("mutation guard error: %s", e)
