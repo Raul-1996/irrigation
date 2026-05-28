@@ -3,8 +3,43 @@ import logging
 import os
 import secrets
 import stat
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def to_iso_with_tz(s: str | None) -> str | None:
+    """Convert a naive controller-local timestamp string to ISO-8601 with TZ offset.
+
+    Input: "YYYY-MM-DD HH:MM:SS" (as stored in the zones table — naive,
+    implicitly in the controller's local TZ, written by ``datetime.now()``).
+    Output: e.g. "2026-05-28T00:45:52+05:00".
+
+    Why this exists (issue #47): the browser parses
+    ``new Date("2026-05-28 00:45:52")`` as device-local time. When the device
+    TZ differs from the controller TZ (Moscow phone, Yekaterinburg controller),
+    the displayed timer was shifted by the offset. Emitting an explicit TZ
+    suffix removes the ambiguity for every JS consumer at once, without
+    changing the DB storage format (which Python ``strptime`` callers rely on).
+
+    Returns the input unchanged if it is None, empty, or already TZ-aware
+    (contains a '+'/'-' offset after the time part or a trailing 'Z').
+    """
+    if not s:
+        return s
+    txt = str(s)
+    # Already TZ-aware? Check for 'Z' suffix or offset after position 10
+    # (skip the date part where '-' is the separator).
+    if txt.endswith("Z") or "+" in txt[10:] or "-" in txt[10:]:
+        return txt
+    try:
+        naive = datetime.strptime(txt, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return txt
+    # astimezone() with no arg uses the system local TZ, matching the
+    # convention of ``datetime.now()`` used everywhere in the server.
+    aware = naive.astimezone()
+    return aware.isoformat(timespec="seconds")
 
 
 def normalize_topic(topic: str | None) -> str:
