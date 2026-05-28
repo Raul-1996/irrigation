@@ -18,6 +18,7 @@ from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
 from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
+from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
 from services.monitors import env_monitor, probe_env_values
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from utils import normalize_topic
@@ -143,9 +144,33 @@ def api_map():
             m = request.files.get("file")
             if not m or (getattr(m, "mimetype", None) not in ALLOWED_MIME_TYPES):
                 return jsonify({"success": False, "message": "Неподдерживаемый тип содержимого"}), 400
-            filename = f"zones_map_{int(time.time())}{ext}"
+            # Issue #49: route every upload through the shared image pipeline
+            # so big PNG maps (the 5.34 MB camera dump that triggered the
+            # ticket) land on disk as WebP q=95 with the long edge clamped.
+            file_data = file.read()
+            try:
+                out_bytes, out_ext = optimize_uploaded_image(file_data)
+            except ImageTooLargeError:
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Изображение слишком большое",
+                        "error_code": "IMAGE_TOO_LARGE",
+                    }
+                ), 400
+            except (OSError, ValueError) as e:
+                logger.error("map upload: optimize failed: %s", e)
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Не удалось обработать изображение",
+                        "error_code": "IMAGE_PROCESSING_FAILED",
+                    }
+                ), 400
+            filename = f"zones_map_{int(time.time())}{out_ext}"
             save_path = os.path.join(MAP_DIR, filename)
-            file.save(save_path)
+            with open(save_path, "wb") as f:
+                f.write(out_bytes)
             return jsonify({"success": True, "message": "Карта загружена", "path": f"media/maps/{filename}"})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка работы с картой зон: {e}")
