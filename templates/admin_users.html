@@ -1,0 +1,267 @@
+{% extends 'base.html' %}
+{% block title %}Пользователи — WB-Irrigation{% endblock %}
+{% block page_title %}Пользователи{% endblock %}
+{% block extra_css %}
+<style>
+    .users-card { background:#fff; border-radius:12px; box-shadow:0 6px 24px rgba(0,0,0,.06); padding:18px; margin-bottom:18px; }
+    .users-card h2 { margin:0 0 12px; font-size:18px; }
+    table.users { width:100%; border-collapse:collapse; }
+    table.users th, table.users td { padding:10px 8px; border-bottom:1px solid #eef0f3; text-align:left; font-size:14px; }
+    table.users th { color:#6b7280; font-weight:600; background:#fafbfc; }
+    .role-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+    .role-admin { background:#fee2e2; color:#b91c1c; }
+    .role-viewer { background:#dbeafe; color:#1e40af; }
+    .badge-inactive { background:#f3f4f6; color:#6b7280; }
+    .row-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .row-actions button { background:#1976d2; color:#fff; border:0; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer; }
+    .row-actions button.danger { background:#d32f2f; }
+    .row-actions button.secondary { background:#475569; }
+    .row-actions button:disabled { opacity:.4; cursor:not-allowed; }
+    .create-form { display:grid; grid-template-columns: 1fr 1fr 160px 120px; gap:8px; align-items:end; }
+    .create-form label { font-size:12px; color:#6b7280; display:block; margin-bottom:4px; }
+    .create-form input, .create-form select { width:100%; padding:9px 10px; border:1px solid #d1d5db; border-radius:8px; font-size:14px; }
+    .create-form button { background:#2e7d32; color:#fff; border:0; border-radius:8px; padding:10px 12px; font-size:14px; cursor:pointer; }
+    .msg { margin-top:10px; font-size:13px; min-height:1.2em; }
+    .msg.err { color:#d32f2f; }
+    .msg.ok { color:#2e7d32; }
+    @media (max-width: 700px) {
+        .create-form { grid-template-columns: 1fr; }
+    }
+</style>
+{% endblock %}
+{% block content %}
+<div class="users-card">
+    <h2>Создать пользователя</h2>
+    <form id="createForm" class="create-form" autocomplete="off">
+        <div>
+            <label for="newUsername">Логин</label>
+            <input id="newUsername" type="text" pattern="^[a-zA-Z0-9_.\-]{1,32}$" maxlength="32" required />
+        </div>
+        <div>
+            <label for="newPassword">Пароль</label>
+            <input id="newPassword" type="password" minlength="8" required />
+        </div>
+        <div>
+            <label for="newRole">Роль</label>
+            <select id="newRole">
+                <option value="viewer">viewer</option>
+                <option value="admin">admin</option>
+            </select>
+        </div>
+        <div>
+            <button type="submit">Создать</button>
+        </div>
+    </form>
+    <div id="createMsg" class="msg" role="status" aria-live="polite"></div>
+</div>
+
+<div class="users-card">
+    <h2>Все пользователи</h2>
+    <table class="users">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Логин</th>
+                <th>Роль</th>
+                <th>Создан</th>
+                <th>Последний вход</th>
+                <th>Активен</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody id="usersBody"></tbody>
+    </table>
+    <div id="listMsg" class="msg" role="status" aria-live="polite"></div>
+</div>
+
+<script>
+// B9: ВСЕ user-controlled поля рендерятся через createElement + textContent.
+// Никаких innerHTML с интерполяцией.
+(function () {
+    const SELF_USER_ID = {{ session.get('user_id') | int if session.get('user_id') else 0 }};
+
+    function csrfToken() {
+        const m = document.querySelector('meta[name="csrf-token"]');
+        return m ? m.getAttribute('content') : '';
+    }
+
+    function tCell(text) {
+        const td = document.createElement('td');
+        td.textContent = text == null ? '' : String(text);
+        return td;
+    }
+
+    function roleBadge(role) {
+        const td = document.createElement('td');
+        const span = document.createElement('span');
+        span.className = 'role-badge ' + (role === 'admin' ? 'role-admin' : 'role-viewer');
+        span.textContent = String(role || '');
+        td.appendChild(span);
+        return td;
+    }
+
+    function activeBadge(isActive) {
+        const td = document.createElement('td');
+        const span = document.createElement('span');
+        if (isActive) {
+            span.className = 'role-badge role-viewer';
+            span.textContent = 'да';
+        } else {
+            span.className = 'role-badge badge-inactive';
+            span.textContent = 'нет';
+        }
+        td.appendChild(span);
+        return td;
+    }
+
+    function actionsCell(user) {
+        const td = document.createElement('td');
+        const wrap = document.createElement('div');
+        wrap.className = 'row-actions';
+
+        const isSelf = Number(user.id) === SELF_USER_ID;
+
+        const btnRole = document.createElement('button');
+        btnRole.className = 'secondary';
+        btnRole.textContent = user.role === 'admin' ? 'Сделать viewer' : 'Сделать admin';
+        btnRole.disabled = isSelf;
+        if (isSelf) btnRole.title = 'Нельзя менять свою роль';
+        btnRole.addEventListener('click', function () {
+            changeRole(user.id, user.role === 'admin' ? 'viewer' : 'admin');
+        });
+        wrap.appendChild(btnRole);
+
+        const btnActive = document.createElement('button');
+        btnActive.className = 'secondary';
+        btnActive.textContent = user.is_active ? 'Деактивировать' : 'Активировать';
+        btnActive.disabled = isSelf;
+        if (isSelf) btnActive.title = 'Нельзя менять свой статус';
+        btnActive.addEventListener('click', function () {
+            setActive(user.id, !user.is_active);
+        });
+        wrap.appendChild(btnActive);
+
+        const btnDel = document.createElement('button');
+        btnDel.className = 'danger';
+        btnDel.textContent = 'Удалить';
+        btnDel.disabled = isSelf;
+        if (isSelf) btnDel.title = 'Нельзя удалить себя';
+        btnDel.addEventListener('click', function () {
+            if (confirm('Удалить пользователя ' + user.username + '?')) {
+                deleteUser(user.id);
+            }
+        });
+        wrap.appendChild(btnDel);
+
+        td.appendChild(wrap);
+        return td;
+    }
+
+    function renderUsers(users) {
+        const tbody = document.getElementById('usersBody');
+        // Полная очистка перед перерисовкой — без innerHTML.
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+        users.forEach(function (u) {
+            const tr = document.createElement('tr');
+            tr.appendChild(tCell(u.id));
+            tr.appendChild(tCell(u.username));
+            tr.appendChild(roleBadge(u.role));
+            tr.appendChild(tCell(u.created_at || ''));
+            tr.appendChild(tCell(u.last_login_at || ''));
+            tr.appendChild(activeBadge(!!u.is_active));
+            tr.appendChild(actionsCell(u));
+            tbody.appendChild(tr);
+        });
+    }
+
+    function showMsg(elId, text, kind) {
+        const el = document.getElementById(elId);
+        el.className = 'msg ' + (kind === 'err' ? 'err' : (kind === 'ok' ? 'ok' : ''));
+        el.textContent = text || '';
+    }
+
+    async function loadUsers() {
+        try {
+            const r = await fetch('/api/admin/users', { credentials: 'same-origin' });
+            const data = await r.json();
+            if (!r.ok || !data.success) {
+                showMsg('listMsg', (data && data.message) || 'Ошибка загрузки', 'err');
+                return;
+            }
+            renderUsers(data.users || []);
+            showMsg('listMsg', '', '');
+        } catch (e) {
+            showMsg('listMsg', 'Сетевая ошибка', 'err');
+        }
+    }
+
+    async function jsonPost(url, body, method) {
+        return fetch(url, {
+            method: method || 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+            body: body ? JSON.stringify(body) : undefined
+        });
+    }
+
+    async function changeRole(id, role) {
+        const r = await jsonPost('/api/admin/users/' + encodeURIComponent(id) + '/role', { role: role });
+        const data = await r.json().catch(function () { return {}; });
+        if (!r.ok || !data.success) {
+            showMsg('listMsg', data.message || 'Ошибка', 'err');
+            return;
+        }
+        loadUsers();
+    }
+
+    async function setActive(id, isActive) {
+        const r = await jsonPost('/api/admin/users/' + encodeURIComponent(id) + '/active', { is_active: !!isActive });
+        const data = await r.json().catch(function () { return {}; });
+        if (!r.ok || !data.success) {
+            showMsg('listMsg', data.message || 'Ошибка', 'err');
+            return;
+        }
+        loadUsers();
+    }
+
+    async function deleteUser(id) {
+        const r = await jsonPost('/api/admin/users/' + encodeURIComponent(id), null, 'DELETE');
+        const data = await r.json().catch(function () { return {}; });
+        if (!r.ok || !data.success) {
+            showMsg('listMsg', data.message || 'Ошибка', 'err');
+            return;
+        }
+        loadUsers();
+    }
+
+    document.getElementById('createForm').addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        const username = document.getElementById('newUsername').value.trim();
+        const password = document.getElementById('newPassword').value;
+        const role = document.getElementById('newRole').value;
+        showMsg('createMsg', '', '');
+        if (!/^[a-zA-Z0-9_.\-]{1,32}$/.test(username)) {
+            showMsg('createMsg', 'Логин: только a-z, 0-9, _ . -; до 32 символов', 'err');
+            return;
+        }
+        if (password.length < 8) {
+            showMsg('createMsg', 'Пароль минимум 8 символов', 'err');
+            return;
+        }
+        const r = await jsonPost('/api/admin/users', { username: username, password: password, role: role });
+        const data = await r.json().catch(function () { return {}; });
+        if (!r.ok || !data.success) {
+            showMsg('createMsg', data.message || 'Ошибка создания', 'err');
+            return;
+        }
+        showMsg('createMsg', 'Создан id=' + data.user_id, 'ok');
+        document.getElementById('newUsername').value = '';
+        document.getElementById('newPassword').value = '';
+        document.getElementById('newRole').value = 'viewer';
+        loadUsers();
+    });
+
+    loadUsers();
+})();
+</script>
+{% endblock %}

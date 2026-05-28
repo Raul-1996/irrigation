@@ -1,0 +1,104 @@
+{% extends 'base.html' %}
+{% block title %}Аккаунт — WB-Irrigation{% endblock %}
+{% block page_title %}Мой аккаунт{% endblock %}
+{% block extra_css %}
+<style>
+    .account-card { background:#fff; border-radius:12px; box-shadow:0 6px 24px rgba(0,0,0,.06); padding:18px; margin-bottom:18px; max-width:520px; }
+    .account-card h2 { margin:0 0 12px; font-size:18px; }
+    .account-info { font-size:14px; color:#374151; margin-bottom:14px; }
+    .account-info b { color:#111827; }
+    .form-row { margin-bottom:12px; }
+    .form-row label { display:block; font-size:13px; color:#6b7280; margin-bottom:4px; }
+    .form-row input { width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:14px; box-sizing:border-box; }
+    .form-row input:focus { outline:none; border-color:#1976d2; box-shadow:0 0 0 4px rgba(25,118,210,.18); }
+    button.primary { background:#1976d2; color:#fff; border:0; border-radius:8px; padding:10px 14px; font-size:14px; cursor:pointer; }
+    button.primary:disabled { opacity:.6; cursor:default; }
+    .msg { margin-top:10px; font-size:13px; min-height:1.2em; }
+    .msg.err { color:#d32f2f; }
+    .msg.ok { color:#2e7d32; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="account-card">
+    <div class="account-info">
+        Логин: <b id="acctUser"></b><br>
+        Роль: <b id="acctRole"></b>
+    </div>
+</div>
+
+<div class="account-card">
+    <h2>Сменить пароль</h2>
+    <form id="pwdForm" autocomplete="off">
+        <div class="form-row">
+            <label for="oldPwd">Текущий пароль</label>
+            <input id="oldPwd" type="password" required autocomplete="current-password" />
+        </div>
+        <div class="form-row">
+            <label for="newPwd">Новый пароль (минимум 8 символов)</label>
+            <input id="newPwd" type="password" minlength="8" required autocomplete="new-password" />
+        </div>
+        <div class="form-row">
+            <label for="newPwd2">Повторите новый пароль</label>
+            <input id="newPwd2" type="password" minlength="8" required autocomplete="new-password" />
+        </div>
+        <button class="primary" type="submit" id="pwdBtn">Сохранить</button>
+        <div id="pwdMsg" class="msg" role="status" aria-live="polite"></div>
+    </form>
+</div>
+
+<script>
+// XSS-safe: значения username/role вставляются через textContent.
+(function () {
+    document.getElementById('acctUser').textContent = "{{ username | e }}";
+    document.getElementById('acctRole').textContent = "{{ role | e }}";
+
+    function csrfToken() {
+        const m = document.querySelector('meta[name="csrf-token"]');
+        return m ? m.getAttribute('content') : '';
+    }
+
+    function showMsg(text, kind) {
+        const el = document.getElementById('pwdMsg');
+        el.className = 'msg ' + (kind === 'err' ? 'err' : (kind === 'ok' ? 'ok' : ''));
+        el.textContent = text || '';
+    }
+
+    document.getElementById('pwdForm').addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        showMsg('', '');
+        const oldPwd = document.getElementById('oldPwd').value;
+        const newPwd = document.getElementById('newPwd').value;
+        const newPwd2 = document.getElementById('newPwd2').value;
+        if (newPwd.length < 8) {
+            showMsg('Пароль минимум 8 символов', 'err');
+            return;
+        }
+        if (newPwd !== newPwd2) {
+            showMsg('Пароли не совпадают', 'err');
+            return;
+        }
+        const btn = document.getElementById('pwdBtn');
+        btn.disabled = true;
+        try {
+            const r = await fetch('/api/account/password', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+                body: JSON.stringify({ old_password: oldPwd, new_password: newPwd })
+            });
+            const data = await r.json().catch(function () { return {}; });
+            if (!r.ok || !data.success) {
+                showMsg(data.message || 'Ошибка', 'err');
+                return;
+            }
+            showMsg('Пароль обновлён', 'ok');
+            document.getElementById('pwdForm').reset();
+        } catch (e) {
+            showMsg('Сетевая ошибка', 'err');
+        } finally {
+            btn.disabled = false;
+        }
+    });
+})();
+</script>
+{% endblock %}
