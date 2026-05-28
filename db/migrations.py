@@ -218,6 +218,17 @@ class MigrationRunner:
                     "zone_runs_backfill_source",
                     self._backfill_zone_runs_source,
                 )
+                # Issue #52: users table for in-app login (replaces single password_hash)
+                self._apply_named_migration(
+                    conn,
+                    "create_users_table",
+                    self._migrate_create_users,
+                )
+                self._apply_named_migration(
+                    conn,
+                    "seed_default_users",
+                    self._migrate_seed_default_users,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1392,6 +1403,63 @@ class MigrationRunner:
         except sqlite3.Error as e:
             logger.error("Ошибка миграции programs v2 fields: %s", e)
 
+    def _migrate_create_users(self, conn):
+        """Issue #52: create users table for in-app login (replaces single password_hash).
+
+        Schema per spec: id, username UNIQUE, password_hash, role IN ('viewer','admin'),
+        created_at, last_login_at, is_active.
+        """
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'viewer'
+                        CHECK(role IN ('viewer', 'admin')),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_login_at TIMESTAMP,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+            conn.commit()
+            logger.info("Создана таблица users (issue #52)")
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции create_users_table: %s", e)
+
+    def _migrate_seed_default_users(self, conn):
+        """Issue #52: seed default users.
+
+        - Poliv/Poliv viewer
+        - admin/1234 admin (override with the EXISTING password_hash from settings
+          when present — so deployed instances keep their admin password).
+        """
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM users")
+            if cur.fetchone()[0] > 0:
+                logger.info("seed_default_users: users table not empty, skip")
+                return
+
+            # admin: reuse existing settings.password_hash if it exists (deployed instances)
+            cur = conn.execute("SELECT value FROM settings WHERE key = 'password_hash' LIMIT 1")
+            row = cur.fetchone()
+            admin_hash = row[0] if row and row[0] else generate_password_hash("1234", method="pbkdf2:sha256")
+
+            viewer_hash = generate_password_hash("Poliv", method="pbkdf2:sha256")
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, is_active) VALUES (?, ?, 'admin', 1)",
+                ("admin", admin_hash),
+            )
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, is_active) VALUES (?, ?, 'viewer', 1)",
+                ("Poliv", viewer_hash),
+            )
+            conn.commit()
+            logger.info("seed_default_users: создан admin (admin/1234 или текущий hash) + Poliv viewer")
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции seed_default_users: %s", e)
+
     # =====================================================================
     # Downgrade methods for the last 10 migrations
     # =====================================================================
@@ -1415,6 +1483,8 @@ class MigrationRunner:
         "create_audit_log": "_down_create_audit_log",
         "zone_runs_add_source": "_down_add_zone_runs_source",
         "zone_runs_backfill_source": "_down_backfill_zone_runs_source",
+        "create_users_table": "_down_create_users",
+        "seed_default_users": "_down_seed_default_users",
     }
 
     def _down_add_zone_runs_source(self, conn):
@@ -1537,3 +1607,14 @@ class MigrationRunner:
         # Nothing to reverse — the km/h value was kept, ms value will be removed
         # by _down_add_extended_weather_settings
         logger.info("Downgrade: weather_wind_kmh_to_ms — noop (ms key removed by extended settings downgrade)")
+
+    def _down_create_users(self, conn):
+        conn.execute("DROP TABLE IF EXISTS users")
+        conn.commit()
+        logger.info("Downgrade: удалена таблица users")
+
+    def _down_seed_default_users(self, conn):
+        # Best-effort: only delete the canonical seeded usernames; don't touch user-created rows.
+        conn.execute("DELETE FROM users WHERE username IN ('admin', 'Poliv')")
+        conn.commit()
+        logger.info("Downgrade: удалены seed-пользователи admin/Poliv (если ещё были)")
