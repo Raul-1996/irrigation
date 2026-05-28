@@ -60,13 +60,11 @@ def _make_master_group(test_db, *, gid_offset: int = 0):
 class TestA8ProgramFinally:
     def test_program_finally_schedules_master_close(self, test_db):
         """_run_program_threaded's finally calls _schedule_master_close for touched groups."""
-        from irrigation_scheduler import IrrigationScheduler
         import services.zone_control as zc
+        from irrigation_scheduler import IrrigationScheduler
 
         gid, _ = _make_master_group(test_db)
-        zone = test_db.create_zone(
-            {"name": "Z1", "duration": 1, "group_id": gid, "topic": "/devices/x/controls/Z"}
-        )
+        zone = test_db.create_zone({"name": "Z1", "duration": 1, "group_id": gid, "topic": "/devices/x/controls/Z"})
 
         sched_calls: list = []
 
@@ -115,13 +113,11 @@ class TestA8ProgramFinally:
         loop after one group's master valve is already open. The finally
         must still call _schedule_master_close for that group.
         """
-        from irrigation_scheduler import IrrigationScheduler
         import services.zone_control as zc
+        from irrigation_scheduler import IrrigationScheduler
 
         gid, _ = _make_master_group(test_db)
-        zone = test_db.create_zone(
-            {"name": "Z1", "duration": 1, "group_id": gid, "topic": "/devices/x/controls/Z"}
-        )
+        zone = test_db.create_zone({"name": "Z1", "duration": 1, "group_id": gid, "topic": "/devices/x/controls/Z"})
 
         sched_calls: list = []
 
@@ -161,13 +157,11 @@ class TestA8ProgramFinally:
 class TestA8GroupSequenceFinally:
     def test_group_sequence_finally_schedules_master_close(self, test_db, _force_real_group_seq):
         """_run_group_sequence's finally calls _schedule_master_close for its group_id."""
-        from irrigation_scheduler import IrrigationScheduler
         import services.zone_control as zc
+        from irrigation_scheduler import IrrigationScheduler
 
         gid, _ = _make_master_group(test_db)
-        zone = test_db.create_zone(
-            {"name": "Z1", "duration": 1, "group_id": gid, "topic": "/devices/x/controls/Z"}
-        )
+        zone = test_db.create_zone({"name": "Z1", "duration": 1, "group_id": gid, "topic": "/devices/x/controls/Z"})
 
         sched_calls: list = []
 

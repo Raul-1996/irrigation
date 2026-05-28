@@ -72,7 +72,7 @@ class ZoneWatchdog(threading.Thread):
             try:
                 self._check_zones()
                 self._check_master_valves()
-            except Exception as e:  # noqa: BLE001 — daemon thread must survive every tick
+            except Exception as e:  # daemon thread must survive every tick
                 # A7/A9: narrow tuples used to let KeyError/TypeError/
                 # AttributeError kill the daemon thread; supervisor was off
                 # until process restart. Broaden + logger.exception so we
@@ -205,13 +205,9 @@ class ZoneWatchdog(threading.Thread):
                 continue
             zone_id = int(z.get("id"))
             try:
-                self.db.update_zone(
-                    zone_id, {"state": "off", "watering_start_time": None}
-                )
+                self.db.update_zone(zone_id, {"state": "off", "watering_start_time": None})
             except Exception:
-                logger.exception(
-                    "_recover_stale_zones: update_zone(off) failed zone_id=%s", zone_id
-                )
+                logger.exception("_recover_stale_zones: update_zone(off) failed zone_id=%s", zone_id)
                 continue
             try:
                 import json as _json
@@ -229,9 +225,7 @@ class ZoneWatchdog(threading.Thread):
                     ),
                 )
             except Exception:
-                logger.exception(
-                    "_recover_stale_zones: add_log failed zone_id=%s", zone_id
-                )
+                logger.exception("_recover_stale_zones: add_log failed zone_id=%s", zone_id)
             try:
                 from services.audit import record_audit
 
@@ -343,9 +337,7 @@ class ZoneWatchdog(threading.Thread):
                 try:
                     zones_peer = self.db.get_zones_by_group(gid_peer) or []
                 except Exception:
-                    logger.exception(
-                        "_check_master_valves: get_zones_by_group(%s) failed", gid_peer
-                    )
+                    logger.exception("_check_master_valves: get_zones_by_group(%s) failed", gid_peer)
                     zones_peer = []
                 for z in zones_peer:
                     if str(z.get("state") or "").lower() in ("on", "starting"):
@@ -384,9 +376,7 @@ class ZoneWatchdog(threading.Thread):
                 if ok:
                     published_topics.add(t_norm)
             except Exception:
-                logger.exception(
-                    "_check_master_valves: bounded close failed topic=%s", t_norm
-                )
+                logger.exception("_check_master_valves: bounded close failed topic=%s", t_norm)
 
     def _publish_master_close_bounded(self, group_dict: dict) -> bool:
         """A9: bounded master-valve close publish.
@@ -415,14 +405,10 @@ class ZoneWatchdog(threading.Thread):
         try:
             mserver = self.db.get_mqtt_server(int(msid))
         except Exception:
-            logger.exception(
-                "_publish_master_close_bounded: get_mqtt_server(%s) failed", msid
-            )
+            logger.exception("_publish_master_close_bounded: get_mqtt_server(%s) failed", msid)
             return False
         if not mserver:
-            logger.warning(
-                "_publish_master_close_bounded: server msid=%s not found", msid
-            )
+            logger.warning("_publish_master_close_bounded: server msid=%s not found", msid)
             return False
         try:
             mode = (group_dict.get("master_mode") or "NC").strip().upper()
@@ -483,9 +469,7 @@ class ZoneWatchdog(threading.Thread):
                     t_norm,
                 )
 
-        worker = threading.Thread(
-            target=_do_publish, name=f"mv-supervisor-pub-{t_norm}", daemon=True
-        )
+        worker = threading.Thread(target=_do_publish, name=f"mv-supervisor-pub-{t_norm}", daemon=True)
         worker.start()
         worker.join(SUPERVISOR_PUBLISH_TIMEOUT_SEC)
         if worker.is_alive():
@@ -509,9 +493,7 @@ class ZoneWatchdog(threading.Thread):
 
                     from services import sse_hub as _sse_hub_sb
 
-                    _sse_hub_sb.broadcast(
-                        _json_sb.dumps({"mv_group_id": int(gid), "mv_state": "closed"})
-                    )
+                    _sse_hub_sb.broadcast(_json_sb.dumps({"mv_group_id": int(gid), "mv_state": "closed"}))
                 except Exception:
                     logger.debug(
                         "_publish_master_close_bounded: SSE broadcast failed",

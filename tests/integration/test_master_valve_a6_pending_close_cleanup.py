@@ -158,9 +158,7 @@ class TestA6PendingCloseCleanup:
                 time.sleep(0.1)
 
         with zc._PENDING_CLOSE_LOCK:
-            assert t_norm not in zc._PENDING_CLOSE_TIMERS, (
-                "_PENDING_CLOSE_TIMERS leaked entry after any-on skip"
-            )
+            assert t_norm not in zc._PENDING_CLOSE_TIMERS, "_PENDING_CLOSE_TIMERS leaked entry after any-on skip"
 
     def test_race_two_schedule_calls_no_foreign_wipeout(self, test_db):
         """Two _schedule_master_close in quick succession → second wins.
@@ -220,6 +218,4 @@ class TestA6PendingCloseCleanup:
                 time.sleep(0.1)
 
         with zc._PENDING_CLOSE_LOCK:
-            assert t_norm not in zc._PENDING_CLOSE_TIMERS, (
-                "_PENDING_CLOSE_TIMERS leaked entry after two-call race"
-            )
+            assert t_norm not in zc._PENDING_CLOSE_TIMERS, "_PENDING_CLOSE_TIMERS leaked entry after two-call race"

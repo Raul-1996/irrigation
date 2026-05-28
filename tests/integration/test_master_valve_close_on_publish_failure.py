@@ -89,9 +89,7 @@ class TestMasterCloseDesyncIssue38:
 
         # CRITICAL: no SSE broadcast announcing mv_state='closed'.
         for payload in broadcasts:
-            assert "closed" not in str(payload), (
-                f"SSE must not broadcast 'closed' on publish failure; got {payload!r}"
-            )
+            assert "closed" not in str(payload), f"SSE must not broadcast 'closed' on publish failure; got {payload!r}"
 
     def test_publish_success_writes_closed(self, test_db):
         """Happy path: publish returns True → DB updated, SSE broadcast emitted.
@@ -123,6 +121,4 @@ class TestMasterCloseDesyncIssue38:
         )
 
         closed_broadcasts = [p for p in broadcasts if "closed" in str(p) and str(gid) in str(p)]
-        assert closed_broadcasts, (
-            f"Expected at least one SSE broadcast with 'closed' for gid={gid}; got {broadcasts!r}"
-        )
+        assert closed_broadcasts, f"Expected at least one SSE broadcast with 'closed' for gid={gid}; got {broadcasts!r}"

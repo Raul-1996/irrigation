@@ -1040,9 +1040,7 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
                 # ack lost). Don't mark observed=closed — SSE-hub will heal
                 # from the real relay echo if/when the close lands later.
                 stats["masters_failed_publish"] += 1
-                logger.warning(
-                    "emergency_stop_all: master close publish FAILED — group=%s topic=%s", gid, t_norm
-                )
+                logger.warning("emergency_stop_all: master close publish FAILED — group=%s topic=%s", gid, t_norm)
                 continue
             stats["masters_closed"] += 1
             logger.info(

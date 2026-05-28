@@ -1130,9 +1130,7 @@ class IrrigationScheduler:
                             continue
                         _schedule_master_close(g_safety, immediate=False)
                     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                        logger.debug(
-                            "_run_program_threaded A8 master-close safety gid=%s: %s", gid, e
-                        )
+                        logger.debug("_run_program_threaded A8 master-close safety gid=%s: %s", gid, e)
             except ImportError:
                 logger.exception("_run_program_threaded A8 safety: import failed")
 

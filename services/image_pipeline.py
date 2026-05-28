@@ -48,16 +48,12 @@ def load_safe_image(file_data: bytes) -> Image.Image:
     img.load()  # force decode so PIL raises here, not later
     w0, h0 = img.size
     if w0 * h0 > MAX_INPUT_PIXELS:
-        raise ImageTooLargeError(
-            f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {MAX_INPUT_PIXELS}"
-        )
+        raise ImageTooLargeError(f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {MAX_INPUT_PIXELS}")
     try:
         img = ImageOps.exif_transpose(img)
     except (ValueError, TypeError, OSError) as e:
         logger.debug("load_safe_image: exif_transpose ignored: %s", e)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
-    elif img.mode != "RGB":
+    if img.mode in ("RGBA", "LA", "P") or img.mode != "RGB":
         img = img.convert("RGB")
     return img
 

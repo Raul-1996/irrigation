@@ -75,8 +75,7 @@ class TestA7StaleRecovery:
             matching = [
                 lg
                 for lg in logs
-                if str(lg.get("type") or lg.get("log_type") or "")
-                == "stale_on_recovery_after_restart"
+                if str(lg.get("type") or lg.get("log_type") or "") == "stale_on_recovery_after_restart"
             ]
             assert matching, "expected log entry stale_on_recovery_after_restart"
 
@@ -108,9 +107,7 @@ class TestA7StaleRecovery:
         wd._recover_stale_zones()
 
         z_after = test_db.get_zone(zone["id"])
-        assert str(z_after.get("state")).lower() == "on", (
-            "fresh ON zone must not be marked off by stale-recovery"
-        )
+        assert str(z_after.get("state")).lower() == "on", "fresh ON zone must not be marked off by stale-recovery"
 
     def test_recovery_triggers_master_close_when_observed_open(self, test_db):
         """After cleanup, supervisor publishes master close for observed=open groups."""
@@ -141,19 +138,15 @@ class TestA7StaleRecovery:
             wd = ZoneWatchdog(test_db, MagicMock(), interval=1)
             wd._recover_stale_zones()
 
-        assert publishes, (
-            "expected at least one master_close publish via supervisor after recovery"
-        )
+        assert publishes, "expected at least one master_close publish via supervisor after recovery"
         # NC mode → close value is '0'
-        assert any(value == "0" for _, value, _ in publishes), (
-            f"NC master close payload must be '0'; got {publishes!r}"
-        )
+        assert any(value == "0" for _, value, _ in publishes), f"NC master close payload must be '0'; got {publishes!r}"
 
     def test_recovery_no_master_close_when_observed_closed(self, test_db):
         """If observed=closed already, don't republish on recovery."""
+        import services.mqtt_pub as mqtt_pub
         from services import watchdog as wd_mod
         from services.watchdog import ZoneWatchdog
-        import services.mqtt_pub as mqtt_pub
 
         gid, _ = _make_master_group(test_db, observed="closed")
         zone = test_db.create_zone({"name": "S", "duration": 10, "group_id": gid})
@@ -174,6 +167,4 @@ class TestA7StaleRecovery:
             wd = ZoneWatchdog(test_db, MagicMock(), interval=1)
             wd._recover_stale_zones()
 
-        assert not publishes, (
-            f"no master close publish expected when observed=closed; got {publishes!r}"
-        )
+        assert not publishes, f"no master close publish expected when observed=closed; got {publishes!r}"

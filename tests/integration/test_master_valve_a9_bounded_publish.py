@@ -49,8 +49,8 @@ def _make_master_group(test_db, *, observed: str = "open"):
 class TestA9BoundedPublish:
     def test_single_tick_completes_within_3s_on_dead_broker(self, test_db):
         """publish_mqtt_value sleeps 30s → _check_master_valves tick < 3s."""
-        from services.watchdog import ZoneWatchdog
         import services.mqtt_pub as mqtt_pub
+        from services.watchdog import ZoneWatchdog
 
         gid, _ = _make_master_group(test_db, observed="open")
         # Group has observed=open AND no active zones → supervisor will
@@ -78,8 +78,8 @@ class TestA9BoundedPublish:
 
     def test_is_connected_false_skips_publish_fast(self, test_db):
         """Cached client offline → no publish call at all, tick is near-zero."""
-        from services.watchdog import ZoneWatchdog
         import services.mqtt_pub as mqtt_pub
+        from services.watchdog import ZoneWatchdog
 
         gid, srv_id = _make_master_group(test_db, observed="open")
 
@@ -104,8 +104,7 @@ class TestA9BoundedPublish:
 
         assert elapsed < 1.0, f"offline-broker fast path took {elapsed:.2f}s, expected < 1s"
         assert not publish_called, (
-            f"publish_mqtt_value must NOT be called when cached client reports offline; "
-            f"got {publish_called!r}"
+            f"publish_mqtt_value must NOT be called when cached client reports offline; got {publish_called!r}"
         )
 
 
@@ -119,8 +118,8 @@ class TestRunResilience:
         AttributeError, so any of those would unwind the daemon thread
         and the supervisor was permanently OFF until process restart.
         """
-        from services.watchdog import ZoneWatchdog
         import services.watchdog as wd_mod
+        from services.watchdog import ZoneWatchdog
 
         wd = ZoneWatchdog(test_db, MagicMock(), interval=1)
 
@@ -156,8 +155,6 @@ class TestRunResilience:
             wd.run()
 
         # The boom function was called → run() did iterate.
-        assert boom_count["n"] >= 1, (
-            "expected at least one tick to hit the stubbed db.get_zones/get_groups"
-        )
+        assert boom_count["n"] >= 1, "expected at least one tick to hit the stubbed db.get_zones/get_groups"
         # Quietly assert we used the broadened exception path: run() must
         # have completed normally (no propagating KeyError).

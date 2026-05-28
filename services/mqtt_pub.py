@@ -172,18 +172,14 @@ def _publish_with_retries(cl: Any, topic: str, value: str, qos: int, retain: boo
                     published = True
                     break
                 except (ValueError, RuntimeError, Exception) as wfp_err:
-                    logger.warning(
-                        f"MQTT wait_for_publish failed (attempt {retry_idx + 1}/3) topic={topic}: {wfp_err}"
-                    )
+                    logger.warning(f"MQTT wait_for_publish failed (attempt {retry_idx + 1}/3) topic={topic}: {wfp_err}")
                     time.sleep(delay)
                     try:
                         res = cl.publish(topic, payload=value, qos=effective_qos, retain=retain)
                     except (ConnectionError, TimeoutError, OSError):
                         logger.exception("MQTT publish (QoS>=1 retry republish) failed topic=%s", topic)
             if not published:
-                logger.critical(
-                    f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={topic} value={value}"
-                )
+                logger.critical(f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={topic} value={value}")
                 try:
                     from services.audit import record_audit
 
