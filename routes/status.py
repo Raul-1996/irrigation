@@ -13,8 +13,11 @@ def _get_inline_data():
     """Pre-fetch zones + groups + status for instant SSR render."""
     try:
         from database import db
+        from routes.zones_crud_api import _zone_ts_to_iso
 
         zones = db.zones.get_zones()
+        # Same TZ normalisation as /api/zones — see issue #47.
+        zones = [_zone_ts_to_iso(z) for z in (zones or [])]
         groups = db.groups.get_groups()
         # Build status summary
         status_data = None

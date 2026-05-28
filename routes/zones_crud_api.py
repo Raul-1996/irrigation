@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 from database import db
 from services.audit import audit_log, debug_audit
 from services.helpers import parse_dt
+from utils import to_iso_with_tz
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,30 @@ _STATE_MACHINE_FIELDS = {
     "fault_count",
     "last_fault",
 }
+
+
+# Fields that store controller-local "YYYY-MM-DD HH:MM:SS" timestamps and are
+# consumed by the browser as ``new Date(...)``. Without an explicit TZ the
+# browser parses them as device-local time, so on a device whose TZ differs
+# from the controller's the UI timer drifts by the offset (issue #47). We
+# serialise the API response with an ISO-8601 + offset suffix while keeping
+# the DB storage format unchanged (server-side ``strptime`` callers and the
+# existing tests parse the DB string directly via ``db.get_zone()``).
+_ZONE_TS_FIELDS = ("planned_end_time", "watering_start_time")
+
+
+def _zone_ts_to_iso(zone: dict | None) -> dict | None:
+    """Return a shallow copy of ``zone`` with timestamp fields ISO-formatted.
+
+    Idempotent: ``to_iso_with_tz`` short-circuits on TZ-aware input.
+    """
+    if not zone:
+        return zone
+    out = dict(zone)
+    for f in _ZONE_TS_FIELDS:
+        if out.get(f):
+            out[f] = to_iso_with_tz(out[f])
+    return out
 
 
 def _weather_skip_today() -> bool:
@@ -51,7 +76,7 @@ def _weather_skip_today() -> bool:
 @zones_crud_api_bp.route("/api/zones")
 def api_zones():
     zones = db.get_zones()
-    return jsonify(zones)
+    return jsonify([_zone_ts_to_iso(z) for z in zones])
 
 
 @zones_crud_api_bp.route("/api/zones/<int:zone_id>", methods=["GET", "PUT", "DELETE"])
@@ -60,7 +85,7 @@ def api_zone(zone_id):
     if request.method == "GET":
         zone = db.get_zone(zone_id)
         if zone:
-            return jsonify(zone)
+            return jsonify(_zone_ts_to_iso(zone))
         return jsonify({"success": False, "message": "Zone not found"}), 404
 
     elif request.method == "PUT":
