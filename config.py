@@ -2,6 +2,7 @@ import logging
 import os
 import secrets
 import stat
+from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -47,11 +48,23 @@ def _load_or_generate_secret(env_var: str = "SECRET_KEY", file_path: str = ".sec
 TESTING: bool = os.environ.get("TESTING") == "1"
 
 
+def _env_truthy(name: str, default: str) -> bool:
+    return str(os.environ.get(name, default)).strip().lower() in ("1", "true", "yes", "on")
+
+
 class Config:
     SECRET_KEY = _load_or_generate_secret()
     WTF_CSRF_ENABLED = True
     WTF_CSRF_CHECK_DEFAULT = True  # CSRF проверка включена для всех POST/PUT/DELETE
-    WTF_CSRF_TIME_LIMIT = None
+    # B6: CSRF token lifetime 24h (was None = unlimited). 365-day session × never-expiring
+    # CSRF token = stolen token reused for a year. 24h is the conventional rotation window.
+    WTF_CSRF_TIME_LIMIT = 86400
+    # B7: explicit Раулом — 365 days. Удобство > безопасность для домашнего полива.
+    PERMANENT_SESSION_LIFETIME = timedelta(days=365)
+    # B5: secure cookie ON by default. Disable only via explicit env SESSION_COOKIE_SECURE=0.
+    SESSION_COOKIE_SECURE = _env_truthy("SESSION_COOKIE_SECURE", "1")
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = "Lax"
     # Прочие настройки
     EMERGENCY_STOP = False
     TESTING = TESTING
@@ -60,3 +73,5 @@ class Config:
 class TestConfig(Config):
     TESTING = True
     WTF_CSRF_ENABLED = False
+    # Test client uses http://, so Secure cookie would prevent session use.
+    SESSION_COOKIE_SECURE = False
