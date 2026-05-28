@@ -202,9 +202,22 @@ _sse_hub.init(
 )
 
 try:
-    app.config.setdefault("SEND_FILE_MAX_AGE_DEFAULT", 60 * 60 * 24 * 7)
+    # Issue #50: Flask initialises SEND_FILE_MAX_AGE_DEFAULT=None at app
+    # construction, so `setdefault` is a no-op (key already exists, value is
+    # None). Use direct assignment so Werkzeug emits
+    # `Cache-Control: public, max-age=604800` on /static/* instead of the
+    # `no-cache` default that defeats browser caching.
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 60 * 60 * 24 * 7
 except (TypeError, ValueError) as e:
     logger.debug("SEND_FILE_MAX_AGE_DEFAULT config: %s", e)
+
+# Issue #50: register image/webp MIME so Werkzeug serves *.webp with
+# Content-Type: image/webp. Python 3.11 stdlib already maps it, but the
+# WB-target Debian 11 base image and some minimal containers ship an older
+# /etc/mime.types — defensive registration keeps behaviour consistent.
+import mimetypes as _mimetypes
+
+_mimetypes.add_type("image/webp", ".webp")
 
 # ── App version ────────────────────────────────────────────────────────────
 # Resolution: git describe → VERSION file → 'unknown'. See services/version.py.
@@ -416,6 +429,14 @@ _PUBLIC_AUTH_PATHS = {"/api/login", "/api/login/escalate", "/api/auth/status"}
 
 @app.before_request
 def _auth_before_request():
+    # Issue #50: skip all session/auth processing for /static/* so Flask doesn't
+    # mark the session dirty (which would emit Set-Cookie + Cache-Control: no-cache
+    # and defeat browser caching of /static/media/maps/*.webp etc.).
+    # Static paths require no auth — early return is safe.
+    if request.path.startswith("/static/"):
+        return None
+    # Issue #52: no implicit "guest" role anymore. session["role"] is set only
+    # by /api/login on successful authentication.
     try:
         if not app.config.get("TESTING"):
             try:
