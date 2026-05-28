@@ -19,6 +19,7 @@ from services.helpers import (
     UnsafePathError,
     safe_zone_photo_path,
 )
+from services.image_pipeline import ImageTooLargeError, encode_webp, load_safe_image
 
 try:
     from PIL import Image, ImageOps
@@ -32,14 +33,10 @@ zones_photo_api_bp = Blueprint("zones_photo_api", __name__)
 
 
 # ---- Image helpers ----
-# Issue #11: hard cap on input pixel count to avoid Pillow decompression OOM
-# on the WB controller (low-memory). 50 MP allows phone cameras (~12-48 MP)
-# while rejecting absurdly large inputs even if file size is under 20 MB.
-_MAX_INPUT_PIXELS = 50_000_000
-
-
-class ImageTooLargeError(ValueError):
-    """Raised when input image exceeds the pixel-count safety cap."""
+# Issue #49: decode/EXIF/RGB/50 MP-cap moved into services.image_pipeline so
+# every upload handler shares one path. Two-variant rendering stays here
+# because the thumb is a domain-specific 400x400 center-crop that no other
+# uploader needs.
 
 
 def allowed_file(filename):
@@ -51,22 +48,13 @@ def render_two_variants(image_bytes):
 
     - Main: long edge resized to <=1920, aspect preserved, WebP q=92.
     - Thumb: 400x400 center-crop, WebP q=90.
-    Single PIL decode + EXIF transpose, then both outputs derived from it.
+    Single PIL decode (via services.image_pipeline.load_safe_image which also
+    applies EXIF rotation, RGB conversion and the 50 MP cap) then both
+    outputs are encoded from the same in-memory image.
     Raises ImageTooLargeError if input exceeds the pixel safety cap.
     Other Pillow/IO errors propagate to caller.
     """
-    img = Image.open(io.BytesIO(image_bytes))
-    img.load()  # force decode so PIL raises here, not later
-    # Pixel-count guard (decompression-bomb defense in depth).
-    w0, h0 = img.size
-    if w0 * h0 > _MAX_INPUT_PIXELS:
-        raise ImageTooLargeError(f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {_MAX_INPUT_PIXELS}")
-    try:
-        img = ImageOps.exif_transpose(img)
-    except (ValueError, TypeError, OSError) as e:
-        logger.debug("render_two_variants: exif_transpose ignored: %s", e)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
+    img = load_safe_image(image_bytes)
 
     # Main: long edge <= 1920, preserve aspect.
     w, h = img.size
@@ -75,8 +63,7 @@ def render_two_variants(image_bytes):
         main = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
     else:
         main = img.copy()
-    out_main = io.BytesIO()
-    main.save(out_main, format="WEBP", quality=92, method=6)
+    main_bytes = encode_webp(main, quality=92)
 
     # Thumb: 400x400 center-crop (no stretching).
     tw = th = 400
@@ -86,10 +73,9 @@ def render_two_variants(image_bytes):
     left = max(0, (sized.size[0] - tw) // 2)
     top = max(0, (sized.size[1] - th) // 2)
     cropped = sized.crop((left, top, left + tw, top + th))
-    out_thumb = io.BytesIO()
-    cropped.save(out_thumb, format="WEBP", quality=90, method=6)
+    thumb_bytes = encode_webp(cropped, quality=90)
 
-    return out_main.getvalue(), out_thumb.getvalue()
+    return main_bytes, thumb_bytes
 
 
 def _atomic_write(path, data):
