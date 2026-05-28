@@ -128,10 +128,12 @@ app.config["MAX_CONTENT_LENGTH"] = (
 app.db = db
 csrf = CSRFProtect(app)
 
-# Exempt login endpoint from CSRF — login page doesn't include CSRF token
+# Exempt login endpoints from CSRF — login page doesn't include CSRF token
 from routes.auth import api_login as _api_login_view
+from routes.auth import api_login_escalate as _api_login_escalate_view
 
 csrf.exempt(_api_login_view)
+csrf.exempt(_api_login_escalate_view)
 
 # ── CSRF policy (SEC-003 fix) ──────────────────────────────────────────────
 # Previously every API blueprint was `csrf.exempt(bp)`, leaving all mutating

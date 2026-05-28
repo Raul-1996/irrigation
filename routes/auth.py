@@ -127,3 +127,40 @@ def api_login():
 
     login_limiter.record_failure(ip, username=username)
     return jsonify({"success": False, "message": "Неверный логин или пароль"}), 401
+
+
+@auth_bp.route("/api/login/escalate", methods=["POST"])
+@audit_log(
+    "login_escalate",
+    target_extractor=lambda *a, **kw: "session",
+    payload_filter=lambda p: {k: v for k, v in p.items() if k != "password"},
+)
+def api_login_escalate():
+    """Two-step privilege upgrade — viewer → admin.
+
+    Requires the caller to already hold a logged-in session (viewer or admin).
+    Body: {username, password}. Both must resolve to an *admin* user.
+    On success, the existing session id is rotated and role is set to 'admin'.
+    """
+    # TESTING mode lets fixtures hand-craft sessions; skip the gate.
+    if not current_app.config.get("TESTING") and not session.get("logged_in"):
+        return jsonify({"success": False, "error_code": "UNAUTHENTICATED"}), 401
+
+    data = request.get_json(silent=True) or {}
+    password = (data.get("password") or "").strip()
+    username = _resolve_username_from_payload(data)
+
+    ip = request.remote_addr or "0.0.0.0"
+    allowed, retry_after = login_limiter.check(ip, username=username)
+    if not allowed:
+        return jsonify({"success": False, "message": f"Слишком много попыток. Повторите через {retry_after}с"}), 429
+
+    user = users_service.authenticate(username, password)
+    if user is None or user.role != "admin":
+        login_limiter.record_failure(ip, username=username)
+        return jsonify({"success": False, "message": "Неверные admin-креды"}), 401
+
+    login_limiter.reset(ip, username=username)
+    _seed_session(user)
+    users_service.mark_login(user.id)
+    return jsonify({"success": True, "role": user.role, "username": user.username})
