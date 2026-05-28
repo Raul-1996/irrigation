@@ -126,6 +126,13 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             immediate,
         )
 
+        # Holder for the Timer object — populated AFTER we create the Timer
+        # below. The closure reads it through this list so the inner cleanup
+        # can do an identity check against _PENDING_CLOSE_TIMERS without
+        # being able to wipe a foreign (newer) Timer scheduled for the same
+        # topic. See A6 in audits/2026-05-28-security/findings.md.
+        _self_timer: list = [None]
+
         def _do_close():
             try:
                 # Check ON or STARTING zones across all groups sharing the same master topic
@@ -209,6 +216,19 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                         logger.debug("master_valve_observed update (closed) failed: %s", e)
             except Exception:
                 logger.exception("master valve delayed close failed (topic=%s)", t_norm)
+            finally:
+                # A6 (audits/2026-05-28-security/findings.md): _PENDING_CLOSE_TIMERS
+                # used to leak forever, breaking the watchdog supervisor's
+                # "skip — close already armed" guard after the first legitimate
+                # close. Identity check protects a freshly-scheduled timer
+                # for the same topic from being wiped by our late finally.
+                try:
+                    with _PENDING_CLOSE_LOCK:
+                        cached = _PENDING_CLOSE_TIMERS.get(t_norm)
+                        if cached is _self_timer[0]:
+                            _PENDING_CLOSE_TIMERS.pop(t_norm, None)
+                except Exception:
+                    logger.exception("master valve close: pending-timers cleanup failed")
 
         # Cancel any pending close for this topic (covers both delayed and immediate paths)
         with _PENDING_CLOSE_LOCK:
@@ -227,6 +247,9 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             # consistent (callers don't expect to block on master close).
             t = threading.Timer(0.0, _do_close)
             t.daemon = True
+            # Populate identity holder BEFORE start() so the closure's finally
+            # can recognise itself (A6 identity guard).
+            _self_timer[0] = t
             with _PENDING_CLOSE_LOCK:
                 _PENDING_CLOSE_TIMERS[t_norm] = t
             t.start()
@@ -234,6 +257,7 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
 
         timer = threading.Timer(float(delay), _do_close)
         timer.daemon = True
+        _self_timer[0] = timer
         with _PENDING_CLOSE_LOCK:
             _PENDING_CLOSE_TIMERS[t_norm] = timer
         timer.start()
@@ -1016,9 +1040,7 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
                 # ack lost). Don't mark observed=closed — SSE-hub will heal
                 # from the real relay echo if/when the close lands later.
                 stats["masters_failed_publish"] += 1
-                logger.warning(
-                    "emergency_stop_all: master close publish FAILED — group=%s topic=%s", gid, t_norm
-                )
+                logger.warning("emergency_stop_all: master close publish FAILED — group=%s topic=%s", gid, t_norm)
                 continue
             stats["masters_closed"] += 1
             logger.info(
