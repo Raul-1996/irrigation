@@ -218,6 +218,9 @@ class MigrationRunner:
                     "zone_runs_backfill_source",
                     self._backfill_zone_runs_source,
                 )
+                # Issue #52 — in-app auth from scratch.
+                self._apply_named_migration(conn, "create_users", self._migrate_create_users)
+                self._apply_named_migration(conn, "seed_default_users", self._migrate_seed_default_users)
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1537,3 +1540,74 @@ class MigrationRunner:
         # Nothing to reverse — the km/h value was kept, ms value will be removed
         # by _down_add_extended_weather_settings
         logger.info("Downgrade: weather_wind_kmh_to_ms — noop (ms key removed by extended settings downgrade)")
+
+    # --- Issue #52: in-app auth migrations ---
+
+    def _migrate_create_users(self, conn):
+        """Create the users table per issue #52 schema."""
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('viewer', 'admin')),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_login_at TIMESTAMP,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+            conn.commit()
+            logger.info("Создана таблица users")
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции create_users: %s", e)
+
+    def _migrate_seed_default_users(self, conn):
+        """Seed default credentials: admin/1234 (admin), Poliv/Poliv (viewer).
+
+        B13: both INSERTs run in a single transaction (``with conn:``) so a
+        failure on the second row rolls back the first — never leave the DB
+        with admin but no viewer (or vice versa).
+
+        If the legacy ``settings.password_hash`` row exists (created by older
+        first-start init), reuse it as the admin's hash to preserve Raul's
+        currently-set password instead of resetting to "1234".
+        """
+        from werkzeug.security import generate_password_hash
+
+        # Skip if any users already exist (idempotency across re-runs).
+        try:
+            existing = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            if existing:
+                logger.info("seed_default_users: пропуск — таблица users непуста (%d)", existing)
+                return
+        except sqlite3.Error as e:
+            logger.error("seed_default_users: count failed: %s", e)
+            return
+
+        # Preserve admin's existing pw hash if a legacy settings.password_hash exists.
+        admin_hash: str | None = None
+        try:
+            row = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", ("password_hash",)).fetchone()
+            if row and row[0]:
+                admin_hash = str(row[0])
+        except sqlite3.Error as e:
+            logger.debug("seed_default_users: legacy hash lookup: %s", e)
+        if not admin_hash:
+            admin_hash = generate_password_hash("1234", method="pbkdf2:sha256")
+        poliv_hash = generate_password_hash("Poliv", method="pbkdf2:sha256")
+
+        # B13: атомарная транзакция — если второй INSERT упадёт, первый откатится.
+        with conn:
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, is_active) VALUES (?, ?, ?, 1)",
+                ("admin", admin_hash, "admin"),
+            )
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, is_active) VALUES (?, ?, ?, 1)",
+                ("Poliv", poliv_hash, "viewer"),
+            )
+        logger.info("seed_default_users: вставлены admin (admin) и Poliv (viewer)")

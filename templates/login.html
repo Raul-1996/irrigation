@@ -51,10 +51,13 @@
         .btn-primary { background: var(--primary); color: #fff; }
         .btn-primary:hover { background: var(--primary-pressed); }
         .btn:disabled { opacity: .7; cursor: default; }
-        .btn-secondary { background: #eef2f7; color: #374151; }
         .error { color: var(--danger); font-size: 13px; margin-top: 12px; text-align: center; min-height: 1.2em; }
     </style>
     <script>
+        // Login does NOT enforce minimum length — Раул's seeded defaults
+        // (admin/1234, Poliv/Poliv) are intentionally shorter than the 8-char
+        // policy. /api/account/password (new passwords) enforces the floor.
+
         function setLoading(isLoading) {
             const submitBtn = document.getElementById('submitBtn');
             if (!submitBtn) return;
@@ -68,11 +71,16 @@
         }
         async function onSubmit(event) {
             event.preventDefault();
-            const password = document.getElementById('password').value.trim();
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
             const errorEl = document.getElementById('error');
             errorEl.textContent = '';
-            if (password.length < 4) {
-                errorEl.textContent = 'Минимальная длина пароля — 4 символа.';
+            if (!username) {
+                errorEl.textContent = 'Введите логин';
+                return;
+            }
+            if (!password) {
+                errorEl.textContent = 'Введите пароль';
                 return;
             }
             setLoading(true);
@@ -80,7 +88,7 @@
                 const resp = await fetch('/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
+                    body: JSON.stringify({ username, password })
                 });
                 if (resp.ok) {
                     window.location.href = '/';
@@ -118,19 +126,18 @@
         <form onsubmit="onSubmit(event)"
               data-audit-action="login_attempt"
               data-audit-target="auth:login"
-              data-audit-fields="">
+              data-audit-fields="username">
+            <label for="username">Логин</label>
+            <input id="username" name="username" type="text" placeholder="Логин" autocomplete="username" required autofocus />
             <label for="password">Пароль</label>
             <div class="input-group">
-                <input id="password" name="password" type="password" placeholder="Введите пароль" autocomplete="current-password" minlength="4" required autofocus onkeyup="handleCaps(event)" />
+                <input id="password" name="password" type="password" placeholder="Пароль" autocomplete="current-password" required onkeyup="handleCaps(event)" />
                 <button type="button" id="toggleBtn" class="toggle-visibility" aria-controls="password" aria-label="Показать пароль" onclick="toggleVisibility()">Показать</button>
             </div>
             <div id="caps" class="caps-warning">Включён Caps Lock</div>
             <button type="submit" class="btn btn-primary" id="submitBtn">Войти</button>
-            <button type="button" class="btn btn-secondary" onclick="window.location.href='/?guest=1'">Продолжить без пароля</button>
             <div id="error" class="error" role="status" aria-live="polite"></div>
         </form>
     </div>
 </body>
 </html>
-
-

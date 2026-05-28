@@ -52,6 +52,7 @@ import threading
 import time as _perf_time
 
 from config import Config
+from routes.admin_users import admin_users_bp
 from routes.auth import auth_bp
 from routes.files import files_bp
 from routes.groups import groups_bp
@@ -126,12 +127,28 @@ app.config["MAX_CONTENT_LENGTH"] = (
     22 * 1024 * 1024
 )  # 22MB (issue #11: route-level MAX_FILE_SIZE enforces 20MB; +2MB for multipart envelope)
 app.db = db
+
+# B2: ProxyFix only when explicit env TRUSTED_PROXY=1. Without env we MUST NOT
+# trust X-Forwarded-* (trivially spoofable from any LAN client). With env set,
+# the WSGI wrapper rewrites request.remote_addr from X-Forwarded-For so audit
+# logs / rate-limit see the real client IP behind Cloudflare Tunnel / nginx.
+if os.environ.get("TRUSTED_PROXY") == "1":
+    from werkzeug.middleware.proxy_fix import ProxyFix as _ProxyFix
+
+    app.wsgi_app = _ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
 csrf = CSRFProtect(app)
 
-# Exempt login endpoint from CSRF — login page doesn't include CSRF token
+# Exempt login endpoint from CSRF — login page doesn't include CSRF token.
+# Also exempt the escalate variant (browser may not have CSRF token in
+# fetched-from-API workflows).
 from routes.auth import api_login as _api_login_view
+from routes.auth import api_login_escalate as _api_login_escalate_view
+from routes.auth import api_logout as _api_logout_view
 
 csrf.exempt(_api_login_view)
+csrf.exempt(_api_login_escalate_view)
+csrf.exempt(_api_logout_view)
 
 # ── CSRF policy (SEC-003 fix) ──────────────────────────────────────────────
 # Previously every API blueprint was `csrf.exempt(bp)`, leaving all mutating
@@ -373,15 +390,8 @@ def _strip_conditional_revalidation(resp):
     return resp
 
 
-try:
-    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
-    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
-    if not Config.TESTING and "SESSION_COOKIE_SECURE" not in app.config:
-        app.config["SESSION_COOKIE_SECURE"] = bool(
-            os.environ.get("SESSION_COOKIE_SECURE", "0") in ("1", "true", "True")
-        )
-except (TypeError, KeyError) as e:
-    logger.debug("Session cookie config: %s", e)
+# Session cookie policy lives in config.py (B5/B6/B7). No env overrides here —
+# config.Config reads SESSION_COOKIE_SECURE from env (default ON) at import time.
 
 
 # ── Debug logging helpers ──────────────────────────────────────────────────
@@ -401,91 +411,136 @@ def dlog(msg: str, *args) -> None:
             logger.debug("dlog format error: %s", e)
 
 
-# ── Shared helper: check if a path is a "status action" allowed without admin ──
-# Service runs behind nginx basic auth. Internal Flask auth for zone/group
-# control is unnecessary — gardeners need start/stop without admin password.
+# ── Auth before-request (B1 LAN bypass + B3 explicit public paths) ────────
+import ipaddress as _ipaddress
 import re as _re
 
-_ALLOWED_PUBLIC_POSTS = {
+# B3: Explicit allowlist of endpoints that bypass auth entirely.
+# Anything else (GET or POST) requires a logged-in session unless _is_lan_request().
+_PUBLIC_AUTH_PATHS = {
     "/api/login",
-    "/api/status",
+    "/api/logout",
+    "/login",
+    "/logout",
     "/health",
-    "/api/env",
-    "/api/emergency-stop",
-    "/api/emergency-resume",
-    "/api/postpone",
-    "/api/zones/next-watering-bulk",
-    "/api/audit/ui",
+    "/healthz",
+    "/readyz",
+    "/metrics",
+    "/sw.js",
+    "/ws",
 }
 
-# Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
-_ALLOWED_PUBLIC_PATTERNS = [
-    _re.compile(r"^/api/zones/\d+/mqtt/start$"),
-    _re.compile(r"^/api/zones/\d+/mqtt/stop$"),
-    _re.compile(r"^/api/zones/\d+/start$"),
-    _re.compile(r"^/api/zones/\d+/stop$"),
-    _re.compile(r"^/api/groups/\d+/start-from-first$"),
-    _re.compile(r"^/api/groups/\d+/stop$"),
-    _re.compile(r"^/api/groups/\d+/master-valve/\w+$"),
-    _re.compile(r"^/api/groups/\d+/start-zone/\d+$"),
-    _re.compile(r"^/api/groups/\d+/run-selected$"),
-    _re.compile(r"^/api/groups/\d+/skip-current$"),
-]
+# Static / asset paths — never auth.
+_PUBLIC_AUTH_PREFIXES = ("/static/",)
+
+# B1: LAN network — direct controller access bypasses auth.
+_LAN_NETWORK = _ipaddress.ip_network("10.0.0.0/8")
 
 
-def _is_status_action(path):
-    if path in _ALLOWED_PUBLIC_POSTS:
+def _is_lan_request() -> bool:
+    """Return True only when request is a direct LAN hit, not via CF Tunnel.
+
+    Strict rules (per Raul):
+      * If `CF-Connecting-IP` header is present → NOT LAN (CF Tunnel path).
+      * If `X-Forwarded-For` header is present → NOT LAN (proxy path).
+      * If `request.remote_addr` is in 10.0.0.0/8 → LAN.
+      * Otherwise → NOT LAN.
+
+    Note: a forwarded header that *contains* a LAN-looking IP is still
+    treated as NOT LAN — header content cannot be trusted for the bypass
+    decision (spoof-safe).
+    """
+    try:
+        if request.headers.get("CF-Connecting-IP"):
+            return False
+        if request.headers.get("X-Forwarded-For"):
+            return False
+        addr = request.remote_addr
+        if not addr:
+            return False
+        return _ipaddress.ip_address(addr) in _LAN_NETWORK
+    except (ValueError, TypeError):
+        return False
+
+
+def _is_public_path(path: str) -> bool:
+    """Return True iff `path` is in the explicit public allowlist."""
+    if not path:
+        return False
+    if path in _PUBLIC_AUTH_PATHS:
         return True
-    for pat in _ALLOWED_PUBLIC_PATTERNS:
-        if pat.match(path):
+    for pref in _PUBLIC_AUTH_PREFIXES:
+        if path.startswith(pref):
             return True
     return False
 
 
-# ── Auth before-request ────────────────────────────────────────────────────
+# Mutation paths reserved for admin role. Anything else viewers may GET.
+_VIEWER_MUTATION_ALLOWLIST = {
+    "/api/account/password",  # any logged-in user may change their own pw
+    "/api/login/escalate",  # viewer→admin re-auth
+    "/api/logout",
+    "/logout",
+    "/api/audit/ui",  # benign UI click telemetry
+}
+
+
+def _viewer_mutation_allowed(path: str) -> bool:
+    return path in _VIEWER_MUTATION_ALLOWLIST
+
+
 @app.before_request
 def _auth_before_request():
-    # Issue #50: skip all session/auth processing for /static/* so Flask doesn't
-    # mark the session dirty (which would emit Set-Cookie + Cache-Control: no-cache
-    # and defeat browser caching of /static/media/maps/*.webp etc.).
-    # Static paths require no auth — early return is safe.
-    if request.path.startswith("/static/"):
+    """B1 + B3 auth gate.
+
+    Order of decisions (top wins):
+      1. `/static/*` → no auth.
+      2. Explicit `_PUBLIC_AUTH_PATHS` (login/logout/health/sw.js/ws) → no auth.
+      3. LAN bypass (`_is_lan_request()`) → no auth.
+      4. Logged-in session → allowed (further role check below).
+      5. Otherwise → 401 for /api/, 302→login for HTML pages.
+
+    Spec B3: applies to GET requests too. The legacy early-return for GET
+    that exposed `/api/zones`, `/api/programs`, `/api/system/config` publicly
+    is gone.
+    """
+    # In TESTING the test client logs in directly via session_transaction.
+    if app.config.get("TESTING"):
         return None
-    if "role" not in session:
-        session["role"] = "guest"
-    try:
-        if not app.config.get("TESTING"):
-            try:
-                db.ensure_password_change_required()
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("ensure_password_change_required: %s", e)
-            if request.path.startswith("/api/"):
-                if request.method == "GET":
-                    return None
-                pth = request.path or ""
-                if session.get("role") == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
-                    if pth != "/api/login":
-                        return jsonify(
-                            {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
-                        ), 403
-                if session.get("role") != "admin" and not _is_status_action(pth):
-                    return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
-                if session.get("role") == "admin" and request.method in ["POST", "PUT", "DELETE"]:
-                    must = db.get_setting_value("password_must_change") if True else None
-                    if str(must or "0") == "1" and request.path != "/api/password":
-                        return jsonify(
-                            {
-                                "success": False,
-                                "message": "password change required",
-                                "error_code": "PASSWORD_MUST_CHANGE",
-                            }
-                        ), 403
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.warning("auth before_request error: %s", e)
+
+    path = request.path or ""
+
+    # 1. Static
+    if path.startswith("/static/"):
+        return None
+
+    # 2. Explicit public allowlist
+    if _is_public_path(path):
+        return None
+
+    # 3. LAN bypass — direct controller access skips auth entirely.
+    if _is_lan_request():
+        return None
+
+    # 4. Session check
+    if not session.get("logged_in"):
+        if path.startswith("/api/"):
+            return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
+        from flask import redirect, url_for
+
+        return redirect(url_for("auth_bp.login_page"))
+
+    # 5. Role-based gate for mutations
+    if path.startswith("/api/") and request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        role = session.get("role", "viewer")
+        if role == "viewer" and not _viewer_mutation_allowed(path):
+            return jsonify(
+                {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
+            ), 403
 
 
 # ── Blueprint registration ─────────────────────────────────────────────────
-for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp):
+for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp, admin_users_bp):
     app.register_blueprint(bp)
 try:
     if telegram_bp:
@@ -524,29 +579,9 @@ csrf.exempt(health_api_bp)
 app.register_blueprint(health_api_bp)
 
 
-# ── Mutation guard ─────────────────────────────────────────────────────────
-@app.before_request
-def _require_admin_for_mutations():
-    try:
-        if app.config.get("TESTING"):
-            return None
-        p = request.path or ""
-        if not p.startswith("/api/") or request.method == "GET":
-            return None
-        role = session.get("role", "guest")
-        if role == "viewer" and request.method in ["POST", "PUT", "DELETE"] and p != "/api/login":
-            return jsonify(
-                {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
-            ), 403
-        if request.method in ["POST", "PUT", "DELETE"]:
-            # SECURITY FIX (VULN-003): removed /api/mqtt/ from whitelist
-            if p == "/api/login" or p.startswith("/api/env") or p == "/api/password":
-                return None
-            if role != "admin" and not _is_status_action(p):
-                return jsonify({"success": False, "message": "admin required", "error_code": "FORBIDDEN"}), 403
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.warning("mutation guard error: %s", e)
-        return None
+# Note: legacy `_require_admin_for_mutations` collapsed into
+# `_auth_before_request` (B1/B3 rewrite). Viewer vs admin role check is
+# performed there using `_VIEWER_MUTATION_ALLOWLIST`.
 
 
 # ── Group exclusivity watchdog ─────────────────────────────────────────────

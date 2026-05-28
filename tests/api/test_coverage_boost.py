@@ -324,6 +324,9 @@ class TestSettingsOperations:
         assert resp.status_code == 200
 
     def test_password_change(self, admin_client):
+        # B10 (issue #52): legacy /api/password endpoint replaced by
+        # /api/account/password (self-service) and /api/admin/users (admin
+        # reset). The legacy URL now responds 410 Gone for every method.
         resp = admin_client.post(
             "/api/password",
             data=json.dumps(
@@ -334,7 +337,7 @@ class TestSettingsOperations:
             ),
             content_type="application/json",
         )
-        assert resp.status_code in (200, 400)
+        assert resp.status_code == 410
 
 
 class TestEmergencyOperations:
@@ -353,12 +356,18 @@ class TestLoginLogout:
     """Authentication flow."""
 
     def test_login_with_password(self, client):
-        resp = client.post("/api/login", data=json.dumps({"password": "1234"}), content_type="application/json")
-        assert resp.status_code in (200, 401)
+        # issue #52: payload now requires {username, password}; missing
+        # username → 400 (B12). Accept 400 alongside legacy 200/401.
+        resp = client.post(
+            "/api/login", data=json.dumps({"username": "admin", "password": "1234"}), content_type="application/json"
+        )
+        assert resp.status_code in (200, 400, 401)
 
     def test_login_wrong_password(self, client):
-        resp = client.post("/api/login", data=json.dumps({"password": "wrong"}), content_type="application/json")
-        assert resp.status_code in (200, 401)
+        resp = client.post(
+            "/api/login", data=json.dumps({"username": "admin", "password": "wrong"}), content_type="application/json"
+        )
+        assert resp.status_code in (200, 400, 401)
 
     def test_logout(self, admin_client):
         resp = admin_client.get("/logout")

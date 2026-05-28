@@ -9,6 +9,7 @@ from db.mqtt import MqttRepository
 from db.programs import ProgramRepository
 from db.settings import SettingsRepository
 from db.telegram import TelegramRepository
+from db.users import UsersRepository
 from db.zones import ZoneRepository
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "ProgramRepository",
     "SettingsRepository",
     "TelegramRepository",
+    "UsersRepository",
     "ZoneRepository",
     "retry_on_busy",
 ]
