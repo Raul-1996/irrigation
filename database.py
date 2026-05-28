@@ -16,6 +16,7 @@ from db.mqtt import MqttRepository
 from db.programs import ProgramRepository
 from db.settings import SettingsRepository
 from db.telegram import TelegramRepository
+from db.users import UsersRepository
 from db.zones import ZoneRepository
 
 # Логирование: не вызываем logging.basicConfig() на import-time (CQ-012 / MASTER-C2).
@@ -49,6 +50,7 @@ class IrrigationDB:
         self.telegram = TelegramRepository(db_path)
         self.logs = LogRepository(db_path, self.backup_dir)
         self.audit = AuditRepository(db_path)
+        self.users = UsersRepository(db_path)
 
         # Init schema + migrations
         self._migrations = MigrationRunner(db_path)
