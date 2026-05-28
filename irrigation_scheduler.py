@@ -1102,6 +1102,39 @@ class IrrigationScheduler:
                     self.group_skip_current_events.pop(gid, None)
                 except (KeyError, TypeError, ValueError) as e:
                     logger.debug("_run_program_threaded skip-cleanup gid=%s: %s", gid, e)
+            # A8 (audits/2026-05-28-security/findings.md): safety net for
+            # every group the program touched (collected up-front in
+            # ``program_gids`` BEFORE the try block, exactly as the spec
+            # requires — pre-collect approach). Without this, a raise
+            # AFTER exclusive_start_zone opened the master valve but
+            # BEFORE the matching stop_zone() runs (e.g. _check_weather_skip
+            # raises mid-loop, KeyError propagating through the
+            # weather-coefficient path) leaves the valve open until the
+            # zone-cap watchdog catches it ~4h later.
+            # ``_schedule_master_close`` has its own "any zone still on"
+            # guard, so this is a no-op when zones are still running — it
+            # only fires when we really did leak a master-open without a
+            # matching close.
+            try:
+                from services.zone_control import _schedule_master_close
+
+                for gid in program_gids:
+                    try:
+                        g_safety = next(
+                            (gg for gg in (self.db.get_groups() or []) if int(gg.get("id")) == gid),
+                            None,
+                        )
+                        if not g_safety:
+                            continue
+                        if int(g_safety.get("use_master_valve") or 0) != 1:
+                            continue
+                        _schedule_master_close(g_safety, immediate=False)
+                    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                        logger.debug(
+                            "_run_program_threaded A8 master-close safety gid=%s: %s", gid, e
+                        )
+            except ImportError:
+                logger.exception("_run_program_threaded A8 safety: import failed")
 
     def schedule_program(self, program_id: int, program_data: dict[str, Any]):
         try:
@@ -2038,6 +2071,22 @@ class IrrigationScheduler:
                 self.group_skip_current_events.pop(group_id, None)
             except (KeyError, TypeError, ValueError) as e:
                 logger.debug("group_skip_current_events cleanup: %s", e)
+            # A8: same safety net as _run_program_threaded but for a single
+            # group. ``group_id`` is the function argument — known BEFORE the
+            # try block, so the pre-collect requirement is trivially met. The
+            # close is a no-op when zones are still on (see
+            # _schedule_master_close's any_on guard).
+            try:
+                from services.zone_control import _schedule_master_close
+
+                g_safety = next(
+                    (gg for gg in (self.db.get_groups() or []) if int(gg.get("id")) == group_id),
+                    None,
+                )
+                if g_safety and int(g_safety.get("use_master_valve") or 0) == 1:
+                    _schedule_master_close(g_safety, immediate=False)
+            except (ImportError, sqlite3.Error, OSError, ValueError, TypeError) as e:
+                logger.debug("_run_group_sequence A8 master-close safety gid=%s: %s", group_id, e)
 
     def get_active_programs(self) -> dict[int, dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
