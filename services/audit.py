@@ -212,11 +212,14 @@ def _resolve_actor(req) -> str:
 
 
 def _resolve_ip(req) -> str | None:
+    """Return the real client IP from the WSGI environment.
+
+    B11: do NOT read X-Forwarded-For directly here. ProxyFix (enabled via
+    TRUSTED_PROXY=1 in app.py) is the single place that may rewrite
+    request.remote_addr from XFF. Without ProxyFix, XFF is spoofable from any
+    client and must NOT be used for audit attribution.
+    """
     try:
-        # Honour X-Forwarded-For if behind nginx
-        fwd = req.headers.get("X-Forwarded-For") if req.headers else None
-        if fwd:
-            return str(fwd).split(",")[0].strip()
         return req.remote_addr
     except (AttributeError, KeyError):
         return None
