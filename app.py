@@ -199,7 +199,12 @@ _sse_hub.init(
 )
 
 try:
-    app.config.setdefault("SEND_FILE_MAX_AGE_DEFAULT", 60 * 60 * 24 * 7)
+    # Issue #50: Flask initialises SEND_FILE_MAX_AGE_DEFAULT=None at app
+    # construction, so `setdefault` is a no-op (key already exists, value is
+    # None). Use direct assignment so Werkzeug emits
+    # `Cache-Control: public, max-age=604800` on /static/* instead of the
+    # `no-cache` default that defeats browser caching.
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 60 * 60 * 24 * 7
 except (TypeError, ValueError) as e:
     logger.debug("SEND_FILE_MAX_AGE_DEFAULT config: %s", e)
 
@@ -432,6 +437,12 @@ def _is_status_action(path):
 # ── Auth before-request ────────────────────────────────────────────────────
 @app.before_request
 def _auth_before_request():
+    # Issue #50: skip all session/auth processing for /static/* so Flask doesn't
+    # mark the session dirty (which would emit Set-Cookie + Cache-Control: no-cache
+    # and defeat browser caching of /static/media/maps/*.webp etc.).
+    # Static paths require no auth — early return is safe.
+    if request.path.startswith("/static/"):
+        return None
     if "role" not in session:
         session["role"] = "guest"
     try:
