@@ -126,6 +126,10 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             immediate,
         )
 
+        # Forward-declare timer cell so _do_close can identity-check the
+        # pending entry before popping it (A6: never wipe foreign newer timer).
+        t: threading.Timer | None = None
+
         def _do_close():
             try:
                 # Check ON or STARTING zones across all groups sharing the same master topic
@@ -209,6 +213,17 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                         logger.debug("master_valve_observed update (closed) failed: %s", e)
             except Exception:
                 logger.exception("master valve delayed close failed (topic=%s)", t_norm)
+            finally:
+                # A6: pop OUR pending-close entry, but ONLY if the cached value
+                # is the exact Timer object we scheduled. If a newer call
+                # superseded us by swapping in its own Timer, leave it alone.
+                try:
+                    with _PENDING_CLOSE_LOCK:
+                        cached = _PENDING_CLOSE_TIMERS.get(t_norm)
+                        if cached is not None and cached is t:
+                            _PENDING_CLOSE_TIMERS.pop(t_norm, None)
+                except Exception:
+                    logger.exception("pending-close cleanup failed (topic=%s)", t_norm)
 
         # Cancel any pending close for this topic (covers both delayed and immediate paths)
         with _PENDING_CLOSE_LOCK:
@@ -232,11 +247,11 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             t.start()
             return
 
-        timer = threading.Timer(float(delay), _do_close)
-        timer.daemon = True
+        t = threading.Timer(float(delay), _do_close)
+        t.daemon = True
         with _PENDING_CLOSE_LOCK:
-            _PENDING_CLOSE_TIMERS[t_norm] = timer
-        timer.start()
+            _PENDING_CLOSE_TIMERS[t_norm] = t
+        t.start()
     except (RuntimeError, OSError, ValueError, TypeError):
         logger.exception("schedule master close failed")
 
