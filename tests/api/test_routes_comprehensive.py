@@ -428,10 +428,12 @@ class TestPostponeAPI:
 
 class TestPasswordAPI:
     def test_change_password(self, admin_client):
+        # B10 (issue #52): /api/password is permanently 410 — use
+        # /api/account/password (self) or /api/admin/users (admin).
         resp = admin_client.post(
             "/api/password", data=json.dumps({"new_password": "NewPass123!"}), content_type="application/json"
         )
-        assert resp.status_code in (200, 400)
+        assert resp.status_code == 410
 
 
 class TestEarlyOffAPI:

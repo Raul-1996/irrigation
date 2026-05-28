@@ -197,16 +197,19 @@ class TestSystemAPIExtended:
         assert resp.status_code in (200, 400)
 
     def test_password_change(self, admin_client):
+        # B10 (issue #52): /api/password is permanently 410 — single-pw flow
+        # replaced by /api/account/password (self) and /api/admin/users (admin).
         resp = admin_client.post(
             "/api/password", data=json.dumps({"new_password": "NewSecure123!"}), content_type="application/json"
         )
-        assert resp.status_code in (200, 400)
+        assert resp.status_code == 410
 
     def test_password_change_short(self, admin_client):
+        # B10: 410 regardless of payload — see test_password_change.
         resp = admin_client.post(
             "/api/password", data=json.dumps({"new_password": "sh"}), content_type="application/json"
         )
-        assert resp.status_code in (200, 400)
+        assert resp.status_code == 410
 
     def test_map_get(self, admin_client):
         resp = admin_client.get("/api/map")
