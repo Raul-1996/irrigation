@@ -68,9 +68,14 @@
         }
         async function onSubmit(event) {
             event.preventDefault();
+            const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value.trim();
             const errorEl = document.getElementById('error');
             errorEl.textContent = '';
+            if (!username) {
+                errorEl.textContent = 'Введите логин.';
+                return;
+            }
             if (password.length < 4) {
                 errorEl.textContent = 'Минимальная длина пароля — 4 символа.';
                 return;
@@ -80,7 +85,7 @@
                 const resp = await fetch('/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
+                    body: JSON.stringify({ username, password })
                 });
                 if (resp.ok) {
                     window.location.href = '/';
@@ -118,15 +123,16 @@
         <form onsubmit="onSubmit(event)"
               data-audit-action="login_attempt"
               data-audit-target="auth:login"
-              data-audit-fields="">
+              data-audit-fields="username">
+            <label for="username">Логин</label>
+            <input id="username" name="username" type="text" placeholder="admin или Poliv" autocomplete="username" required autofocus />
             <label for="password">Пароль</label>
             <div class="input-group">
-                <input id="password" name="password" type="password" placeholder="Введите пароль" autocomplete="current-password" minlength="4" required autofocus onkeyup="handleCaps(event)" />
+                <input id="password" name="password" type="password" placeholder="Введите пароль" autocomplete="current-password" minlength="4" required onkeyup="handleCaps(event)" />
                 <button type="button" id="toggleBtn" class="toggle-visibility" aria-controls="password" aria-label="Показать пароль" onclick="toggleVisibility()">Показать</button>
             </div>
             <div id="caps" class="caps-warning">Включён Caps Lock</div>
             <button type="submit" class="btn btn-primary" id="submitBtn">Войти</button>
-            <button type="button" class="btn btn-secondary" onclick="window.location.href='/?guest=1'">Продолжить без пароля</button>
             <div id="error" class="error" role="status" aria-live="polite"></div>
         </form>
     </div>

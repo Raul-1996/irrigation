@@ -1,7 +1,25 @@
-from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
+"""Auth routes (Issue #52 — in-app login, replaces nginx/CF basic auth).
 
+Endpoints:
+    GET  /login                — login page (HTML).
+    POST /api/login            — username+password login. Backwards-compatible:
+                                 if only `password` is sent, we look it up
+                                 against the default admin account.
+    POST /api/login/escalate   — viewer → admin two-step escalation.
+    POST /api/logout           — clear session (GET also accepted, preserved
+                                 by routes/system_config_api.api_logout).
+
+Decorators exposed for the rest of the app:
+    @login_required   — any active logged-in user (viewer or admin).
+    @admin_required   — admin role only.
+"""
+
+from functools import wraps
+
+from flask import Blueprint, current_app, jsonify, redirect, render_template, request, session, url_for
+
+from services import users_service
 from services.audit import audit_log
-from services.auth_service import verify_password
 from services.rate_limiter import login_limiter
 
 auth_bp = Blueprint("auth_bp", __name__)
@@ -11,34 +29,76 @@ csrf = None
 
 
 def _regenerate_session(new_values: dict) -> None:
-    """Invalidate the current session and issue a fresh session id.
+    """Invalidate the current session id and seed it with new values.
 
-    Mitigates SEC-006 (session fixation): an attacker who planted a
-    pre-known session cookie on the victim (via phishing, `?guest=1`,
-    XSS, MITM) cannot escalate to the authenticated victim's session
-    because login clears the previous session identifier.
+    Issue #52: also marks session.permanent=True so the 365-day
+    PERMANENT_SESSION_LIFETIME applies — fixes iPhone Safari losing
+    Basic Auth after a few hours.
     """
-    # Capture anything we want to preserve *before* clear(), but by design
-    # for a privilege-changing event we preserve nothing except what the
-    # caller explicitly passes in.
     session.clear()
-    # Flask signs the session cookie using app.secret_key; modifying the
-    # session after clear() forces a new signed cookie on the response.
-    session.permanent = False
+    session.permanent = True
     for k, v in new_values.items():
         session[k] = v
 
 
+def _seed_session(user) -> None:
+    """Common session bootstrap used by login + escalate."""
+    _regenerate_session(
+        {
+            "logged_in": True,
+            "user_id": user.id,
+            "username": user.username,
+            "role": user.role,
+        }
+    )
+
+
+def login_required(view_func):
+    """Allow any authenticated user (viewer or admin). 401 for anon on /api/*, 302 to /login otherwise."""
+
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if current_app.config.get("TESTING"):
+            return view_func(*args, **kwargs)
+        if not session.get("logged_in") or session.get("role") not in ("viewer", "admin"):
+            if (request.path or "").startswith("/api/"):
+                return jsonify({"success": False, "error_code": "UNAUTHENTICATED"}), 401
+            return redirect(url_for("auth_bp.login_page"))
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
+def admin_required(view_func):
+    """Allow only admins."""
+
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if current_app.config.get("TESTING"):
+            return view_func(*args, **kwargs)
+        if session.get("role") != "admin":
+            if (request.path or "").startswith("/api/"):
+                if not session.get("logged_in"):
+                    return jsonify({"success": False, "error_code": "UNAUTHENTICATED"}), 401
+                return jsonify({"success": False, "error_code": "FORBIDDEN"}), 403
+            return redirect(url_for("auth_bp.login_page"))
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
 @auth_bp.route("/login", methods=["GET"])
 def login_page():
-    # Поддержка гостевого входа (viewer — только чтение, без мутаций)
-    if request.args.get("guest") == "1":
-        # Regenerate session id even for guest login — prevents a stored
-        # unauthenticated sid from being re-used later when the same
-        # browser authenticates as admin.
-        _regenerate_session({"logged_in": True, "role": "viewer"})
-        return redirect(url_for("status_bp.index"))
     return render_template("login.html")
+
+
+def _resolve_username_from_payload(data: dict) -> str:
+    """Back-compat: if `username` is omitted, fall back to 'admin' (the legacy
+    single-account behaviour). New clients should always send username."""
+    raw = data.get("username")
+    if raw is None or str(raw).strip() == "":
+        return "admin"
+    return str(raw).strip()
 
 
 @auth_bp.route("/api/login", methods=["POST"])
@@ -50,22 +110,20 @@ def login_page():
 def api_login():
     data = request.get_json(silent=True) or {}
     password = (data.get("password") or "").strip()
+    username = _resolve_username_from_payload(data)
 
-    # IP-based rate limiting (TASK-009)
+    # IP-based rate limiting
     ip = request.remote_addr or "0.0.0.0"
-    allowed, retry_after = login_limiter.check(ip)
+    allowed, retry_after = login_limiter.check(ip, username=username)
     if not allowed:
         return jsonify({"success": False, "message": f"Слишком много попыток. Повторите через {retry_after}с"}), 429
 
-    success, role = verify_password(password)
+    user = users_service.authenticate(username, password)
+    if user is not None:
+        login_limiter.reset(ip, username=username)
+        _seed_session(user)
+        users_service.mark_login(user.id)
+        return jsonify({"success": True, "role": user.role, "username": user.username})
 
-    if success:
-        login_limiter.reset(ip)
-        # SEC-006 fix: regenerate session id on successful authentication.
-        # `session.clear()` + setting new keys forces Flask to emit a new
-        # signed cookie, breaking any fixation attempt.
-        _regenerate_session({"logged_in": True, "role": role})
-        return jsonify({"success": True, "role": role})
-
-    login_limiter.record_failure(ip)
-    return jsonify({"success": False, "message": "Неверный пароль"}), 401
+    login_limiter.record_failure(ip, username=username)
+    return jsonify({"success": False, "message": "Неверный логин или пароль"}), 401

@@ -367,6 +367,11 @@ try:
         app.config["SESSION_COOKIE_SECURE"] = bool(
             os.environ.get("SESSION_COOKIE_SECURE", "0") in ("1", "true", "True")
         )
+    # Issue #52: long-lived session so iPhone Safari doesn't drop the cookie
+    # after a few hours of inactivity (the original Basic Auth pain point).
+    from datetime import timedelta as _td
+
+    app.config.setdefault("PERMANENT_SESSION_LIFETIME", _td(days=365))
 except (TypeError, KeyError) as e:
     logger.debug("Session cookie config: %s", e)
 

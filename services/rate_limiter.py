@@ -32,7 +32,7 @@ class LoginRateLimiter:
         self.window_sec = window_sec
         self.lockout_sec = lockout_sec
 
-    def check(self, ip: str) -> tuple[bool, int]:
+    def check(self, ip: str, username: str | None = None) -> tuple[bool, int]:
         """Check if an IP is allowed to attempt login.
 
         Returns:
@@ -66,7 +66,7 @@ class LoginRateLimiter:
 
             return True, 0
 
-    def record_failure(self, ip: str) -> None:
+    def record_failure(self, ip: str, username: str | None = None) -> None:
         """Record a failed login attempt for the given IP."""
         now = time.time()
         with self._lock:
@@ -77,7 +77,7 @@ class LoginRateLimiter:
             cutoff = now - self.window_sec
             self._attempts[ip] = [ts for ts in self._attempts[ip] if ts > cutoff]
 
-    def reset(self, ip: str) -> None:
+    def reset(self, ip: str, username: str | None = None) -> None:
         """Reset failure count and lockout for the given IP (e.g., after successful login)."""
         with self._lock:
             self._attempts.pop(ip, None)
