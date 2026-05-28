@@ -4,7 +4,9 @@ Verifies that:
 * a big PNG map upload lands on disk as ``.webp``,
 * the saved file is smaller than the source,
 * the response path points at the new ``.webp`` filename,
-* a small image still works (regression on the happy path).
+* a small image still works (regression on the happy path),
+* undecodable bytes return a structured 400 (no garbage on disk),
+* GET /api/map surfaces the re-encoded ``.webp`` in its listing.
 """
 
 from __future__ import annotations
@@ -105,3 +107,41 @@ class TestMapUploadCompressed:
         body = resp.get_json()
         # Even a tiny JPEG gets re-encoded to .webp because the pipeline is uniform.
         assert body["path"].endswith(".webp")
+
+
+class TestMapUploadInvalid:
+    def test_garbage_bytes_return_400(self, admin_client):
+        """Bytes that pass extension+MIME guard but Pillow cannot decode must
+        produce a structured 400 (not 500, not silent save of garbage)."""
+        before = set(_list_map_files())
+        resp = admin_client.post(
+            "/api/map",
+            data={"file": (io.BytesIO(b"this is not an image at all"), "fake.png")},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 400, resp.data
+        body = resp.get_json()
+        assert body.get("success") is False
+        assert body.get("error_code") == "IMAGE_PROCESSING_FAILED"
+        # And critically: nothing got persisted to disk.
+        assert set(_list_map_files()) == before
+
+
+class TestMapListIncludesWebp:
+    def test_listing_returns_uploaded_webp(self, admin_client):
+        """GET /api/map must surface the re-encoded .webp filename so the UI
+        can render the freshly uploaded map without a manual refresh path."""
+        src = _small_png_bytes((300, 300))
+        up = admin_client.post(
+            "/api/map",
+            data={"file": (io.BytesIO(src), "list-me.png")},
+            content_type="multipart/form-data",
+        )
+        assert up.status_code == 200, up.data
+        uploaded_name = os.path.basename(up.get_json()["path"])
+        assert uploaded_name.endswith(".webp")
+
+        resp = admin_client.get("/api/map")
+        assert resp.status_code == 200
+        names = [it["name"] for it in resp.get_json()["items"]]
+        assert uploaded_name in names
