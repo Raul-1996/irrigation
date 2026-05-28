@@ -1,6 +1,5 @@
 """System Config API — auth, password, rain, env, map, postpone, settings."""
 
-import contextlib
 import json
 import logging
 import os
@@ -8,14 +7,11 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 
-from flask import Blueprint, current_app, jsonify, redirect, request, session, url_for
-from werkzeug.security import check_password_hash
+from flask import Blueprint, current_app, jsonify, request, session
 from werkzeug.utils import secure_filename
 
-from constants import MIN_PASSWORD_LENGTH
 from database import db
 from irrigation_scheduler import get_scheduler
-from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
 from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
 from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
@@ -32,8 +28,6 @@ logger = logging.getLogger(__name__)
 
 system_config_api_bp = Blueprint("system_config_api", __name__)
 
-# Password blocklist (TASK-013)
-_PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
 
 
 # ===== Auth / Password =====
@@ -49,64 +43,24 @@ def api_auth_status():
     )
 
 
-@system_config_api_bp.route("/logout", methods=["GET", "POST"])
-@audit_log("logout", target_extractor=lambda *a, **kw: "session")
-def api_logout():
-    """Terminate the current session.
+# B10/issue #52: /logout moved to routes/auth.py — single owner of session
+# lifecycle. /api/logout (POST, CSRF-protected) lives there too.
 
-    Security fixes:
-      * SEC-007: `session.clear()` fully destroys the server-side session
-        payload AND forces Flask to rotate the signed cookie. The previous
-        implementation left `logged_in=False` but kept role='user' which
-        (via the `_is_status_action` whitelist) still allowed mutating
-        calls on zone/group control endpoints.
-      * SEC-008: GET-based logout was CSRF-able (e.g. `<img src=/logout>`
-        in email/IM would forcibly log admin out). The GET variant is
-        preserved for backward compatibility with the existing link in
-        the sidebar template, but mutating side-effects are now identical
-        and the cookie is rotated. New integrations should POST to
-        `/logout`.
+
+@system_config_api_bp.route("/api/password", methods=["POST", "GET", "PUT", "DELETE"])
+def api_change_password_gone():
+    """B10: legacy endpoint removed (multi-user auth, issue #52).
+
+    The single-password model is gone — see /api/account/password for
+    self-service and /api/admin/users/<id> for admin password reset.
     """
-    # Capture whether the session had any sign-in so audit logs make
-    # sense, but never log the role/user because that is PII-adjacent.
-    was_logged_in = bool(session.get("logged_in"))
-    session.clear()
-    # Force-invalidate any Flask-Session server-side entry too, if present.
-    with contextlib.suppress(AttributeError, TypeError):
-        session.modified = True
-    logger.info("logout: session cleared (was_logged_in=%s)", was_logged_in)
-    return redirect(url_for("auth_bp.login_page"))
-
-
-@system_config_api_bp.route("/api/password", methods=["POST"])
-@rate_limit("password_change", max_requests=3, window_sec=300)
-@audit_log("password_change", target_extractor=lambda *a, **kw: "admin", payload_filter=lambda p: {"changed": True})
-def api_change_password():
-    try:
-        if not session.get("logged_in") and not current_app.config.get("TESTING"):
-            return jsonify({"success": False, "message": "Требуется аутентификация"}), 401
-        data = request.get_json() or {}
-        old_password = data.get("old_password", "")
-        new_password = data.get("new_password", "")
-        if len(new_password) < MIN_PASSWORD_LENGTH:
-            return jsonify(
-                {"success": False, "message": f"Пароль должен быть не менее {MIN_PASSWORD_LENGTH} символов"}
-            ), 400
-        if len(new_password) > 32:
-            return jsonify({"success": False, "message": "Пароль не может быть длиннее 32 символов"}), 400
-        if not new_password:
-            return jsonify({"success": False, "message": "Новый пароль обязателен"}), 400
-        if new_password.lower() in _PASSWORD_BLOCKLIST:
-            return jsonify({"success": False, "message": "Этот пароль слишком простой. Выберите другой."}), 400
-        stored_hash = db.get_password_hash()
-        if stored_hash and (current_app.config.get("TESTING") or check_password_hash(stored_hash, old_password)):
-            if db.set_password(new_password):
-                return jsonify({"success": True})
-            return jsonify({"success": False, "message": "Не удалось обновить пароль"}), 500
-        return jsonify({"success": False, "message": "Старый пароль неверен"}), 400
-    except (sqlite3.Error, OSError) as e:
-        logger.error(f"Ошибка смены пароля: {e}")
-        return jsonify({"success": False, "message": "Ошибка смены пароля"}), 500
+    return jsonify(
+        {
+            "success": False,
+            "message": "Gone. Use /api/account/password or /api/admin/users.",
+            "error_code": "GONE",
+        }
+    ), 410
 
 
 # ===== Map =====

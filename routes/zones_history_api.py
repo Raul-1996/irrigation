@@ -321,6 +321,25 @@ def get_global_history():
 # ---- CSV ----
 
 
+# B14: CSV injection guard. Excel/Numbers interpret cells starting with these
+# chars as formulas; prefixing with a single quote is the OWASP-recommended
+# mitigation. Apply to every user-controlled field in CSV output.
+_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """Return `value` neutered for CSV — prefix with ' if value starts with
+    a formula-trigger character. Non-string inputs are passed through.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return value
+    if value and value[0] in _CSV_DANGEROUS_PREFIXES:
+        return "'" + value
+    return value
+
+
 @zones_history_api_bp.route("/api/zones/<int:zone_id>/history.csv", methods=["GET"])
 def get_zone_history_csv(zone_id: int):
     days = _parse_days()
@@ -373,15 +392,15 @@ def get_zone_history_csv(zone_id: int):
             dur_min = 0
         writer.writerow(
             [
-                date_str,
-                start_str,
-                end_str,
+                _csv_safe(date_str),
+                _csv_safe(start_str),
+                _csv_safe(end_str),
                 r.get("zone_id"),
-                zone.get("name") or "",
+                _csv_safe(zone.get("name") or ""),
                 dur_min,
                 "" if r.get("total_liters") is None else r.get("total_liters"),
-                r.get("source") or "",
-                r.get("status") or "",
+                _csv_safe(r.get("source") or ""),
+                _csv_safe(r.get("status") or ""),
             ]
         )
 
