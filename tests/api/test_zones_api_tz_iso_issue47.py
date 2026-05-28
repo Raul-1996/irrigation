@@ -118,9 +118,7 @@ class TestZonesApiTzIso:
         remaining_sec = (end_local_naive - datetime.now()).total_seconds()
         # 5-minute zone: remaining should be ~300 s (allow generous ±15 s for
         # CI clock skew between the two now() reads and any test slowness).
-        assert 285 <= remaining_sec <= 315, (
-            f"remaining {remaining_sec}s outside [285, 315] — TZ handling drifted"
-        )
+        assert 285 <= remaining_sec <= 315, f"remaining {remaining_sec}s outside [285, 315] — TZ handling drifted"
 
     def test_api_response_serialisable_back_to_json(self, admin_client, app):
         """Sanity: the response is plain JSON (no datetime objects leaked)."""

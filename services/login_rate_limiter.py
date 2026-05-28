@@ -160,10 +160,7 @@ def send_telegram_alert(ip: str, fails_hour: int) -> None:
     Exposed at module level so routes can call it inside their own
     try/except — alerts must NEVER raise into the auth flow.
     """
-    message = (
-        f"wb-irrigation: brute-force suspected — "
-        f"{fails_hour} failed logins from {ip} in the last hour"
-    )
+    message = f"wb-irrigation: brute-force suspected — {fails_hour} failed logins from {ip} in the last hour"
     url = os.environ.get("TELEGRAM_ALERT_URL", "").strip()
     if not url:
         logger.warning("SECURITY ALERT (no TELEGRAM_ALERT_URL set): %s", message)

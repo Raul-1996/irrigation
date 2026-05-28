@@ -27,9 +27,7 @@ USERNAME_PATTERN = USERNAME_REGEX.pattern
 # B8: dummy pbkdf2 hash generated once at module load. authenticate() runs
 # check_password_hash against this when the user doesn't exist so the timing
 # profile is indistinguishable from a real user + wrong-password attempt.
-_DUMMY_HASH: str = generate_password_hash(
-    "dummy-for-timing-equalisation", method="pbkdf2:sha256"
-)
+_DUMMY_HASH: str = generate_password_hash("dummy-for-timing-equalisation", method="pbkdf2:sha256")
 
 
 # ── Validation helpers (tuple-return API used by routes) ───────────────────
@@ -114,9 +112,7 @@ def _hash_needs_upgrade(stored: str) -> bool:
 # ── CRUD (tuple-return API) ───────────────────────────────────────────────
 
 
-def create_user(
-    username: str, password: str, role: str
-) -> tuple[bool, str, int | None]:
+def create_user(username: str, password: str, role: str) -> tuple[bool, str, int | None]:
     """Create a user. Returns (ok, message, new_id).
 
     On failure new_id is None and message describes the problem.

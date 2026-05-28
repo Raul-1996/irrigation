@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 system_config_api_bp = Blueprint("system_config_api", __name__)
 
 
-
 # ===== Auth / Password =====
 
 

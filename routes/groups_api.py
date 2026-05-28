@@ -564,9 +564,7 @@ def api_master_valve_toggle(group_id, action):
         # Issue #38: publish_mqtt_value returns False if the base topic or
         # '/on' companion delivery is not confirmed. Don't lie to the UI/DB.
         if not ok:
-            logger.warning(
-                "master valve publish returned False — gid=%s action=%s", group_id, action
-            )
+            logger.warning("master valve publish returned False — gid=%s action=%s", group_id, action)
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
         try:
             db.update_group_fields(int(group_id), {"master_valve_observed": ("open" if want_open else "closed")})

@@ -28,9 +28,7 @@ def _require_admin():
     """Return a 403 response if session role != admin, else None."""
     role = session.get("role")
     if role != "admin":
-        return jsonify(
-            {"success": False, "message": "admin role required"}
-        ), 403
+        return jsonify({"success": False, "message": "admin role required"}), 403
     return None
 
 
@@ -97,9 +95,7 @@ def api_set_role(user_id: int):
         return guard
     # Self-demotion guard
     if int(session.get("user_id") or 0) == int(user_id):
-        return jsonify(
-            {"success": False, "message": "cannot modify own role/active"}
-        ), 400
+        return jsonify({"success": False, "message": "cannot modify own role/active"}), 400
     data = request.get_json(silent=True) or {}
     role = data.get("role") or ""
     ok, msg = set_role(user_id, role)
@@ -119,9 +115,7 @@ def api_set_active(user_id: int):
         return guard
     # Self-deactivate guard
     if int(session.get("user_id") or 0) == int(user_id):
-        return jsonify(
-            {"success": False, "message": "cannot modify own role/active"}
-        ), 400
+        return jsonify({"success": False, "message": "cannot modify own role/active"}), 400
     data = request.get_json(silent=True) or {}
     is_active = bool(data.get("is_active"))
     if not set_active(user_id, is_active):

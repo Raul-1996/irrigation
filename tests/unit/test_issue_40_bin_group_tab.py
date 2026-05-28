@@ -125,9 +125,7 @@ class TestGroupsApiReturnsBinGroup:
         ids = [g.get("id") for g in data]
         assert 999 in ids, f"Group 999 missing from /api/groups response — got ids {ids}"
         bin_group = next(g for g in data if g.get("id") == 999)
-        assert bin_group.get("name") == "БЕЗ ПОЛИВА", (
-            f"Group 999 has unexpected name {bin_group.get('name')!r}"
-        )
+        assert bin_group.get("name") == "БЕЗ ПОЛИВА", f"Group 999 has unexpected name {bin_group.get('name')!r}"
 
 
 # ─── End-to-end zone-filter logic (mirrors the JS in Python) ───
@@ -193,9 +191,7 @@ class TestBinZoneFilteringLogic:
         wizard = self._wizard(zones)
 
         # «Все» tab — bin zones hidden
-        assert {z["name"] for z in vse} == {"Normal-A"}, (
-            f"«Все» tab leaked bin zones: {[z['name'] for z in vse]}"
-        )
+        assert {z["name"] for z in vse} == {"Normal-A"}, f"«Все» tab leaked bin zones: {[z['name'] for z in vse]}"
 
         # «БЕЗ ПОЛИВА» tab — exactly the two bin zones
         assert {z["name"] for z in bin_view} == {"Bin-A", "Bin-B"}, (

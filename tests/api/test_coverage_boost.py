@@ -358,11 +358,15 @@ class TestLoginLogout:
     def test_login_with_password(self, client):
         # issue #52: payload now requires {username, password}; missing
         # username → 400 (B12). Accept 400 alongside legacy 200/401.
-        resp = client.post("/api/login", data=json.dumps({"username": "admin", "password": "1234"}), content_type="application/json")
+        resp = client.post(
+            "/api/login", data=json.dumps({"username": "admin", "password": "1234"}), content_type="application/json"
+        )
         assert resp.status_code in (200, 400, 401)
 
     def test_login_wrong_password(self, client):
-        resp = client.post("/api/login", data=json.dumps({"username": "admin", "password": "wrong"}), content_type="application/json")
+        resp = client.post(
+            "/api/login", data=json.dumps({"username": "admin", "password": "wrong"}), content_type="application/json"
+        )
         assert resp.status_code in (200, 400, 401)
 
     def test_logout(self, admin_client):

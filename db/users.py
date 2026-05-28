@@ -52,8 +52,7 @@ class UsersRepository(BaseRepository):
         try:
             with self._connect() as conn:
                 cur = conn.execute(
-                    "SELECT id, username, role, created_at, last_login_at, is_active "
-                    "FROM users ORDER BY id"
+                    "SELECT id, username, role, created_at, last_login_at, is_active FROM users ORDER BY id"
                 )
                 return [dict(r) for r in cur.fetchall()]
         except sqlite3.Error as e:
@@ -97,9 +96,7 @@ class UsersRepository(BaseRepository):
             return False
         try:
             with self._connect() as conn:
-                cur = conn.execute(
-                    "UPDATE users SET role = ? WHERE id = ?", (role, int(user_id))
-                )
+                cur = conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, int(user_id)))
                 conn.commit()
                 return cur.rowcount > 0
         except sqlite3.Error as e:

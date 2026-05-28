@@ -187,7 +187,8 @@ class TestB2ProxyFixGated:
         # Verify the env-check pattern still matches in app.py source.
         import app as app_mod
 
-        src = open(app_mod.__file__).read()
+        with open(app_mod.__file__) as f:
+            src = f.read()
         assert 'os.environ.get("TRUSTED_PROXY") == "1"' in src
         assert "ProxyFix" in src
         importlib.reload  # touch import to keep type-checker happy
@@ -212,9 +213,7 @@ class TestB9AdminUserCreateRejectsXSS:
         client = self._admin(app)
         resp = client.post(
             "/api/admin/users",
-            data=json.dumps(
-                {"username": "<script>alert(1)</script>", "password": "ok-password-1", "role": "viewer"}
-            ),
+            data=json.dumps({"username": "<script>alert(1)</script>", "password": "ok-password-1", "role": "viewer"}),
             content_type="application/json",
         )
         assert resp.status_code == 400
@@ -224,9 +223,7 @@ class TestB9AdminUserCreateRejectsXSS:
         client = self._admin(app)
         resp = client.post(
             "/api/admin/users",
-            data=json.dumps(
-                {"username": "x\"</td>", "password": "ok-password-1", "role": "viewer"}
-            ),
+            data=json.dumps({"username": 'x"</td>', "password": "ok-password-1", "role": "viewer"}),
             content_type="application/json",
         )
         assert resp.status_code == 400
@@ -235,9 +232,7 @@ class TestB9AdminUserCreateRejectsXSS:
         client = self._admin(app)
         resp = client.post(
             "/api/admin/users",
-            data=json.dumps(
-                {"username": "alice.new", "password": "ok-password-1", "role": "viewer"}
-            ),
+            data=json.dumps({"username": "alice.new", "password": "ok-password-1", "role": "viewer"}),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -247,9 +242,7 @@ class TestB9AdminUserCreateRejectsXSS:
         client = self._admin(app)
         resp = client.post(
             "/api/admin/users",
-            data=json.dumps(
-                {"username": "a" * 33, "password": "ok-password-1", "role": "viewer"}
-            ),
+            data=json.dumps({"username": "a" * 33, "password": "ok-password-1", "role": "viewer"}),
             content_type="application/json",
         )
         assert resp.status_code == 400

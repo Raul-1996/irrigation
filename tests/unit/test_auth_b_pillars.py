@@ -17,7 +17,6 @@ os.environ["TESTING"] = "1"
 
 from datetime import timedelta
 
-
 # ── B5/B6/B7: configuration constants ──────────────────────────────────────
 
 
@@ -55,7 +54,7 @@ class TestConfigSecurityDefaults:
         """B7: PERMANENT_SESSION_LIFETIME == 365 days (Раул's call)."""
         from config import Config
 
-        assert Config.PERMANENT_SESSION_LIFETIME == timedelta(days=365)
+        assert timedelta(days=365) == Config.PERMANENT_SESSION_LIFETIME
 
     def test_session_cookie_httponly_and_lax(self):
         """SameSite=Lax + HttpOnly — hardening defaults."""
@@ -227,8 +226,8 @@ class TestAuthTimingUniform:
     def test_lazy_rehash_upgrades_legacy_hash(self, app):
         """B8 lazy-upgrade: successful login on a legacy 120k-iter hash
         re-hashes the password at the current default."""
-        from services.users_service import _DUMMY_HASH, authenticate
         from database import db
+        from services.users_service import _DUMMY_HASH, authenticate
 
         # The admin row in the test DB inherits the legacy 120k-iter hash
         # via _insert_initial_data; verify and then exercise the upgrade.
@@ -258,9 +257,7 @@ class TestAuthTimingUniform:
 class TestUsernameRegex:
     """B9: server-side username allowlist `^[a-zA-Z0-9_.\\-]{1,32}$`."""
 
-    @pytest.mark.parametrize(
-        "name", ["admin", "Poliv", "user.1", "user_2", "user-3", "a", "A1.B-2_C"]
-    )
+    @pytest.mark.parametrize("name", ["admin", "Poliv", "user.1", "user_2", "user-3", "a", "A1.B-2_C"])
     def test_accept_valid(self, name):
         from services.users_service import validate_username
 
@@ -380,9 +377,7 @@ class TestSeedDefaultUsersAtomic:
             runner._migrate_create_users(conn)
             runner._migrate_seed_default_users(conn)
         with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(
-                "SELECT username, role, is_active FROM users ORDER BY id"
-            ).fetchall()
+            rows = conn.execute("SELECT username, role, is_active FROM users ORDER BY id").fetchall()
         assert len(rows) == 2
         assert rows[0][0] == "admin"
         assert rows[0][1] == "admin"

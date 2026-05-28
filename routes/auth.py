@@ -89,9 +89,7 @@ def api_login():
     # B4: pre-check — if IP already over limit, reject without burning CPU.
     allowed, _ = ip_login_limiter.pre_check(ip)
     if not allowed:
-        return jsonify(
-            {"success": False, "message": "Too many failed attempts. Retry later."}
-        ), 429
+        return jsonify({"success": False, "message": "Too many failed attempts. Retry later."}), 429
 
     user = authenticate(username, password)
 
@@ -111,9 +109,7 @@ def api_login():
                 "role": user["role"],
             }
         )
-        return jsonify(
-            {"success": True, "role": user["role"], "username": user["username"]}
-        )
+        return jsonify({"success": True, "role": user["role"], "username": user["username"]})
 
     # Failure path: B4 progressive sleep + alert
     sleep_sec, fails_min, fails_hour = ip_login_limiter.record_failure(ip)
@@ -153,9 +149,7 @@ def api_login_escalate():
     ip = _client_ip()
     allowed, _ = ip_login_limiter.pre_check(ip)
     if not allowed:
-        return jsonify(
-            {"success": False, "message": "Too many failed attempts. Retry later."}
-        ), 429
+        return jsonify({"success": False, "message": "Too many failed attempts. Retry later."}), 429
 
     user = authenticate(username, password)
     if not user:

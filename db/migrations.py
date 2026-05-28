@@ -1591,9 +1591,7 @@ class MigrationRunner:
         # Preserve admin's existing pw hash if a legacy settings.password_hash exists.
         admin_hash: str | None = None
         try:
-            row = conn.execute(
-                "SELECT value FROM settings WHERE key = ? LIMIT 1", ("password_hash",)
-            ).fetchone()
+            row = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", ("password_hash",)).fetchone()
             if row and row[0]:
                 admin_hash = str(row[0])
         except sqlite3.Error as e:

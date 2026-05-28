@@ -431,9 +431,7 @@ _PUBLIC_AUTH_PATHS = {
 }
 
 # Static / asset paths — never auth.
-_PUBLIC_AUTH_PREFIXES = (
-    "/static/",
-)
+_PUBLIC_AUTH_PREFIXES = ("/static/",)
 
 # B1: LAN network — direct controller access bypasses auth.
 _LAN_NETWORK = _ipaddress.ip_network("10.0.0.0/8")
@@ -480,10 +478,10 @@ def _is_public_path(path: str) -> bool:
 # Mutation paths reserved for admin role. Anything else viewers may GET.
 _VIEWER_MUTATION_ALLOWLIST = {
     "/api/account/password",  # any logged-in user may change their own pw
-    "/api/login/escalate",     # viewer→admin re-auth
+    "/api/login/escalate",  # viewer→admin re-auth
     "/api/logout",
     "/logout",
-    "/api/audit/ui",           # benign UI click telemetry
+    "/api/audit/ui",  # benign UI click telemetry
 }
 
 
@@ -527,9 +525,7 @@ def _auth_before_request():
     # 4. Session check
     if not session.get("logged_in"):
         if path.startswith("/api/"):
-            return jsonify(
-                {"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}
-            ), 401
+            return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
         from flask import redirect, url_for
 
         return redirect(url_for("auth_bp.login_page"))
