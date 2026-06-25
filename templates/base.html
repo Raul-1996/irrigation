@@ -59,6 +59,14 @@
         </div>
     </header>
 
+    <!-- System health banner: visible while any zone is in fault. Click opens details. -->
+    <div class="sysfault-banner" id="sysFaultBanner" role="button" tabindex="0"
+         aria-live="assertive"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}"
+         hidden>
+        <span class="sysfault-banner__text">⚠️ Полив не работает — нажмите для деталей</span>
+    </div>
+
     <main>
         <h1>{% block page_title %}{% endblock %}</h1>
         {% block content %}{% endblock %}
@@ -77,10 +85,29 @@
     <!-- Issue #35: irrigation history modal — included on every page. -->
     {% include '_history_modal.html' %}
 
+    <!-- System fault details modal — auto-opened once per new fault set by system_health.js. -->
+    <div class="sysfault-overlay" id="sysFaultOverlay" hidden
+         onclick="if(event.target===this)this.hidden=true,document.body.style.overflow=''">
+      <div class="sysfault-modal" role="dialog" aria-modal="true" aria-labelledby="sysFaultTitle">
+        <div class="sysfault-modal__header">
+          <div class="sysfault-modal__title" id="sysFaultTitle">⚠️ Сбой системы полива</div>
+          <button class="sysfault-modal__close" type="button" id="sysFaultClose" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="sysfault-modal__body">
+          <p class="sysfault-modal__lead">Следующие зоны не поливаются — реле не подтвердило включение:</p>
+          <ul class="sysfault-list" id="sysFaultList"></ul>
+        </div>
+        <div class="sysfault-modal__footer">
+          <button type="button" class="sysfault-modal__ok" id="sysFaultOk">Понятно</button>
+        </div>
+      </div>
+    </div>
+
     <script src="{{ asset('static/js/app.js') }}"></script>
     <script src="{{ asset('static/js/audit.js') }}" defer></script>
     <script src="{{ asset('/static/vendor/chart.umd.min.js') }}" defer></script>
     <script src="{{ asset('static/js/history.js') }}" defer></script>
+    <script src="{{ asset('static/js/system_health.js') }}" defer></script>
 
     {% block extra_js %}{% endblock %}
 </body>

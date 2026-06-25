@@ -615,6 +615,44 @@ def api_status():
     except (KeyError, TypeError, ValueError) as e:
         logger.debug("Exception in line_893: %s", e)
         is_admin = False
+
+    # Feature A: aggregate system health so the UI can show a prominent alert.
+    # A zone in state='fault' means its relay did not confirm switching — the
+    # zone is excluded from the schedule and is NOT being watered.
+    # TODO: master-valve-stuck faults are not aggregated yet.
+    faults = []
+    try:
+        for z in zones:
+            if str(z.get("state") or "").lower() == "fault":
+                zid = z.get("id")
+                faults.append(
+                    {
+                        "type": "zone_fault",
+                        "zone_id": int(zid) if zid is not None else None,
+                        "zone_name": z.get("name") or (f"#{zid}" if zid is not None else "?"),
+                        "reason": "Реле не подтвердило включение зоны",
+                        "since": z.get("last_fault"),
+                    }
+                )
+    except (KeyError, TypeError, ValueError) as e:
+        logger.debug("api_status: fault aggregation failed: %s", e)
+
+    # MQTT broker unreachable while servers are enabled — no command can reach
+    # any relay, so the whole system is effectively not watering.
+    try:
+        if mqtt_enabled_count and not mqtt_connected:
+            faults.append(
+                {
+                    "type": "mqtt_disconnect",
+                    "zone_id": None,
+                    "zone_name": None,
+                    "reason": "Нет связи с MQTT-брокером — команды не доходят до реле",
+                    "since": None,
+                }
+            )
+    except (NameError, TypeError) as e:
+        logger.debug("api_status: mqtt health check failed: %s", e)
+
     return jsonify(
         {
             "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -628,6 +666,7 @@ def api_status():
             "mqtt_servers_count": mqtt_servers_count,
             "mqtt_enabled_count": mqtt_enabled_count,
             "mqtt_connected": mqtt_connected,
+            "system_health": {"ok": len(faults) == 0, "faults": faults},
         }
     )
 
