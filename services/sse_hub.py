@@ -250,6 +250,13 @@ def ensure_hub_started() -> None:
                             z = _db.get_zone(int(zid)) or {}
                             updates = {"state": new_state}
                             if new_state == "on":
+                                # Real relay-on echo — flag the open run as
+                                # physically confirmed so finish_zone_run records
+                                # a genuine watering, not a phantom 'ok'.
+                                try:
+                                    _db.mark_zone_run_confirmed(int(zid))
+                                except (sqlite3.Error, OSError) as e:
+                                    logger.debug("mark_zone_run_confirmed zid=%s: %s", zid, e)
                                 if not z.get("watering_start_time"):
                                     updates["watering_start_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                     updates["watering_start_source"] = "remote"

@@ -758,6 +758,24 @@ class ZoneRepository(BaseRepository):
             logger.error("Ошибка чтения открытого run для зоны %s: %s", zone_id, e)
             return None
 
+    def mark_zone_run_confirmed(self, zone_id: int) -> bool:
+        """Flag the zone's currently-open run as physically confirmed — the
+        relay echoed 'on'. The SSE hub calls this on a real relay-on event so
+        finish_zone_run can tell a genuine watering from a command that never
+        reached the valve. Idempotent; no-op if there is no open run.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE zone_runs SET confirmed = 1 WHERE zone_id = ? AND end_utc IS NULL",
+                    (int(zone_id),),
+                )
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error("Ошибка mark_zone_run_confirmed зоны %s: %s", zone_id, e)
+            return False
+
     @retry_on_busy()
     def finish_zone_run(
         self,
@@ -771,6 +789,20 @@ class ZoneRepository(BaseRepository):
     ) -> bool:
         try:
             with self._connect() as conn:
+                # History truth: 'ok' is only honest if the relay's physical
+                # 'on' was confirmed (confirmed=1) at least once during the run.
+                # Downgrade an unconfirmed run to 'failed' so history never
+                # claims a watering that didn't physically happen. An explicit
+                # non-'ok' status (e.g. 'aborted') is left as-is.
+                if status == "ok":
+                    try:
+                        row = conn.execute(
+                            "SELECT confirmed FROM zone_runs WHERE id = ?", (int(run_id),)
+                        ).fetchone()
+                        if row is not None and not row[0]:
+                            status = "failed"
+                    except sqlite3.Error:
+                        pass
                 fields = ["end_utc = ?", "end_monotonic = ?", "status = ?", "updated_at = CURRENT_TIMESTAMP"]
                 params: list = [str(end_utc), float(end_monotonic), str(status)]
                 if end_raw_pulses is not None:

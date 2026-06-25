@@ -65,6 +65,9 @@ class TestStopZoneEndTime:
             None,
         )
         assert run_id is not None
+        # Simulate the real relay-on echo so the finished run stays status='ok'
+        # (finish_zone_run downgrades unconfirmed runs to 'failed').
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
 
         with (
             patch("services.zone_control.db", test_db),
@@ -113,6 +116,9 @@ class TestStopZoneEndTime:
             1,
             None,
         )
+        # The seeded prior run is a genuine watering — confirm it before
+        # closing so finish_zone_run keeps status='ok'.
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         assert test_db.finish_zone_run(
             int(run_id),
             prior_end,
@@ -166,6 +172,8 @@ class TestStopZoneEndTime:
             1,
             None,
         )
+        # Simulate the relay-on echo so the run stays status='ok'.
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
@@ -293,6 +301,8 @@ class TestSchedulerAutoStopEndTime:
             1,
             None,
         )
+        # Simulate the relay-on echo so the auto-stopped run stays status='ok'.
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         from irrigation_scheduler import IrrigationScheduler
 
         class _StubSched:

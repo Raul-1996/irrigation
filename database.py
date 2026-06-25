@@ -147,6 +147,9 @@ class IrrigationDB:
     def get_open_zone_run(self, zone_id: int):
         return self.zones.get_open_zone_run(zone_id)
 
+    def mark_zone_run_confirmed(self, zone_id: int):
+        return self.zones.mark_zone_run_confirmed(zone_id)
+
     def finish_zone_run(self, run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status="ok"):
         return self.zones.finish_zone_run(
             run_id, end_utc, end_monotonic, end_raw_pulses, total_liters, avg_flow_lpm, status

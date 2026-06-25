@@ -244,6 +244,22 @@
 .history-run.is-interrupted .history-run__dur {
   color: var(--warning-color, #ff9800);
 }
+.history-run.is-failed {
+  background: var(--danger-bg, rgba(244, 67, 54, 0.08));
+  border-left: 3px solid var(--danger-color, #f44336);
+  opacity: 1;
+}
+.history-run.is-failed .history-run__icon {
+  color: var(--danger-color, #f44336);
+}
+.history-run__status--failed {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #fff;
+  background: var(--danger-color, #f44336);
+}
 .history-run__plan {
   font-size: 11px;
   color: var(--text-muted, #777);

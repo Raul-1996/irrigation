@@ -49,12 +49,26 @@ def test_group_sequence_opens_and_closes_zone_run(runner_db):
     prior = os.environ.get("SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ")
     os.environ["SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ"] = "1"
 
+    # The run is opened and closed entirely inside the background sequence
+    # thread, so there is no outside window to flag the relay-on echo. Wrap
+    # create_zone_run to confirm the run the instant it is opened — this
+    # mirrors the real relay echoing 'on' right after start (in prod the SSE
+    # hub calls mark_zone_run_confirmed). Without it finish_zone_run would
+    # downgrade the genuine watering to status='failed'.
+    _orig_create_zone_run = runner_db.create_zone_run
+
+    def _create_and_confirm(zone_id, *args, **kwargs):
+        rid = _orig_create_zone_run(zone_id, *args, **kwargs)
+        runner_db.mark_zone_run_confirmed(int(zone_id))
+        return rid
+
     try:
         with (
             patch("services.mqtt_pub.publish_mqtt_value", return_value=True),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
             patch("services.zone_control.db", runner_db),
             patch("services.zone_control.state_verifier"),
+            patch.object(runner_db, "create_zone_run", side_effect=_create_and_confirm),
         ):
             t = threading.Thread(
                 target=sched._run_group_sequence,
