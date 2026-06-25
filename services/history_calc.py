@@ -212,6 +212,11 @@ def calculate_actual_for_zone(
     minutes: dict[date, int] = {d: 0 for d in date_set}
     counts: dict[date, int] = {d: 0 for d in date_set}
     for run in runs:
+        # A 'failed' run is a phantom watering (relay never confirmed) — it
+        # stays visible as a row in the history list, but must not inflate the
+        # actual-minutes / run-count totals shown in the summary.
+        if run.get("status") == "failed":
+            continue
         d = _run_local_date(run)
         if d is None or d not in date_set:
             continue

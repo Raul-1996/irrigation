@@ -218,6 +218,14 @@ class MigrationRunner:
                     "zone_runs_backfill_source",
                     self._backfill_zone_runs_source,
                 )
+                # History truth: track whether the relay's physical 'on' was
+                # ever confirmed (MQTT echo) during a run, so a run that never
+                # actually opened the valve is recorded as 'failed', not 'ok'.
+                self._apply_named_migration(
+                    conn,
+                    "zone_runs_add_confirmed",
+                    self._migrate_add_zone_runs_confirmed,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1173,6 +1181,29 @@ class MigrationRunner:
             conn.commit()
         except sqlite3.Error as e:
             logger.error("Ошибка миграции zone_runs_add_source: %s", e)
+
+    def _migrate_add_zone_runs_confirmed(self, conn):
+        """Add zone_runs.confirmed — was the relay 'on' physically confirmed
+        (MQTT echo) at least once during this run.
+
+        History must not report a successful watering when the valve never
+        actually opened. ``finish_zone_run`` downgrades status 'ok' -> 'failed'
+        for any run that ends with confirmed=0. The SSE hub sets it to 1 when a
+        real relay-on echo arrives for the zone's open run.
+
+        Default 0. Legacy rows finished before this migration already have an
+        explicit status persisted, so the downgrade only affects runs finished
+        after it.
+        """
+        try:
+            cursor = conn.execute("PRAGMA table_info(zone_runs)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if "confirmed" not in columns:
+                conn.execute("ALTER TABLE zone_runs ADD COLUMN confirmed INTEGER DEFAULT 0")
+                logger.info("Добавлено поле confirmed в таблицу zone_runs")
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции zone_runs_add_confirmed: %s", e)
 
     def _backfill_zone_runs_source(self, conn):
         """Issue #35: backfill source on pre-existing zone_runs.

@@ -95,6 +95,8 @@ class TestGetLastWateringTime:
             1,
             None,
         )
+        # Confirm the relay-on echo on the open run so it stays status='ok'.
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         assert test_db.finish_zone_run(
             int(r1),
             "2026-04-01 09:15:00",
@@ -113,6 +115,7 @@ class TestGetLastWateringTime:
             1,
             None,
         )
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         assert test_db.finish_zone_run(
             int(r2),
             "2026-04-02 09:30:00",
@@ -145,6 +148,8 @@ class TestGetLastWateringTime:
             1,
             None,
         )
+        # Confirm the relay-on echo so the run stays status='ok'.
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         assert test_db.finish_zone_run(
             int(run_id),
             "2026-04-03 10:20:00",
@@ -171,6 +176,8 @@ class TestGetLastWateringTime:
             1,
             None,
         )
+        # Confirm the relay-on echo on z1's open run so it stays status='ok'.
+        test_db.mark_zone_run_confirmed(int(z1["id"]))
         test_db.finish_zone_run(
             int(r1),
             "2026-04-01 09:15:00",

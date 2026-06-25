@@ -60,6 +60,10 @@ class TestZoneRunsWrittenForNonMeterGroups:
 
             assert exclusive_start_zone(zone["id"]) is True
             _time.sleep(0.05)  # give monotonic clock a tick
+            # Simulate the real relay-on echo so the run is recorded as a
+            # genuine watering (finish_zone_run keeps status='ok' only when
+            # the relay was physically confirmed).
+            test_db.mark_zone_run_confirmed(zone["id"])
             assert stop_zone(zone["id"], reason="test") is True
 
         with sqlite3.connect(test_db.db_path) as conn:

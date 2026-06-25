@@ -389,9 +389,16 @@
     dates.forEach(function (date) {
       var dayRuns = groups[date];
       var dayMin = 0;
-      dayRuns.forEach(function (r) { dayMin += (r.duration_min || 0); });
-      var headExtra = dayRuns.length > 1
-        ? ' · ' + dayRuns.length + ' запуска · ' + dayMin + ' мин'
+      var dayCount = 0;
+      dayRuns.forEach(function (r) {
+        // Exclude phantom waterings (status='failed') from the day totals —
+        // they remain visible as rows below, but don't inflate minutes/count.
+        if (r.status === 'failed') return;
+        dayMin += (r.duration_min || 0);
+        dayCount += 1;
+      });
+      var headExtra = dayCount > 1
+        ? ' · ' + dayCount + ' запуска · ' + dayMin + ' мин'
         : '';
       html += '<div class="history-runs__day-header">' + safeText(formatDateLong(date)) + headExtra + '</div>';
       dayRuns.forEach(function (r) {
@@ -404,9 +411,12 @@
   var SOURCE_LABELS = { program: 'Программа', manual: 'Вручную', api: 'API' };
 
   function renderRunRow(r) {
-    var interrupted = (r.status && r.status !== 'ok') || (r.duration_min === 0);
-    var cls = 'history-run' + (interrupted ? ' is-interrupted' : '');
-    var icon = interrupted ? '⏹' : '✓';
+    // A run the relay never physically confirmed is recorded status='failed'
+    // — show it distinctly ("не полито"), not as a normal interruption.
+    var failed = (r.status === 'failed');
+    var interrupted = !failed && ((r.status && r.status !== 'ok') || (r.duration_min === 0));
+    var cls = 'history-run' + (failed ? ' is-failed' : (interrupted ? ' is-interrupted' : ''));
+    var icon = failed ? '⚠️' : (interrupted ? '⏹' : '✓');
     var tStart = utcIsoToLocalTime(r.start_utc);
     var tEnd = utcIsoToLocalTime(r.end_utc);
     var time = tEnd ? (tStart + ' → ' + tEnd) : tStart;
@@ -416,11 +426,15 @@
     var sourceBadge = srcLabel
       ? '<span class="history-run__source history-run__source--' + safeText(r.source) + '">' + safeText(srcLabel) + '</span>'
       : '';
+    var statusBadge = failed
+      ? '<span class="history-run__status history-run__status--failed">не полито</span>'
+      : '';
     return '<div class="' + cls + '">'
       + '<span class="history-run__icon">' + icon + '</span>'
       + '<span class="history-run__time">' + safeText(time) + '</span>'
       + '<span class="history-run__zone">' + safeText(zoneLabel) + '</span>'
       + sourceBadge
+      + statusBadge
       + '<span class="history-run__dur">' + safeText(dur) + ' мин</span>'
       + '</div>';
   }

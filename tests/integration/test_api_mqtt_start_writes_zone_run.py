@@ -85,6 +85,10 @@ class TestApiMqttStartWritesZoneRun:
             r1 = admin_client.post(f"/api/zones/{zone['id']}/mqtt/start")
             assert r1.status_code == 200, r1.get_data(as_text=True)
 
+            # Simulate the real relay-on echo on the open run so the finished
+            # run stays status='ok' (unconfirmed runs are downgraded to 'failed').
+            app.db.mark_zone_run_confirmed(int(zone["id"]))
+
             r2 = admin_client.post(f"/api/zones/{zone['id']}/mqtt/stop")
             assert r2.status_code == 200, r2.get_data(as_text=True)
 

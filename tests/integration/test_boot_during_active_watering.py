@@ -36,6 +36,9 @@ class TestBootSyncAbortsStaleRuns:
             1,
             None,
         )
+        # The prior run is a genuine watering — confirm it before closing so
+        # finish_zone_run keeps status='ok' (unconfirmed runs become 'failed').
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         assert test_db.finish_zone_run(
             int(prior),
             "2026-04-01 09:15:00",
@@ -110,6 +113,9 @@ class TestBootSyncAbortsStaleRuns:
             1,
             None,
         )
+        # Confirm the relay-on echo so finish_zone_run keeps status='ok'
+        # (an already-finished, genuine run must be left untouched by boot_sync).
+        test_db.mark_zone_run_confirmed(int(zone["id"]))
         assert test_db.finish_zone_run(
             int(ok_id),
             "2026-04-01 09:15:00",
