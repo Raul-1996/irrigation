@@ -41,6 +41,32 @@ def get_or_create_mqtt_client(server: dict[str, Any]) -> Any | None:
     except (ValueError, TypeError, KeyError) as e:
         logger.debug("Exception in get_or_create_mqtt_client: %s", e)
         sid = 0
+    # Proactively evict a cached client that lost its broker connection.
+    # Eviction (pop) is done under the lock, but teardown (loop_stop/disconnect,
+    # which join the network thread and may block) runs OUTSIDE the lock so a
+    # slow teardown can't serialise every other publisher — same pattern as
+    # _invalidate_client.
+    stale = None
+    with _MQTT_CLIENTS_LOCK:
+        cl = _MQTT_CLIENTS.get(sid)
+        if cl is not None:
+            try:
+                if hasattr(cl, "is_connected") and not cl.is_connected():
+                    _MQTT_CLIENTS.pop(sid, None)
+                    stale, cl = cl, None
+            except Exception as e:
+                logger.debug("is_connected check sid=%s: %s", sid, e)
+    if stale is not None:
+        logger.warning("MQTT cached client sid=%s disconnected — recreating", sid)
+        try:
+            stale.loop_stop()
+        except Exception as e:
+            logger.debug("recreate loop_stop sid=%s: %s", sid, e)
+        try:
+            stale.disconnect()
+        except Exception as e:
+            logger.debug("recreate disconnect sid=%s: %s", sid, e)
+
     with _MQTT_CLIENTS_LOCK:
         cl = _MQTT_CLIENTS.get(sid)
         if cl is None:
@@ -169,17 +195,27 @@ def _publish_with_retries(cl: Any, topic: str, value: str, qos: int, retain: boo
             for retry_idx, delay in enumerate(backoff_delays):
                 try:
                     res.wait_for_publish(timeout=5.0)
-                    published = True
-                    break
-                except (ValueError, RuntimeError, Exception) as wfp_err:
+                    # wait_for_publish() returns silently on timeout when rc==0
+                    # (message accepted into the queue but never sent — the
+                    # wedged-inflight failure mode). Confirm actual delivery
+                    # via is_published() instead of trusting "no exception".
+                    if res.is_published():
+                        published = True
+                        break
+                    logger.warning(
+                        f"MQTT message not delivered — queued but unpublished "
+                        f"(attempt {retry_idx + 1}/3) topic={topic}"
+                    )
+                except Exception as wfp_err:
                     logger.warning(
                         f"MQTT wait_for_publish failed (attempt {retry_idx + 1}/3) topic={topic}: {wfp_err}"
                     )
-                    time.sleep(delay)
-                    try:
-                        res = cl.publish(topic, payload=value, qos=effective_qos, retain=retain)
-                    except (ConnectionError, TimeoutError, OSError):
-                        logger.exception("MQTT publish (QoS>=1 retry republish) failed topic=%s", topic)
+                # Not delivered (timeout or error) → backoff and republish.
+                time.sleep(delay)
+                try:
+                    res = cl.publish(topic, payload=value, qos=effective_qos, retain=retain)
+                except (ConnectionError, TimeoutError, OSError):
+                    logger.exception("MQTT publish (QoS>=1 retry republish) failed topic=%s", topic)
             if not published:
                 logger.critical(
                     f"MQTT QoS {effective_qos} delivery FAILED after 3 retries topic={topic} value={value}"
@@ -208,6 +244,55 @@ def _publish_with_retries(cl: Any, topic: str, value: str, qos: int, retain: boo
     except (ConnectionError, TimeoutError, OSError):
         logger.exception("MQTT publish failed topic=%s", topic)
         return False
+
+
+def _invalidate_client(sid: Any) -> None:
+    """Drop a (likely wedged) cached MQTT client and tear it down.
+
+    The next ``get_or_create_mqtt_client`` rebuilds a fresh client with an
+    empty inflight window. This is the recovery path for the failure mode
+    where QoS>=1 messages get queued-but-never-published after a
+    mid-handshake disconnect leaves orphaned mids occupying the inflight
+    window (mqtt-client-recovery).
+    """
+    try:
+        key = int(sid) if sid is not None else 0
+    except (ValueError, TypeError):
+        key = 0
+    with _MQTT_CLIENTS_LOCK:
+        cl = _MQTT_CLIENTS.pop(key, None)
+    if cl is not None:
+        try:
+            cl.loop_stop()
+        except Exception as e:
+            logger.debug("invalidate loop_stop sid=%s: %s", key, e)
+        try:
+            cl.disconnect()
+        except Exception as e:
+            logger.debug("invalidate disconnect sid=%s: %s", key, e)
+        logger.info("MQTT client invalidated sid=%s (recreate on next publish)", key)
+
+
+def _publish_one(server: dict, sid: Any, topic: str, value: str, qos: int, retain: bool) -> bool:
+    """Publish one topic with self-healing.
+
+    On delivery failure the cached client is most likely wedged (its inflight
+    window is full of QoS>=1 messages that will never be acknowledged). We
+    rebuild the client once and retry on a clean window. Without this, relay
+    commands block indefinitely in ``wait_for_publish`` (mqtt-client-recovery).
+    """
+    cl = get_or_create_mqtt_client(server)
+    if cl is None:
+        logger.warning("MQTT publish: client unavailable, dropping topic=%s", topic)
+        return False
+    if _publish_with_retries(cl, topic, value, qos, retain):
+        return True
+    logger.warning("MQTT delivery failed — recreating client sid=%s topic=%s", sid, topic)
+    _invalidate_client(sid)
+    cl = get_or_create_mqtt_client(server)
+    if cl is None:
+        return False
+    return _publish_with_retries(cl, topic, value, qos, retain)
 
 
 def publish_mqtt_value(
@@ -247,13 +332,10 @@ def publish_mqtt_value(
                 return True
             _TOPIC_LAST_SEND[key] = (value, now)
         logger.debug(f"MQTT publish topic={t} value={value}")
-        cl = get_or_create_mqtt_client(server)
-        if cl is None:
-            logger.warning("MQTT publish: client unavailable, dropping message")
-            return False
-        # Publish to base topic with retries + (QoS≥1) broker-ack wait.
+        # Publish to base topic with retries + (QoS≥1) broker-ack wait, and
+        # self-heal a wedged client (recreate + retry) on delivery failure.
         effective_qos = max(0, min(2, int(qos or 0)))
-        if not _publish_with_retries(cl, t, value, effective_qos, retain):
+        if not _publish_one(server, sid, t, value, effective_qos, retain):
             return False
 
         # Debug-level audit: every successful publish. Volume is high
@@ -293,7 +375,7 @@ def publish_mqtt_value(
                 return True
             _TOPIC_LAST_SEND[on_key] = (value, now2)
         logger.debug(f"MQTT publish topic={t_on} value={value}")
-        if not _publish_with_retries(cl, t_on, value, effective_qos, retain):
+        if not _publish_one(server, sid, t_on, value, effective_qos, retain):
             logger.error("MQTT publish to /on companion FAILED topic=%s", t_on)
             return False
 
@@ -303,7 +385,9 @@ def publish_mqtt_value(
                 t_meta = t + "/meta"
                 payload_meta = ";".join([f"{k}={v}" for k, v in meta.items() if v is not None])
                 if payload_meta:
-                    cl.publish(t_meta, payload=payload_meta, qos=0, retain=False)
+                    cl_meta = get_or_create_mqtt_client(server)
+                    if cl_meta is not None:
+                        cl_meta.publish(t_meta, payload=payload_meta, qos=0, retain=False)
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Exception in line_201: %s", e)
             # meta is best-effort
