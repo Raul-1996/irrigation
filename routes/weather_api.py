@@ -170,6 +170,16 @@ def api_get_weather_settings():
                     "humidity": _get("weather.factor.humidity", True, "bool"),
                     "heat": _get("weather.factor.heat", True, "bool"),
                 },
+                # H2 virtual water balance (mode switch + tuning)
+                "balance": {
+                    "enabled": _get("weather.balance.enabled", False, "bool"),
+                    "window_days": _get("weather.balance.window_days", 3, "int"),
+                    "norm_window_days": _get("weather.balance.norm_window_days", 30, "int"),
+                    "coef_min": _get("weather.balance.coef_min", 50, "int"),
+                    "coef_max": _get("weather.balance.coef_max", 150, "int"),
+                    "intercept_mm": _get("weather.balance.intercept_mm", 4.0),
+                    "stale_fallback_days": _get("weather.balance.stale_fallback_days", 2, "int"),
+                },
             }
         )
     except (sqlite3.Error, ValueError, TypeError) as e:
@@ -222,6 +232,30 @@ def api_put_weather_settings():
                 if factor_name in factors:
                     key = f"weather.factor.{factor_name}"
                     ok = ok and db.set_setting_value(key, "1" if factors[factor_name] else "0")
+
+        # H2 virtual water balance settings (mode switch + tuning, clamped)
+        balance = data.get("balance")
+        if balance and isinstance(balance, dict):
+            if "enabled" in balance:
+                ok = ok and db.set_setting_value("weather.balance.enabled", "1" if balance["enabled"] else "0")
+            if "window_days" in balance:
+                val = int(float(balance["window_days"]))
+                ok = ok and db.set_setting_value("weather.balance.window_days", str(max(1, min(14, val))))
+            if "norm_window_days" in balance:
+                val = int(float(balance["norm_window_days"]))
+                ok = ok and db.set_setting_value("weather.balance.norm_window_days", str(max(7, min(90, val))))
+            if "coef_min" in balance:
+                val = int(float(balance["coef_min"]))
+                ok = ok and db.set_setting_value("weather.balance.coef_min", str(max(0, min(100, val))))
+            if "coef_max" in balance:
+                val = int(float(balance["coef_max"]))
+                ok = ok and db.set_setting_value("weather.balance.coef_max", str(max(100, min(300, val))))
+            if "intercept_mm" in balance:
+                val = float(balance["intercept_mm"])
+                ok = ok and db.set_setting_value("weather.balance.intercept_mm", str(max(0.0, min(20.0, val))))
+            if "stale_fallback_days" in balance:
+                val = int(float(balance["stale_fallback_days"]))
+                ok = ok and db.set_setting_value("weather.balance.stale_fallback_days", str(max(1, min(14, val))))
 
         return jsonify({"success": bool(ok)})
     except (sqlite3.Error, ValueError, TypeError) as e:
@@ -301,3 +335,49 @@ def api_get_weather_log():
     except (sqlite3.Error, ValueError, TypeError) as e:
         logger.debug("Weather log read error: %s", e)
         return jsonify({"logs": []})
+
+
+@weather_api_bp.route("/api/weather/balance/log", methods=["GET"])
+@admin_required
+def api_get_weather_balance_log():
+    """Get H2 water-balance audit log (last N entries) for shadow-mode review."""
+    try:
+        limit = min(100, max(1, int(request.args.get("limit", 50))))
+        with db.logs._connect() as conn:
+            cur = conn.execute(
+                "SELECT * FROM weather_balance_log ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            return jsonify({"logs": rows})
+    except sqlite3.OperationalError as e:
+        # Table may not exist yet (migration not run on this DB).
+        if "no such table" in str(e):
+            return jsonify({"logs": []})
+        logger.debug("Weather balance log read error: %s", e)
+        return jsonify({"logs": []})
+    except (sqlite3.Error, ValueError, TypeError) as e:
+        logger.debug("Weather balance log read error: %s", e)
+        return jsonify({"logs": []})
+
+
+@weather_api_bp.route("/api/weather/balance/recalc", methods=["POST"])
+@admin_required
+@audit_log("weather_balance_recalc", target_extractor=lambda *a, **kw: "weather_balance")
+def api_recalc_weather_balance():
+    """Manually trigger an H2 water-balance recalculation (admin).
+
+    Bypasses the same-day idempotency by clearing ``last_recalc_date`` first, so
+    an operator can force a fresh pull/recompute on demand.
+    """
+    try:
+        from services.weather.balance import recalc_balance
+
+        db.set_setting_value("weather.balance.last_recalc_date", None)
+        result = recalc_balance(db.db_path)
+        if result is not None:
+            return jsonify({"success": True, "result": result})
+        return jsonify({"success": False, "message": "Пересчёт не выполнен (нет данных/локации)."}), 400
+    except (ImportError, sqlite3.Error, OSError, ValueError, TypeError) as e:
+        logger.debug("Weather balance recalc error: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500

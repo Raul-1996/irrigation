@@ -499,6 +499,66 @@ class WeatherAdjustment:
         result = max(0, min(200, round(coefficient)))
         return result
 
+    # --- H2 water-balance integration -----------------------------------
+    # These additive methods route the watering path to the cached balance
+    # coefficient when enabled and fresh, and fall back to H1 otherwise.
+    # ``get_coefficient`` / sensor-source / ``should_skip`` are NOT touched.
+
+    def _balance_enabled(self) -> bool:
+        """True if the H2 water-balance mode flag is set in settings."""
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.enabled'")
+                row = cur.fetchone()
+                return row is not None and str(row[0]) in ("1", "true", "True")
+        except (sqlite3.Error, OSError):
+            return False
+
+    def _balance_coef_fresh(self) -> bool:
+        """True if the cached balance coef was recalculated recently enough.
+
+        Stale = ``last_recalc_date`` older than ``stale_fallback_days`` (the
+        nightly job has not run — service was down or Open-Meteo unreachable for
+        several nights). A stale balance must not steer watering (review #5);
+        we fall back to H1 instead.
+        """
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.last_recalc_date'")
+                row = cur.fetchone()
+                if not row or not row["value"]:
+                    return False
+                cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.stale_fallback_days'")
+                srow = cur.fetchone()
+                stale_days = 2
+                if srow and srow["value"] is not None:
+                    with contextlib.suppress(ValueError, TypeError):
+                        stale_days = int(float(srow["value"]))
+                from datetime import date, datetime
+
+                last = datetime.strptime(str(row["value"]), "%Y-%m-%d").date()
+                age_days = (date.today() - last).days
+                return age_days <= stale_days
+        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+            logger.debug("balance freshness check failed: %s", e)
+            return False
+
+    def get_effective_coefficient(self) -> int:
+        """Coefficient actually applied to watering: balance if live, else H1.
+
+        Returns the cached H2 water-balance coefficient when the balance mode is
+        enabled AND its cache is fresh; otherwise (disabled / stale / empty)
+        returns the H1 ``get_coefficient()`` — leaving the legacy path entirely
+        untouched. The hard safety-skip thresholds remain a separate gate on top
+        of whichever multiplier is returned.
+        """
+        if self._balance_enabled() and self._balance_coef_fresh():
+            from services.weather.balance import read_cached_coef
+
+            return read_cached_coef(self.db_path)
+        return self.get_coefficient()
+
     def get_factors_detail(self, weather: Any | None = None) -> dict[str, dict[str, Any]]:
         """Return per-factor breakdown for the weather widget.
 

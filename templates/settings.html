@@ -134,6 +134,57 @@
           </label>
         </div>
       </details>
+      <details style="margin-top:8px;">
+        <summary style="font-size:0.85rem; cursor:pointer;">🧮 Режим коррекции (H1 / Водный баланс)</summary>
+        <div style="padding:8px 0;">
+          <div class="settings-row">
+            <label style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" id="balance_enabled"> Включить водный баланс (H2) вместо Зиммермана
+            </label>
+          </div>
+          <p class="settings-note" style="margin:4px 0 8px;">
+            Баланс копит скользящий ET-дефицит и сравнивает его с климат-нормой точки →
+            ровный коэффициент на сутки (лечит ночное занижение и внутридневные скачки).
+            Пока выключено — применяется H1, а баланс показывается как «второе мнение».
+          </p>
+          <div class="settings-row">
+            <label for="balance_window_days">Окно дефицита (дней)</label>
+            <div class="settings-input">
+              <input type="number" id="balance_window_days" step="1" min="1" max="14" value="3">
+            </div>
+          </div>
+          <div class="settings-row">
+            <label for="balance_norm_window_days">Окно нормы EMA (дней)</label>
+            <div class="settings-input">
+              <input type="number" id="balance_norm_window_days" step="1" min="7" max="90" value="30">
+            </div>
+          </div>
+          <div class="settings-row">
+            <label for="balance_coef_min">Мин. коэффициент (%)</label>
+            <div class="settings-input">
+              <input type="number" id="balance_coef_min" step="5" min="0" max="100" value="50">
+            </div>
+          </div>
+          <div class="settings-row">
+            <label for="balance_coef_max">Макс. коэффициент (%)</label>
+            <div class="settings-input">
+              <input type="number" id="balance_coef_max" step="5" min="100" max="300" value="150">
+            </div>
+          </div>
+          <div class="settings-row">
+            <label for="balance_intercept_mm">Перехват осадков газоном (мм)</label>
+            <div class="settings-input">
+              <input type="number" id="balance_intercept_mm" step="0.5" min="0" max="20" value="4">
+            </div>
+          </div>
+          <div class="settings-actions" style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+            <button type="button" id="balance-recalc" class="settings-btn"
+                    data-audit-action="settings_weather_balance_recalc"
+                    data-audit-target="setting:weather_balance">Пересчитать сейчас</button>
+            <span class="settings-msg" id="balance-msg"></span>
+          </div>
+        </div>
+      </details>
       <div class="settings-actions" style="display:flex; gap:8px; align-items:center;">
         <button type="button" id="weather-save" class="settings-btn"
                 data-audit-action="settings_weather_save"
@@ -321,6 +372,14 @@
       if (factors.wind !== undefined) document.getElementById('factor_wind').checked = !!factors.wind;
       if (factors.humidity !== undefined) document.getElementById('factor_humidity').checked = !!factors.humidity;
       if (factors.heat !== undefined) document.getElementById('factor_heat').checked = !!factors.heat;
+      // H2 water-balance settings
+      var bal = wj.balance || {};
+      if (bal.enabled !== undefined) document.getElementById('balance_enabled').checked = !!bal.enabled;
+      if (bal.window_days !== undefined) document.getElementById('balance_window_days').value = bal.window_days;
+      if (bal.norm_window_days !== undefined) document.getElementById('balance_norm_window_days').value = bal.norm_window_days;
+      if (bal.coef_min !== undefined) document.getElementById('balance_coef_min').value = bal.coef_min;
+      if (bal.coef_max !== undefined) document.getElementById('balance_coef_max').value = bal.coef_max;
+      if (bal.intercept_mm !== undefined) document.getElementById('balance_intercept_mm').value = bal.intercept_mm;
     }catch(e){ console.debug('weather settings load:', e); }
   })();
 
@@ -366,12 +425,39 @@
             wind: document.getElementById('factor_wind').checked,
             humidity: document.getElementById('factor_humidity').checked,
             heat: document.getElementById('factor_heat').checked
+          },
+          balance: {
+            enabled: document.getElementById('balance_enabled').checked,
+            window_days: parseInt(document.getElementById('balance_window_days').value),
+            norm_window_days: parseInt(document.getElementById('balance_norm_window_days').value),
+            coef_min: parseInt(document.getElementById('balance_coef_min').value),
+            coef_max: parseInt(document.getElementById('balance_coef_max').value),
+            intercept_mm: parseFloat(document.getElementById('balance_intercept_mm').value)
           }
         })});
       const j = await r.json();
       msg.style.color = j.success ? '#2e7d32' : '#c62828';
       msg.textContent = j.success ? 'Настройки погоды сохранены' : 'Ошибка сохранения';
     }catch(e){ msg.textContent='Ошибка: '+e.message; msg.style.color='#c62828'; }
+  });
+
+  // Recalculate water balance now
+  document.getElementById('balance-recalc').addEventListener('click', async (ev)=>{
+    const btn = ev.currentTarget;
+    const msg = document.getElementById('balance-msg');
+    btn.disabled = true; msg.style.color='#666'; msg.textContent='Пересчёт...';
+    try{
+      const r = await fetch('/api/weather/balance/recalc', {method:'POST'});
+      const j = await r.json();
+      if (j.success && j.result){
+        msg.style.color = '#2e7d32';
+        msg.textContent = `Готово: коэффициент ${j.result.coefficient}% (ET-дефицит окна ${j.result.deficit_window})`;
+      } else {
+        msg.style.color = '#c62828';
+        msg.textContent = j.message || 'Не удалось пересчитать';
+      }
+    }catch(e){ msg.style.color='#c62828'; msg.textContent='Ошибка: '+e.message; }
+    finally{ btn.disabled = false; }
   });
 
   // Test weather

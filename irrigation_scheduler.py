@@ -423,6 +423,11 @@ class IrrigationScheduler:
             self.schedule_daily_backup()
         except (OSError, ValueError) as e:
             logger.error(f"Не удалось запланировать ежедневный бэкап: {e}")
+        # Плановый джоб: ночной пересчёт водного баланса (H2, 03:30)
+        try:
+            self.schedule_water_balance_recalc()
+        except (OSError, ValueError) as e:
+            logger.error(f"Не удалось запланировать пересчёт водного баланса: {e}")
 
     def stop(self):
         if not self.is_running:
@@ -531,6 +536,31 @@ class IrrigationScheduler:
             logger.info("daily_backup job scheduled: daily at 03:15")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Не удалось добавить джоб daily_backup: {e}")
+
+    def schedule_water_balance_recalc(self) -> None:
+        """Plan nightly H2 water-balance recalc at 03:35 (before morning watering).
+
+        Job body lives in ``scheduler.jobs.job_recalc_water_balance`` (a stable
+        top-level importable, required for APScheduler persistence). Runs every
+        night regardless of the ``balance.enabled`` flag so shadow mode keeps
+        accumulating the audit log. 03:35 (not 03:30) to avoid sharing a slot
+        with ``audit_cleanup``.
+        """
+        try:
+            from scheduler.jobs import job_recalc_water_balance
+
+            self.scheduler.add_job(
+                job_recalc_water_balance,
+                trigger=CronTrigger(hour=3, minute=35),
+                id="water_balance_recalc",
+                name="nightly water-balance recalc",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
+            logger.info("water_balance_recalc job scheduled: daily at 03:35")
+        except (ValueError, TypeError, KeyError, ImportError) as e:
+            logger.error(f"Не удалось добавить джоб water_balance_recalc: {e}")
 
     def _stop_zone(self, zone_id: int):
         try:

@@ -121,6 +121,23 @@ def job_clear_expired_postpones():
         logger.debug("Handled exception in job_clear_expired_postpones: %s", e)
 
 
+def job_recalc_water_balance():
+    """Nightly APScheduler job: recompute the H2 water-balance coefficient.
+
+    Best-effort — ``recalc_balance`` swallows its own errors and leaves the
+    previous cached coef in place on failure, so a bad night never crashes the
+    scheduler. Runs regardless of the ``balance.enabled`` flag so shadow mode
+    keeps writing the audit log while the flag is still off.
+    """
+    try:
+        from database import db
+        from services.weather.balance import recalc_balance
+
+        recalc_balance(db.db_path)
+    except (sqlite3.Error, OSError, ValueError, TypeError, ImportError) as e:
+        logger.debug("Handled exception in job_recalc_water_balance: %s", e)
+
+
 def job_dispatch_bot_subscriptions():
     try:
         from database import db

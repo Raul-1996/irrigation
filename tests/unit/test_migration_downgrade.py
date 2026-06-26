@@ -92,6 +92,24 @@ class TestMigrationDowngrade:
         assert runner.rollback_migration("telegram_create_bot_users")
         assert not self._has_table(test_db_path, "bot_users")
 
+    def test_rollback_weather_balance_settings(self, runner, test_db_path):
+        assert self._is_applied(test_db_path, "weather_add_balance_settings")
+        # Defaults seeded by the migration
+        with sqlite3.connect(test_db_path) as conn:
+            cur = conn.execute("SELECT value FROM settings WHERE key='weather.balance.enabled'")
+            assert cur.fetchone() is not None
+        assert runner.rollback_migration("weather_add_balance_settings")
+        assert not self._is_applied(test_db_path, "weather_add_balance_settings")
+        with sqlite3.connect(test_db_path) as conn:
+            cur = conn.execute("SELECT value FROM settings WHERE key='weather.balance.enabled'")
+            assert cur.fetchone() is None
+
+    def test_rollback_weather_balance_log(self, runner, test_db_path):
+        assert self._has_table(test_db_path, "weather_balance_log")
+        assert runner.rollback_migration("weather_create_balance_log")
+        assert not self._has_table(test_db_path, "weather_balance_log")
+        assert not self._is_applied(test_db_path, "weather_create_balance_log")
+
     def test_rollback_unknown_migration_returns_false(self, runner):
         assert not runner.rollback_migration("nonexistent_migration")
 

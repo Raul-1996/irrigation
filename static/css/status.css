@@ -874,6 +874,20 @@
         font-size: 0.65rem;
         color: #999;
     }
+    .coeff-mode-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 8px;
+        background: #e2e8f0;
+        color: #334155;
+        font-size: 0.62rem;
+        font-weight: 600;
+        vertical-align: middle;
+    }
+    .coeff-second {
+        font-size: 0.62rem;
+        color: #94a3b8;
+    }
     .weather-metrics {
         display: flex;
         gap: 0.8rem;
