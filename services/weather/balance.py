@@ -242,6 +242,24 @@ def read_cached_coef(db_path: str) -> int:
     return _NEUTRAL_COEF
 
 
+def has_computed(db_path: str) -> bool:
+    """True if the nightly balance job has produced a coefficient at least once.
+
+    The UI layer uses this to decide whether to surface the balance "second
+    opinion": a fresh-install default ``coef_cached=100`` is indistinguishable
+    from a genuinely computed 100, so we key off ``last_recalc_date`` being set
+    (written only by an actual recalc). Lets shadow mode (flag off) still show
+    the second opinion without balance steering watering.
+    """
+    try:
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            cur = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", (_K_LAST_RECALC_DATE,))
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except (sqlite3.Error, ValueError, TypeError):
+        return False
+
+
 def recalc_balance(db_path: str) -> dict | None:
     """Recompute the water-balance coefficient from Open-Meteo history.
 

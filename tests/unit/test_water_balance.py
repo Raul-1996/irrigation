@@ -291,6 +291,13 @@ class TestIdempotencyAndDays:
         conn.close()
         assert n == 1
 
+    def test_has_computed_false_until_recalc(self, bal_db):
+        """has_computed gates the UI 'second opinion': False on a fresh DB, True
+        after the nightly job runs once — so shadow (flag off) can still show it."""
+        assert wb.has_computed(bal_db) is False
+        _run_recalc(bal_db, _history_payload(_days_back(30, 5.0, 0.0)))
+        assert wb.has_computed(bal_db) is True
+
     def test_current_partial_day_is_ignored(self, bal_db):
         """A row dated today (partial) must not be used as a completed day."""
         days = _days_back(30, 5.0, 0.0)
