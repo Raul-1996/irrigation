@@ -163,3 +163,48 @@ class TestPhys1Reconciliation:
         assert after.get("state") == "fault"
         assert int(after.get("fault_count") or 0) == 1
         assert after.get("last_fault") is not None
+
+    def test_verify_on_success_confirms_open_run(self, test_db):
+        """A successful 'on' verification confirms the zone's open run — the
+        independent second source so a real watering isn't recorded 'failed'
+        even if the SSE hub's subscription is dead."""
+        import sqlite3
+        import time
+
+        from services.observed_state import StateVerifier
+
+        zone, _server = self._make_zone_with_mqtt(test_db)
+        zone_id = zone["id"]
+        run_id = test_db.create_zone_run(zone_id, 1, "2026-01-01 10:00:00", time.monotonic(), None, 1)
+
+        sv = StateVerifier()
+        sv._db = test_db
+        sv._notifier = MagicMock()
+        with patch.object(StateVerifier, "_subscribe_and_wait", return_value=True):
+            assert sv.verify(zone_id, "on", timeout=0.01, retries=3) is True
+
+        with sqlite3.connect(test_db.db_path) as conn:
+            confirmed = conn.execute("SELECT confirmed FROM zone_runs WHERE id = ?", (run_id,)).fetchone()[0]
+        assert confirmed == 1
+
+    def test_verify_off_success_does_not_confirm(self, test_db):
+        """An 'off' verification must NOT confirm a run — only a physical 'on'
+        means the zone actually watered."""
+        import sqlite3
+        import time
+
+        from services.observed_state import StateVerifier
+
+        zone, _server = self._make_zone_with_mqtt(test_db)
+        zone_id = zone["id"]
+        run_id = test_db.create_zone_run(zone_id, 1, "2026-01-01 10:00:00", time.monotonic(), None, 1)
+
+        sv = StateVerifier()
+        sv._db = test_db
+        sv._notifier = MagicMock()
+        with patch.object(StateVerifier, "_subscribe_and_wait", return_value=True):
+            assert sv.verify(zone_id, "off", timeout=0.01, retries=3) is True
+
+        with sqlite3.connect(test_db.db_path) as conn:
+            confirmed = conn.execute("SELECT confirmed FROM zone_runs WHERE id = ?", (run_id,)).fetchone()[0]
+        assert confirmed == 0

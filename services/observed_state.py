@@ -123,6 +123,15 @@ class StateVerifier:
             confirmed = self._subscribe_and_wait(server, norm_topic, expected_payloads, timeout)
             if confirmed:
                 logger.info("StateVerifier: zone %s confirmed '%s' on attempt %d", zone_id, expected, attempt)
+                # Second, independent source of run-confirmation. The verifier
+                # actively reads the relay state (including the retained value),
+                # so it confirms even when the SSE hub's subscription is down.
+                # Only an 'on' confirmation means the zone physically watered.
+                if str(expected).lower() in ("on", "1"):
+                    try:
+                        db.mark_zone_run_confirmed(zone_id)
+                    except (sqlite3.Error, OSError, AttributeError):
+                        logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
                 return True
 
             logger.warning(

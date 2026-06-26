@@ -349,8 +349,38 @@ def ensure_hub_started() -> None:
                                     logger.debug("Handled exception in line_271: %s", e)
 
                 client.on_message = _on_message
+
+                # Re-subscribe on every (re)connect. Without this, a dropped
+                # MQTT link silently loses the zone/mv subscriptions: paho
+                # auto-reconnects but a clean session starts with no subs, so
+                # the hub stops seeing relay echoes — observed_state stops
+                # updating and runs never get confirmed (history then records
+                # real waterings as 'failed'). Mirrors float_monitor's
+                # _on_mqtt_connect. Bound topic lists via defaults so the
+                # closure isn't affected by the outer per-server loop.
+                _zone_topics = list(topics)
+                _mv_topics_list = list(mv_topics.get(int(sid), {}))
+
+                def _on_connect(cl, userdata, flags, reason_code, properties=None, _zt=_zone_topics, _mv=_mv_topics_list, _sid=int(sid)):
+                    try:
+                        for _t in _zt:
+                            cl.subscribe(_t, qos=1)
+                        for _t in _mv:
+                            cl.subscribe(_t, qos=1)
+                        logger.info(
+                            "sse_hub: (re)subscribed %d zone + %d mv topics on connect (sid=%s)",
+                            len(_zt), len(_mv), _sid,
+                        )
+                    except (ConnectionError, TimeoutError, OSError):
+                        logger.exception("sse_hub: resubscribe on connect failed sid=%s", _sid)
+
+                client.on_connect = _on_connect
+                try:
+                    client.reconnect_delay_set(min_delay=1, max_delay=30)
+                except (ValueError, AttributeError, OSError) as e:
+                    logger.debug("sse_hub reconnect_delay_set failed: %s", e)
                 client.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 5)
-                # Subscribe to zone topics
+                # Initial subscribe (on_connect also re-subscribes on reconnect)
                 for t in topics:
                     try:
                         client.subscribe(t, qos=1)
