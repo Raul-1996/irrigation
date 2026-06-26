@@ -143,12 +143,38 @@ class WeatherService:
             "daily_et0": weather.daily_et0,
         }
 
+        # H2 "second opinion": always expose BOTH coefficients (legacy is cheap
+        # to compute from current weather, balance is a cached read), tagging
+        # which one is actually applied. In shadow mode legacy is applied and
+        # balance is shown as the second opinion; in live mode it is reversed.
+        coefficient_legacy = coefficient  # == get_coefficient() above
+        balance_on = adj._balance_enabled()
+        balance_fresh = balance_on and adj._balance_coef_fresh()
+        coefficient_balance = None
+        if balance_on:
+            from services.weather.balance import read_cached_coef
+
+            coefficient_balance = read_cached_coef(self.db_path)
+        if balance_fresh:
+            mode = "balance"
+            coefficient_applied = coefficient_balance
+        elif balance_on:
+            mode = "shadow"
+            coefficient_applied = coefficient_legacy
+        else:
+            mode = "legacy"
+            coefficient_applied = coefficient_legacy
+
         adjustment = {
             "coefficient": coefficient,
             "skip": skip_info.get("skip", False),
             "skip_reason": skip_info.get("reason", ""),
             "skip_type": skip_info.get("details", {}).get("type"),
             "factors": factors,
+            "mode": mode,
+            "coefficient_applied": coefficient_applied,
+            "coefficient_legacy": coefficient_legacy,
+            "coefficient_balance": coefficient_balance,
         }
 
         forecast_24h = []

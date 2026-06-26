@@ -177,6 +177,11 @@ class MigrationRunner:
                     conn, "weather_add_extended_settings", self._migrate_add_extended_weather_settings
                 )
                 self._apply_named_migration(conn, "weather_wind_kmh_to_ms", self._migrate_wind_kmh_to_ms)
+                # Weather H2: virtual water balance (additive, default off)
+                self._apply_named_migration(
+                    conn, "weather_add_balance_settings", self._migrate_add_water_balance_settings
+                )
+                self._apply_named_migration(conn, "weather_create_balance_log", self._migrate_create_water_balance_log)
                 # Queue & float support (spec v1.1)
                 self._apply_named_migration(conn, "queue_and_float_support", self._migrate_queue_and_float_support)
                 # Programs v2: new fields (type, schedule_type, interval_days, even_odd, color, enabled, extra_times)
@@ -940,6 +945,56 @@ class MigrationRunner:
         except (sqlite3.Error, ValueError, TypeError) as e:
             logger.error("Ошибка миграции weather_wind_kmh_to_ms: %s", e)
 
+    # --- Weather H2: virtual water balance (additive, default off) ---
+
+    def _migrate_add_water_balance_settings(self, conn):
+        """Add H2 water-balance settings defaults (mode off by default)."""
+        try:
+            balance_keys = {
+                "weather.balance.enabled": "0",
+                "weather.balance.window_days": "3",
+                "weather.balance.norm_window_days": "30",
+                "weather.balance.coef_min": "50",
+                "weather.balance.coef_max": "150",
+                "weather.balance.kc": "1.0",
+                "weather.balance.intercept_mm": "4.0",
+                "weather.balance.stale_fallback_days": "2",
+                "weather.balance.et0_norm_daily": "",
+                "weather.balance.coef_cached": "100",
+            }
+            for key, default_val in balance_keys.items():
+                cur = conn.execute("SELECT 1 FROM settings WHERE key = ?", (key,))
+                if cur.fetchone() is None:
+                    conn.execute("INSERT INTO settings(key, value) VALUES(?, ?)", (key, default_val))
+            conn.commit()
+            logger.info("Добавлены настройки водного баланса (H2) в settings")
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_add_balance_settings: %s", e)
+
+    def _migrate_create_water_balance_log(self, conn):
+        """Create weather_balance_log for shadow-mode forecast/fact auditing."""
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS weather_balance_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT,
+                    et0_fact REAL,
+                    et0_norm REAL,
+                    precip_fact REAL,
+                    precip_eff REAL,
+                    deficit_day REAL,
+                    deficit_window REAL,
+                    coefficient INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_balance_log_date ON weather_balance_log(date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_balance_log_created ON weather_balance_log(created_at)")
+            conn.commit()
+            logger.info("Создана таблица weather_balance_log")
+        except sqlite3.Error as e:
+            logger.error("Ошибка миграции weather_create_balance_log: %s", e)
+
     # --- Queue & float support (spec v1.1) ---
 
     def _migrate_queue_and_float_support(self, conn):
@@ -1442,6 +1497,8 @@ class MigrationRunner:
         "weather_create_decisions": "_down_create_weather_decisions",
         "weather_add_extended_settings": "_down_add_extended_weather_settings",
         "weather_wind_kmh_to_ms": "_down_wind_kmh_to_ms",
+        "weather_add_balance_settings": "_down_add_water_balance_settings",
+        "weather_create_balance_log": "_down_create_water_balance_log",
         "queue_and_float_support": "_down_queue_and_float_support",
         "create_audit_log": "_down_create_audit_log",
         "zone_runs_add_source": "_down_add_zone_runs_source",
@@ -1568,3 +1625,29 @@ class MigrationRunner:
         # Nothing to reverse — the km/h value was kept, ms value will be removed
         # by _down_add_extended_weather_settings
         logger.info("Downgrade: weather_wind_kmh_to_ms — noop (ms key removed by extended settings downgrade)")
+
+    def _down_add_water_balance_settings(self, conn):
+        balance_keys = [
+            "weather.balance.enabled",
+            "weather.balance.window_days",
+            "weather.balance.norm_window_days",
+            "weather.balance.coef_min",
+            "weather.balance.coef_max",
+            "weather.balance.kc",
+            "weather.balance.intercept_mm",
+            "weather.balance.stale_fallback_days",
+            "weather.balance.et0_norm_daily",
+            "weather.balance.coef_cached",
+            "weather.balance.deficit_buffer",
+            "weather.balance.last_recalc_date",
+            "weather.balance.norm_last_day",
+        ]
+        for key in balance_keys:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        conn.commit()
+        logger.info("Downgrade: удалены настройки водного баланса (H2) из settings")
+
+    def _down_create_water_balance_log(self, conn):
+        conn.execute("DROP TABLE IF EXISTS weather_balance_log")
+        conn.commit()
+        logger.info("Downgrade: удалена таблица weather_balance_log")

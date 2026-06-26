@@ -1391,6 +1391,28 @@
         if (c > 120) return 'var(--primary-color, #2196f3)';
         return 'var(--success-color, #4caf50)';
     }
+    // "Second opinion": a mode badge for the applied coefficient plus the other
+    // coefficient (legacy vs balance) shown as a comparison. Returns '' when the
+    // balance coefficient is unavailable (legacy-only mode, nothing to compare).
+    function renderCoeffSecondOpinion(adj) {
+        if (!adj || adj.mode === undefined) return '';
+        var legacy = adj.coefficient_legacy;
+        var balance = adj.coefficient_balance;
+        var badge, second;
+        if (adj.mode === 'balance') {
+            badge = 'Баланс';
+            second = (legacy !== undefined && legacy !== null) ? legacy : null;
+        } else {
+            // shadow or legacy: Zimmerman is applied
+            badge = (adj.mode === 'shadow') ? 'Зимм. (shadow)' : 'Зимм.';
+            second = (balance !== undefined && balance !== null) ? balance : null;
+        }
+        var html = '<span class="coeff-mode-badge">' + badge + '</span>';
+        if (second !== null) {
+            html += ' <span class="coeff-second">второе мнение: ' + second + '%</span>';
+        }
+        return html;
+    }
     function formatCacheAge(sec) {
         if (!sec && sec !== 0) return '';
         if (sec < 60) return Math.round(sec) + ' сек назад';
@@ -1454,10 +1476,13 @@
         var tempVal = (cur.temperature && cur.temperature.value !== undefined) ? cur.temperature.value : j.temperature;
         var tempEl = document.getElementById('w-temp');
         if (tempEl) tempEl.textContent = formatTemp(tempVal);
-        // Coefficient
-        var coeff = (adj.coefficient !== undefined) ? adj.coefficient : j.coefficient;
+        // Coefficient — applied value (balance or legacy), with "second opinion".
+        var coeffApplied = (adj.coefficient_applied !== undefined && adj.coefficient_applied !== null)
+            ? adj.coefficient_applied
+            : ((adj.coefficient !== undefined) ? adj.coefficient : j.coefficient);
         var skip = (adj.skip !== undefined) ? adj.skip : j.skip;
         var coeffEl = document.getElementById('w-coeff');
+        var coeffModeEl = document.getElementById('w-coeff-mode');
         if (coeffEl) {
             if (skip) {
                 var skipReason = adj.skip_reason || j.skip_reason;
@@ -1466,10 +1491,12 @@
                     + (phrase ? '<span class="skip-reason">(' + phrase + ')</span>' : '');
                 coeffEl.style.color = 'var(--danger-color, #f44336)';
                 coeffEl.classList.add('skip');
+                if (coeffModeEl) coeffModeEl.textContent = '';
             } else {
-                coeffEl.textContent = (coeff !== null && coeff !== undefined) ? coeff + '%' : '—';
-                coeffEl.style.color = coeffColor(coeff || 100);
+                coeffEl.textContent = (coeffApplied !== null && coeffApplied !== undefined) ? coeffApplied + '%' : '—';
+                coeffEl.style.color = coeffColor(coeffApplied || 100);
                 coeffEl.classList.remove('skip');
+                if (coeffModeEl) coeffModeEl.innerHTML = renderCoeffSecondOpinion(adj);
             }
         }
         // Metrics

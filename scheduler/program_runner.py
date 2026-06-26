@@ -76,7 +76,7 @@ class WeatherMixin:
             adj = get_weather_adjustment(self.db.db_path)
             if not adj.is_enabled():
                 return base_duration
-            coeff = adj.get_coefficient()
+            coeff = adj.get_effective_coefficient()
             adjusted = round(base_duration * coeff / 100.0)
             adjusted = 0 if coeff == 0 else max(1, adjusted)
             if adjusted != base_duration:
