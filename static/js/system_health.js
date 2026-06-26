@@ -39,19 +39,36 @@
     try { localStorage.removeItem(SEEN_KEY); } catch (e) {}
   }
 
+  // ---------- Severity ----------
+  // Faults without an explicit severity default to 'critical' (back-compat).
+  function isCritical(f) { return (f && f.severity) ? f.severity === 'critical' : true; }
+
   // ---------- Banner ----------
   function updateBanner(health) {
     var banner = $('sysFaultBanner');
     if (!banner) return;
+    var textEl = banner.querySelector('.sysfault-banner__text');
     var faults = (health && health.faults) || [];
-    if (health && health.ok === false && faults.length) {
-      var n = faults.length;
-      // Russian plural for "зона".
+    var critical = faults.filter(isCritical);
+    var warnings = faults.filter(function (f) { return f && f.severity === 'warning'; });
+
+    if (critical.length) {
+      // Red alarm: watering is actually broken.
+      banner.classList.remove('sysfault-banner--warning');
+      var n = critical.length;
       var word = pluralZones(n);
-      banner.querySelector('.sysfault-banner__text').textContent =
+      textEl.textContent =
         '⚠️ Полив не работает: ' + n + ' ' + word + ' в сбое — нажмите для деталей';
       banner.hidden = false;
+    } else if (warnings.length) {
+      // Amber warning: watering continues (e.g. sensor_mismatch → API fallback).
+      banner.classList.add('sysfault-banner--warning');
+      textEl.textContent = (warnings.length === 1)
+        ? '⚠️ ' + (warnings[0].reason || 'Предупреждение') + ' — нажмите для деталей'
+        : '⚠️ Предупреждений: ' + warnings.length + ' — нажмите для деталей';
+      banner.hidden = false;
     } else {
+      banner.classList.remove('sysfault-banner--warning');
       banner.hidden = true;
     }
   }
@@ -67,17 +84,27 @@
   function renderModalBody(faults) {
     var box = $('sysFaultList');
     if (!box) return;
+    var titleEl = $('sysFaultTitle');
+    if (titleEl) {
+      titleEl.textContent = faults.some(isCritical) ? '⚠️ Сбой системы полива' : '🟡 Предупреждения';
+    }
     var html = '';
     faults.forEach(function (f) {
-      var name = safeText(f.zone_name || ('Зона ' + f.zone_id));
-      var zid = safeText(f.zone_id);
       var reason = safeText(f.reason || 'Сбой');
       var since = f.since ? (', с ' + safeText(f.since)) : '';
+      var icon = (f.severity === 'warning') ? '🟡' : '⚠️';
+      var text;
+      if (f.zone_id != null) {
+        // Zone-scoped fault (relay failed to confirm).
+        var name = safeText(f.zone_name || ('Зона ' + f.zone_id));
+        text = 'Зона «' + name + '» (#' + safeText(f.zone_id) + ') — ' + reason + since;
+      } else {
+        // System-wide fault/warning (mqtt_disconnect, sensor_mismatch).
+        text = reason + since;
+      }
       html += '<li class="sysfault-item">'
-        + '<span class="sysfault-item__icon">⚠️</span>'
-        + '<span class="sysfault-item__text">'
-        + 'Зона «' + name + '» (#' + zid + ') — ' + reason + since
-        + '</span>'
+        + '<span class="sysfault-item__icon">' + icon + '</span>'
+        + '<span class="sysfault-item__text">' + text + '</span>'
         + '</li>';
     });
     box.innerHTML = html;
@@ -131,7 +158,9 @@
         if (!health) { lastFaults = []; updateBanner(null); return; }
         lastFaults = (health.faults) || [];
         updateBanner(health);
-        maybeAutoOpen(lastFaults);
+        // Auto-open the modal only for critical (relay) faults — warnings are
+        // surfaced by the amber banner without an intrusive popup.
+        maybeAutoOpen(lastFaults.filter(isCritical));
       })
       .catch(function (err) { /* network hiccup — keep last banner state */ void err; })
       // Reschedule only after this poll settles — avoids overlapping requests
