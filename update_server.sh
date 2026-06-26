@@ -76,10 +76,17 @@ for f in "${DB_FILES[@]}"; do
   fi
 done
 
-# Archive working tree excluding heavy/volatile dirs
+# Archive working tree excluding heavy/volatile dirs. The live SQLite DB
+# (irrigation.db + WAL/SHM) is excluded: it is backed up separately by the cp
+# loop above, and tarring it while the service writes the WAL makes tar exit 1
+# ("file changed as we read it"), which under `set -e` aborts the whole deploy
+# before git reset. The code snapshot is best-effort (`|| true`) — code is
+# always recoverable from git; the authoritative DB backup is the cp above.
 ARCHIVE="$BACKUP_DIR/repo_snapshot.tar.gz"
 tar --exclude="./venv" --exclude="./.git" --exclude="./__pycache__" \
-    --exclude="./backups" --exclude="./*.pid" -czf "$ARCHIVE" .
+    --exclude="./backups" --exclude="./*.pid" \
+    --exclude="./irrigation.db" --exclude="./irrigation.db-wal" --exclude="./irrigation.db-shm" \
+    -czf "$ARCHIVE" . || true
 ok "Backup created: $ARCHIVE"
 
 # 2) Update code
