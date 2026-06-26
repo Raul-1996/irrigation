@@ -391,7 +391,7 @@
         }
         /* Warning severity (e.g. sensor_mismatch): watering continues, so use a
            distinct amber banner instead of the red "полив не работает" alarm. */
-        .sysfault-banner--warning { background: var(--warning-color, #f9a825); color: #1a1a1a; }
+        .sysfault-banner--warning { background: var(--warning-color, #ff9800); color: #1a1a1a; }
         .sysfault-banner--warning:hover { background: #f57f17; }
         .sysfault-banner__text {
             display: inline-block;

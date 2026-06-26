@@ -64,8 +64,8 @@
       // Amber warning: watering continues (e.g. sensor_mismatch → API fallback).
       banner.classList.add('sysfault-banner--warning');
       textEl.textContent = (warnings.length === 1)
-        ? '⚠️ ' + (warnings[0].reason || 'Предупреждение') + ' — нажмите для деталей'
-        : '⚠️ Предупреждений: ' + warnings.length + ' — нажмите для деталей';
+        ? '🟡 ' + (warnings[0].reason || 'Предупреждение') + ' — нажмите для деталей'
+        : '🟡 Предупреждений: ' + warnings.length + ' — нажмите для деталей';
       banner.hidden = false;
     } else {
       banner.classList.remove('sysfault-banner--warning');
@@ -84,9 +84,17 @@
   function renderModalBody(faults) {
     var box = $('sysFaultList');
     if (!box) return;
+    var hasCrit = faults.some(isCritical);
     var titleEl = $('sysFaultTitle');
     if (titleEl) {
-      titleEl.textContent = faults.some(isCritical) ? '⚠️ Сбой системы полива' : '🟡 Предупреждения';
+      titleEl.textContent = hasCrit ? '⚠️ Сбой системы полива' : '🟡 Предупреждения';
+    }
+    var leadEl = $('sysFaultLead');
+    if (leadEl) {
+      // Warning-only must NOT claim zones aren't watering — watering continues.
+      leadEl.textContent = hasCrit
+        ? 'Обнаружены сбои системы полива:'
+        : 'Полив продолжается, но требуется внимание:';
     }
     var html = '';
     faults.forEach(function (f) {
