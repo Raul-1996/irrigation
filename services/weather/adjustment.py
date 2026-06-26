@@ -15,6 +15,7 @@ preserved from the pre-split implementation. Migrating to
 """
 
 import contextlib
+import copy
 import json
 import logging
 import sqlite3
@@ -43,6 +44,17 @@ class WeatherAdjustment:
     DEFAULT_BASELINE_TEMP_C = 25.0
     DEFAULT_BASELINE_HUM_PCT = 50.0
 
+    # Local WB-MSW sensor sanity bounds + mismatch thresholds vs Open-Meteo.
+    # Local temp/hum take priority over the API forecast when present, sane
+    # and fresh; a temperature gap beyond the hard threshold flags a faulty
+    # sensor and forces an Open-Meteo fallback for the whole calculation.
+    SENSOR_TEMP_MIN_C = -50.0
+    SENSOR_TEMP_MAX_C = 60.0
+    SENSOR_HUM_MIN_PCT = 0.0
+    SENSOR_HUM_MAX_PCT = 100.0
+    DEFAULT_SENSOR_MISMATCH_SOFT_C = 5.0
+    DEFAULT_SENSOR_MISMATCH_HARD_C = 10.0
+
     def __init__(self, db_path: str = "irrigation.db") -> None:
         self.db_path = db_path
 
@@ -62,6 +74,8 @@ class WeatherAdjustment:
             "factor_wind": True,
             "factor_humidity": True,
             "factor_heat": True,
+            "sensor_mismatch_soft_c": self.DEFAULT_SENSOR_MISMATCH_SOFT_C,
+            "sensor_mismatch_hard_c": self.DEFAULT_SENSOR_MISMATCH_HARD_C,
         }
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
@@ -79,6 +93,8 @@ class WeatherAdjustment:
                     "weather.factor.wind",
                     "weather.factor.humidity",
                     "weather.factor.heat",
+                    "weather.sensor_mismatch_soft_c",
+                    "weather.sensor_mismatch_hard_c",
                 ]
                 for key in keys:
                     cur = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -114,9 +130,125 @@ class WeatherAdjustment:
                         self._maybe_alert_api_down(f"cache stale {int(age / 60)}min")
             except (TypeError, ValueError):
                 pass
-            return weather
+            return self._select_input_source(weather)
         except (ImportError, OSError) as e:
             logger.debug("Weather data unavailable: %s", e)
+            return None
+
+    @staticmethod
+    def _sane(value: Any, lo: float, hi: float) -> bool:
+        """True if ``value`` is a finite number within ``[lo, hi]``."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return False
+        return v == v and lo <= v <= hi  # v == v rejects NaN
+
+    def evaluate_sensor_source(self, api_weather: Any) -> dict[str, Any]:
+        """Choose temp/hum input source (local sensor priority) + detect mismatch.
+
+        The local WB-MSW sensor wins over the Open-Meteo forecast when its
+        reading is present, physically sane and fresh (handled by
+        ``_get_env_state``). A temperature gap vs the API beyond the *hard*
+        threshold is treated as a faulty sensor: the whole calculation falls
+        back to Open-Meteo and a ``mismatch`` of level ``'hard'`` is returned.
+        A gap beyond the *soft* threshold keeps the local value but flags
+        ``'soft'`` for the UI. Precipitation/wind/ET₀ are untouched (API only).
+
+        Returns ``{temperature, humidity, temp_source, hum_source, mismatch}``
+        where ``*_source`` is ``'local'`` / ``'api'`` / ``'api_fallback'`` and
+        ``mismatch`` is ``None`` or ``{'level', 'local', 'api', 'delta'}``.
+        """
+        from services.weather.merge import _get_env_state
+
+        settings = self._get_settings()
+        soft = float(settings.get("sensor_mismatch_soft_c", self.DEFAULT_SENSOR_MISMATCH_SOFT_C))
+        hard = float(settings.get("sensor_mismatch_hard_c", self.DEFAULT_SENSOR_MISMATCH_HARD_C))
+
+        env = _get_env_state(time.time())
+        api_t = getattr(api_weather, "temperature", None)
+        api_h = getattr(api_weather, "humidity", None)
+
+        mismatch = None
+
+        # Temperature: local sensor priority, with mismatch detection vs API.
+        temp_value: Any = api_t
+        temp_source = "api_fallback" if (env["temp_enabled"] and not env["temp_online"]) else "api"
+        if env["temp_online"] and self._sane(env["temp_value"], self.SENSOR_TEMP_MIN_C, self.SENSOR_TEMP_MAX_C):
+            local_t = float(env["temp_value"])
+            if self._sane(api_t, self.SENSOR_TEMP_MIN_C, self.SENSOR_TEMP_MAX_C):
+                delta = abs(local_t - float(api_t))
+                if delta > hard:
+                    mismatch = {"level": "hard", "local": local_t, "api": float(api_t), "delta": round(delta, 1)}
+                    temp_value, temp_source = float(api_t), "api_fallback"
+                else:
+                    if delta > soft:
+                        mismatch = {"level": "soft", "local": local_t, "api": float(api_t), "delta": round(delta, 1)}
+                    temp_value, temp_source = local_t, "local"
+            else:
+                temp_value, temp_source = local_t, "local"
+
+        # Humidity: local priority, but a hard temp mismatch distrusts the whole
+        # sensor module → use API humidity too.
+        hum_value: Any = api_h
+        hum_source = "api_fallback" if (env["hum_enabled"] and not env["hum_online"]) else "api"
+        hard_mismatch = mismatch is not None and mismatch["level"] == "hard"
+        if hard_mismatch:
+            # a hard temp mismatch distrusts the whole sensor module → deliberate
+            # API fallback for humidity too, even though it may be online/sane.
+            hum_value, hum_source = api_h, "api_fallback"
+        elif env["hum_online"] and self._sane(env["hum_value"], self.SENSOR_HUM_MIN_PCT, self.SENSOR_HUM_MAX_PCT):
+            hum_value, hum_source = float(env["hum_value"]), "local"
+
+        return {
+            "temperature": temp_value,
+            "humidity": hum_value,
+            "temp_source": temp_source,
+            "hum_source": hum_source,
+            "mismatch": mismatch,
+        }
+
+    def _apply_source(self, weather: Any, verdict: dict[str, Any]) -> Any:
+        """Return a shallow copy of ``weather`` with temp/hum from ``verdict``.
+
+        ``min_temp_forecast_6h`` and all other fields stay as the API provided
+        them, so freeze protection still triggers on the *minimum* of the local
+        sensor and the forecast.
+        """
+        eff = copy.copy(weather)
+        eff.temperature = verdict["temperature"]
+        eff.humidity = verdict["humidity"]
+        return eff
+
+    def _select_input_source(self, weather: Any) -> Any:
+        """Wrap source selection so it never breaks weather retrieval."""
+        try:
+            verdict = self.evaluate_sensor_source(weather)
+            return self._apply_source(weather, verdict)
+        except (ImportError, OSError, AttributeError, ValueError, TypeError, KeyError) as e:
+            logger.debug("Input source selection failed, using API data: %s", e)
+            return weather
+
+    def get_sensor_mismatch(self) -> dict[str, Any] | None:
+        """Cache-only temp mismatch check for the status banner (no network).
+
+        Reads only the fresh weather cache (never triggers an API fetch) so it
+        is cheap enough for the frequently-polled ``/api/status`` endpoint.
+        Returns the ``mismatch`` dict (or ``None``).
+        """
+        if not self.is_enabled():
+            return None
+        try:
+            svc = get_weather_service(self.db_path)
+            loc = svc._get_location()
+            if not loc:
+                return None
+            cached = svc._get_cached(loc["latitude"], loc["longitude"])
+            if cached is None:
+                return None
+            return self.evaluate_sensor_source(cached).get("mismatch")
+        except (ImportError, OSError, AttributeError, ValueError, TypeError, KeyError) as e:
+            logger.debug("sensor mismatch check failed: %s", e)
             return None
 
     def _check_safety_skip(self, weather, settings):

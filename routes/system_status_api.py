@@ -628,6 +628,7 @@ def api_status():
                 faults.append(
                     {
                         "type": "zone_fault",
+                        "severity": "critical",
                         "zone_id": int(zid) if zid is not None else None,
                         "zone_name": z.get("name") or (f"#{zid}" if zid is not None else "?"),
                         "reason": "Реле не подтвердило включение зоны",
@@ -644,6 +645,7 @@ def api_status():
             faults.append(
                 {
                     "type": "mqtt_disconnect",
+                    "severity": "critical",
                     "zone_id": None,
                     "zone_name": None,
                     "reason": "Нет связи с MQTT-брокером — команды не доходят до реле",
@@ -652,6 +654,30 @@ def api_status():
             )
     except (NameError, TypeError) as e:
         logger.debug("api_status: mqtt health check failed: %s", e)
+
+    # sensor_mismatch (Горизонт 1): local temp sensor disagrees with Open-Meteo
+    # beyond the hard threshold → the coefficient fell back to the forecast.
+    # This is a *warning* (watering continues on API data), not a relay fault.
+    try:
+        from services.weather.singletons import get_weather_adjustment
+
+        mm = get_weather_adjustment().get_sensor_mismatch()
+        if mm and mm.get("level") == "hard":
+            faults.append(
+                {
+                    "type": "sensor_mismatch",
+                    "severity": "warning",
+                    "zone_id": None,
+                    "zone_name": None,
+                    "reason": (
+                        f"Датчик температуры {mm['local']:.0f}°C расходится с прогнозом Open-Meteo "
+                        f"{mm['api']:.0f}°C — полив считается по прогнозу"
+                    ),
+                    "since": None,
+                }
+            )
+    except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+        logger.debug("api_status: sensor_mismatch check failed: %s", e)
 
     return jsonify(
         {
@@ -666,7 +692,10 @@ def api_status():
             "mqtt_servers_count": mqtt_servers_count,
             "mqtt_enabled_count": mqtt_enabled_count,
             "mqtt_connected": mqtt_connected,
-            "system_health": {"ok": len(faults) == 0, "faults": faults},
+            "system_health": {
+                "ok": not any(f.get("severity", "critical") == "critical" for f in faults),
+                "faults": faults,
+            },
         }
     )
 
