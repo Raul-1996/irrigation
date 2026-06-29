@@ -55,6 +55,13 @@ class Config:
     # Прочие настройки
     EMERGENCY_STOP = False
     TESTING = TESTING
+    # Optional GitHub relay channel for weather data, used when the live
+    # ``weather.source_mode`` setting is ``relay`` (sites where Open-Meteo is
+    # network-blocked). URL = api.github.com contents endpoint of the relay
+    # file; token = fine-grained PAT with Contents:read on that one repo.
+    # Read once at import time — changing them needs a service restart.
+    OPEN_METEO_RELAY_URL = os.environ.get("OPEN_METEO_RELAY_URL", "").strip()
+    OPEN_METEO_RELAY_TOKEN = os.environ.get("OPEN_METEO_RELAY_TOKEN", "").strip()
 
 
 class TestConfig(Config):

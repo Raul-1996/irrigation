@@ -70,6 +70,15 @@
         </label>
       </div>
       <div class="settings-row">
+        <label for="weather_source_mode">Источник данных</label>
+        <div class="settings-input">
+          <select id="weather_source_mode" name="weather_source_mode">
+            <option value="direct">Прямой Open-Meteo</option>
+            <option value="relay">Через GitHub-релей</option>
+          </select>
+        </div>
+      </div>
+      <div class="settings-row">
         <label for="weather_lat">Широта (lat)</label>
         <div class="settings-input" style="display:flex; gap:6px; align-items:center;">
           <input type="text" id="weather_lat" name="weather_lat" placeholder="55.7558" style="flex:1">
@@ -354,6 +363,7 @@
       const wr = await fetch('/api/settings/weather');
       const wj = await wr.json();
       document.getElementById('weather_enabled').checked = !!wj.enabled;
+      if (wj.source_mode) document.getElementById('weather_source_mode').value = wj.source_mode;
       if (wj.rain_threshold_mm !== undefined) document.getElementById('rain_threshold').value = wj.rain_threshold_mm;
       if (wj.freeze_threshold_c !== undefined) document.getElementById('freeze_threshold').value = wj.freeze_threshold_c;
       // Wind: prefer m/s, fallback to km/h conversion
@@ -414,6 +424,7 @@
       const r = await fetch('/api/settings/weather', {method:'PUT', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
           enabled: document.getElementById('weather_enabled').checked,
+          source_mode: document.getElementById('weather_source_mode').value,
           rain_threshold_mm: parseFloat(document.getElementById('rain_threshold').value),
           freeze_threshold_c: parseFloat(document.getElementById('freeze_threshold').value),
           wind_threshold_ms: parseFloat(document.getElementById('wind_threshold').value),
