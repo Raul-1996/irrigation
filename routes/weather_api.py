@@ -155,6 +155,8 @@ def api_get_weather_settings():
         return jsonify(
             {
                 "enabled": _get("weather.enabled", False, "bool"),
+                # Data source channel: "direct" (Open-Meteo) | "relay" (GitHub file)
+                "source_mode": _get("weather.source_mode", "direct", "str"),
                 "rain_threshold_mm": _get("weather.rain_threshold_mm", 5.0),
                 "freeze_threshold_c": _get("weather.freeze_threshold_c", 2.0),
                 # Legacy field for backward compat
@@ -198,6 +200,10 @@ def api_put_weather_settings():
 
         if "enabled" in data:
             ok = ok and db.set_setting_value("weather.enabled", "1" if data["enabled"] else "0")
+        if "source_mode" in data:
+            mode = str(data["source_mode"]).strip().lower()
+            if mode in ("direct", "relay"):
+                ok = ok and db.set_setting_value("weather.source_mode", mode)
         if "rain_threshold_mm" in data:
             val = float(data["rain_threshold_mm"])
             ok = ok and db.set_setting_value("weather.rain_threshold_mm", str(max(0, min(100, val))))

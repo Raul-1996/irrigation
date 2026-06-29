@@ -216,3 +216,74 @@ def fetch_history(lat: float, lon: float, past_days: int) -> dict[str, Any] | No
             logger.warning("Weather history fetch failed: %s", e)
             return None
     return None
+
+
+def fetch_relay(url: str, token: str = "") -> dict[str, Any] | None:
+    """Fetch the weather payload from a GitHub relay file.
+
+    Used on sites where Open-Meteo is network-blocked (e.g. Губерля): a GitHub
+    Action periodically fetches the Open-Meteo forecast and commits it verbatim
+    to a relay repo, and this reads that file back (``*.githubusercontent.com``
+    / ``api.github.com`` are reachable where ``api.open-meteo.com`` is not).
+
+    Repo visibility is selected by whether ``token`` is supplied:
+      * **Public repo** (``token=""``) → plain GET of the raw URL
+        (``raw.githubusercontent.com/<owner>/<repo>/<branch>/<file>``). No auth.
+      * **Private repo** (token set) → GET the *contents* API
+        (``api.github.com/repos/<owner>/<repo>/contents/<file>``) with
+        ``Authorization: Bearer`` + ``Accept: application/vnd.github.raw`` (the
+        header that returns raw bytes, not base64-wrapped metadata).
+
+    In both cases the payload is the verbatim Open-Meteo response, so the
+    downstream ``WeatherData`` parser is unchanged. Same retry/timeout
+    semantics as :func:`fetch_api`.
+
+    Args:
+        url: Relay file URL — raw URL (public) or contents API URL (private).
+        token: Optional PAT with Contents:read (private repos only); empty for
+            public repos.
+
+    Returns:
+        Raw JSON payload as a dict, or ``None`` on any network / decode error.
+    """
+    headers = {"User-Agent": "WB-Irrigation/2.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/vnd.github.raw"
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
+
+    try:
+        import requests
+    except ImportError:
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            logger.warning("Weather relay fetch (urllib) failed: %s", e)
+            return None
+
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.get(url, timeout=_REQUEST_TIMEOUT, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logger.warning("Weather relay fetch attempt %d/%d failed (transient): %s", attempt, _RETRY_MAX_ATTEMPTS, e)
+            if attempt >= _RETRY_MAX_ATTEMPTS:
+                return None
+            time.sleep(_RETRY_BACKOFF_SEC)
+        except requests.exceptions.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status in _RETRYABLE_STATUS and attempt < _RETRY_MAX_ATTEMPTS:
+                logger.warning("Weather relay fetch attempt %d/%d failed (HTTP %s)", attempt, _RETRY_MAX_ATTEMPTS, status)
+                time.sleep(_RETRY_BACKOFF_SEC)
+            else:
+                logger.warning("Weather relay fetch failed (HTTP %s): %s", status, e)
+                return None
+        except Exception as e:
+            logger.warning("Weather relay fetch failed: %s", e)
+            return None
+    return None

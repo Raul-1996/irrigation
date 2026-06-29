@@ -13,13 +13,34 @@ via ``@patch('services.weather.WeatherService._fetch_api')`` and we committed
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from services.weather import cache as _cache
 from services.weather.client import fetch_api as _fetch_api_impl
+from services.weather.client import fetch_relay as _fetch_relay_impl
 from services.weather.models import WeatherData
 
 logger = logging.getLogger(__name__)
+
+
+def _relay_payload_is_current(raw: dict[str, Any]) -> bool:
+    """True if a relay payload's hourly forecast still covers the current hour.
+
+    A stale relay file (the Action stopped committing) comes back as HTTP 200
+    with old content — not a network error — so without this check
+    ``WeatherData._parse`` would silently fall back to ``idx=0`` (midnight of the
+    file's first day): ~zero ``precipitation_24h`` and a wrong freeze window on a
+    live irrigation controller. We mirror the parser's own "current hour" math
+    and reject the payload when that hour is absent, so the caller fails closed.
+    """
+    hourly = raw.get("hourly") or {}
+    times = hourly.get("time") or []
+    offset = raw.get("utc_offset_seconds")
+    if not times or offset is None:
+        return False
+    now_local = datetime.utcfromtimestamp(time.time() + int(offset))
+    return now_local.strftime("%Y-%m-%dT%H:00") in times
 
 
 class WeatherService:
@@ -41,12 +62,53 @@ class WeatherService:
         _cache.save(self.db_path, lat, lon, data)
 
     def _fetch_api(self, lat: float, lon: float) -> dict[str, Any] | None:
-        """Fetch weather data from Open-Meteo API (delegates to ``client.fetch_api``).
+        """Fetch weather data — direct Open-Meteo or via the GitHub relay.
+
+        Routing depends on the live ``weather.source_mode`` setting:
+            * ``direct`` (default) → ``client.fetch_api`` (Open-Meteo).
+            * ``relay``            → ``client.fetch_relay`` (a GitHub file
+              pre-fetched by an Action), for sites where Open-Meteo is
+              network-blocked. Requires ``OPEN_METEO_RELAY_URL``;
+              ``OPEN_METEO_RELAY_TOKEN`` is only needed for a private relay
+              repo (empty for a public one). If the URL is missing we log and
+              fall back to a direct call.
 
         Kept as an instance method (rather than a free function call) so that
         test code can ``@patch('services.weather.WeatherService._fetch_api')``.
         """
+        if self._get_source_mode() == "relay":
+            from config import Config
+
+            url = Config.OPEN_METEO_RELAY_URL
+            if url:
+                # token may be "" for a public relay repo (raw URL, no auth)
+                raw = _fetch_relay_impl(url, Config.OPEN_METEO_RELAY_TOKEN)
+                if raw is not None and not _relay_payload_is_current(raw):
+                    # Relay served 200 but its forecast no longer covers "now"
+                    # (Action stopped updating). Fail CLOSED: return None →
+                    # stale-cache fallback + api-down alert, instead of letting
+                    # the parser silently use idx=0 (midnight of an old day).
+                    logger.error(
+                        "weather relay payload is stale (no current-hour entry); treating as fetch failure"
+                    )
+                    return None
+                return raw
+            logger.error(
+                "weather.source_mode=relay but OPEN_METEO_RELAY_URL not set; "
+                "falling back to a direct Open-Meteo call"
+            )
         return _fetch_api_impl(lat, lon)
+
+    def _get_source_mode(self) -> str:
+        """Read the live weather source mode (``direct`` | ``relay``).
+
+        Defaults to ``direct`` when unset or invalid, so a fresh DB and any
+        unexpected value both behave like the historical direct-only path.
+        """
+        from db.settings import SettingsRepository
+
+        val = SettingsRepository(self.db_path).get_setting_value("weather.source_mode")
+        return val if val in ("direct", "relay") else "direct"
 
     def get_weather(self, force_refresh: bool = False) -> WeatherData | None:
         """Get current weather data (cached or fresh).

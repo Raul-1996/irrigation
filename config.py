@@ -55,6 +55,17 @@ class Config:
     # Прочие настройки
     EMERGENCY_STOP = False
     TESTING = TESTING
+    # Optional GitHub relay channel for weather data, used when the live
+    # ``weather.source_mode`` setting is ``relay`` (sites where Open-Meteo is
+    # network-blocked). URL = raw file URL (public repo) or contents-API URL
+    # (private repo); token only needed for a private repo. Read once at import
+    # time — changing them needs a service restart.
+    # NOTE: the relay only covers the forecast path (WeatherService._fetch_api).
+    # The H2 water-balance history fetch (services/weather/balance.py::fetch_history)
+    # still calls Open-Meteo directly, so on a relay-only site keep
+    # weather.balance.enabled OFF — otherwise balance silently freezes.
+    OPEN_METEO_RELAY_URL = os.environ.get("OPEN_METEO_RELAY_URL", "").strip()
+    OPEN_METEO_RELAY_TOKEN = os.environ.get("OPEN_METEO_RELAY_TOKEN", "").strip()
 
 
 class TestConfig(Config):
