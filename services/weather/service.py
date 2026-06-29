@@ -13,6 +13,7 @@ via ``@patch('services.weather.WeatherService._fetch_api')`` and we committed
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from services.weather import cache as _cache
@@ -21,6 +22,25 @@ from services.weather.client import fetch_relay as _fetch_relay_impl
 from services.weather.models import WeatherData
 
 logger = logging.getLogger(__name__)
+
+
+def _relay_payload_is_current(raw: dict[str, Any]) -> bool:
+    """True if a relay payload's hourly forecast still covers the current hour.
+
+    A stale relay file (the Action stopped committing) comes back as HTTP 200
+    with old content — not a network error — so without this check
+    ``WeatherData._parse`` would silently fall back to ``idx=0`` (midnight of the
+    file's first day): ~zero ``precipitation_24h`` and a wrong freeze window on a
+    live irrigation controller. We mirror the parser's own "current hour" math
+    and reject the payload when that hour is absent, so the caller fails closed.
+    """
+    hourly = raw.get("hourly") or {}
+    times = hourly.get("time") or []
+    offset = raw.get("utc_offset_seconds")
+    if not times or offset is None:
+        return False
+    now_local = datetime.utcfromtimestamp(time.time() + int(offset))
+    return now_local.strftime("%Y-%m-%dT%H:00") in times
 
 
 class WeatherService:
@@ -62,7 +82,17 @@ class WeatherService:
             url = Config.OPEN_METEO_RELAY_URL
             if url:
                 # token may be "" for a public relay repo (raw URL, no auth)
-                return _fetch_relay_impl(url, Config.OPEN_METEO_RELAY_TOKEN)
+                raw = _fetch_relay_impl(url, Config.OPEN_METEO_RELAY_TOKEN)
+                if raw is not None and not _relay_payload_is_current(raw):
+                    # Relay served 200 but its forecast no longer covers "now"
+                    # (Action stopped updating). Fail CLOSED: return None →
+                    # stale-cache fallback + api-down alert, instead of letting
+                    # the parser silently use idx=0 (midnight of an old day).
+                    logger.error(
+                        "weather relay payload is stale (no current-hour entry); treating as fetch failure"
+                    )
+                    return None
+                return raw
             logger.error(
                 "weather.source_mode=relay but OPEN_METEO_RELAY_URL not set; "
                 "falling back to a direct Open-Meteo call"
