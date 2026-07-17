@@ -321,6 +321,7 @@ function escapeHtml(str) {
             if (visible){ refresh(true); timer = setInterval(refresh, 2500); }
         }
         document.addEventListener('keydown', (ev)=>{
+            if (!(ev.target instanceof Element) || ev.target.closest('input, textarea, select, [contenteditable]')) return;
             if (ev.key === 'h' || ev.key === 'H') setVisible(!visible);
         });
     })();
@@ -349,7 +350,10 @@ function escapeHtml(str) {
         function start(label){ t0 = performance.now(); marks = [{label: label||'click', t: t0}]; if (swVisible) render(); }
         function mark(label){ if (!t0) return; marks.push({label: label||'mark', t: performance.now()}); if (swVisible) render(); }
         window.__sw = { start, mark, show: setVisible };
-        document.addEventListener('keydown', (ev)=>{ if (ev.key === 's' || ev.key === 'S') setVisible(!swVisible); });
+        document.addEventListener('keydown', (ev)=>{
+            if (!(ev.target instanceof Element) || ev.target.closest('input, textarea, select, [contenteditable]')) return;
+            if (ev.key === 's' || ev.key === 'S') setVisible(!swVisible);
+        });
     })();
     // Real user timing for Chrome (from navigation start to content complete state on Status page)
     (function(){

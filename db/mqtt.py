@@ -78,33 +78,43 @@ class MqttRepository(BaseRepository):
     @retry_on_busy()
     def update_mqtt_server(self, server_id: int, data: dict[str, Any]) -> bool:
         try:
+            # Пустой/отсутствующий пароль и маска "***" (GET-ответы API)
+            # означают «не менять» — иначе сохранение строки из UI без поля
+            # password затирало бы сохранённый секрет.
             raw_password = data.get("password")
-            enc_password = ("ENC:" + encrypt_secret(raw_password)) if raw_password else raw_password
+            set_password = bool(raw_password) and raw_password != "***"
+            password_sql = "password = ?, " if set_password else ""
+            params: list[Any] = [
+                data.get("name", "MQTT"),
+                data.get("host", "localhost"),
+                int(data.get("port", 1883)),
+                data.get("username"),
+            ]
+            if set_password:
+                params.append("ENC:" + encrypt_secret(raw_password))
+            params.extend(
+                [
+                    data.get("client_id"),
+                    1 if data.get("enabled", True) else 0,
+                    1 if data.get("tls_enabled") else 0,
+                    data.get("tls_ca_path"),
+                    data.get("tls_cert_path"),
+                    data.get("tls_key_path"),
+                    1 if data.get("tls_insecure") else 0,
+                    data.get("tls_version"),
+                    server_id,
+                ]
+            )
             with self._connect() as conn:
                 conn.execute(
-                    """
+                    f"""
                     UPDATE mqtt_servers
-                    SET name = ?, host = ?, port = ?, username = ?, password = ?, client_id = ?, enabled = ?,
+                    SET name = ?, host = ?, port = ?, username = ?, {password_sql}client_id = ?, enabled = ?,
                         tls_enabled = ?, tls_ca_path = ?, tls_cert_path = ?, tls_key_path = ?, tls_insecure = ?, tls_version = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 """,
-                    (
-                        data.get("name", "MQTT"),
-                        data.get("host", "localhost"),
-                        int(data.get("port", 1883)),
-                        data.get("username"),
-                        enc_password,
-                        data.get("client_id"),
-                        1 if data.get("enabled", True) else 0,
-                        1 if data.get("tls_enabled") else 0,
-                        data.get("tls_ca_path"),
-                        data.get("tls_cert_path"),
-                        data.get("tls_key_path"),
-                        1 if data.get("tls_insecure") else 0,
-                        data.get("tls_version"),
-                        server_id,
-                    ),
+                    params,
                 )
                 conn.commit()
                 return True

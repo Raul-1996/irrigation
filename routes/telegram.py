@@ -133,8 +133,24 @@ def _screen_group_actions(group_id: int) -> tuple[str, dict]:
 # ---------- действия ----------
 
 
+def _emergency_stop_active() -> bool:
+    """Флаг аварийной остановки из app.config.
+
+    Обработчики Telegram работают в потоке поллинга, вне request context,
+    поэтому current_app здесь недоступен — читаем app напрямую.
+    """
+    try:
+        from app import app as flask_app
+
+        return bool(flask_app.config.get("EMERGENCY_STOP"))
+    except ImportError:
+        return False
+
+
 def _do_group_start(group_id: int) -> str:
     try:
+        if _emergency_stop_active():
+            return "Аварийная остановка активна. Сначала отключите аварийный режим."
         from irrigation_scheduler import get_scheduler
 
         s = get_scheduler()

@@ -4,7 +4,7 @@ import json
 import logging
 import sqlite3
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from database import db
 from irrigation_scheduler import get_scheduler
@@ -247,6 +247,10 @@ def api_toggle_program_enabled(prog_id):
 @audit_log("program_manual_run", target_extractor=lambda *a, **kw: f"program:{kw.get('prog_id', a[0] if a else '?')}")
 def api_run_program(prog_id):
     """Manual ad-hoc run of a program — start all its zones sequentially."""
+    if current_app.config.get("EMERGENCY_STOP"):
+        return jsonify(
+            {"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}
+        ), 400
     program = db.get_program(prog_id)
     if not program:
         return jsonify({"success": False, "message": "Program not found"}), 404

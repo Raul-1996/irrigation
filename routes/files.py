@@ -9,9 +9,3 @@ files_bp = Blueprint("files_bp", __name__)
 @user_required
 def map_page():
     return render_template("map.html")
-
-
-@files_bp.route("/water")
-@user_required
-def water_page():
-    return render_template("water.html")

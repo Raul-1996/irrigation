@@ -338,6 +338,10 @@ def api_skip_current_zone(group_id):
 def api_start_group_from_first(group_id):
     """Start sequential watering of the group from the first zone."""
     try:
+        if current_app.config.get("EMERGENCY_STOP"):
+            return jsonify(
+                {"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}
+            ), 400
         scheduler = get_scheduler()
         if not scheduler:
             try:
@@ -634,6 +638,10 @@ def _build_ad_hoc_name(zone_ids, override_dur, override_pct) -> str:
 def api_run_selected(gid):
     """Ad-hoc run of a selected subset of zones in one group (issue #15)."""
     try:
+        if current_app.config.get("EMERGENCY_STOP"):
+            return jsonify(
+                {"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}
+            ), 400
         group = next((g for g in (db.get_groups() or []) if int(g["id"]) == int(gid)), None)
         if not group:
             return jsonify({"success": False, "message": "Группа не найдена"}), 404

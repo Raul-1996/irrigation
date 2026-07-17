@@ -10,6 +10,7 @@ import contextlib
 import json as _json
 import logging
 import os
+import re as _re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -56,10 +57,10 @@ class PIIMaskingFilter(logging.Filter):
         try:
             msg = str(record.getMessage())
             for key in self.SENSITIVE_KEYS:
-                k = key.lower()
-                msg = msg.replace(f"{k}=", f"{k}=[REDACTED]")
-                msg = msg.replace(f'"{k}":"', f'"{key}":"[REDACTED]')
-                msg = msg.replace(f"'{k}':'", f"'{key}':'[REDACTED]")
+                k = _re.escape(key)
+                msg = _re.sub(rf"(?i)({k})=\S+", r"\1=[REDACTED]", msg)
+                msg = _re.sub(rf'(?i)("{k}"\s*:\s*")[^"]*(")', r"\1[REDACTED]\2", msg)
+                msg = _re.sub(rf"(?i)('{k}'\s*:\s*')[^']*(')", r"\1[REDACTED]\2", msg)
             record.msg = msg
             record.args = ()
         except (ValueError, TypeError, KeyError) as e:
@@ -71,10 +72,11 @@ class PIIFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = str(record.getMessage())
-            for key in ("password", "old_password", "new_password"):
-                msg = msg.replace(f'"{key}":"', f'"{key}":"***').replace(f"{key}=", f"{key}=***")
-            if "Authorization" in msg:
-                msg = msg.replace("Authorization", "Authorization: ***")
+            for key in ("old_password", "new_password", "password"):
+                k = _re.escape(key)
+                msg = _re.sub(rf'("{k}"\s*:\s*")[^"]*(")', r"\1***\2", msg)
+                msg = _re.sub(rf"({k})=\S+", r"\1=***", msg)
+            msg = _re.sub(r"(Authorization)[:=]?\s*(?:(?:Bearer|Basic)\s+)?\S+", r"\1: ***", msg)
             record.msg = msg
             record.args = ()
         except (ValueError, TypeError, KeyError) as e:

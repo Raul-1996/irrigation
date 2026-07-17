@@ -43,7 +43,45 @@ class TestEventBus:
         # Fill dedup beyond max
         old = events._DEDUP.copy()
         for i in range(5000):
-            events._DEDUP.add(f"key_{i}")
+            events._DEDUP[f"key_{i}"] = 0.0
         events._cleanup(0)
         assert len(events._DEDUP) == 0
         events._DEDUP = old
+
+    def test_cleanup_expires_entries_after_ttl(self):
+        from services import events
+
+        old = events._DEDUP.copy()
+        events._DEDUP.clear()
+        try:
+            events._DEDUP["stale_key"] = 0.0
+            events._DEDUP["fresh_key"] = events._DEDUP_TTL + 1.0
+            events._cleanup(events._DEDUP_TTL + 1.0)
+            assert "stale_key" not in events._DEDUP
+            assert "fresh_key" in events._DEDUP
+        finally:
+            events._DEDUP.clear()
+            events._DEDUP.update(old)
+
+    def test_republish_after_ttl_reaches_subscribers(self):
+        """Повторный emergency_on после истечения TTL снова доходит до подписчиков."""
+        from unittest.mock import patch
+
+        from services import events
+
+        old = events._DEDUP.copy()
+        events._DEDUP.clear()
+        try:
+            cb = MagicMock()
+            events.subscribe(cb)
+            with patch("services.events.time.time", return_value=1000.0):
+                events.publish({"type": "emergency_on", "by": "api"})
+                events.publish({"type": "emergency_on", "by": "api"})  # в окне TTL — глушится
+            assert cb.call_count == 1
+            with patch("services.events.time.time", return_value=1000.0 + events._DEDUP_TTL + 1.0):
+                events.publish({"type": "emergency_on", "by": "api"})
+            assert cb.call_count == 2
+        finally:
+            events._DEDUP.clear()
+            events._DEDUP.update(old)
+            events._SUBS.pop()

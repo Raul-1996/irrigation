@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 _BUS_LOCK = threading.Lock()
 _SUBS = []  # list[Callable[[dict], None]]
-_DEDUP = set()
+_DEDUP: dict[str, float] = {}  # key -> ts первой публикации
 _DEDUP_TTL = float(DEDUP_TTL_SEC)
 
 
@@ -22,7 +22,7 @@ def publish(event: dict[str, Any]) -> None:
             _cleanup(now)
             if key in _DEDUP:
                 return
-            _DEDUP.add(key)
+            _DEDUP[key] = now
             subs = list(_SUBS)
         for cb in subs:
             try:
@@ -39,5 +39,8 @@ def subscribe(callback: Callable[[dict[str, Any]], None]) -> None:
 
 
 def _cleanup(now: float) -> None:
+    expired = [k for k, ts in _DEDUP.items() if now - ts > _DEDUP_TTL]
+    for k in expired:
+        del _DEDUP[k]
     if len(_DEDUP) > DEDUP_SET_MAX_SIZE:
         _DEDUP.clear()

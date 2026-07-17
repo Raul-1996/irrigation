@@ -389,9 +389,15 @@ def rotate_zone_photo(zone_id):
                 continue
             try:
                 with Image.open(filepath) as img:
-                    img = img.rotate(-angle, expand=True)
+                    # Capture the format BEFORE rotate(): derived images always
+                    # have .format == None, which silently re-encoded WebP as JPEG.
                     fmt = img.format or "JPEG"
-                    img.save(filepath, format=fmt)
+                    rotated = img.rotate(-angle, expand=True)
+                    if fmt == "WEBP":
+                        # Same quality as the upload pipeline (main q=92 / thumb q=90).
+                        rotated.save(filepath, format="WEBP", quality=92 if label == "main" else 90, method=6)
+                    else:
+                        rotated.save(filepath, format=fmt)
             except (OSError, PermissionError) as e:
                 logger.error(f"rotate failed ({label}): {e}")
                 return jsonify({"success": False, "message": "Ошибка обработки изображения"}), 500
