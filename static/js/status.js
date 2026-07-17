@@ -1238,10 +1238,6 @@
         if (window._ssrZones && window._ssrZones.length) {
             zonesData = window._ssrZones;
             zoneGroupsCache = window._ssrGroups || [];
-            if (window._ssrStatus && window._ssrStatus.groups) {
-                statusData = window._ssrStatus;
-                updateStatusDisplay();
-            }
             renderGroupTabs();
             renderZoneCards();
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}

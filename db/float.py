@@ -1,8 +1,8 @@
 """Float-sensor repository (PHYS-3 / MASTER-H3 / audit N16).
 
-`services/float_monitor.py` is safety-critical: it protects the pump
-from dry-run by pausing zones when the tank float switch reports empty.
-Before PHYS-3 the monitor opened raw `sqlite3.connect()` connections,
+The float-sensor path is safety-critical: it protects the pump from
+dry-run by pausing zones when the tank float switch reports empty.
+Before PHYS-3 this path opened raw `sqlite3.connect()` connections,
 bypassing `BaseRepository._connect()`. That meant:
 
   * `PRAGMA foreign_keys=ON` was NOT applied -> orphaned rows on cascade
@@ -79,8 +79,8 @@ class FloatRepository(BaseRepository):
     def pause_active_zones(self, group_id: int) -> list[int]:
         """Mark all active zones in the group as paused='float'.
 
-        Returns the list of zone IDs that were paused. Called from
-        FloatMonitor when the float sensor reports the tank empty.
+        Returns the list of zone IDs that were paused. Intended for the
+        float-sensor path when the sensor reports the tank empty.
         """
         paused: list[int] = []
         try:

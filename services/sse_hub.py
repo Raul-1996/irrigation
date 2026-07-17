@@ -355,9 +355,8 @@ def ensure_hub_started() -> None:
                 # auto-reconnects but a clean session starts with no subs, so
                 # the hub stops seeing relay echoes — observed_state stops
                 # updating and runs never get confirmed (history then records
-                # real waterings as 'failed'). Mirrors float_monitor's
-                # _on_mqtt_connect. Bound topic lists via defaults so the
-                # closure isn't affected by the outer per-server loop.
+                # real waterings as 'failed'). Bound topic lists via defaults
+                # so the closure isn't affected by the outer per-server loop.
                 _zone_topics = list(topics)
                 _mv_topics_list = list(mv_topics.get(int(sid), {}))
 

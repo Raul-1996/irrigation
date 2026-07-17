@@ -259,7 +259,7 @@ def api_run_program(prog_id):
     try:
         import threading
 
-        from scheduler.jobs import job_run_program
+        from irrigation_scheduler import job_run_program
 
         # Issue #31: manual=True — bypass weather skip / coefficient for user-initiated runs.
         threading.Thread(

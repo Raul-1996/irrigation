@@ -63,11 +63,6 @@ from routes.status import status_bp
 from routes.zones import zones_bp
 
 try:
-    from routes.telegram import telegram_bp
-except ImportError as e:
-    logging.getLogger(__name__).debug("telegram blueprint not loaded: %s", e)
-    telegram_bp = None
-try:
     from routes.reports import reports_bp
 except ImportError as e:
     logging.getLogger(__name__).debug("reports blueprint not loaded: %s", e)
@@ -488,8 +483,6 @@ def _auth_before_request():
 for bp in (status_bp, files_bp, zones_bp, programs_bp, groups_bp, auth_bp, settings_bp):
     app.register_blueprint(bp)
 try:
-    if telegram_bp:
-        app.register_blueprint(telegram_bp)
     if reports_bp:
         app.register_blueprint(reports_bp)
 except (ValueError, TypeError, KeyError) as e:

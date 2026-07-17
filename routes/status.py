@@ -10,7 +10,7 @@ status_bp = Blueprint("status_bp", __name__)
 
 
 def _get_inline_data():
-    """Pre-fetch zones + groups + status for instant SSR render."""
+    """Pre-fetch zones + groups for instant SSR render."""
     try:
         from database import db
         from routes.zones_crud_api import _zone_ts_to_iso
@@ -19,22 +19,13 @@ def _get_inline_data():
         # Same TZ normalisation as /api/zones — see issue #47.
         zones = [_zone_ts_to_iso(z) for z in (zones or [])]
         groups = db.groups.get_groups()
-        # Build status summary
-        status_data = None
-        try:
-            from routes.system_status_api import build_status_response
-
-            status_data = build_status_response()
-        except (ImportError, AttributeError, TypeError):
-            pass
         return {
             "inline_zones": json.dumps(zones or [], ensure_ascii=False, default=str),
             "inline_groups": json.dumps(groups or [], ensure_ascii=False, default=str),
-            "inline_status": json.dumps(status_data or {}, ensure_ascii=False, default=str),
         }
     except Exception as e:
         logger.debug("SSR data prefetch failed: %s", e)
-        return {"inline_zones": "[]", "inline_groups": "[]", "inline_status": "{}"}
+        return {"inline_zones": "[]", "inline_groups": "[]"}
 
 
 @status_bp.route("/")

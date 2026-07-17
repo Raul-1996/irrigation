@@ -260,7 +260,7 @@ class TestPeerOffEndTime:
 
 
 class TestSchedulerAutoStopEndTime:
-    """Auto-stop fallback paths in irrigation_scheduler / zone_runner.
+    """Auto-stop fallback paths in irrigation_scheduler.
 
     The fallbacks no longer write last_watering_time directly (column
     is gone). They delegate state transitions to the audited helper or
@@ -355,35 +355,6 @@ class TestSchedulerAutoStopEndTime:
 
         with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
             IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
-
-        z = test_db.get_zone(zone["id"])
-        assert z["state"] == "off"
-        assert z["watering_start_time"] is None
-
-    def test_zone_runner_fallback_when_central_fails(self, test_db):
-        """Same contract for the scheduler.zone_runner mixin path."""
-        zone = test_db.create_zone(
-            {
-                "name": "RunnerStop",
-                "duration": 10,
-                "group_id": 1,
-                "topic": "/test/runner",
-            }
-        )
-        test_db.update_zone(
-            zone["id"],
-            {
-                "state": "on",
-                "watering_start_time": "2026-01-01 10:00:00",
-            },
-        )
-        from scheduler.zone_runner import ZoneRunnerMixin
-
-        class _StubSched:
-            db = test_db
-
-        with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
-            ZoneRunnerMixin._stop_zone(_StubSched(), zone["id"])
 
         z = test_db.get_zone(zone["id"])
         assert z["state"] == "off"

@@ -5,13 +5,10 @@ Core invariants:
      PRAGMA foreign_keys=ON and journal_mode=WAL.
   2. FloatRepository sets PRAGMA busy_timeout=30000 for safety-critical
      writes (protects against WAL-checkpoint contention).
-  3. FloatMonitor routes all DB I/O through the repository — no direct
-     sqlite3.connect() on the primary path.
 """
 
 import os
 import sqlite3
-from unittest.mock import MagicMock
 
 os.environ["TESTING"] = "1"
 
@@ -148,66 +145,3 @@ class TestFloatRepositoryOps:
         assert 1 in ids
         # group 999 (postponed) must not be float-enabled
         assert 999 not in ids
-
-
-class TestFloatMonitorUsesRepo:
-    """Contract: FloatMonitor primary path goes through FloatRepository."""
-
-    def test_monitor_constructs_repo_by_default(self, test_db_path):
-        """When `repo` kwarg is omitted, FloatMonitor instantiates
-        FloatRepository(db_path)."""
-        from db.float import FloatRepository
-        from services.float_monitor import FloatMonitor
-
-        fm = FloatMonitor(
-            db_path=test_db_path,
-            mqtt_clients={},
-            queue_manager=MagicMock(),
-        )
-        assert fm._repo is not None, "FloatMonitor._repo must be wired"
-        assert isinstance(fm._repo, FloatRepository)
-
-    def test_log_event_uses_repo(self, test_db_path):
-        """_log_float_event delegates to repo.log_event()."""
-        from services.float_monitor import FloatMonitor
-
-        fake_repo = MagicMock()
-        fm = FloatMonitor(
-            db_path=test_db_path,
-            mqtt_clients={},
-            queue_manager=MagicMock(),
-            repo=fake_repo,
-        )
-        fm._log_float_event(42, "float_pause", [1, 2, 3])
-        fake_repo.log_event.assert_called_once_with(42, "float_pause", [1, 2, 3])
-
-    def test_pause_active_zones_uses_repo(self, test_db_path):
-        """_pause_active_zones_in_db delegates to repo.pause_active_zones()."""
-        from services.float_monitor import FloatMonitor
-
-        fake_repo = MagicMock()
-        fake_repo.pause_active_zones.return_value = [7, 8]
-        fm = FloatMonitor(
-            db_path=test_db_path,
-            mqtt_clients={},
-            queue_manager=MagicMock(),
-            repo=fake_repo,
-        )
-        result = fm._pause_active_zones_in_db(42)
-        assert result == [7, 8]
-        fake_repo.pause_active_zones.assert_called_once_with(42)
-
-    def test_load_all_groups_uses_repo(self, test_db_path):
-        """_load_all_groups delegates to repo.get_float_enabled_groups()."""
-        from services.float_monitor import FloatMonitor
-
-        fake_repo = MagicMock()
-        fake_repo.get_float_enabled_groups.return_value = []
-        fm = FloatMonitor(
-            db_path=test_db_path,
-            mqtt_clients={},
-            queue_manager=MagicMock(),
-            repo=fake_repo,
-        )
-        fm._load_all_groups()
-        fake_repo.get_float_enabled_groups.assert_called_once()

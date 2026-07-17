@@ -45,24 +45,18 @@ class TestSSRTemplateNoSafe:
             "status.html still uses |safe for inline_groups"
         )
 
-    def test_no_safe_filter_for_inline_status(self):
-        html = read_file("templates/status.html")
-        assert "|safe" not in html or "inline_status" not in html.split("|safe")[0].split("\n")[-1], (
-            "status.html still uses |safe for inline_status"
-        )
-
     def test_no_safe_anywhere_for_ssr_data(self):
         """More robust: no line should contain both inline_ and |safe."""
         html = read_file("templates/status.html")
         for i, line in enumerate(html.split("\n"), 1):
-            if "inline_zones" in line or "inline_groups" in line or "inline_status" in line:
+            if "inline_zones" in line or "inline_groups" in line:
                 assert "|safe" not in line, f"Line {i} uses |safe with SSR data: {line.strip()}"
 
     def test_tojson_filter_used(self):
         """status.html should use |tojson filter for SSR data."""
         html = read_file("templates/status.html")
         assert "|tojson" in html, "status.html missing |tojson filter for SSR data"
-        assert html.count("|tojson") >= 3, "Expected at least 3 |tojson usages for zones, groups, status"
+        assert html.count("|tojson") >= 2, "Expected at least 2 |tojson usages for zones and groups"
 
     def test_json_parse_present(self):
         """status.html should use JSON.parse to decode SSR data."""
