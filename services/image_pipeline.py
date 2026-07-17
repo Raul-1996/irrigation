@@ -55,9 +55,7 @@ def load_safe_image(file_data: bytes) -> Image.Image:
         img = ImageOps.exif_transpose(img)
     except (ValueError, TypeError, OSError) as e:
         logger.debug("load_safe_image: exif_transpose ignored: %s", e)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
-    elif img.mode != "RGB":
+    if img.mode in ("RGBA", "LA", "P") or img.mode != "RGB":
         img = img.convert("RGB")
     return img
 
