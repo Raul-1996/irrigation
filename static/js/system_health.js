@@ -3,8 +3,7 @@
  * GET /api/status reports zone faults (relay failed to confirm a zone ON).
  *
  * Self-contained IIFE, runs on every page. Independent of app.js polling.
- * Reuses global escapeHtml() from app.js for XSS-safe rendering (with a
- * local fallback in case it isn't loaded yet).
+ * Reuses global escapeHtml() from common.js for XSS-safe rendering.
  */
 (function () {
   'use strict';
@@ -15,13 +14,7 @@
 
   // ---------- DOM helpers ----------
   function $(id) { return document.getElementById(id); }
-  // Mirror history.js: prefer the global escapeHtml, fall back to a tiny escaper.
-  function safeText(v) {
-    if (typeof escapeHtml === 'function') return escapeHtml(v);
-    return String(v == null ? '' : v)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-  }
+  function safeText(v) { return escapeHtml(v); }
 
   // ---------- localStorage: set of seen fault zone_ids ----------
   function loadSeen() {

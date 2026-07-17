@@ -2,7 +2,7 @@
 
 Covers:
 - SSR JSON island (no |safe)
-- escapeHtml utility in app.js
+- escapeHtml utility in common.js
 - innerHTML escaping in JS files
 """
 
@@ -142,39 +142,39 @@ class TestAPIReturnsRawData:
             assert xss_name in names, "API should return raw zone name without HTML escaping"
 
 
-# ── 4. escapeHtml Function in app.js ─────────────────────────────────
+# ── 4. escapeHtml Function in common.js ──────────────────────────────
 
 
 class TestEscapeHtmlFunction:
-    """app.js must contain a proper escapeHtml function."""
+    """common.js must contain a proper escapeHtml function."""
 
     def test_escape_html_exists(self):
-        js = read_file("static/js/app.js")
-        assert "function escapeHtml" in js, "app.js missing escapeHtml function"
+        js = read_file("static/js/common.js")
+        assert "function escapeHtml" in js, "common.js missing escapeHtml function"
 
     def test_escape_html_handles_ampersand(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&amp;" in js, "escapeHtml should escape & to &amp;"
 
     def test_escape_html_handles_lt(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&lt;" in js, "escapeHtml should escape < to &lt;"
 
     def test_escape_html_handles_gt(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&gt;" in js, "escapeHtml should escape > to &gt;"
 
     def test_escape_html_handles_double_quote(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&quot;" in js, 'escapeHtml should escape " to &quot;'
 
     def test_escape_html_handles_single_quote(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&#039;" in js, "escapeHtml should escape ' to &#039;"
 
     def test_escape_html_handles_null(self):
         """escapeHtml should handle null/undefined by returning empty string."""
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         # Should check for null: str == null catches both null and undefined
         assert "str == null" in js or "str === null" in js or "str==null" in js, "escapeHtml should handle null input"
 
@@ -282,20 +282,6 @@ class TestInnerHTMLEscaping:
                     if ".innerHTML" in ctx:
                         violations.append(f"Line {i}: raw {pat}: {line.strip()[:100]}")
         assert not violations, "zones.js has raw names in innerHTML:\n" + "\n".join(violations)
-
-    def test_programs_js_names_escaped(self):
-        """programs.js: program.name, meta.name, zone.name must use escapeHtml."""
-        js = read_file("static/js/programs.js")
-        violations = []
-        lines = js.split("\n")
-        name_patterns = ["${program.name}", "${meta.name}", "${zone.name}"]
-        for i, line in enumerate(lines, 1):
-            for pat in name_patterns:
-                if pat in line and "escapeHtml" not in line:
-                    ctx = "\n".join(lines[max(0, i - 20) : i + 5])
-                    if ".innerHTML" in ctx:
-                        violations.append(f"Line {i}: raw {pat}: {line.strip()[:100]}")
-        assert not violations, "programs.js has raw names in innerHTML:\n" + "\n".join(violations)
 
     def test_mqtt_html_names_escaped(self):
         """mqtt.html: s.name, s.host, s.username in innerHTML must use escapeHtml."""

@@ -70,103 +70,12 @@
         if (el) el.textContent = dt;
     }
     
-    function anyGroupUsesWaterMeter() {
-        try {
-            const groups = (statusData && Array.isArray(statusData.groups)) ? statusData.groups : [];
-            const _flag = v => { try { if (v===true||v===1) return true; const s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
-            return groups.some(g => _flag(g.use_water_meter));
-        } catch(e) { return false; }
-    }
-
-    function removeAdminCellsFromRows(){
-        try{
-            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
-            tbody.querySelectorAll('tr').forEach(row=>{
-                row.querySelectorAll('td.admin-only').forEach(td=> td.remove());
-            });
-        }catch(e){}
-    }
-
-    function updateAdminHeaderColumns(){
-        try {
-            const head = document.getElementById('zones-table-head');
-            if (!head) return;
-            const isAdmin = !!(statusData && statusData.is_admin);
-            const wantWaterCols = isAdmin && anyGroupUsesWaterMeter();
-            const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
-            const tr = head.querySelector('tr');
-            if (!tr) return;
-            if (wantWaterCols && !hasAdmin) {
-                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.innerHTML = 'Средний расход<br>(л/мин)';
-                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.innerHTML = 'Расход (л)<br>за прошлый полив';
-                tr.insertBefore(thAvg, tr.lastElementChild);
-                tr.insertBefore(thTot, tr.lastElementChild);
-                // как только добавили заголовки — убедимся, что в строках есть ячейки
-                try { ensureAdminCellsInRows(); } catch(e){}
-                // и сразу заполним их текущими значениями из zonesData, если они уже есть
-                try { fillAdminCellsFromZonesData(); } catch(e){}
-            } else if ((!wantWaterCols) && hasAdmin) {
-                head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
-                try { removeAdminCellsFromRows(); } catch(e){}
-            }
-        } catch(e) {}
-    }
-
-    function ensureAdminCellsInRows(){
-        try{
-            const head = document.getElementById('zones-table-head');
-            const need = !!(head && head.querySelector('th.admin-only'));
-            if (!need) return;
-            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
-            tbody.querySelectorAll('tr').forEach(row=>{
-                const adminTds = row.querySelectorAll('td.admin-only');
-                if (adminTds.length >= 2) return;
-                const photoTd = row.lastElementChild; // фото — последняя колонка
-                const tdAvg = document.createElement('td'); tdAvg.className = 'admin-only'; tdAvg.textContent = 'НД';
-                const tdTot = document.createElement('td'); tdTot.className = 'admin-only'; tdTot.textContent = 'НД';
-                if (photoTd && photoTd.parentElement === row) {
-                    row.insertBefore(tdAvg, photoTd);
-                    row.insertBefore(tdTot, photoTd);
-                } else {
-                    row.appendChild(tdAvg); row.appendChild(tdTot);
-                }
-            });
-        }catch(e){}
-    }
-
-    function fillAdminCellsFromZonesData(){
-        try{
-            if (!Array.isArray(zonesData) || !zonesData.length) return;
-            const byId = {};
-            zonesData.forEach(z=>{ byId[String(z.id)] = z; });
-            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
-            tbody.querySelectorAll('tr').forEach(row=>{
-                const idCell = row.querySelector('td:nth-child(2)');
-                const adminCells = row.querySelectorAll('td.admin-only');
-                if (!idCell || adminCells.length < 2) return;
-                const zid = idCell.textContent.trim();
-                const z = byId[zid]; if (!z) return;
-                let avg = (z.last_avg_flow_lpm!=null && z.last_avg_flow_lpm!=='') ? z.last_avg_flow_lpm : 'НД';
-                let tot = (z.last_total_liters!=null && z.last_total_liters!=='') ? z.last_total_liters : 'НД';
-                if (avg !== 'НД') {
-                    const n = Number(avg);
-                    if (!Number.isNaN(n)) avg = String(Math.round(n));
-                }
-                adminCells[0].textContent = avg;
-                adminCells[1].textContent = tot;
-            });
-        }catch(e){}
-    }
-
     async function loadStatusData() {
         try {
             statusData = await api.get('/api/status');
-            updateAdminHeaderColumns();
             updateStatusDisplay();
             hideConnectionError();
             updateMqttWarnings();
-            // Согласуем таблицу зон с карточками групп (мгновенно)
-            try { reconcileZoneRowsWithGroupStatus(); } catch(e) {}
         } catch (error) {
             console.error('Ошибка загрузки статуса:', error);
             showConnectionError();
@@ -231,44 +140,6 @@
         }
     }
 
-    // Быстрая синхронизация строк зон с текущим статусом групп из statusData
-    function reconcileZoneRowsWithGroupStatus() {
-        try {
-            if (!statusData || !statusData.groups || !statusData.groups.length) return;
-            const wateringByGroup = {};
-            (statusData.groups || []).forEach(g => {
-                if (g && g.status === 'watering' && g.current_zone) {
-                    wateringByGroup[String(g.id)] = Number(g.current_zone);
-                }
-            });
-            const tbody = document.getElementById('zones-table-body');
-            if (!tbody) return;
-            const rows = tbody.querySelectorAll('tr');
-            rows.forEach(row => {
-                try {
-                    const idCell = row.querySelector('td:nth-child(2)');
-                    const grpCell = row.querySelector('td:nth-child(7)');
-                    if (!idCell || !grpCell) return;
-                    const zid = Number(idCell.textContent.trim());
-                    const gidAttr = grpCell.getAttribute('data-group-id');
-                    const gid = gidAttr ? String(Number(gidAttr)) : String(grpCell.textContent.trim());
-                    const runningZoneId = wateringByGroup[gid];
-                    if (typeof runningZoneId === 'undefined') return;
-                    const isOn = (zid === runningZoneId);
-                    const ind = row.querySelector('.indicator');
-                    if (ind) { ind.classList.remove('on','off'); ind.classList.add(isOn ? 'on' : 'off'); }
-                    const btn = row.querySelector('.zone-start-btn');
-                    if (btn) {
-                        btn.textContent = isOn ? '⏹' : '▶';
-                        const emergency = !!(statusData && statusData.emergency_stop);
-                        const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zid + ", '" + (isOn ? 'on' : 'off') + "')");
-                        btn.setAttribute('onclick', action);
-                    }
-                } catch(e) {}
-            });
-        } catch (e) {}
-    }
-    
     function showConnectionError() {
         if (!connectionError) {
             connectionError = true;
@@ -685,85 +556,6 @@
         } catch (e) {}
     }
     
-    async function updateZonesTable() {
-        const tbody = document.getElementById('zones-table-body');
-        const countSpan = document.getElementById('zones-count');
-        
-        if (!tbody) return; // V2: table removed, cards used instead
-        tbody.innerHTML = '';
-        
-        // Фильтруем зоны, исключая группу 999 (БЕЗ ПОЛИВА)
-        const filteredZones = zonesData.filter(zone => zone.group_id !== 999);
-        
-        countSpan.textContent = filteredZones.length;
-        
-        // Получаем имена групп для отображения вместо чисел
-        const groups = await api.get('/api/groups');
-        const groupNameById = {};
-        groups.forEach(g => { groupNameById[g.id] = g.name; });
-
-        // Загружаем следующий полив одним батчем (значительно быстрее на WB)
-        let nextWateringData = [];
-        try {
-            const response = await fetch('/api/zones/next-watering-bulk', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ zone_ids: filteredZones.map(z=>z.id) })
-            });
-            const bulk = await response.json();
-            nextWateringData = (bulk && bulk.items) ? bulk.items : [];
-        } catch (e) {
-            nextWateringData = [];
-        }
-        
-        const frag = document.createDocumentFragment();
-        filteredZones.forEach(zone => {
-            let nextWatering = '—';
-            if (statusData.emergency_stop) {
-                nextWatering = 'До отмены аварии';
-            } else {
-                const item = nextWateringData.find(x => x.zone_id === zone.id) || {};
-                const nextDT = item.next_datetime;
-                if (nextDT) {
-                    nextWatering = String(nextDT).replace('T',' ').slice(0,19);
-                } else if (item.next_watering === 'Никогда') {
-                    nextWatering = 'Никогда';
-                }
-            }
-            const tr = document.createElement('tr');
-            
-            const isAdmin = (!!(statusData && statusData.is_admin));
-            const showWaterCols = isAdmin && anyGroupUsesWaterMeter();
-            const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
-            const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
-             tr.innerHTML = `
-                 <td><span class="indicator ${zone.state}"></span></td>
-                 <td>${zone.id}</td>
-                 <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
-                 <td>${escapeHtml(zone.name)}</td>
-                 <td>${escapeHtml(zone.icon)}</td>
-                 <td>${zone.duration} мин</td>
-                 <td>${escapeHtml(groupNameById[zone.group_id] || zone.group_id)}</td>
-                 <td class="hide-mobile col-last-watering">—</td>
-                 <td class="col-next" data-label="Следующий полив">${nextWatering}</td>
-                 ${showWaterCols ? `<td class=\"admin-only\">${avgFlow}</td>` : ''}
-                 ${showWaterCols ? `<td class=\"admin-only\">${totalLiters}</td>` : ''}
-                 <td class="col-photo" data-label="Фото">
-                     <div class="zone-photo">
-                         ${zone.photo_path ?
-                             `<img src="/api/zones/${zone.id}/photo?variant=thumb" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
-                             `<div class="no-photo" title="Нет фото">📷</div>`
-                         }
-                     </div>
-                 </td>
-             `;
-            
-            frag.appendChild(tr);
-        });
-        tbody.appendChild(frag);
-        // Signal render complete for perf
-        try{ window.dispatchEvent(new CustomEvent('zones-rendered')); }catch(e){}
-    }
-    
     // Обработчики действий
     async function delayGroup(groupId, days) {
         try {
@@ -781,9 +573,8 @@
             
             if (response.success) {
                 showNotification(response.message, 'success');
-                // Точечно обновляем карточку группы и строки зон этой группы
+                // Точечно обновляем карточку группы
                 await refreshSingleGroup(groupId);
-                await refreshZonesRowsForGroup(groupId);
             } else {
                 showNotification(response.message, 'error');
             }
@@ -814,9 +605,8 @@
             
             if (response.success) {
                 showNotification(response.message, 'success');
-                // Точечно обновляем карточку группы и строки зон этой группы
+                // Точечно обновляем карточку группы
                 await refreshSingleGroup(groupId);
-                await refreshZonesRowsForGroup(groupId);
             } else {
                 showNotification(response.message, 'error');
             }
@@ -909,37 +699,9 @@
             const wantOn = currentState !== 'on';
             // Оптимистическое обновление UI: переключим состояние сразу
             zonesData[idx].state = wantOn ? 'on' : 'off';
-            // Мгновенно обновим строку зоны в таблице (индикатор и кнопка)
-            try {
-                const tbody = document.getElementById('zones-table-body');
-                if (tbody) {
-                    let row = tbody.querySelector(`tr[data-zone-id="${zoneId}"]`);
-                    if (!row) {
-                        const rows = tbody.querySelectorAll('tr');
-                        rows.forEach(r => {
-                            const cells = r.querySelectorAll('td');
-                            if (cells.length > 1 && Number(cells[1].textContent.trim()) === zoneId) {
-                                row = r;
-                            }
-                        });
-                    }
-                    if (row) {
-                        const ind = row.querySelector('.indicator');
-                        if (ind) { ind.classList.remove('on','off'); ind.classList.add(wantOn ? 'on' : 'off'); }
-                        const btn = row.querySelector('.zone-start-btn');
-                        if (btn) {
-                            btn.textContent = wantOn ? '⏹' : '▶';
-                            const emergency = !!(statusData && statusData.emergency_stop);
-                            const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zoneId + ", '" + (wantOn ? 'on' : 'off') + "')");
-                            btn.setAttribute('onclick', action);
-                        }
-                    }
-                }
-            } catch (e) {}
             if (groupId) {
-                // Обновим карточку группы и строки зон этой группы без полной перезагрузки
+                // Обновим карточку группы без полной перезагрузки
                 refreshSingleGroup(groupId);
-                refreshZonesRowsForGroup(groupId);
             }
             const url = wantOn ? `/api/zones/${zoneId}/mqtt/start` : `/api/zones/${zoneId}/mqtt/stop`;
             const res = await fetch(url, { method: 'POST' });
@@ -1287,62 +1049,6 @@
     window.handleStatusPhotoUpload = handleStatusPhotoUpload;
     window.deleteStatusPhoto = deleteStatusPhoto;
     window.rotateStatusPhoto = rotateStatusPhoto;
-
-    // Точечное обновление строк зон группы (без полной перерисовки таблицы)
-    async function refreshZonesRowsForGroup(groupId) {
-        try {
-            const tbody = document.getElementById('zones-table-body');
-            if (!tbody) return;
-            const zonesForGroup = (zonesData || []).filter(z => String(z.group_id) === String(groupId));
-            const promises = zonesForGroup.map(async (zone) => {
-                try {
-                    const resp = await fetch(`/api/zones/${zone.id}/next-watering`, { cache: 'no-store' });
-                    const data = await resp.json();
-                    let nextText = '—';
-                    if (data && data.next_datetime) {
-                        nextText = String(data.next_datetime).replace('T',' ').slice(0,19);
-                    } else if (data && data.next_watering === 'Никогда') {
-                        nextText = 'Никогда';
-                    }
-                    // Найти строку зоны по её № (вторая колонка)
-                    const rows = tbody.querySelectorAll('tr');
-                    rows.forEach(row => {
-                        const cells = row.querySelectorAll('td');
-                        if (cells.length >= 9) {
-                            const idCell = cells[1];
-                            if (idCell && String(idCell.textContent.trim()) === String(zone.id)) {
-                                // Колонка "Следующий полив" — девятая (index 8)
-                                const nextCell = cells[8];
-                                if (nextCell) nextCell.textContent = nextText;
-                            }
-                        }
-                    });
-                } catch (e) { /* ignore single zone error */ }
-            });
-            await Promise.all(promises);
-        } catch (e) { /* ignore group update error */ }
-    }
-
-    // Добавим/уберём админские колонки в заголовке по роли
-    try {
-        const head = document.getElementById('zones-table-head');
-        if (head) {
-            const isAdmin = !!(statusData && statusData.is_admin);
-            const ths = head.querySelectorAll('tr th');
-            const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
-            if (isAdmin && !hasAdmin) {
-                const tr = head.querySelector('tr');
-                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.innerHTML = 'Средний расход<br>(л/мин)';
-                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.innerHTML = 'Расход (л)<br>за прошлый полив';
-                tr.insertBefore(thAvg, tr.lastElementChild);
-                tr.insertBefore(thTot, tr.lastElementChild);
-                try { ensureAdminCellsInRows(); } catch(e){}
-                try { fillAdminCellsFromZonesData(); } catch(e){}
-            } else if (!isAdmin && hasAdmin) {
-                head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
-            }
-        }
-    } catch(e) {}
 
     // --- Weather Widget (full) ---
     var WEATHER_ICONS = {
