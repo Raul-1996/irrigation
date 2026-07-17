@@ -801,9 +801,50 @@ class ZoneRepository(BaseRepository):
                 continue
         return None
 
+    @staticmethod
+    def _program_start_times(prog: dict[str, Any]) -> list[str]:
+        """Основное время программы плюс extra_times (строки 'HH:MM')."""
+        times = [str(prog.get("time") or "00:00")]
+        extra = prog.get("extra_times") or []
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except (json.JSONDecodeError, TypeError):
+                extra = []
+        times.extend(str(t) for t in extra)
+        return times
+
+    @staticmethod
+    def _first_program_start_after(prog: dict[str, Any], hour: int, minute: int, lower_bound: datetime) -> datetime | None:
+        """Первый старт программы строго позже ``lower_bound``.
+
+        Семантика повторяет планировщик (irrigation_scheduler._schedule_single_time):
+        weekdays — по дням недели (пустые days — никогда), even-odd — по чётности
+        числа месяца, interval — ближайшее HH:MM (планировщик заново привязывает
+        IntervalTrigger к сегодня/завтра при каждом старте сервиса).
+        """
+        schedule_type = prog.get("schedule_type") or "weekdays"
+        for offset in range(0, 14):
+            d = lower_bound + timedelta(days=offset)
+            if schedule_type == "even-odd":
+                want_even = (prog.get("even_odd") or "even") == "even"
+                if (d.day % 2 == 0) != want_even:
+                    continue
+            elif schedule_type != "interval":
+                if d.weekday() not in (prog.get("days") or []):
+                    continue
+            cand = d.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if cand > lower_bound:
+                return cand
+        return None
+
     def compute_next_run_for_zone(self, zone_id: int, programs_getter=None) -> str | None:
         """Рассчитать ближайшее будущее время запуска зоны по всем программам.
         programs_getter: callable that returns list of programs (injected from facade).
+
+        Учитываются только включённые программы (``enabled``), их schedule_type
+        (weekdays / interval / even-odd) и все времена старта (``time`` +
+        ``extra_times``) — та же семантика, что у живого планировщика.
 
         Если у зоны установлен ``postpone_until`` в будущем, нижняя граница
         поиска (``now``) сдвигается вперёд до конца окна отложки — иначе UI
@@ -823,25 +864,26 @@ class ZoneRepository(BaseRepository):
                 now = postpone_dt
             best_dt: datetime | None = None
             for prog in programs:
+                if not prog.get("enabled", True):
+                    continue
                 if zone_id not in prog.get("zones", []):
                     continue
-                for offset in range(0, 14):
-                    dt_candidate = now + timedelta(days=offset)
-                    if dt_candidate.weekday() in prog["days"]:
-                        hour, minute = map(int, prog["time"].split(":"))
-                        start_dt = dt_candidate.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                        if start_dt <= now:
-                            continue
-                        cum = 0
-                        for zid in sorted(prog["zones"]):
-                            dur = self.get_zone_duration(zid)
-                            if zid == zone_id:
-                                candidate = start_dt + timedelta(minutes=cum)
-                                if best_dt is None or candidate < best_dt:
-                                    best_dt = candidate
-                                break
-                            cum += dur
-                        break
+                for time_str in self._program_start_times(prog):
+                    try:
+                        hour, minute = map(int, time_str.split(":", 1))
+                    except (ValueError, TypeError):
+                        continue
+                    start_dt = self._first_program_start_after(prog, hour, minute, now)
+                    if not start_dt:
+                        continue
+                    cum = 0
+                    for zid in sorted(prog["zones"]):
+                        if zid == zone_id:
+                            candidate = start_dt + timedelta(minutes=cum)
+                            if best_dt is None or candidate < best_dt:
+                                best_dt = candidate
+                            break
+                        cum += self.get_zone_duration(zid)
             if best_dt:
                 return best_dt.strftime("%Y-%m-%d %H:%M:%S")
             return None
