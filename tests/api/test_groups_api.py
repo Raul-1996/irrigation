@@ -90,3 +90,14 @@ class TestGroupStopAuditIssue16:
         assert matched, f"no session_aborted_by_user audit row for group:{group['id']}"
         pj = str(matched[0].get("payload_json") or "")
         assert "api_stop_group" in pj
+
+
+class TestUseMasterValveValidation:
+    """Регрессия: валидация use_master_valve падала AttributeError —
+    фасад IrrigationDB не имеет get_group."""
+
+    def test_enable_master_valve_without_topic_is_400_not_500(self, admin_client, app):
+        g = app.db.create_group("MV Group")
+        resp = admin_client.put(f"/api/groups/{g['id']}", json={"use_master_valve": True})
+        assert resp.status_code == 400
+        assert "топик" in (resp.get_json() or {}).get("message", "").lower()

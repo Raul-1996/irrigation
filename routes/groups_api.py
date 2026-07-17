@@ -93,11 +93,11 @@ def api_update_group(group_id):
     if updates:
         try:
             if "use_master_valve" in updates and int(updates.get("use_master_valve") or 0) == 1:
-                if not (updates.get("master_mqtt_topic") or (db.get_group(group_id) or {}).get("master_mqtt_topic")):
+                # Фасад IrrigationDB не имеет get_group — ищем в get_groups()
+                current = next((g for g in (db.get_groups() or []) if int(g.get("id")) == int(group_id)), {})
+                if not (updates.get("master_mqtt_topic") or current.get("master_mqtt_topic")):
                     return jsonify({"success": False, "message": "Нужен MQTT-топик мастер-клапана"}), 400
-                sid = updates.get("master_mqtt_server_id") or (db.get_group(group_id) or {}).get(
-                    "master_mqtt_server_id"
-                )
+                sid = updates.get("master_mqtt_server_id") or current.get("master_mqtt_server_id")
                 if not sid or not db.get_mqtt_server(int(sid)):
                     return jsonify(
                         {"success": False, "message": "Нужен корректный MQTT-сервер для мастер-клапана"}

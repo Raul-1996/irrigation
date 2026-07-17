@@ -722,7 +722,9 @@ def api_water():
         groups = db.get_groups()
         water_data = {}
         for group in groups:
-            if group["id"] >= 999:
+            # Исключаем только служебную группу 999 («БЕЗ ПОЛИВА»); группы,
+            # созданные после сида, получают id 1000+ и должны попадать в отчёт
+            if group["id"] == 999:
                 continue
             group_id = str(group["id"])
             try:
