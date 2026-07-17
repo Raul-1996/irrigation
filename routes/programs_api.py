@@ -15,6 +15,27 @@ logger = logging.getLogger(__name__)
 
 programs_api_bp = Blueprint("programs_api", __name__)
 
+# Допустимые значения v2-полей программ (см. templates/programs.html и
+# IrrigationScheduler._schedule_single_time — другие значения молча
+# приводят к программе без jobs).
+VALID_PROGRAM_TYPES = ("time-based", "smart")
+VALID_SCHEDULE_TYPES = ("weekdays", "interval", "even-odd")
+
+
+def _validate_program_v2_fields(data: dict) -> str | None:
+    """Проверить v2-поля программы; вернуть текст ошибки или None."""
+    ptype = data.get("type")
+    if ptype is not None and ptype not in VALID_PROGRAM_TYPES:
+        return f"Invalid type: {ptype!r} (expected one of: {', '.join(VALID_PROGRAM_TYPES)})"
+    schedule_type = data.get("schedule_type")
+    if schedule_type is not None and schedule_type not in VALID_SCHEDULE_TYPES:
+        return f"Invalid schedule_type: {schedule_type!r} (expected one of: {', '.join(VALID_SCHEDULE_TYPES)})"
+    if schedule_type == "interval" and not data.get("interval_days"):
+        return "schedule_type='interval' requires interval_days"
+    if schedule_type == "even-odd" and data.get("even_odd") not in ("even", "odd"):
+        return "schedule_type='even-odd' requires even_odd ('even' or 'odd')"
+    return None
+
 
 @programs_api_bp.route("/api/programs")
 def api_programs():
@@ -86,6 +107,9 @@ def api_create_program():
     missing = [f for f in ("name", "time", "zones") if f not in data]
     if missing:
         return jsonify({"success": False, "message": f"Missing required fields: {', '.join(missing)}"}), 400
+    v2_error = _validate_program_v2_fields(data)
+    if v2_error:
+        return jsonify({"success": False, "message": v2_error}), 400
     try:
         if isinstance(data.get("days"), list):
             data["days"] = [int(d) for d in data["days"]]

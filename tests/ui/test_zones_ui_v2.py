@@ -79,28 +79,14 @@ class TestZonesUITemplateElements:
         """Page has CSS classes for zone cards.
 
         After commit 791ff0e (refactor: extract CSS), 'zone-card' lives in
-        static/css/status.css instead of inline <style>.  Walk the linked
-        stylesheets, fetch each through the test client, and grep the
-        combined content — mirrors the helper in test_zones_functional.py
-        and test_desktop_sidebar.py.
+        static/css/status.css instead of inline <style>.  Fetch linked
+        stylesheets and grep the combined content.
         """
-        import re
+        from tests.fixtures.css import fetch_inline_and_external_css
 
         resp = client.get("/")
         assert resp.status_code == 200
-        html = resp.data.decode()
-        pieces = [html]
-        for href in re.findall(
-            r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']',
-            html,
-        ):
-            if href.startswith("http"):
-                continue
-            path = href if href.startswith("/") else "/" + href.lstrip("./")
-            css_resp = client.get(path)
-            if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
-        combined = "\n".join(pieces)
+        combined = fetch_inline_and_external_css(client, "/")
         assert "zone-card" in combined, "'zone-card' class missing from /status HTML and all linked stylesheets"
 
     def test_status_js_loaded(self, client):

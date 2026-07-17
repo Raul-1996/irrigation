@@ -1,6 +1,6 @@
 """Unit tests for services.version.get_app_version.
 
-Format under test: ``2.<N> (<short_sha>[+dirty])``.
+Format under test: ``2.<N>+<short_sha>[+dirty]`` (URL-safe, semver build metadata).
 Resolution chain: git (rev-list count + describe sha) → ``VERSION`` file → ``'unknown'``.
 
 The function is exercised in isolation via ``monkeypatch`` — we never spawn
@@ -54,11 +54,11 @@ def _scripted_run(scripts):
     return fake_run
 
 
-# ── git success: 2.<N> (<sha>) ─────────────────────────────────────────────
+# ── git success: 2.<N>+<sha> ───────────────────────────────────────────────
 
 
 def test_returns_formatted_version_from_count_and_sha(monkeypatch):
-    """Two successful git calls compose ``2.113 (f75c54c)``."""
+    """Two successful git calls compose ``2.113+f75c54c``."""
     captured = []
 
     def fake_run(argv, **kwargs):
@@ -71,7 +71,7 @@ def test_returns_formatted_version_from_count_and_sha(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert get_app_version() == "2.113 (f75c54c)"
+    assert get_app_version() == "2.113+f75c54c"
 
     assert len(captured) == 2
     rev_list_argv = captured[0][0]
@@ -114,8 +114,8 @@ def test_returns_formatted_version_from_count_and_sha(monkeypatch):
         assert argv[wt_idx + 1] == str(version_mod.REPO_ROOT)
 
 
-def test_dirty_marker_passes_through_inside_parentheses(monkeypatch):
-    """``+dirty`` from describe ends up inside the parentheses."""
+def test_dirty_marker_passes_through(monkeypatch):
+    """``+dirty`` from describe survives into the version string."""
 
     def fake_run(argv, **kwargs):
         if "rev-list" in argv:
@@ -123,11 +123,11 @@ def test_dirty_marker_passes_through_inside_parentheses(monkeypatch):
         return _make_completed(stdout="f75c54c+dirty\n", returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert get_app_version() == "2.113 (f75c54c+dirty)"
+    assert get_app_version() == "2.113+f75c54c+dirty"
 
 
 def test_zero_count_at_anchor_commit(monkeypatch):
-    """Sitting exactly on the v2-base tag yields ``2.0 (<sha>)``."""
+    """Sitting exactly on the v2-base tag yields ``2.0+<sha>``."""
 
     def fake_run(argv, **kwargs):
         if "rev-list" in argv:
@@ -135,7 +135,7 @@ def test_zero_count_at_anchor_commit(monkeypatch):
         return _make_completed(stdout="bd6213e\n", returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert get_app_version() == "2.0 (bd6213e)"
+    assert get_app_version() == "2.0+bd6213e"
 
 
 # ── git failure modes → VERSION file fallback ─────────────────────────────
@@ -372,9 +372,9 @@ def test_result_is_cached_across_calls(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert get_app_version() == "2.113 (f75c54c)"
-    assert get_app_version() == "2.113 (f75c54c)"
-    assert get_app_version() == "2.113 (f75c54c)"
+    assert get_app_version() == "2.113+f75c54c"
+    assert get_app_version() == "2.113+f75c54c"
+    assert get_app_version() == "2.113+f75c54c"
     # Two calls (rev-list + describe) on first invocation, zero after.
     assert calls["n"] == 2
 
@@ -391,8 +391,8 @@ def test_reset_cache_forces_recompute(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert get_app_version() == "2.100 (aaaaaaa)"
+    assert get_app_version() == "2.100+aaaaaaa"
     # Without reset, cached value is returned.
-    assert get_app_version() == "2.100 (aaaaaaa)"
+    assert get_app_version() == "2.100+aaaaaaa"
     reset_cache()
-    assert get_app_version() == "2.200 (bbbbbbb)"
+    assert get_app_version() == "2.200+bbbbbbb"

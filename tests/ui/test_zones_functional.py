@@ -344,20 +344,11 @@ class TestPageRender:
         /static/css/status.css.  Fetch linked stylesheets and grep the
         combined content rather than only the HTML body.
         """
-        import re
+        from tests.fixtures.css import fetch_inline_and_external_css
 
         resp = client.get("/")
         assert resp.status_code == 200
-        html = resp.data.decode()
-        pieces = [html]
-        for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
-            if href.startswith("http"):
-                continue
-            path = href if href.startswith("/") else "/" + href.lstrip("./")
-            css_resp = client.get(path)
-            if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
-        combined = "\n".join(pieces)
+        combined = fetch_inline_and_external_css(client, "/")
         classes = [
             "zone-card",
             "zc-icon",

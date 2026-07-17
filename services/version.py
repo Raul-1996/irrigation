@@ -2,11 +2,15 @@
 
 Single source of truth for the running app version.
 
-Format: ``2.<N> (<short_sha>[+dirty])`` where:
+Format: ``2.<N>+<short_sha>[+dirty]`` where:
 - ``2`` is the major (v2 line, anchored at the ``v2-base`` git tag).
 - ``<N>`` is the count of commits between ``v2-base`` and ``HEAD``.
 - ``<short_sha>`` is the abbreviated commit SHA of ``HEAD``.
 - ``+dirty`` is appended when the working tree has uncommitted changes.
+
+The string is semver build-metadata shaped and uses only URL-safe
+characters (``[A-Za-z0-9.+]``) — it is embedded verbatim in asset
+cache-bust query strings, so spaces/parens are not allowed.
 
 Resolution order:
 
@@ -93,7 +97,7 @@ def _run_git(args: list[str]):
 
 
 def _try_git_describe() -> str | None:
-    """Compose ``2.<N> (<sha>[+dirty])`` via two git invocations.
+    """Compose ``2.<N>+<sha>[+dirty]`` via two git invocations.
 
     Returns ``None`` if either invocation fails or yields empty output.
     Never raises.

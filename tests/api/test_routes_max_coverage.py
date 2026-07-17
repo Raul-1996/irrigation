@@ -4,8 +4,6 @@ import json
 import os
 from datetime import datetime, timedelta
 
-import pytest
-
 os.environ["TESTING"] = "1"
 
 
@@ -220,13 +218,22 @@ class TestPostponeDeep:
 
 
 class TestWaterUsageDeep:
-    @pytest.mark.xfail(reason="known bug: get_water_usage returns list but API expects dict")
     def test_water_with_usage_data(self, admin_client, app):
-        g = app.db.create_group("WUG")
-        z = app.db.create_zone({"name": "WU", "duration": 10, "group_id": g["id"]})
+        # Seeded group 1: freshly created groups get id 1000+ and /api/water
+        # skips ids >= 999 (999 = служебная группа "БЕЗ ПОЛИВА").
+        z = app.db.create_zone({"name": "WU", "duration": 10, "group_id": 1})
         app.db.add_water_usage(z["id"], 50)
         resp = admin_client.get("/api/water?days=30")
         assert resp.status_code == 200
+        data = resp.get_json()
+        group_data = data["1"]["data"]
+        assert group_data["total_liters"] == 50
+        zone_entry = group_data["zone_usage"][str(z["id"])]
+        assert zone_entry["name"] == "WU"
+        assert zone_entry["liters"] == 50
+        assert zone_entry["last_used"] is not None
+        assert len(group_data["daily_usage"]) == 30
+        assert sum(d["liters"] for d in group_data["daily_usage"]) == 50
 
     def test_water_no_data(self, admin_client, app):
         resp = admin_client.get("/api/water")

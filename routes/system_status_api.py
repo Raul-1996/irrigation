@@ -744,35 +744,54 @@ def api_logs():
 def api_water():
     """Water usage data — real data from DB or empty arrays."""
     try:
+        try:
+            days = max(1, min(365, int(request.args.get("days", 7))))
+        except (TypeError, ValueError):
+            days = 7
+        # get_water_usage(days) returns flat rows (zone_id, liters, timestamp,
+        # zone_name) for ALL zones over the window — fetch once, split per group.
+        try:
+            usage_rows = db.get_water_usage(days) if hasattr(db, "get_water_usage") else []
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("Exception in api_water: %s", e)
+            usage_rows = []
         groups = db.get_groups()
         water_data = {}
         for group in groups:
             if group["id"] >= 999:
                 continue
             group_id = str(group["id"])
-            daily_usage = []
-            total_liters = 0
-            zone_usage = {}
             try:
                 zones = db.get_zones_by_group(group["id"])
-                try:
-                    usage = db.get_water_usage(group["id"]) if hasattr(db, "get_water_usage") else None
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Exception in api_water: %s", e)
-                    usage = None
-                if usage:
-                    daily_usage = usage.get("daily_usage", [])
-                    total_liters = usage.get("total_liters", 0)
-                    zone_usage = usage.get("zone_usage", {})
-                else:
-                    for zone in zones:
-                        zone_usage[str(zone["id"])] = {"name": zone["name"], "liters": 0, "last_used": None}
-                    for i in range(7):
-                        date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-                        daily_usage.append({"date": date, "liters": 0})
+                zone_ids = {int(zone["id"]) for zone in zones}
+                zone_usage = {str(zone["id"]): {"name": zone["name"], "liters": 0, "last_used": None} for zone in zones}
+                total_liters = 0
+                liters_by_date: dict[str, float] = {}
+                for row in usage_rows:
+                    if row.get("zone_id") not in zone_ids:
+                        continue
+                    liters = float(row.get("liters") or 0)
+                    ts = str(row.get("timestamp") or "")
+                    total_liters += liters
+                    if ts:
+                        liters_by_date[ts[:10]] = liters_by_date.get(ts[:10], 0.0) + liters
+                    zu = zone_usage.get(str(row.get("zone_id")))
+                    if zu:
+                        zu["liters"] = round(zu["liters"] + liters, 2)
+                        # Rows are ordered by timestamp DESC — first hit is the freshest.
+                        if zu["last_used"] is None:
+                            zu["last_used"] = ts or None
+                daily_usage = []
+                for i in range(days):
+                    date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                    daily_usage.append({"date": date, "liters": round(liters_by_date.get(date, 0.0), 2)})
                 water_data[group_id] = {
                     "group_name": group["name"],
-                    "data": {"daily_usage": daily_usage, "total_liters": total_liters, "zone_usage": zone_usage},
+                    "data": {
+                        "daily_usage": daily_usage,
+                        "total_liters": round(total_liters, 2),
+                        "zone_usage": zone_usage,
+                    },
                 }
             except (sqlite3.Error, OSError) as e:
                 logger.error(f"Ошибка обработки группы {group['id']}: {e}")
