@@ -109,8 +109,20 @@ def api_update_group(group_id):
                     return jsonify({"success": False, "message": "pressure_unit должен быть bar|kPa|psi"}), 400
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in line_97: %s", e)
+        # Master-valve MQTT wiring changed → the SSE hub must resubscribe,
+        # otherwise it keeps listening on the old topic until service restart.
+        _mv_wiring = ("use_master_valve", "master_mqtt_topic", "master_mqtt_server_id")
+
+        def _group_row():
+            return next((g for g in (db.get_groups() or []) if int(g.get("id") or 0) == int(group_id)), None)
+
+        prev_g = _group_row() if any(f in updates for f in _mv_wiring) else None
         ok = db.update_group_fields(group_id, updates)
         updated = updated or ok
+        if ok and prev_g:
+            new_g = _group_row() or {}
+            if any(new_g.get(f) != prev_g.get(f) for f in _mv_wiring):
+                _sse_hub.reload_hub()
     if updated:
         try:
             payload = {"group": group_id}

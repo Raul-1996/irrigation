@@ -70,3 +70,42 @@ class TestSSEHub:
 
         buf = sse_hub.get_meta_buffer()
         assert isinstance(buf, list)
+
+
+class TestReloadHub:
+    def test_reload_noop_when_not_started(self):
+        from services import sse_hub
+
+        old = sse_hub._SSE_HUB_STARTED
+        sse_hub._SSE_HUB_STARTED = False
+        try:
+            sse_hub.reload_hub()
+            assert sse_hub._SSE_HUB_STARTED is False
+        finally:
+            sse_hub._SSE_HUB_STARTED = old
+
+    def test_reload_stops_old_clients_and_restarts(self):
+        from unittest.mock import MagicMock
+
+        from services import sse_hub
+
+        old_started = sse_hub._SSE_HUB_STARTED
+        old_cfg = sse_hub._app_config
+        old_mqtt = sse_hub._mqtt
+        fake_client = MagicMock()
+        sse_hub._SSE_HUB_MQTT[1] = fake_client
+        sse_hub._SSE_HUB_STARTED = True
+        sse_hub._app_config = {"TESTING": True}
+        sse_hub._mqtt = MagicMock()
+        try:
+            sse_hub.reload_hub()
+            fake_client.loop_stop.assert_called_once()
+            fake_client.disconnect.assert_called_once()
+            assert 1 not in sse_hub._SSE_HUB_MQTT
+            # Hub restarted (TESTING short-circuit sets the flag back)
+            assert sse_hub._SSE_HUB_STARTED is True
+        finally:
+            sse_hub._SSE_HUB_MQTT.pop(1, None)
+            sse_hub._SSE_HUB_STARTED = old_started
+            sse_hub._app_config = old_cfg
+            sse_hub._mqtt = old_mqtt

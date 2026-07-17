@@ -7,6 +7,7 @@ import sqlite3
 from flask import Blueprint, jsonify, request
 
 from database import db
+from services import sse_hub as _sse_hub
 from services.audit import audit_log, debug_audit
 from services.duration_conflicts import compute_duration_conflicts
 from services.next_watering import compute_next_watering
@@ -28,6 +29,12 @@ _STATE_MACHINE_FIELDS = {
     "fault_count",
     "last_fault",
 }
+
+
+# MQTT wiring of a zone: when these change, the SSE hub must resubscribe —
+# its topic maps are built once and would otherwise miss the new topic until
+# a service restart (relay echoes lost, observed_state stops updating).
+_MQTT_WIRING_FIELDS = ("topic", "mqtt_server_id")
 
 
 # Fields that store controller-local "YYYY-MM-DD HH:MM:SS" timestamps and are
@@ -117,6 +124,7 @@ def api_zone(zone_id):
                 )
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in api_zone: %s", e)
+        prev = db.get_zone(zone_id) if any(f in data for f in _MQTT_WIRING_FIELDS) else None
         zone = db.update_zone(zone_id, data)
         if zone:
             if is_csv:
@@ -125,6 +133,8 @@ def api_zone(zone_id):
                 except (OSError, ValueError) as e:
                     logger.debug("Handled exception in line_128: %s", e)
             db.add_log("zone_edit", json.dumps({"zone": zone_id, "changes": data}))
+            if prev and any(zone.get(f) != prev.get(f) for f in _MQTT_WIRING_FIELDS):
+                _sse_hub.reload_hub()
             return jsonify(zone)
         if is_csv:
             try:
@@ -134,8 +144,11 @@ def api_zone(zone_id):
         return ("Zone not found", 404)
 
     elif request.method == "DELETE":
+        prev = db.get_zone(zone_id)
         if db.delete_zone(zone_id):
             db.add_log("zone_delete", json.dumps({"zone": zone_id}))
+            if prev and (prev.get("topic") or "").strip() and prev.get("mqtt_server_id"):
+                _sse_hub.reload_hub()
             return ("", 204)
         return ("Zone not found", 404)
 
@@ -186,6 +199,8 @@ def api_create_zone():
                 logging.getLogger("import_export").info(f"POST result id={zone.get('id')} OK")
             except (KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in api_create_zone: %s", e)
+        if (zone.get("topic") or "").strip():
+            _sse_hub.reload_hub()
         return jsonify(zone), 201
     if is_csv:
         try:
@@ -227,6 +242,8 @@ def api_import_zones_bulk():
             db.add_log("zones_import", json.dumps({"counts": stats}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("Handled exception in api_import_zones_bulk: %s", e)
+        if any(isinstance(z, dict) and any(f in z for f in _MQTT_WIRING_FIELDS) for z in sanitised):
+            _sse_hub.reload_hub()
         return jsonify({"success": True, **stats})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка импорта зон: {e}")

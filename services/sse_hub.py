@@ -399,6 +399,33 @@ def ensure_hub_started() -> None:
         _SSE_HUB_STARTED = True
 
 
+def reload_hub() -> None:
+    """Перестроить MQTT-подписки хаба после изменения топиков зон/групп.
+
+    ``ensure_hub_started`` строит карты топиков один раз — без перестройки
+    хаб не видит новые/изменённые топики до рестарта сервиса.  Здесь мы
+    останавливаем старые paho-клиенты (их замыкания ``_on_message`` держат
+    снапшот старых карт — просто сбросить флаг нельзя, получим двойную
+    обработку сообщений), очищаем реестр и запускаем хаб заново.
+
+    No-op, пока хаб ещё не стартовал: первый SSE-клиент соберёт свежие карты.
+    """
+    global _SSE_HUB_STARTED
+    with _SSE_HUB_LOCK:
+        if not _SSE_HUB_STARTED:
+            return
+        for sid, client in list(_SSE_HUB_MQTT.items()):
+            try:
+                client.loop_stop()
+                client.disconnect()
+            except (ConnectionError, TimeoutError, OSError, RuntimeError, AttributeError) as e:
+                logger.debug("reload_hub: stop client sid=%s failed: %s", sid, e)
+        _SSE_HUB_MQTT.clear()
+        _SSE_HUB_STARTED = False
+    logger.info("SSE hub reload: MQTT clients stopped, rebuilding subscriptions")
+    ensure_hub_started()
+
+
 def _ensure_cleaner_started() -> None:
     """Start the background cleaner thread (once)."""
     global _SSE_CLEANER_STARTED
