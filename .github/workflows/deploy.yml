@@ -25,7 +25,7 @@ jobs:
           script: |
             cd /opt/wb-irrigation/irrigation
             git pull origin main
-            pip3 install -r requirements.txt
+            venv/bin/pip install -r requirements.txt
             systemctl restart wb-irrigation
             sleep 3
             systemctl is-active wb-irrigation && echo "✅ Deploy OK" || echo "❌ Deploy FAILED"
