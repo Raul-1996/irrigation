@@ -10,16 +10,18 @@ echo "================================================"
 
 # Проверка наличия Python
 if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 не найден! Установите Python 3.8+"
+    echo "❌ Python 3 не найден! Установите Python 3.11+"
     exit 1
 fi
 
 PYTHON_VERSION=$(python3 --version | cut -d' ' -f2 | cut -d'.' -f1,2)
 echo "✅ Python версия: $PYTHON_VERSION"
 
-# Проверка версии Python
-if [[ $(echo "$PYTHON_VERSION >= 3.8" | bc -l) -eq 0 ]]; then
-    echo "❌ Требуется Python 3.8 или выше!"
+# Проверка версии Python (минимум 3.11 — см. pyproject.toml requires-python)
+PY_MAJOR=${PYTHON_VERSION%%.*}
+PY_MINOR=${PYTHON_VERSION#*.}
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 11 ]; }; then
+    echo "❌ Требуется Python 3.11 или выше!"
     exit 1
 fi
 

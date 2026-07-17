@@ -63,7 +63,7 @@ pip install -r requirements-dev.txt
 python run.py
 
 # 6. Запуск тестов
-python tools/tests/tests.py
+pytest -q
 ```
 
 ### 🧰 Wirenboard (установка без Docker)
@@ -124,7 +124,7 @@ install.bat
 start.bat
 
 # 3. Запуск автотестов (опционально)
-python tools/tests/tests.py
+pytest -q
 ```
 
 #### Ручная установка
@@ -148,7 +148,7 @@ pip install -r requirements-dev.txt
 python run.py
 
 # 6. Запуск тестов
-python tools/tests/tests.py
+pytest -q
 ```
 
 ### 🌐 Доступ к приложению
@@ -305,12 +305,12 @@ python tools/tests/tests.py
 wb-irrigation/
 ├── app.py              # Основное Flask приложение
 ├── database.py         # Модуль работы с SQLite БД
-├── tests.py            # Автотесты
+├── tests/              # Автотесты (pytest)
 ├── run.py              # Скрипт запуска
 ├── requirements.txt    # Зависимости Python
 ├── setup.sh           # Скрипт настройки (Linux/macOS)
 ├── start.sh           # Скрипт запуска (Linux/macOS)
-├── test.sh            # Скрипт тестирования (Linux/macOS)
+├── start_tests.sh     # Скрипт тестирования (Linux/macOS)
 ├── install.bat        # Скрипт настройки (Windows)
 ├── start.bat          # Скрипт запуска (Windows)
 ├── README.md          # Документация
@@ -359,7 +359,7 @@ wb-irrigation/
 ./start_tests.sh
 
 # Ручной запуск
-python tools/tests/tests.py
+pytest -q
 ```
 
 ### Покрытие тестами
@@ -464,11 +464,11 @@ lsof -i :8080
 # Запуск всех тестов
 ./start_tests.sh
 
-# Запуск конкретного теста
-python -m unittest tests.TestIrrigationSystem.test_zone_operations
+# Запуск конкретного файла тестов
+pytest tests/unit/test_scheduler_v2.py
 
 # Подробный вывод
-python tools/tests/tests.py -v
+pytest -v
 ```
 
 ## 🔄 Перенос и деплой
@@ -511,13 +511,17 @@ MIT License - свободное использование и модифика�
 
 ```bash
 source venv/bin/activate
-python run_all_tests.py
+pytest -q
 ```
 
-### Pytest (unit style)
+Маркеры `e2e` и `mqtt_real` исключены из дефолтного прогона (см. `addopts` в `pytest.ini`).
 
-We are migrating tests to pytest. To run pytest suites (as they are added):
+### E2E и тесты с реальным брокером (opt-in)
 
 ```bash
-pytest -q
+# E2E против живого контроллера
+WB_E2E_URL=http://<controller>:8080 WB_E2E_PASSWORD=<password> pytest -m e2e
+
+# Интеграция с реальным MQTT-брокером
+WB_MQTT_HOST=<broker> pytest -m mqtt_real
 ```

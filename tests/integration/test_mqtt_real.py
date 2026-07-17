@@ -1,18 +1,24 @@
-"""Integration tests with REAL MQTT broker on 10.2.5.244:1883."""
+"""Integration tests with a real MQTT broker (opt-in: pytest -m mqtt_real).
 
+Требуется переменная окружения WB_MQTT_HOST (опционально WB_MQTT_PORT, по умолчанию 1883).
+"""
+
+import os
 import time
 
 import pytest
 
 pytestmark = pytest.mark.mqtt_real
 
-MQTT_HOST = "10.2.5.244"
-MQTT_PORT = 1883
+MQTT_HOST = os.environ.get("WB_MQTT_HOST", "")
+MQTT_PORT = int(os.environ.get("WB_MQTT_PORT", "1883"))
 
 
 @pytest.fixture
 def mqtt_client():
     """Create a real MQTT client connected to the broker."""
+    if not MQTT_HOST:
+        pytest.fail("mqtt_real tests require the WB_MQTT_HOST environment variable")
     try:
         import paho.mqtt.client as mqtt
     except ImportError:

@@ -1,16 +1,23 @@
-"""E2E tests against the live controller at http://10.2.5.244:8080."""
+"""E2E tests against a live controller (opt-in: pytest -m e2e).
+
+Требуются переменные окружения WB_E2E_URL и WB_E2E_PASSWORD.
+"""
+
+import os
 
 import pytest
 
 pytestmark = pytest.mark.e2e
 
-CONTROLLER_URL = "http://10.2.5.244:8080"
-PASSWORD = "1234"
+CONTROLLER_URL = os.environ.get("WB_E2E_URL", "")
+PASSWORD = os.environ.get("WB_E2E_PASSWORD", "")
 
 
 @pytest.fixture
 def live_session():
     """Create an authenticated session to the live controller."""
+    if not CONTROLLER_URL or not PASSWORD:
+        pytest.fail("e2e tests require WB_E2E_URL and WB_E2E_PASSWORD environment variables")
     try:
         import httpx
     except ImportError:
