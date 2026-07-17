@@ -83,6 +83,12 @@ class LoginRateLimiter:
             self._attempts.pop(ip, None)
             self._lockouts.pop(ip, None)
 
+    def reset_all(self) -> None:
+        """Drop all failure counts and lockouts (test isolation)."""
+        with self._lock:
+            self._attempts.clear()
+            self._lockouts.clear()
+
 
 # Module-level singleton
 login_limiter = LoginRateLimiter()

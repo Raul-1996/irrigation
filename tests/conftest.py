@@ -21,6 +21,20 @@ from tests.fixtures.mqtt import mock_mqtt_client, mock_mqtt_module, patched_mqtt
 
 
 @pytest.fixture(autouse=True)
+def _reset_login_rate_limiter():
+    """Isolate tests from the module-level login limiter.
+
+    Failed logins accumulated by earlier tests in the same process otherwise
+    push later login tests into 429 lockout (order-dependent failures in
+    TestLoginLogout under a full serial run).
+    """
+    from services.rate_limiter import login_limiter
+
+    login_limiter.reset_all()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _set_testing_env():
     """Ensure TESTING=1 is set for all tests."""
     old = os.environ.get("TESTING")
