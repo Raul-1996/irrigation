@@ -122,6 +122,7 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
 
 def _boot_sync(app, db):
     """Ensure all zones and master-valves are OFF at controller start."""
+    from services.master_valve import close_all_master_valves
     from services.mqtt_pub import publish_mqtt_value as _publish
     from utils import normalize_topic
 
@@ -160,42 +161,6 @@ def _boot_sync(app, db):
         except (sqlite3.Error, OSError) as e:
             logger.warning("boot_sync: aborted-run cleanup failed: %s", e)
 
-        # Close master-valves (mode-aware, retain)
-        try:
-            seen: set = set()
-            for g in db.get_groups() or []:
-                try:
-                    if int(g.get("use_master_valve") or 0) != 1:
-                        continue
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Exception in _boot_sync: %s", e)
-                    continue
-                mtopic = (g.get("master_mqtt_topic") or "").strip()
-                msid = g.get("master_mqtt_server_id")
-                if not mtopic or not msid:
-                    continue
-                key = (int(msid), mtopic)
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    server = db.get_mqtt_server(int(msid))
-                    if server:
-                        try:
-                            mode = (g.get("master_mode") or "NC").strip().upper()
-                        except (ValueError, TypeError, KeyError) as e:
-                            logger.debug("Exception in line_113: %s", e)
-                            mode = "NC"
-                        close_val = "1" if mode == "NO" else "0"
-                        logger.info(
-                            f"Boot sync: closing master valve sid={msid} topic={mtopic} mode={mode} val={close_val}"
-                        )
-                        _publish(server, normalize_topic(mtopic), close_val, min_interval_sec=0.0, retain=True, qos=2)
-                except (ConnectionError, TimeoutError, OSError):
-                    logger.exception("Boot sync: master valve close failed")
-        except (ConnectionError, TimeoutError, OSError):
-            logger.exception("Boot sync: master valve sweep failed")
-
         # Direct MQTT OFF publish per zone (secondary safety net with retries)
         try:
             zones = db.get_zones() or []
@@ -211,61 +176,16 @@ def _boot_sync(app, db):
                                 ok = _publish(server, t_norm, "0", min_interval_sec=0.0, retain=True, qos=2)
                                 if ok:
                                     break
-                                try:
-                                    time.sleep(0.2 * (attempt + 1))
-                                except (ValueError, TypeError, KeyError) as e:
-                                    logger.debug("Handled exception in line_142: %s", e)
-                            try:
-                                time.sleep(0.01)
-                            except (ValueError, TypeError, KeyError, OSError) as e:
-                                logger.debug("Handled exception in line_146: %s", e)
+                                time.sleep(0.2 * (attempt + 1))
+                            time.sleep(0.01)
                 except (ConnectionError, TimeoutError, OSError) as e:
                     logger.debug("Handled exception in line_148: %s", e)
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in line_150: %s", e)
 
-        # Close all configured master valves with retries (secondary safety net)
+        # Close all configured master valves with retries (mode-aware, retain)
         try:
-            seen2: set = set()
-            for g in db.get_groups() or []:
-                try:
-                    if int(g.get("use_master_valve") or 0) != 1:
-                        continue
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Exception in line_160: %s", e)
-                    continue
-                mtopic = (g.get("master_mqtt_topic") or "").strip()
-                msid = g.get("master_mqtt_server_id")
-                if not mtopic or not msid:
-                    continue
-                key = (int(msid), mtopic)
-                if key in seen2:
-                    continue
-                seen2.add(key)
-                try:
-                    server = db.get_mqtt_server(int(msid))
-                    if server:
-                        try:
-                            mode = (g.get("master_mode") or "NC").strip().upper()
-                        except (ValueError, TypeError, KeyError) as e:
-                            logger.debug("Exception in line_176: %s", e)
-                            mode = "NC"
-                        close_val = "1" if mode == "NO" else "0"
-                        t_norm = normalize_topic(mtopic)
-                        for attempt in range(3):
-                            ok = _publish(server, t_norm, close_val, min_interval_sec=0.0, retain=True, qos=2)
-                            if ok:
-                                break
-                            try:
-                                time.sleep(0.2 * (attempt + 1))
-                            except (ValueError, TypeError, KeyError) as e:
-                                logger.debug("Handled exception in line_187: %s", e)
-                        try:
-                            time.sleep(0.01)
-                        except (ValueError, TypeError, KeyError, OSError) as e:
-                            logger.debug("Handled exception in line_191: %s", e)
-                except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.debug("Handled exception in line_193: %s", e)
+            close_all_master_valves(db, _publish)
         except (ConnectionError, TimeoutError, OSError):
             logger.exception("boot sync OFF (secondary) failed")
 

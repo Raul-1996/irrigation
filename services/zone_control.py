@@ -404,67 +404,68 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                             logger.debug("observed_state verify_async(on) launch failed")
             except (ConnectionError, TimeoutError, OSError):
                 logger.exception("exclusive_start_zone: mqtt on failed")
-            # Stop others in parallel to reduce latency
+            # Stop others in parallel to reduce latency. _stop_peer is defined
+            # before the try so the sequential fallback below can reuse it.
+            def _stop_peer(other, log_suffix=""):
+                try:
+                    oid = int(other.get("id"))
+                    if oid == int(zone_id):
+                        return
+                    with zone_lock(oid):
+                        ost = str((db.get_zone(oid) or {}).get("state") or "").lower()
+                        if ost not in ("off",):
+                            _versioned_update(
+                                oid, {"state": "stopping", "commanded_state": "off"}, audit_reason="peer_stop"
+                            )
+                    osid = other.get("mqtt_server_id")
+                    otopic = (other.get("topic") or "").strip()
+                    if osid and otopic:
+                        server_o = db.get_mqtt_server(int(osid))
+                        if server_o:
+                            publish_mqtt_value(
+                                server_o,
+                                normalize_topic(otopic),
+                                "0",
+                                min_interval_sec=0.0,
+                                qos=2,
+                                retain=True,
+                                meta={"cmd": "peer_off", "ver": str((other.get("version") or 0) + 1)},
+                            )
+                            with zone_lock(oid):
+                                # Close the open zone_run before flipping
+                                # state — leaves a clean 'ok' row in
+                                # history so get_last_watering_time()
+                                # picks it up. Pre-refactor this path
+                                # leaked open runs: they would only be
+                                # marked 'aborted' on the next reboot via
+                                # _boot_sync, never count as a successful
+                                # watering. The whole find-open-run →
+                                # finish-run → state-update sequence runs
+                                # under the same lock so concurrent
+                                # exclusive_start_zone calls cannot
+                                # double-finish the same run.
+                                try:
+                                    _run = db.get_open_zone_run(oid)
+                                    if _run:
+                                        db.finish_zone_run(
+                                            int(_run["id"]),
+                                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            time.monotonic(),
+                                            None,
+                                            None,
+                                            None,
+                                            status="ok",
+                                        )
+                                except (sqlite3.Error, OSError):
+                                    logger.exception("peer_off finish_zone_run failed oid=%s", oid)
+                                _versioned_update(
+                                    oid, {"state": "off", "watering_start_time": None}, audit_reason="peer_off"
+                                )
+                except (ConnectionError, TimeoutError, OSError):
+                    logger.exception("exclusive_start_zone: mqtt off peer failed%s", log_suffix)
+
             try:
                 import concurrent.futures
-
-                def _stop_peer(other):
-                    try:
-                        oid = int(other.get("id"))
-                        if oid == int(zone_id):
-                            return
-                        with zone_lock(oid):
-                            ost = str((db.get_zone(oid) or {}).get("state") or "").lower()
-                            if ost not in ("off",):
-                                _versioned_update(
-                                    oid, {"state": "stopping", "commanded_state": "off"}, audit_reason="peer_stop"
-                                )
-                        osid = other.get("mqtt_server_id")
-                        otopic = (other.get("topic") or "").strip()
-                        if osid and otopic:
-                            server_o = db.get_mqtt_server(int(osid))
-                            if server_o:
-                                publish_mqtt_value(
-                                    server_o,
-                                    normalize_topic(otopic),
-                                    "0",
-                                    min_interval_sec=0.0,
-                                    qos=2,
-                                    retain=True,
-                                    meta={"cmd": "peer_off", "ver": str((other.get("version") or 0) + 1)},
-                                )
-                                with zone_lock(oid):
-                                    # Close the open zone_run before flipping
-                                    # state — leaves a clean 'ok' row in
-                                    # history so get_last_watering_time()
-                                    # picks it up. Pre-refactor this path
-                                    # leaked open runs: they would only be
-                                    # marked 'aborted' on the next reboot via
-                                    # _boot_sync, never count as a successful
-                                    # watering. The whole find-open-run →
-                                    # finish-run → state-update sequence runs
-                                    # under the same lock so concurrent
-                                    # exclusive_start_zone calls cannot
-                                    # double-finish the same run.
-                                    try:
-                                        _run = db.get_open_zone_run(oid)
-                                        if _run:
-                                            db.finish_zone_run(
-                                                int(_run["id"]),
-                                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                time.monotonic(),
-                                                None,
-                                                None,
-                                                None,
-                                                status="ok",
-                                            )
-                                    except (sqlite3.Error, OSError):
-                                        logger.exception("peer_off finish_zone_run failed oid=%s", oid)
-                                    _versioned_update(
-                                        oid, {"state": "off", "watering_start_time": None}, audit_reason="peer_off"
-                                    )
-                    except (ConnectionError, TimeoutError, OSError):
-                        logger.exception("exclusive_start_zone: mqtt off peer failed")
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(group_zones) - 1))) as pool:
                     pool.map(_stop_peer, group_zones)
@@ -472,57 +473,7 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                 logger.warning("Parallel peer stop failed, falling back to sequential: %s", e)
                 # Fallback to sequential if parallelization fails for any reason
                 for other in group_zones:
-                    try:
-                        oid = int(other.get("id"))
-                        if oid == int(zone_id):
-                            continue
-                        with zone_lock(oid):
-                            ost = str((db.get_zone(oid) or {}).get("state") or "").lower()
-                            if ost not in ("off",):
-                                _versioned_update(
-                                    oid, {"state": "stopping", "commanded_state": "off"}, audit_reason="peer_stop"
-                                )
-                        osid = other.get("mqtt_server_id")
-                        otopic = (other.get("topic") or "").strip()
-                        if osid and otopic:
-                            server_o = db.get_mqtt_server(int(osid))
-                            if server_o:
-                                publish_mqtt_value(
-                                    server_o,
-                                    normalize_topic(otopic),
-                                    "0",
-                                    min_interval_sec=0.0,
-                                    qos=2,
-                                    retain=True,
-                                    meta={"cmd": "peer_off", "ver": str((other.get("version") or 0) + 1)},
-                                )
-                                with zone_lock(oid):
-                                    # Close the open zone_run (see parallel
-                                    # branch comment above) — required for
-                                    # peer_off to show up in
-                                    # get_last_watering_time(). Run-close +
-                                    # state update are atomic under the lock
-                                    # to prevent double-finish under
-                                    # concurrent exclusive_start_zone calls.
-                                    try:
-                                        _run = db.get_open_zone_run(oid)
-                                        if _run:
-                                            db.finish_zone_run(
-                                                int(_run["id"]),
-                                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                time.monotonic(),
-                                                None,
-                                                None,
-                                                None,
-                                                status="ok",
-                                            )
-                                    except (sqlite3.Error, OSError):
-                                        logger.exception("peer_off finish_zone_run failed oid=%s", oid)
-                                    _versioned_update(
-                                        oid, {"state": "off", "watering_start_time": None}, audit_reason="peer_off"
-                                    )
-                    except (ConnectionError, TimeoutError, OSError):
-                        logger.exception("exclusive_start_zone: mqtt off peer failed (sequential)")
+                    _stop_peer(other, " (sequential)")
         try:
             # publish event
             from services import events as _ev
@@ -534,6 +485,92 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
     except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError):
         logger.exception("exclusive_start_zone failed")
         return False
+
+
+def _finalize_water_stats(zone_id: int, z: dict, since_iso: str | None, *, log_label: str = "stop_zone") -> None:
+    """Посчитать и сохранить водную статистику при остановке зоны.
+
+    Быстрый путь — снапшот пульсов открытого zone_run (finish_zone_run);
+    фоллбэк — summarize_run от ``since_iso`` (оригинальное время старта —
+    summarize_run интегрирует пульсы начиная с него). Никогда не бросает
+    исключений: log-and-continue, остановка зоны важнее статистики.
+    """
+    try:
+        gid = int(z.get("group_id") or 0)
+        total_liters = None
+        avg_lpm = None
+        if gid and gid != 999:
+            try:
+                run = db.get_open_zone_run(int(zone_id))
+            except (sqlite3.Error, OSError) as e:
+                logger.debug("%s: get_open_zone_run failed: %s", log_label, e)
+                run = None
+            if run:
+                try:
+                    # Берём пульсы на/после момента стопа, чтобы избежать лагов
+                    end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
+                except (ValueError, TypeError, AttributeError, OSError) as e:
+                    logger.debug("%s: get_pulses_at_or_after failed: %s", log_label, e)
+                    end_raw = None
+                try:
+                    start_raw = run.get("start_raw_pulses")
+                    liters_per_pulse = int(run.get("pulse_liters_at_start") or 1)
+                    end_mono = time.monotonic()
+                    start_mono = float(run.get("start_monotonic") or 0.0)
+                    dp = None if (end_raw is None or start_raw is None) else max(0, int(end_raw) - int(start_raw))
+                    if dp is not None:
+                        total_liters = round(dp * liters_per_pulse, 2)
+                        dur_sec = max(1.0, end_mono - start_mono)
+                        avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
+                    db.finish_zone_run(
+                        int(run["id"]),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        end_mono,
+                        end_raw,
+                        total_liters,
+                        avg_lpm,
+                        status="ok",
+                    )
+                except (sqlite3.Error, OSError):
+                    logger.exception("%s: finish snapshot failed", log_label)
+            # Если снапшоты не дали результата — fallback к summarize_run.
+            if (total_liters is None) and (avg_lpm is None) and since_iso:
+                t_l, a_lpm = water_monitor.summarize_run(gid, since_iso)
+                total_liters = t_l if t_l is not None else total_liters
+                avg_lpm = a_lpm if a_lpm is not None else avg_lpm
+        if (total_liters is not None) or (avg_lpm is not None):
+            updates = {}
+            if avg_lpm is not None:
+                updates["last_avg_flow_lpm"] = avg_lpm
+            if total_liters is not None:
+                updates["last_total_liters"] = total_liters
+            if updates:
+                db.update_zone(int(zone_id), updates)
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        logger.exception("%s: water stats update failed", log_label)
+
+
+def _maybe_schedule_master_close(
+    z: dict, master_close_immediately: bool, skip_master_close: bool, *, log_label: str = "stop_zone"
+) -> None:
+    """Запланировать закрытие мастер-клапана группы зоны (если он включён).
+
+    Log-and-continue: любые ошибки поиска группы или планирования не должны
+    ронять stop_zone.
+    """
+    try:
+        gid = int(z.get("group_id") or 0)
+        if not gid or gid == 999 or skip_master_close:
+            return
+        try:
+            g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == gid), None)
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("%s: get_groups failed: %s", log_label, e)
+            g = None
+        if g and int(g.get("use_master_valve") or 0) == 1:
+            _schedule_master_close(g, immediate=bool(master_close_immediately))
+    except (ValueError, TypeError, KeyError, ConnectionError, TimeoutError, OSError, RuntimeError):
+        logger.exception("%s: master valve close scheduling failed", log_label)
 
 
 def stop_zone(
@@ -574,85 +611,19 @@ def stop_zone(
                 reason,
             )
             # Зона уже оффлайн (часто по MQTT). Тем не менее, попробуем посчитать и сохранить статистику воды.
-            try:
-                gid = int(z.get("group_id") or 0)
-                if gid and gid != 999:
-                    total_liters = None
-                    avg_lpm = None
-                    # 1) Если есть открытый run — завершим его по текущим пульсам
-                    try:
-                        run = db.get_open_zone_run(int(zone_id))
-                    except (sqlite3.Error, OSError) as e:
-                        logger.debug("Exception in stop_zone: %s", e)
-                        run = None
-                    if run:
-                        try:
-                            end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                        except (ValueError, TypeError, AttributeError, OSError) as e:
-                            logger.debug("Exception in stop_zone: %s", e)
-                            end_raw = None
-                        try:
-                            start_raw = run.get("start_raw_pulses")
-                            liters_per_pulse = int(run.get("pulse_liters_at_start") or 1)
-                            end_mono = time.monotonic()
-                            start_mono = float(run.get("start_monotonic") or 0.0)
-                            dp = (
-                                None
-                                if (end_raw is None or start_raw is None)
-                                else max(0, int(end_raw) - int(start_raw))
-                            )
-                            if dp is not None:
-                                total_liters = round(dp * liters_per_pulse, 2)
-                                dur_sec = max(1.0, end_mono - start_mono)
-                                avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
-                            db.finish_zone_run(
-                                int(run["id"]),
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                end_mono,
-                                end_raw,
-                                total_liters,
-                                avg_lpm,
-                                status="ok",
-                            )
-                        except (sqlite3.Error, OSError):
-                            logger.exception("finish snapshot (already off) failed")
-                    # 2) Фоллбэк: по времени последнего полива/старта посчитаем суммарно
-                    if (total_liters is None) and (avg_lpm is None):
-                        try:
-                            since_iso = z.get("last_watering_time") or z.get("watering_start_time")
-                        except (KeyError, TypeError, ValueError) as e:
-                            logger.debug("Exception in line_219: %s", e)
-                            since_iso = None
-                        if since_iso:
-                            t_l, a_lpm = water_monitor.summarize_run(gid, since_iso)
-                            total_liters = t_l if t_l is not None else total_liters
-                            avg_lpm = a_lpm if a_lpm is not None else avg_lpm
-                    if (total_liters is not None) or (avg_lpm is not None):
-                        updates = {}
-                        if avg_lpm is not None:
-                            updates["last_avg_flow_lpm"] = avg_lpm
-                        if total_liters is not None:
-                            updates["last_total_liters"] = total_liters
-                        if updates:
-                            db.update_zone(int(zone_id), updates)
-            except (sqlite3.Error, OSError, ValueError, TypeError):
-                logger.exception("stop_zone (already off): water stats update failed")
+            _finalize_water_stats(
+                zone_id,
+                z,
+                z.get("last_watering_time") or z.get("watering_start_time"),
+                log_label="stop_zone (already off)",
+            )
             # Even when the zone was already off (idempotent path), the caller
             # may want to (re)schedule a master-valve close — required for
             # emergency_stop / rain monitor paths and for keeping idempotency
             # on duplicate manual stops.
-            try:
-                gid_eo = int(z.get("group_id") or 0)
-                if gid_eo and gid_eo != 999:
-                    try:
-                        g_eo = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == gid_eo), None)
-                    except (sqlite3.Error, OSError) as _e:
-                        logger.debug("stop_zone (already off): get_groups failed: %s", _e)
-                        g_eo = None
-                    if g_eo and int(g_eo.get("use_master_valve") or 0) == 1 and not skip_master_close:
-                        _schedule_master_close(g_eo, immediate=bool(master_close_immediately))
-            except (ValueError, TypeError, KeyError) as _e:
-                logger.debug("stop_zone (already off): master close scheduling skipped: %s", _e)
+            _maybe_schedule_master_close(
+                z, master_close_immediately, skip_master_close, log_label="stop_zone (already off)"
+            )
             return True
         # `start_iso` is the original watering start — used as the lower bound
         # for summarize_run() water-stats fallback below (must NOT be touched).
@@ -685,14 +656,7 @@ def stop_zone(
                         logger.debug("observed_state verify_async(off) launch failed")
                     # Delayed master valve close — uses per-group delay
                     # (master_close_delay_sec) and proper cancellable timer.
-                    try:
-                        gid = int(z.get("group_id") or 0)
-                        if gid and gid != 999 and not skip_master_close:
-                            g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == gid), None)
-                            if g and int(g.get("use_master_valve") or 0) == 1:
-                                _schedule_master_close(g, immediate=bool(master_close_immediately))
-                    except (ConnectionError, TimeoutError, OSError, RuntimeError):
-                        logger.exception("master valve close scheduling failed")
+                    _maybe_schedule_master_close(z, master_close_immediately, skip_master_close)
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
             logger.exception("stop_zone: mqtt off failed")
         # Завершаем переход: stopping -> off.
@@ -705,64 +669,11 @@ def stop_zone(
                 {"state": "off", "watering_start_time": None, "planned_end_time": None},
                 audit_reason=f"stop_{reason}_complete",
             )
-        # Обновим статистику воды для зоны, если группа использует счётчик
-        try:
-            gid = int(z.get("group_id") or 0)
-            total_liters = None
-            avg_lpm = None
-            if gid and gid != 999:
-                # Попробуем быстрый расчёт по снапшотам
-                try:
-                    run = db.get_open_zone_run(int(zone_id))
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Exception in line_305: %s", e)
-                    run = None
-                if run:
-                    try:
-                        # Берём пульсы на/после момента стопа, чтобы избежать лагов
-                        end_raw = water_monitor.get_pulses_at_or_after(gid, time.time())
-                    except (ValueError, TypeError, AttributeError, OSError) as e:
-                        logger.debug("Exception in line_312: %s", e)
-                        end_raw = None
-                    try:
-                        start_raw = run.get("start_raw_pulses")
-                        liters_per_pulse = int(run.get("pulse_liters_at_start") or 1)
-                        end_mono = time.monotonic()
-                        start_mono = float(run.get("start_monotonic") or 0.0)
-                        dp = None if (end_raw is None or start_raw is None) else max(0, int(end_raw) - int(start_raw))
-                        if dp is not None:
-                            total_liters = round(dp * liters_per_pulse, 2)
-                            dur_sec = max(1.0, end_mono - start_mono)
-                            avg_lpm = round(total_liters / (dur_sec / 60.0), 2)
-                        db.finish_zone_run(
-                            int(run["id"]),
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            end_mono,
-                            end_raw,
-                            total_liters,
-                            avg_lpm,
-                            status="ok",
-                        )
-                    except (sqlite3.Error, OSError):
-                        logger.exception("finish snapshot failed")
-                # Если снапшоты не дали результата — fallback к summarize_run.
-                # NOTE: summarize_run needs the ORIGINAL start time (start_iso)
-                # as its lower bound — it integrates pulse counts since then.
-                # Do NOT pass end_iso here.
-                if (total_liters is None) and (avg_lpm is None):
-                    t_l, a_lpm = water_monitor.summarize_run(gid, start_iso)
-                    total_liters = t_l if t_l is not None else total_liters
-                    avg_lpm = a_lpm if a_lpm is not None else avg_lpm
-            if total_liters is not None or avg_lpm is not None:
-                updates = {}
-                if avg_lpm is not None:
-                    updates["last_avg_flow_lpm"] = avg_lpm
-                if total_liters is not None:
-                    updates["last_total_liters"] = total_liters
-                if updates:
-                    db.update_zone(int(zone_id), updates)
-        except (sqlite3.Error, OSError, ValueError, TypeError):
-            logger.exception("stop_zone: water stats update failed")
+        # Обновим статистику воды для зоны, если группа использует счётчик.
+        # NOTE: summarize_run needs the ORIGINAL start time (start_iso)
+        # as its lower bound — it integrates pulse counts since then.
+        # Do NOT pass end_iso here.
+        _finalize_water_stats(zone_id, z, start_iso)
         try:
             db.add_log("zone_stop", f"{reason}: zone={int(zone_id)}")
         except (sqlite3.Error, OSError) as e:

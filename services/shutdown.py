@@ -42,6 +42,7 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
         return
 
     try:
+        from services.master_valve import iter_master_close_targets
         from services.mqtt_pub import get_or_create_mqtt_client
         from utils import normalize_topic
     except ImportError:
@@ -107,51 +108,33 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     except (sqlite3.Error, OSError, Exception):
         groups = []
 
-    seen_master_topics: set = set()
-    for g in groups:
-        try:
-            if int(g.get("use_master_valve") or 0) != 1:
-                continue
-            mtopic_raw = (g.get("master_mqtt_topic") or "").strip()
-            msid = g.get("master_mqtt_server_id")
-            if not mtopic_raw or not msid:
-                continue
-            msid = int(msid)
-            mtopic = normalize_topic(mtopic_raw)
-            # deduplicate — same physical valve may be shared across groups
-            if mtopic in seen_master_topics:
-                continue
-            seen_master_topics.add(mtopic)
+    try:
+        for msid, mtopic, close_val in iter_master_close_targets(groups):
+            try:
+                if msid not in server_cache:
+                    try:
+                        server_cache[msid] = db.get_mqtt_server(msid)
+                    except (sqlite3.Error, OSError, Exception):
+                        server_cache[msid] = None
+                mserver = server_cache.get(msid)
+                if not mserver:
+                    continue
 
-            if msid not in server_cache:
+                cl = get_or_create_mqtt_client(mserver)
+                if cl is None:
+                    continue
+                res = cl.publish(mtopic, payload=close_val, qos=2, retain=True)
+                inflight.append((mtopic, res))
                 try:
-                    server_cache[msid] = db.get_mqtt_server(msid)
-                except (sqlite3.Error, OSError, Exception):
-                    server_cache[msid] = None
-            mserver = server_cache.get(msid)
-            if not mserver:
-                continue
-
-            try:
-                mode = (g.get("master_mode") or "NC").strip().upper()
-            except (ValueError, TypeError, KeyError):
-                mode = "NC"
-            # Close: NC → '0' (de-energise = closed), NO → '1' (energise = closed)
-            close_val = "0" if mode == "NC" else "1"
-
-            cl = get_or_create_mqtt_client(mserver)
-            if cl is None:
-                continue
-            res = cl.publish(mtopic, payload=close_val, qos=2, retain=True)
-            inflight.append((mtopic, res))
-            try:
-                res_on = cl.publish(mtopic + "/on", payload=close_val, qos=2, retain=True)
-                inflight.append((mtopic + "/on", res_on))
-            except (ConnectionError, TimeoutError, OSError):
-                pass
-            master_count += 1
-        except (ValueError, TypeError, KeyError, ConnectionError, TimeoutError, OSError, Exception) as exc:
-            logger.warning("Shutdown: master valve error: %s", exc)
+                    res_on = cl.publish(mtopic + "/on", payload=close_val, qos=2, retain=True)
+                    inflight.append((mtopic + "/on", res_on))
+                except (ConnectionError, TimeoutError, OSError):
+                    pass
+                master_count += 1
+            except (ValueError, TypeError, KeyError, ConnectionError, TimeoutError, OSError, Exception) as exc:
+                logger.warning("Shutdown: master valve error: %s", exc)
+    except Exception as exc:
+        logger.warning("Shutdown: master valve sweep error: %s", exc)
 
     # ── wait for publish acknowledgements ───────────────────────────
     success = 0

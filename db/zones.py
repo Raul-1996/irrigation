@@ -9,9 +9,99 @@ from db.base import BaseRepository, retry_on_busy
 
 logger = logging.getLogger(__name__)
 
+# SEC-004: bulk-импорт (bulk_upsert_zones) обновляет только этот строгий
+# whitelist колонок. B1 FIX: 'state' и прочие поля state-machine намеренно
+# ИСКЛЮЧЕНЫ — импорт не должен обходить state-machine guard, optimistic-lock
+# и audit trail в services.zones_state. Любой вызывающий, который хочет
+# менять runtime-состояние зоны, обязан идти через /api/zones/<id>/start|stop
+# или services.zones_state.update_zone_state, чтобы был zone_state_change
+# audit row.
+_ALLOWED_UPDATE_COLUMNS = frozenset(
+    {
+        "name",
+        "icon",
+        "duration",
+        "group_id",
+        "topic",
+        "mqtt_server_id",
+    }
+)
+
 
 class ZoneRepository(BaseRepository):
     """Repository for zone CRUD, bulk operations, and zone_runs."""
+
+    @staticmethod
+    def _build_zone_update_fields(
+        merged: dict[str, Any], payload: dict[str, Any], allowed: frozenset[str] | None = None
+    ) -> tuple[list[str], list[Any]]:
+        """Собрать SET-часть UPDATE zones по единому whitelist'у колонок.
+
+        ``merged`` — текущая строка с наложенным поверх payload'ом: штатные
+        колонки всегда присутствуют в строке и попадают в SET с актуальным
+        значением. State-machine/verifier-поля (PHYS-1 / MASTER-C1:
+        StateVerifier._record_fault и пр.) берутся только из ``payload`` —
+        merged-путь не должен трогать их неявно.
+
+        ``allowed`` дополнительно сужает список колонок (SEC-004: импорт).
+        Имена колонок здесь всегда литеральные, значения идут только через
+        placeholder'ы — пользовательские данные не попадают в SQL.
+        """
+        fields: list[str] = []
+        params: list[Any] = []
+
+        def add(column: str, value: Any) -> None:
+            if allowed is not None and column not in allowed:
+                return
+            fields.append(f"{column} = ?")
+            params.append(value)
+
+        if "name" in merged:
+            add("name", merged["name"])
+        if "icon" in merged:
+            add("icon", merged["icon"])
+        if "duration" in merged:
+            add("duration", merged["duration"])
+        if ("group_id" in merged) or ("group" in merged):
+            add("group_id", merged.get("group_id", merged.get("group", 1)))
+        if "topic" in merged:
+            add("topic", (merged.get("topic") or "").strip())
+        if "state" in merged:
+            add("state", merged["state"])
+        if "postpone_until" in merged:
+            add("postpone_until", merged["postpone_until"])
+        if "postpone_reason" in merged:
+            add("postpone_reason", merged["postpone_reason"])
+        if "photo_path" in merged:
+            add("photo_path", merged["photo_path"])
+        if "watering_start_time" in merged:
+            add("watering_start_time", merged["watering_start_time"])
+        if "scheduled_start_time" in merged:
+            add("scheduled_start_time", merged["scheduled_start_time"])
+        # 'last_watering_time' is no longer a column on zones — it is derived
+        # from zone_runs.end_utc and injected at read time. Silently ignore
+        # the key so legacy callers that still pass it don't crash.
+        if "last_avg_flow_lpm" in merged:
+            add("last_avg_flow_lpm", merged["last_avg_flow_lpm"])
+        if "last_total_liters" in merged:
+            add("last_total_liters", merged["last_total_liters"])
+        if "mqtt_server_id" in merged:
+            add("mqtt_server_id", merged.get("mqtt_server_id"))
+        for column in (
+            "planned_end_time",
+            "watering_start_source",
+            "commanded_state",
+            "observed_state",
+            "fault_count",
+            "last_fault",
+        ):
+            if column in payload:
+                add(column, payload[column])
+
+        # updated_at is always set but uses SQL CURRENT_TIMESTAMP — not a
+        # parameter, and not user-controllable.
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        return fields, params
 
     def get_zones(self) -> list[dict[str, Any]]:
         """Получить все зоны.
@@ -165,75 +255,7 @@ class ZoneRepository(BaseRepository):
                 updated_data = current_zone.copy()
                 updated_data.update(zone_data)
 
-                sql_fields = []
-                params = []
-
-                if "name" in updated_data:
-                    sql_fields.append("name = ?")
-                    params.append(updated_data["name"])
-                if "icon" in updated_data:
-                    sql_fields.append("icon = ?")
-                    params.append(updated_data["icon"])
-                if "duration" in updated_data:
-                    sql_fields.append("duration = ?")
-                    params.append(updated_data["duration"])
-                if "group_id" in updated_data or "group" in updated_data:
-                    sql_fields.append("group_id = ?")
-                    params.append(updated_data.get("group_id", updated_data.get("group", 1)))
-                if "topic" in updated_data:
-                    sql_fields.append("topic = ?")
-                    params.append((updated_data.get("topic") or "").strip())
-                if "state" in updated_data:
-                    sql_fields.append("state = ?")
-                    params.append(updated_data["state"])
-                if "postpone_until" in updated_data:
-                    sql_fields.append("postpone_until = ?")
-                    params.append(updated_data["postpone_until"])
-                if "photo_path" in updated_data:
-                    sql_fields.append("photo_path = ?")
-                    params.append(updated_data["photo_path"])
-                if "watering_start_time" in updated_data:
-                    sql_fields.append("watering_start_time = ?")
-                    params.append(updated_data["watering_start_time"])
-                if "scheduled_start_time" in updated_data:
-                    sql_fields.append("scheduled_start_time = ?")
-                    params.append(updated_data["scheduled_start_time"])
-                # 'last_watering_time' is no longer a column on zones —
-                # it is derived from zone_runs.end_utc and injected at
-                # read time. Silently ignore the key in the update payload
-                # so legacy callers that still pass it don't crash.
-                if "last_avg_flow_lpm" in updated_data:
-                    sql_fields.append("last_avg_flow_lpm = ?")
-                    params.append(updated_data["last_avg_flow_lpm"])
-                if "last_total_liters" in updated_data:
-                    sql_fields.append("last_total_liters = ?")
-                    params.append(updated_data["last_total_liters"])
-                if "mqtt_server_id" in updated_data:
-                    sql_fields.append("mqtt_server_id = ?")
-                    params.append(updated_data.get("mqtt_server_id"))
-                if "planned_end_time" in zone_data:
-                    sql_fields.append("planned_end_time = ?")
-                    params.append(zone_data["planned_end_time"])
-                if "watering_start_source" in zone_data:
-                    sql_fields.append("watering_start_source = ?")
-                    params.append(zone_data["watering_start_source"])
-                if "commanded_state" in zone_data:
-                    sql_fields.append("commanded_state = ?")
-                    params.append(zone_data["commanded_state"])
-                # PHYS-1 / MASTER-C1: allow StateVerifier._record_fault() to
-                # persist observed_state/fault_count/last_fault so zones can
-                # be pinned to state='fault' after N MQTT-observation retries.
-                if "observed_state" in zone_data:
-                    sql_fields.append("observed_state = ?")
-                    params.append(zone_data["observed_state"])
-                if "fault_count" in zone_data:
-                    sql_fields.append("fault_count = ?")
-                    params.append(zone_data["fault_count"])
-                if "last_fault" in zone_data:
-                    sql_fields.append("last_fault = ?")
-                    params.append(zone_data["last_fault"])
-
-                sql_fields.append("updated_at = CURRENT_TIMESTAMP")
+                sql_fields, params = self._build_zone_update_fields(updated_data, zone_data)
                 params.append(zone_id)
 
                 sql = f"""
@@ -347,43 +369,7 @@ class ZoneRepository(BaseRepository):
                     current = dict(zip([d[0] for d in cur.description], row))
                     merged = current.copy()
                     merged.update(upd)
-                    fields = []
-                    params = []
-
-                    def add(field: str, value):
-                        fields.append(f"{field} = ?")
-                        params.append(value)
-
-                    if "name" in merged:
-                        add("name", merged["name"])
-                    if "icon" in merged:
-                        add("icon", merged["icon"])
-                    if "duration" in merged:
-                        add("duration", int(merged["duration"]))
-                    if ("group_id" in merged) or ("group" in merged):
-                        add("group_id", int(merged.get("group_id", merged.get("group", 1))))
-                    if "topic" in merged:
-                        add("topic", (merged.get("topic") or "").strip())
-                    if "state" in merged:
-                        add("state", merged["state"])
-                    if "postpone_until" in merged:
-                        add("postpone_until", merged["postpone_until"])
-                    if "postpone_reason" in merged:
-                        add("postpone_reason", merged["postpone_reason"])
-                    if "photo_path" in merged:
-                        add("photo_path", merged["photo_path"])
-                    if "watering_start_time" in merged:
-                        add("watering_start_time", merged["watering_start_time"])
-                    if "scheduled_start_time" in merged:
-                        add("scheduled_start_time", merged["scheduled_start_time"])
-                    # 'last_watering_time' was dropped — derived from zone_runs now.
-                    if "last_avg_flow_lpm" in merged:
-                        add("last_avg_flow_lpm", merged["last_avg_flow_lpm"])
-                    if "last_total_liters" in merged:
-                        add("last_total_liters", merged["last_total_liters"])
-                    if "mqtt_server_id" in merged:
-                        add("mqtt_server_id", merged.get("mqtt_server_id"))
-                    fields.append("updated_at = CURRENT_TIMESTAMP")
+                    fields, params = self._build_zone_update_fields(merged, upd)
                     params.append(zone_id)
                     sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ?"
                     try:
@@ -419,62 +405,13 @@ class ZoneRepository(BaseRepository):
                             cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
                             row = cur.fetchone()
                             if row:
-                                # SEC-004: build UPDATE via a strict column
-                                # whitelist. Never interpolate a field name
-                                # that wasn't preauthorized at import time —
-                                # otherwise a future refactor that lets user
-                                # data leak into the key side promotes this
-                                # to a full SQL injection.
-                                #
-                                # B1 FIX: 'state' and other state-machine
-                                # fields are deliberately EXCLUDED here —
-                                # bulk-upsert must never bypass the
-                                # state-machine guard, optimistic-lock, and
-                                # audit trail in services.zones_state.  Any
-                                # caller that wants to change zone runtime
-                                # state must use /api/zones/<id>/start|stop
-                                # or services.zones_state.update_zone_state
-                                # so a zone_state_change audit row is
-                                # emitted.
-                                _ALLOWED_UPDATE_COLUMNS = {
-                                    "name",
-                                    "icon",
-                                    "duration",
-                                    "group_id",
-                                    "topic",
-                                    "mqtt_server_id",
-                                }
-
-                                assignments = []
-                                params = []
-
-                                def _set(column: str, value):
-                                    if column not in _ALLOWED_UPDATE_COLUMNS:
-                                        # Defensive: this branch is only
-                                        # reachable if someone edits this
-                                        # function and passes a bad name.
-                                        raise ValueError(f"refusing to UPDATE unknown zones column: {column!r}")
-                                    assignments.append(f"{column} = ?")
-                                    params.append(value)
-
-                                if "name" in z:
-                                    _set("name", z["name"])
-                                if "icon" in z:
-                                    _set("icon", z["icon"])
-                                if "duration" in z:
-                                    _set("duration", int(z["duration"]))
-                                if ("group_id" in z) or ("group" in z):
-                                    _set("group_id", int(z.get("group_id", z.get("group", 1))))
-                                if "topic" in z:
-                                    _set("topic", (z.get("topic") or "").strip())
-                                # B1 FIX: 'state' deliberately not handled — see
-                                # _ALLOWED_UPDATE_COLUMNS comment above.
-                                if "mqtt_server_id" in z:
-                                    _set("mqtt_server_id", z.get("mqtt_server_id"))
-                                # updated_at is always set but uses SQL
-                                # CURRENT_TIMESTAMP — not a parameter, and
-                                # not user-controllable.
-                                assignments.append("updated_at = CURRENT_TIMESTAMP")
+                                # SEC-004 / B1 FIX: импорт строит UPDATE через
+                                # общий builder, суженный до
+                                # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
+                                # константы) — state-machine-поля исключены.
+                                assignments, params = self._build_zone_update_fields(
+                                    z, z, allowed=_ALLOWED_UPDATE_COLUMNS
+                                )
                                 params.append(zid)
                                 if assignments:
                                     conn.execute(

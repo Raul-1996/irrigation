@@ -15,7 +15,7 @@ import sqlite3
 
 
 def test_import_zones_source_contains_whitelist():
-    """Static check: the import_zones loop must have an _ALLOWED_UPDATE_COLUMNS set."""
+    """Static check: the import_zones UPDATE must stay behind _ALLOWED_UPDATE_COLUMNS."""
     import inspect
 
     from db import zones as zones_mod
@@ -26,8 +26,14 @@ def test_import_zones_source_contains_whitelist():
     )
     # The UPDATE line must still bind via parameters (has ?), not pure f-string.
     assert "UPDATE zones SET" in src
-    # Ensure it routes through _set() (rejects unknown columns).
-    assert "_set(" in src, "bulk_upsert_zones must use the _set() guard wrapper"
+    # Ensure it routes through the shared builder (filters unknown columns).
+    assert "_build_zone_update_fields" in src, "bulk_upsert_zones must use the whitelisted update builder"
+    builder_src = inspect.getsource(zones_mod.ZoneRepository._build_zone_update_fields)
+    assert "column not in allowed" in builder_src, (
+        "SEC-004 regression: the update builder must filter columns against the allowed whitelist"
+    )
+    # State-machine fields must stay outside the import whitelist (B1 FIX).
+    assert "state" not in zones_mod._ALLOWED_UPDATE_COLUMNS
 
 
 def test_import_zones_rejects_unknown_column_in_update(tmp_path):

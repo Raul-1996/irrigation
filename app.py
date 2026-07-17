@@ -404,7 +404,6 @@ import re as _re
 _ALLOWED_PUBLIC_POSTS = {
     "/api/login",
     "/api/status",
-    "/health",
     "/api/env",
     "/api/emergency-stop",
     "/api/emergency-resume",
@@ -466,7 +465,7 @@ def _auth_before_request():
                 if session.get("role") != "admin" and not _is_status_action(pth):
                     return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
                 if session.get("role") == "admin" and request.method in ["POST", "PUT", "DELETE"]:
-                    must = db.get_setting_value("password_must_change") if True else None
+                    must = db.get_setting_value("password_must_change")
                     if str(must or "0") == "1" and request.path != "/api/password":
                         return jsonify(
                             {
@@ -515,31 +514,6 @@ for bp in (
 # added later.  init_metrics() is called from services.app_init.initialize_app().
 csrf.exempt(health_api_bp)
 app.register_blueprint(health_api_bp)
-
-
-# ── Mutation guard ─────────────────────────────────────────────────────────
-@app.before_request
-def _require_admin_for_mutations():
-    try:
-        if app.config.get("TESTING"):
-            return None
-        p = request.path or ""
-        if not p.startswith("/api/") or request.method == "GET":
-            return None
-        role = session.get("role", "guest")
-        if role == "viewer" and request.method in ["POST", "PUT", "DELETE"] and p != "/api/login":
-            return jsonify(
-                {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
-            ), 403
-        if request.method in ["POST", "PUT", "DELETE"]:
-            # SECURITY FIX (VULN-003): removed /api/mqtt/ from whitelist
-            if p == "/api/login" or p.startswith("/api/env") or p == "/api/password":
-                return None
-            if role != "admin" and not _is_status_action(p):
-                return jsonify({"success": False, "message": "admin required", "error_code": "FORBIDDEN"}), 403
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.warning("mutation guard error: %s", e)
-        return None
 
 
 # ── Group exclusivity watchdog ─────────────────────────────────────────────
