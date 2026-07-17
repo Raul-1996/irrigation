@@ -60,10 +60,12 @@ class ZoneRepository(BaseRepository):
             add("name", merged["name"])
         if "icon" in merged:
             add("icon", merged["icon"])
+        # int(): нечисловой duration/group_id должен падать ValueError у
+        # вызывающего (как в старых bulk-путях), а не молча писать TEXT в БД.
         if "duration" in merged:
-            add("duration", merged["duration"])
+            add("duration", int(merged["duration"]))
         if ("group_id" in merged) or ("group" in merged):
-            add("group_id", merged.get("group_id", merged.get("group", 1)))
+            add("group_id", int(merged.get("group_id", merged.get("group", 1)) or 1))
         if "topic" in merged:
             add("topic", (merged.get("topic") or "").strip())
         if "state" in merged:
@@ -827,7 +829,8 @@ class ZoneRepository(BaseRepository):
         for offset in range(0, 14):
             d = lower_bound + timedelta(days=offset)
             if schedule_type == "even-odd":
-                want_even = (prog.get("even_odd") or "even") == "even"
+                # NULL в even_odd планировщик трактует как нечётные дни
+                want_even = prog.get("even_odd", "even") == "even"
                 if (d.day % 2 == 0) != want_even:
                     continue
             elif schedule_type != "interval":

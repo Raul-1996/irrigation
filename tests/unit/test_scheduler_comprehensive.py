@@ -372,7 +372,10 @@ class TestRecoverMissedRuns:
             started_scheduler.recover_missed_runs()
         assert not mock_add.called
 
-    def test_recover_interval_program(self, started_scheduler, test_db):
+    def test_recover_skips_interval_program(self, started_scheduler, test_db):
+        # IntervalTrigger пере-якорится при каждом старте сервиса: после
+        # рестарта нельзя отличить прерванный запуск от дня, когда полив
+        # не планировался, поэтому interval-программы не восстанавливаются.
         z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
         test_db.create_program(
             {
@@ -386,10 +389,25 @@ class TestRecoverMissedRuns:
         )
         with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
             started_scheduler.recover_missed_runs()
-        assert mock_add.called
-        kwargs = mock_add.call_args.kwargs
-        assert "_recover_" in kwargs["id"]
-        assert kwargs["args"][1] == [z["id"]]
+        assert not mock_add.called
+
+    def test_recover_even_odd_null_means_odd(self, started_scheduler, test_db):
+        # NULL в even_odd планировщик трактует как нечётные дни —
+        # восстановление обязано совпадать с ним.
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "EvenOddNull",
+                "time": _recent_time_today(),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": None,
+            }
+        )
+        with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
+            started_scheduler.recover_missed_runs()
+        assert mock_add.called == (datetime.now().day % 2 == 1)
 
     def test_recover_even_odd_program_matching_parity(self, started_scheduler, test_db):
         z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})

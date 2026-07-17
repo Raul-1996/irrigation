@@ -411,17 +411,21 @@ def reload_hub() -> None:
     No-op, пока хаб ещё не стартовал: первый SSE-клиент соберёт свежие карты.
     """
     global _SSE_HUB_STARTED
+    # Снимаем снапшот и чистим реестр под локом, но останавливаем клиентов
+    # СНАРУЖИ: paho loop_stop() джойнит сетевой тред, а его _on_message
+    # сам берёт _SSE_HUB_LOCK (fan-out событий) — join под локом даёт дедлок.
     with _SSE_HUB_LOCK:
         if not _SSE_HUB_STARTED:
             return
-        for sid, client in list(_SSE_HUB_MQTT.items()):
-            try:
-                client.loop_stop()
-                client.disconnect()
-            except (ConnectionError, TimeoutError, OSError, RuntimeError, AttributeError) as e:
-                logger.debug("reload_hub: stop client sid=%s failed: %s", sid, e)
+        stale = list(_SSE_HUB_MQTT.items())
         _SSE_HUB_MQTT.clear()
         _SSE_HUB_STARTED = False
+    for sid, client in stale:
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except (ConnectionError, TimeoutError, OSError, RuntimeError, AttributeError) as e:
+            logger.debug("reload_hub: stop client sid=%s failed: %s", sid, e)
     logger.info("SSE hub reload: MQTT clients stopped, rebuilding subscriptions")
     ensure_hub_started()
 

@@ -43,7 +43,7 @@ class TestWizardValidation:
         assert "schedule_type === 'weekdays'" in body
         assert "wizardData.days.length === 0" in body
         assert "schedule_type === 'interval'" in body
-        assert "schedule_type === 'even_odd'" in body
+        assert "schedule_type === 'even-odd'" in body
 
     def test_step4_validates_zones_selected(self):
         html = read_file("templates/programs.html")

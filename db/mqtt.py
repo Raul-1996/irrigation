@@ -78,11 +78,12 @@ class MqttRepository(BaseRepository):
     @retry_on_busy()
     def update_mqtt_server(self, server_id: int, data: dict[str, Any]) -> bool:
         try:
-            # Пустой/отсутствующий пароль и маска "***" (GET-ответы API)
-            # означают «не менять» — иначе сохранение строки из UI без поля
-            # password затирало бы сохранённый секрет.
+            # Отсутствующий пароль и маска "***" (GET-ответы API) означают
+            # «не менять» — иначе сохранение строки из UI без поля password
+            # затирало бы сохранённый секрет. Явная пустая строка — «очистить»
+            # (брокер перестал требовать авторизацию).
             raw_password = data.get("password")
-            set_password = bool(raw_password) and raw_password != "***"
+            set_password = "password" in data and raw_password != "***" and raw_password is not None
             password_sql = "password = ?, " if set_password else ""
             params: list[Any] = [
                 data.get("name", "MQTT"),
@@ -91,7 +92,7 @@ class MqttRepository(BaseRepository):
                 data.get("username"),
             ]
             if set_password:
-                params.append("ENC:" + encrypt_secret(raw_password))
+                params.append(("ENC:" + encrypt_secret(raw_password)) if raw_password else None)
             params.extend(
                 [
                     data.get("client_id"),

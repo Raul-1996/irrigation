@@ -110,7 +110,7 @@ class WeatherService:
         val = SettingsRepository(self.db_path).get_setting_value("weather.source_mode")
         return val if val in ("direct", "relay") else "direct"
 
-    def get_weather(self, force_refresh: bool = False) -> WeatherData | None:
+    def get_weather(self, force_refresh: bool = False, cache_only: bool = False) -> WeatherData | None:
         """Get current weather data (cached or fresh).
 
         Order of fallback:
@@ -118,6 +118,10 @@ class WeatherService:
             2. Live API call via ``_fetch_api``.
             3. Stale cache (any age) — degraded-mode fallback.
             4. ``None``.
+
+        ``cache_only=True`` never touches the network (fresh cache → stale
+        cache → None) — for hot paths like /api/status polling, where a
+        synchronous HTTP fetch would block the UI.
         """
         location = self._get_location()
         if not location:
@@ -131,6 +135,9 @@ class WeatherService:
             cached = self._get_cached(lat, lon)
             if cached:
                 return cached
+
+        if cache_only:
+            return _cache.read_stale(self.db_path, lat, lon)
 
         raw = self._fetch_api(lat, lon)
         if raw:

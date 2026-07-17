@@ -63,3 +63,42 @@ class TestEmptyDaysMeansNever:
         assert single_dt == bulk_dt.replace(second=0)
         assert single_dt > datetime.now()
         assert single_dt <= datetime.now() + timedelta(days=1, minutes=1)
+
+
+class TestScheduleTypesNextWatering:
+    """interval/even-odd программы (days=[]) не должны давать «Никогда» —
+    планировщик их реально запускает (семантика program_runs_on)."""
+
+    def test_interval_program_gives_slot(self, admin_client, app):
+        z = app.db.create_zone({"name": "IntNW", "duration": 10, "group_id": 1})
+        app.db.create_program(
+            {
+                "name": "IntervalNW",
+                "time": "06:00",
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "interval",
+                "interval_days": 2,
+            }
+        )
+        item = _bulk_item(admin_client, z["id"])
+        assert item["next_datetime"] is not None
+        assert item["next_watering"] != "Никогда"
+
+    def test_even_odd_program_gives_slot_within_two_days(self, admin_client, app):
+        z = app.db.create_zone({"name": "EONW", "duration": 10, "group_id": 1})
+        app.db.create_program(
+            {
+                "name": "EvenOddNW",
+                "time": "06:00",
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": "even",
+            }
+        )
+        item = _bulk_item(admin_client, z["id"])
+        assert item["next_datetime"] is not None
+        nd = datetime.strptime(item["next_datetime"], "%Y-%m-%d %H:%M:%S")
+        assert nd.day % 2 == 0
+        assert nd <= datetime.now() + timedelta(days=3)

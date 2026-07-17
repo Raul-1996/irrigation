@@ -23,7 +23,13 @@ VALID_SCHEDULE_TYPES = ("weekdays", "interval", "even-odd")
 
 
 def _validate_program_v2_fields(data: dict) -> str | None:
-    """Проверить v2-поля программы; вернуть текст ошибки или None."""
+    """Проверить v2-поля программы; вернуть текст ошибки или None.
+
+    Мутирует data: каноникализирует schedule_type 'even_odd' → 'even-odd'
+    (историческое написание из мастера программ и старых строк БД).
+    """
+    if data.get("schedule_type") == "even_odd":
+        data["schedule_type"] = "even-odd"
     ptype = data.get("type")
     if ptype is not None and ptype not in VALID_PROGRAM_TYPES:
         return f"Invalid type: {ptype!r} (expected one of: {', '.join(VALID_PROGRAM_TYPES)})"
@@ -53,6 +59,8 @@ def api_program(prog_id):
 
     elif request.method == "PUT":
         data = request.get_json() or {}
+        if data.get("schedule_type") == "even_odd":
+            data["schedule_type"] = "even-odd"
         try:
             if isinstance(data.get("days"), list):
                 data["days"] = [int(d) for d in data["days"]]

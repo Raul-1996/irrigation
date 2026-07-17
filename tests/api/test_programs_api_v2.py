@@ -572,3 +572,24 @@ class TestCheckConflictsWithExtraTimes:
         assert resp.status_code == 200
         data = resp.get_json()
         assert "has_conflicts" in data
+
+
+class TestEvenOddCanonicalization:
+    """Мастер программ исторически шлёт 'even_odd' — API канонизирует в 'even-odd'."""
+
+    def test_create_with_legacy_even_odd_spelling(self, admin_client, app):
+        app.db.create_zone({"name": "ZEO", "duration": 10, "group_id": 1})
+        resp = admin_client.post(
+            "/api/programs",
+            json={
+                "name": "LegacyEO",
+                "time": "06:00",
+                "days": [],
+                "zones": [1],
+                "schedule_type": "even_odd",
+                "even_odd": "odd",
+            },
+        )
+        assert resp.status_code in (200, 201), resp.get_json()
+        progs = [p for p in app.db.get_programs() if p["name"] == "LegacyEO"]
+        assert progs and progs[0]["schedule_type"] == "even-odd"

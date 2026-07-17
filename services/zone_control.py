@@ -493,6 +493,7 @@ def start_zone_orchestrated(
     override_duration: int | None = None,
     override_percent: int | None = None,
     source: str = "manual",
+    restart_if_on: bool = False,
 ) -> tuple[str, dict]:
     """Полная оркестрация ручного старта зоны вокруг ``exclusive_start_zone``.
 
@@ -537,8 +538,12 @@ def start_zone_orchestrated(
     # Delegating would peer-off siblings (none changed) and re-publish
     # ON (no-op with retain). The only useful effect of a re-start while
     # ON is updating the auto-stop time, so handle it here without a
-    # new zone_run row.
+    # new zone_run row. restart_if_on: /start и /start-zone исторически
+    # перевзводили auto-stop на полную длительность зоны — повторный клик
+    # «Старт» продлевает полив, а не делает молчаливый no-op.
     if str(z.get("state") or "") == "on":
+        if override_dur is None and restart_if_on:
+            override_dur = int(z.get("duration") or 0) or None
         if override_dur is not None:
             now_dt = datetime.now()
             new_end = (now_dt + timedelta(minutes=override_dur)).strftime("%Y-%m-%d %H:%M:%S")

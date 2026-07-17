@@ -170,7 +170,7 @@ function renderList() {
           </div>
           <div class="program-time">⏰ ${p.time}</div>
           <div class="program-days">
-            ${p.schedule_type === 'even_odd' ? 
+            ${p.schedule_type === 'even-odd' ? 
               `<div class="day-pill active">${p.even_odd === 'even' ? 'Чётные дни' : 'Нечётные дни'}</div>` :
               p.schedule_type === 'interval' ?
               `<div class="day-pill active">Каждые ${p.interval_days || 3} дн.</div>` :
@@ -416,8 +416,8 @@ function renderWizardStep() {
         onclick="wizardData.schedule_type = 'weekdays'; wizardData.even_odd = null; renderWizard()">Дни недели</button>
       <button class="schedule-tab ${wizardData.schedule_type === 'interval' ? 'active' : ''}" 
         onclick="wizardData.schedule_type = 'interval'; wizardData.even_odd = null; renderWizard()">Интервал</button>
-      <button class="schedule-tab ${wizardData.schedule_type === 'even_odd' ? 'active' : ''}" 
-        onclick="wizardData.schedule_type = 'even_odd'; renderWizard()">Чёт/Нечет</button>
+      <button class="schedule-tab ${wizardData.schedule_type === 'even-odd' ? 'active' : ''}" 
+        onclick="wizardData.schedule_type = 'even-odd'; renderWizard()">Чёт/Нечет</button>
     </div>
     
     ${wizardData.schedule_type === 'weekdays' ? `
@@ -445,7 +445,7 @@ function renderWizardStep() {
       </div>
     ` : ''}
 
-    ${wizardData.schedule_type === 'even_odd' ? `
+    ${wizardData.schedule_type === 'even-odd' ? `
       <div class="even-odd-selector">
         <div class="radio-cards">
           <div class="radio-card ${wizardData.even_odd === 'even' ? 'selected' : ''}" 
@@ -512,7 +512,7 @@ function renderWizardStep() {
         <div class="summary-value">
           ${wizardData.schedule_type === 'weekdays' ? 
             ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].filter((d, i) => wizardData.days.includes(i)).join(', ') :
-            wizardData.schedule_type === 'even_odd' ?
+            wizardData.schedule_type === 'even-odd' ?
             (wizardData.even_odd === 'even' ? 'Чётные дни месяца' : 'Нечётные дни месяца') :
             `Каждые ${wizardData.interval_days || 3} дней`
           }
@@ -559,7 +559,7 @@ function validateWizardStep(step) {
       showToast('Укажите интервал в днях (минимум 1)');
       return false;
     }
-    if (wizardData.schedule_type === 'even_odd' && wizardData.even_odd !== 'even' && wizardData.even_odd !== 'odd') {
+    if (wizardData.schedule_type === 'even-odd' && wizardData.even_odd !== 'even' && wizardData.even_odd !== 'odd') {
       showToast('Выберите чётные или нечётные дни');
       return false;
     }

@@ -30,10 +30,31 @@ def weather_skip_today() -> bool:
         adj = get_weather_adjustment(db.db_path)
         if not adj.is_enabled():
             return False
-        return bool(adj.should_skip().get("skip"))
+        # cache_only: /api/status поллится каждые несколько секунд — сетевой
+        # запрос за погодой здесь блокировал бы UI (решение при самом поливе
+        # принимается свежими данными в планировщике).
+        return bool(adj.should_skip(cache_only=True).get("skip"))
     except (ImportError, OSError, sqlite3.Error, ValueError, TypeError) as e:
         logger.debug("Weather-skip check failed in next-watering: %s", e)
         return False
+
+
+def program_runs_on(prog, d) -> bool:
+    """Планируется ли запуск программы в календарный день ``d``.
+
+    Семантика планировщика (_schedule_single_time): weekdays — день недели в
+    days (пустой список → никогда); even-odd — чётность числа месяца (NULL в
+    even_odd, как и у CronTrigger планировщика, означает нечётные дни);
+    interval — ежедневная аппроксимация: IntervalTrigger пере-якорится при
+    каждом старте сервиса, точный день заранее неизвестен.
+    """
+    st = prog.get("schedule_type") or "weekdays"
+    if st == "interval":
+        return True
+    if st == "even-odd":
+        want_even = prog.get("even_odd", "even") == "even"
+        return (d.day % 2 == 0) == want_even
+    return d.weekday() in (prog.get("days") or [])
 
 
 def first_program_start_after(prog, lower_bound):
@@ -41,8 +62,8 @@ def first_program_start_after(prog, lower_bound):
 
     Same 0..14 day search as the per-program ``next_start`` in
     ``compute_next_watering`` but anchored at *lower_bound* instead of the
-    global *now*.  Returns None if the program has no day list or its time
-    string is malformed.
+    global *now*.  Returns None if the program never runs (see
+    ``program_runs_on``) or its time string is malformed.
     """
     if not prog:
         return None
@@ -51,12 +72,9 @@ def first_program_start_after(prog, lower_bound):
     except (ValueError, TypeError, KeyError) as e:
         logger.debug("Exception in first_program_start_after time parse: %s", e)
         return None
-    days = prog.get("days") or []
-    if not days:
-        return None
     for off in range(0, 15):
         d = lower_bound + timedelta(days=off)
-        if d.weekday() in days:
+        if program_runs_on(prog, d):
             cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if cand > lower_bound:
                 return cand
@@ -125,9 +143,8 @@ def compute_next_watering(
             logger.debug("Exception in compute_next_watering: %s", e)
             hh, mm = 0, 0
         best = None
-        days = p.get("days") or []
         today_start = None
-        if now.weekday() in days:
+        if program_runs_on(p, now):
             today_start = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         try:
             zones_list = p.get("zones") or []
@@ -144,7 +161,7 @@ def compute_next_watering(
                 elapsed_min = int((now - today_start).total_seconds() // 60)
         for off in range(0, 14):
             d = now + timedelta(days=off)
-            if d.weekday() in days:
+            if program_runs_on(p, d):
                 cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
                 if cand <= now:
                     continue
@@ -201,14 +218,20 @@ def compute_next_watering(
             else:
                 # Common path: cached next_start (anchored at global now).
                 # When the zone is postponed (or the start landed inside
-                # the postpone window), recompute from zone_now.
+                # the postpone window), recompute from zone_now. Якорь
+                # сдвигается на offset зоны: postpone, истекающий между
+                # стартом программы и слотом зоны, не должен уводить показ
+                # на следующий запуск — планировщик польёт в сегодняшний
+                # слот (job зоны стреляет в start+offset, когда postpone
+                # уже истёк).
+                off_min = int(offsets.get(zid, 0))
                 if zone_now != now:
-                    start_dt = first_program_start_after(p, zone_now)
+                    start_dt = first_program_start_after(p, zone_now - timedelta(minutes=off_min))
                 else:
                     start_dt = pinfo.get("next_start")
                 if not start_dt:
                     continue
-                cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
+                cand = start_dt + timedelta(minutes=off_min)
                 try:
                     # cancelled_today shifts to next-week's run — but if
                     # zone is postponed, we already searched from zone_now
@@ -220,7 +243,7 @@ def compute_next_watering(
                         ns = None
                         for off in range(1, 15):
                             d = now + timedelta(days=off)
-                            if d.weekday() in (p.get("days") or []):
+                            if program_runs_on(p, d):
                                 ns = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
                                 break
                         if ns:

@@ -232,6 +232,13 @@ class MigrationRunner:
                     "zone_runs_add_confirmed",
                     self._migrate_add_zone_runs_confirmed,
                 )
+                # Канонизация schedule_type: мастер программ исторически слал
+                # 'even_odd' (подчёркивание), планировщик сравнивает с 'even-odd'.
+                self._apply_named_migration(
+                    conn,
+                    "programs_canonical_even_odd",
+                    self._migrate_canonical_even_odd,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -1336,6 +1343,13 @@ class MigrationRunner:
             logger.info(f"Добавлено поле {col_name} в таблицу programs")
         conn.commit()
         logger.info("Миграция programs v2 fields завершена")
+
+    def _migrate_canonical_even_odd(self, conn):
+        """Normalise legacy schedule_type 'even_odd' rows to canonical 'even-odd'."""
+        cur = conn.execute("UPDATE programs SET schedule_type = 'even-odd' WHERE schedule_type = 'even_odd'")
+        conn.commit()
+        if cur.rowcount:
+            logger.info("Канонизировано schedule_type even_odd → even-odd: %s программ", cur.rowcount)
 
     # =====================================================================
     # Downgrade methods for the last 10 migrations

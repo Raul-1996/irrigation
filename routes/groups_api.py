@@ -438,7 +438,7 @@ def api_start_zone_exclusive(group_id, zone_id):
         try:
             from services.zone_control import start_zone_orchestrated
 
-            status, _ctx = start_zone_orchestrated(int(zone_id))
+            status, _ctx = start_zone_orchestrated(int(zone_id), restart_if_on=True)
         except (ValueError, TypeError, KeyError):
             logger.exception("exclusive_start failed")
             return jsonify({"success": False, "message": "Ошибка запуска зоны"}), 500

@@ -114,11 +114,11 @@ class WeatherAdjustment:
             logger.debug("Weather settings read error: %s", e)
         return defaults
 
-    def _get_weather(self):
+    def _get_weather(self, cache_only: bool = False):
         """Get current weather data."""
         try:
             svc = get_weather_service(self.db_path)
-            weather = svc.get_weather()
+            weather = svc.get_weather(cache_only=cache_only)
             if weather is None:
                 self._maybe_alert_api_down("weather=None")
                 return None
@@ -330,18 +330,21 @@ class WeatherAdjustment:
         """Check if weather adjustment is enabled."""
         return self._get_settings().get("enabled", False)
 
-    def should_skip(self) -> dict[str, Any]:
+    def should_skip(self, cache_only: bool = False) -> dict[str, Any]:
         """Determine if watering should be skipped entirely.
 
         Returns a dict with keys ``skip`` (bool), ``reason`` (human-readable
         string) and ``details`` (dict with ``type``/``value``/``threshold``).
+
+        ``cache_only=True`` decides по кэшу погоды без сетевого запроса —
+        для hot-path'ов отображения (поллинг /api/status).
         """
         result = {"skip": False, "reason": "", "details": {}}
         settings = self._get_settings()
         if not settings.get("enabled"):
             return result
 
-        weather = self._get_weather()
+        weather = self._get_weather(cache_only=cache_only)
         if not weather:
             result["details"]["api_unavailable"] = True
             return result

@@ -99,11 +99,15 @@ def _audit_timer_fire(action: str, target: str, payload: dict) -> None:
 
 
 def job_run_program(program_id: int, zones: list, program_name: str, manual: bool = False):
-    _audit_timer_fire(
-        "scheduler_timer_fire",
-        f"program:{int(program_id)}",
-        {"job": "run_program", "zones": list(zones), "program_name": str(program_name), "manual": bool(manual)},
-    )
+    # Ручной запуск (POST /api/programs/<id>/run) уже аудируется роутом как
+    # prog_manual_run — scheduler_timer_fire пишем только для срабатываний
+    # таймера, чтобы ручное действие не маскировалось под планировщик.
+    if not manual:
+        _audit_timer_fire(
+            "scheduler_timer_fire",
+            f"program:{int(program_id)}",
+            {"job": "run_program", "zones": list(zones), "program_name": str(program_name), "manual": False},
+        )
     try:
         from irrigation_scheduler import get_scheduler
 
@@ -2238,15 +2242,17 @@ class IrrigationScheduler:
         """Мог ли сегодня быть плановый запуск программы (по schedule_type).
 
         Семантика повторяет _schedule_single_time: weekdays — день недели в
-        days, even-odd — чётность числа месяца; interval-триггер привязывается
-        к сегодня/завтра при каждом старте сервиса, поэтому сегодняшний день
-        считаем допустимым.
+        days, even-odd — чётность числа месяца (NULL в even_odd, как и в
+        планировщике, означает нечётные дни). Interval-программы НЕ
+        восстанавливаются: IntervalTrigger пере-якорится при каждом старте
+        сервиса, и после рестарта нельзя отличить прерванный запуск от дня,
+        когда полив вовсе не планировался.
         """
         schedule_type = p.get("schedule_type") or "weekdays"
         if schedule_type == "interval":
-            return True
+            return False
         if schedule_type == "even-odd":
-            want_even = (p.get("even_odd") or "even") == "even"
+            want_even = p.get("even_odd", "even") == "even"
             return (now.day % 2 == 0) == want_even
         return now.weekday() in (p.get("days") or [])
 
