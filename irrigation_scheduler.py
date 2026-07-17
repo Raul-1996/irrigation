@@ -2220,8 +2220,42 @@ class IrrigationScheduler:
         except (sqlite3.Error, OSError) as e:
             logger.error(f"Ошибка загрузки программ: {e}")
 
+    @staticmethod
+    def _program_start_times(p: dict[str, Any]) -> list[str]:
+        """Основное время программы плюс extra_times (строки 'HH:MM')."""
+        times = [str(p.get("time") or "00:00")]
+        extra = p.get("extra_times") or []
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except (json.JSONDecodeError, TypeError):
+                extra = []
+        times.extend(str(t) for t in extra)
+        return times
+
+    @staticmethod
+    def _program_scheduled_today(p: dict[str, Any], now: datetime) -> bool:
+        """Мог ли сегодня быть плановый запуск программы (по schedule_type).
+
+        Семантика повторяет _schedule_single_time: weekdays — день недели в
+        days, even-odd — чётность числа месяца; interval-триггер привязывается
+        к сегодня/завтра при каждом старте сервиса, поэтому сегодняшний день
+        считаем допустимым.
+        """
+        schedule_type = p.get("schedule_type") or "weekdays"
+        if schedule_type == "interval":
+            return True
+        if schedule_type == "even-odd":
+            want_even = (p.get("even_odd") or "even") == "even"
+            return (now.day % 2 == 0) == want_even
+        return now.weekday() in (p.get("days") or [])
+
     def recover_missed_runs(self) -> None:
-        """Догоняем пропущенный старт сегодняшней программы, если сервис перезапустился между стартом и окончанием."""
+        """Догоняем пропущенный старт сегодняшней программы, если сервис перезапустился между стартом и окончанием.
+
+        Учитываются enabled, schedule_type (weekdays/interval/even-odd) и все
+        времена старта (time + extra_times) — как в schedule_program.
+        """
         try:
             programs = self.db.get_programs()
             now = datetime.now()
@@ -2229,13 +2263,9 @@ class IrrigationScheduler:
             zones_by_id = {int(z["id"]): z for z in zones_all}
             for p in programs:
                 try:
-                    days = p.get("days") or []
-                    if now.weekday() not in days:
+                    if not p.get("enabled", True):
                         continue
-                    time_str = p.get("time") or "00:00"
-                    hh, mm = map(int, time_str.split(":", 1))
-                    start_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                    if now < start_dt:
+                    if not self._program_scheduled_today(p, now):
                         continue
                     zones = sorted([int(z) for z in (p.get("zones") or [])])
                     if not zones:
@@ -2245,8 +2275,21 @@ class IrrigationScheduler:
                         continue
                     durations = [int((zones_by_id.get(zid) or {}).get("duration") or 0) for zid in zones]
                     total_min = sum(durations)
-                    if now >= start_dt + timedelta(minutes=total_min):
+                    # Кандидаты: старты (основное время + extra_times), в чьё
+                    # окно выполнения попадает текущий момент; из них берём
+                    # самый поздний — он и был прерван рестартом.
+                    candidates = []
+                    for time_str in self._program_start_times(p):
+                        try:
+                            hh, mm = map(int, str(time_str).split(":", 1))
+                        except (ValueError, TypeError):
+                            continue
+                        sd = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                        if sd <= now < sd + timedelta(minutes=total_min):
+                            candidates.append(sd)
+                    if not candidates:
                         continue
+                    start_dt = max(candidates)
                     # Индекс первой незавершённой зоны согласно прошедшему времени
                     elapsed_min = int((now - start_dt).total_seconds() // 60)
                     cumulative = 0

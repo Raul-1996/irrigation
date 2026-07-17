@@ -329,6 +329,15 @@ class TestLoadPrograms:
         # Should have scheduled the program
 
 
+def _recent_time_today(minutes_ago=10):
+    """HH:MM строкой ``minutes_ago`` минут назад, не пересекая полночь."""
+    now = datetime.now()
+    start = now - timedelta(minutes=minutes_ago)
+    if start.date() != now.date():
+        start = now.replace(hour=0, minute=0)
+    return start.strftime("%H:%M")
+
+
 class TestRecoverMissedRuns:
     def test_recover_no_programs(self, started_scheduler, test_db):
         started_scheduler.recover_missed_runs()  # should not crash
@@ -347,6 +356,94 @@ class TestRecoverMissedRuns:
             }
         )
         started_scheduler.recover_missed_runs()  # should skip
+
+    def test_recover_skips_disabled_program(self, started_scheduler, test_db):
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "Disabled",
+                "time": _recent_time_today(),
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "zones": [z["id"]],
+                "enabled": False,
+            }
+        )
+        with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
+            started_scheduler.recover_missed_runs()
+        assert not mock_add.called
+
+    def test_recover_interval_program(self, started_scheduler, test_db):
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "Interval",
+                "time": _recent_time_today(),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "interval",
+                "interval_days": 2,
+            }
+        )
+        with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
+            started_scheduler.recover_missed_runs()
+        assert mock_add.called
+        kwargs = mock_add.call_args.kwargs
+        assert "_recover_" in kwargs["id"]
+        assert kwargs["args"][1] == [z["id"]]
+
+    def test_recover_even_odd_program_matching_parity(self, started_scheduler, test_db):
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        parity = "even" if datetime.now().day % 2 == 0 else "odd"
+        test_db.create_program(
+            {
+                "name": "EvenOdd",
+                "time": _recent_time_today(),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": parity,
+            }
+        )
+        with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
+            started_scheduler.recover_missed_runs()
+        assert mock_add.called
+
+    def test_recover_even_odd_program_wrong_parity(self, started_scheduler, test_db):
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        wrong_parity = "odd" if datetime.now().day % 2 == 0 else "even"
+        test_db.create_program(
+            {
+                "name": "EvenOddWrong",
+                "time": _recent_time_today(),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": wrong_parity,
+            }
+        )
+        with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
+            started_scheduler.recover_missed_runs()
+        assert not mock_add.called
+
+    def test_recover_extra_time_window(self, started_scheduler, test_db):
+        # Main time is outside the execution window, extra time is inside it.
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        now = datetime.now()
+        main_t = (now + timedelta(hours=4)).strftime("%H:%M")
+        test_db.create_program(
+            {
+                "name": "ExtraTimes",
+                "time": main_t,
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "zones": [z["id"]],
+                "extra_times": [_recent_time_today()],
+            }
+        )
+        with patch.object(started_scheduler.scheduler, "add_job") as mock_add:
+            started_scheduler.recover_missed_runs()
+        assert mock_add.called
+        kwargs = mock_add.call_args.kwargs
+        assert "_recover_" in kwargs["id"]
 
 
 class TestCleanupJobsOnBoot:
