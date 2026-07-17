@@ -3,10 +3,10 @@ import math
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import TESTING
-from constants import MASTER_VALVE_CLOSE_DELAY_SEC, MAX_MANUAL_WATERING_MIN
+from constants import MASTER_VALVE_CLOSE_DELAY_SEC, MAX_MANUAL_WATERING_MIN, ZONE_CAP_DEFAULT_MIN
 from database import db
 from services.locks import group_lock, zone_lock
 from services.monitors import water_monitor
@@ -485,6 +485,189 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
     except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError):
         logger.exception("exclusive_start_zone failed")
         return False
+
+
+def start_zone_orchestrated(
+    zone_id: int,
+    *,
+    override_duration: int | None = None,
+    override_percent: int | None = None,
+    source: str = "manual",
+) -> tuple[str, dict]:
+    """Полная оркестрация ручного старта зоны вокруг ``exclusive_start_zone``.
+
+    Единый путь для /api/zones/<id>/start, /api/zones/<id>/mqtt/start и
+    /api/groups/<gid>/start-zone/<zid>: снятие заданий группы и отметка
+    сегодняшних программ отменёнными, делегирование ``exclusive_start_zone``
+    (peer-off, мастер-клапан, MQTT, zone_run), аудируемая запись
+    planned_end_time/watering_start_source и планирование auto-stop /
+    hard-stop / cap.
+
+    ``override_duration`` (минуты) имеет приоритет над ``override_percent``
+    (валидация диапазонов — на вызывающей стороне; здесь значения считаются
+    доверенными). Возвращает ``(status, ctx)``: status ∈ {"not_found",
+    "already_on", "rescheduled", "failed", "started"}, ctx содержит
+    "warnings" (list[str]) и "duration" (эффективная длительность, мин).
+    """
+    z = db.get_zone(zone_id)
+    if not z:
+        return "not_found", {"warnings": [], "duration": None}
+
+    # ---- Optional one-time duration override ----
+    # Carried as a local only — exclusive_start_zone does NOT consult
+    # z['duration'] for any scheduling; base duration in DB stays untouched.
+    override_dur = None
+    warnings: list[str] = []
+    if override_duration is not None:
+        override_dur = int(override_duration)
+        logger.info(
+            "start_zone_orchestrated: zone %s using override duration %s min (base unchanged)", zone_id, override_dur
+        )
+    elif override_percent is not None:
+        override_dur, warnings = per_zone_dur(z, None, int(override_percent))
+        logger.info(
+            "start_zone_orchestrated: zone %s using override percent %s%% -> %s min (warnings=%s)",
+            zone_id,
+            override_percent,
+            override_dur,
+            warnings,
+        )
+
+    # ---- Already-ON branch — reschedule stop, do NOT delegate ----
+    # Delegating would peer-off siblings (none changed) and re-publish
+    # ON (no-op with retain). The only useful effect of a re-start while
+    # ON is updating the auto-stop time, so handle it here without a
+    # new zone_run row.
+    if str(z.get("state") or "") == "on":
+        if override_dur is not None:
+            now_dt = datetime.now()
+            new_end = (now_dt + timedelta(minutes=override_dur)).strftime("%Y-%m-%d %H:%M:%S")
+            db.update_zone(
+                int(zone_id),
+                {
+                    "planned_end_time": new_end,
+                    "watering_start_time": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "watering_start_source": "manual",
+                },
+            )
+            try:
+                from irrigation_scheduler import get_scheduler
+
+                sched = get_scheduler()
+                if sched:
+                    # Remove existing stop jobs for THIS zone only —
+                    # cancel_group_jobs would stop running peers.
+                    try:
+                        for job in sched.scheduler.get_jobs():
+                            jid = str(job.id)
+                            if f"zone_stop:{int(zone_id)}:" in jid or f"zone_hard_stop:{int(zone_id)}" in jid:
+                                job.remove()
+                    except (RuntimeError, AttributeError, ValueError) as e:
+                        logger.debug("remove old stop jobs: %s", e)
+                    if not TESTING:
+                        sched.schedule_zone_stop(int(zone_id), override_dur, command_id=str(int(time.time())))
+                        sched.schedule_zone_hard_stop(int(zone_id), now_dt + timedelta(minutes=override_dur))
+            except (ImportError, ValueError, TypeError) as e:
+                logger.debug("reschedule on override: %s", e)
+            logger.info(
+                "start_zone_orchestrated: zone %s already ON, rescheduled to %s min (end=%s)",
+                zone_id,
+                override_dur,
+                new_end,
+            )
+            return "rescheduled", {"warnings": warnings, "duration": override_dur}
+        return "already_on", {"warnings": warnings, "duration": None}
+
+    # ---- Pre-delegate housekeeping: cancel scheduled program/stop jobs ----
+    # cancel_group_jobs sets the cancel-event flag and removes APScheduler
+    # jobs for the group (programs, peer zone_stops). It also calls
+    # stop_all_in_group(force=True) — which the delegate's parallel
+    # peer-off would do anyway, but we still need cancel_group_jobs for
+    # the program/job-removal side effects.
+    gid = int(z.get("group_id") or 0)
+    if gid:
+        try:
+            from irrigation_scheduler import get_scheduler
+
+            sched = get_scheduler()
+            if sched:
+                sched.cancel_group_jobs(int(gid))
+            try:
+                programs = db.get_programs() or []
+                now = datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                for p in programs:
+                    try:
+                        hh, mm = map(int, str(p.get("time") or "00:00").split(":", 1))
+                    except (ValueError, TypeError, KeyError):
+                        hh, mm = 0, 0
+                    if now.replace(hour=hh, minute=mm, second=0, microsecond=0) <= now:
+                        db.cancel_program_run_for_group(int(p.get("id")), today, int(gid))
+            except (ConnectionError, TimeoutError, OSError, sqlite3.Error) as e:
+                logger.debug("start_zone_orchestrated: cancel programs failed: %s", e)
+            try:
+                db.reschedule_group_to_next_program(int(gid))
+            except (sqlite3.Error, OSError) as e:
+                logger.debug("start_zone_orchestrated: reschedule_group_to_next_program failed: %s", e)
+        except (ImportError, ConnectionError, TimeoutError, OSError) as e:
+            logger.debug("start_zone_orchestrated pre-delegate housekeeping: %s", e)
+
+    # ---- Delegate to single source of truth ----
+    # exclusive_start_zone does (in order, all under group/zone locks):
+    #   1) state -> 'starting'
+    #   2) db.create_zone_run(...)
+    #   3) master-valve open (if group uses MV)
+    #   4) MQTT publish '1' on zone topic
+    #   5) state -> 'on'
+    #   6) parallel peer-off (publish '0' + finish their zone_runs)
+    # On MQTT failure step 4, the zone_run row stays open and is
+    # aborted by _boot_sync on next boot — that's the documented
+    # invariant, do not reorder.
+    try:
+        ok = exclusive_start_zone(int(zone_id), source=source)
+    except (ValueError, TypeError, KeyError):
+        logger.exception("start_zone_orchestrated: central start failed")
+        return "failed", {"warnings": warnings, "duration": None}
+    if not ok:
+        return "failed", {"warnings": warnings, "duration": None}
+
+    # ---- Post-delegate: planned_end_time + source, schedule auto-stop ----
+    # exclusive_start_zone writes state/commanded_state/watering_start_time
+    # but NOT planned_end_time or watering_start_source. Add them here so
+    # the UI auto-stop timer / "manual" badge work.
+    dur_min = override_dur if override_dur is not None else int(z.get("duration") or 10)
+    now_dt = datetime.now()
+    planned_end = (now_dt + timedelta(minutes=dur_min)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        _update_zone_state(
+            int(zone_id),
+            {"planned_end_time": planned_end, "watering_start_source": "manual"},
+            audit_reason="manual_start_planned_end",
+        )
+    except (sqlite3.Error, OSError, ImportError):
+        logger.exception(
+            "start_zone_orchestrated: audited planned_end_time update failed zone=%s — "
+            "falling back to raw update_zone",
+            zone_id,
+        )
+        try:
+            db.update_zone(int(zone_id), {"planned_end_time": planned_end, "watering_start_source": "manual"})
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("start_zone_orchestrated: planned_end_time fallback update failed: %s", e)
+
+    # Schedule auto-stop synchronously (sched calls are non-blocking).
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        sched = get_scheduler()
+        if sched and not TESTING:
+            sched.schedule_zone_stop(int(zone_id), dur_min, command_id=str(int(time.time())))
+            sched.schedule_zone_hard_stop(int(zone_id), now_dt + timedelta(minutes=dur_min))
+            sched.schedule_zone_cap(int(zone_id), cap_minutes=ZONE_CAP_DEFAULT_MIN)
+    except (ImportError, ValueError, TypeError) as e:
+        logger.debug("start_zone_orchestrated schedule stops: %s", e)
+
+    return "started", {"warnings": warnings, "duration": dur_min}
 
 
 def _finalize_water_stats(zone_id: int, z: dict, since_iso: str | None, *, log_label: str = "stop_zone") -> None:

@@ -329,56 +329,14 @@ def api_postpone():
         return jsonify({"success": True, "message": "Отложенный полив отменен"})
 
     elif action == "postpone":
-        postpone_date = datetime.now() + timedelta(days=days)
-        postpone_until = postpone_date.strftime("%Y-%m-%d 23:59:59")
-        zones = db.get_zones()
-        group_zones = [z for z in zones if int(z.get("group_id") or 0) == int(group_id)]
-        for zone in group_zones:
-            db.update_zone_postpone(zone["id"], postpone_until, "manual")
-        try:
-            for zone in group_zones:
-                try:
-                    if (zone.get("state") == "on") or zone.get("watering_start_time"):
-                        # Postpone applies to a group — each zone going OFF
-                        # is an audited transition (operator action via
-                        # /api/postpone) that we want to see in audit_log.
-                        try:
-                            from services.zones_state import update_zone_state as _uzs
+        from services.postpone import postpone_group
 
-                            _uzs(
-                                zone["id"],
-                                {"state": "off", "watering_start_time": None},
-                                audit_reason="postpone_action",
-                            )
-                        except (sqlite3.Error, OSError, ImportError):
-                            logger.exception(
-                                "system_config.postpone: audited path failed zone=%s — falling back to raw update_zone",
-                                zone.get("id"),
-                            )
-                            db.update_zone(zone["id"], {"state": "off", "watering_start_time": None})
-                        sid = zone.get("mqtt_server_id")
-                        topic = (zone.get("topic") or "").strip()
-                        if mqtt and sid and topic:
-                            t = normalize_topic(topic)
-                            server = db.get_mqtt_server(int(sid))
-                            if server:
-                                _publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
-                except (ConnectionError, TimeoutError, OSError):
-                    logger.exception("Ошибка остановки зоны при установке отложенного полива")
-            try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    scheduler.cancel_group_jobs(group_id)
-            except (ValueError, KeyError, RuntimeError):
-                logger.exception("Ошибка отмены заданий планировщика при отложенном поливе группы")
-        except (ConnectionError, TimeoutError, OSError):
-            logger.exception("Ошибка массовой остановки зон при отложенном поливе группы")
-        db.add_log("postpone_set", json.dumps({"group": group_id, "days": days, "until": postpone_until}))
+        res = postpone_group(group_id, days, source="api")
         return jsonify(
             {
                 "success": True,
                 "message": f"Полив отложен на {days} дней",
-                "postpone_until": postpone_date.strftime("%Y-%m-%d %H:%M:%S"),
+                "postpone_until": res["postpone_date"].strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
 

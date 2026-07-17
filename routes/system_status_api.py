@@ -16,6 +16,7 @@ from services.audit import audit_log
 from services.helpers import api_error, parse_dt
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services.monitors import env_monitor, rain_monitor, water_monitor
+from services.next_watering import compute_next_watering, weather_skip_today
 from services.security import admin_required
 
 try:
@@ -319,6 +320,8 @@ def api_status():
     rain_cfg = db.get_rain_config()
     zones = db.get_zones()
     groups = db.get_groups()
+    programs = db.get_programs()
+    weather_skip = weather_skip_today()
 
     zones_by_group = {}
     for zone in zones:
@@ -371,54 +374,15 @@ def api_status():
 
         next_start = None
         if group_zones:
-            programs = db.get_programs()
-            group_programs = []
-            for program in programs:
-                if isinstance(program["zones"], str):
-                    program_zones = json.loads(program["zones"])
-                else:
-                    program_zones = program["zones"]
-                group_zone_ids = [z["id"] for z in group_zones]
-                if any(zone_id in group_zone_ids for zone_id in program_zones):
-                    group_programs.append(program)
-            if group_programs:
-                # parse_dt imported at module level (top of file).
-                search_from = datetime.now()
-                try:
-                    pu_candidates = []
-                    for z in group_zones:
-                        pu = z.get("postpone_until")
-                        if pu:
-                            pu_dt = parse_dt(pu)
-                            if pu_dt and pu_dt > search_from:
-                                pu_candidates.append(pu_dt)
-                    if pu_candidates:
-                        search_from = max(pu_candidates)
-                except (KeyError, TypeError, ValueError) as e:
-                    logger.debug("Handled exception in line_720: %s", e)
-                best_dt = None
-                for program in group_programs:
-                    program_time = datetime.strptime(program["time"], "%H:%M").time()
-                    program_zones_list = (
-                        program["zones"] if isinstance(program["zones"], list) else json.loads(program["zones"])
-                    )
-                    group_zone_ids = [z["id"] for z in group_zones]
-                    if not any(zid in group_zone_ids for zid in program_zones_list):
-                        continue
-                    prog_weekdays = set(
-                        int(d)
-                        for d in (program["days"] if isinstance(program["days"], list) else json.loads(program["days"]))
-                    )
-                    for add_days in range(0, 14):
-                        day_date = search_from.date() + timedelta(days=add_days)
-                        if ((day_date.weekday() + 0) % 7) not in prog_weekdays:
-                            continue
-                        dt_candidate = datetime.combine(day_date, program_time)
-                        if dt_candidate > search_from and (best_dt is None or dt_candidate < best_dt):
-                            best_dt = dt_candidate
-                            break
-                if best_dt:
-                    next_start = best_dt.strftime("%H:%M")
+            nw = compute_next_watering(
+                [z["id"] for z in group_zones],
+                all_zones=zones,
+                programs=programs,
+                skip_today=weather_skip,
+            )
+            candidates = [e["next_dt"] for e in nw.values() if e.get("next_dt")]
+            if candidates:
+                next_start = min(candidates).strftime("%H:%M")
 
         postpone_until = None
         group_postpone_reason = None

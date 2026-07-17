@@ -5,11 +5,11 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from flask import Blueprint, current_app, jsonify, request
 
-from constants import GROUP_DEBOUNCE_SEC, ZONE_CAP_DEFAULT_MIN
+from constants import GROUP_DEBOUNCE_SEC
 from database import db
 from irrigation_scheduler import get_scheduler, init_scheduler
 from services import sse_hub as _sse_hub
@@ -420,67 +420,18 @@ def api_start_zone_exclusive(group_id, zone_id):
         if not current_app.config.get("TESTING") and _should_throttle_group(int(group_id)):
             return jsonify({"success": True, "message": "Группа уже обрабатывается"})
         try:
-            scheduler = get_scheduler()
-            if scheduler:
-                scheduler.cancel_group_jobs(int(group_id))
+            from services.zone_control import start_zone_orchestrated
+
+            status, _ctx = start_zone_orchestrated(int(zone_id))
         except (ValueError, TypeError, KeyError):
-            logger.exception("exclusive start: cancel_group_jobs failed")
-        try:
-            from services.zone_control import stop_all_in_group as _stop_all
-
-            _stop_all(int(group_id), reason="manual_zone_start_preempt", force=True)
-        except ImportError:
-            logger.exception("exclusive start: stop_all_in_group failed")
-        try:
-            from services.zone_control import exclusive_start_zone as _exclusive_start
-
-            ok = _exclusive_start(int(zone_id))
-            if not ok:
-                return jsonify({"success": False, "message": "Не удалось запустить зону"}), 400
-        except (ValueError, TypeError, KeyError) as _e:
             logger.exception("exclusive_start failed")
             return jsonify({"success": False, "message": "Ошибка запуска зоны"}), 500
-        try:
-            sched = get_scheduler()
-            if sched:
-                sched.schedule_zone_cap(int(zone_id), cap_minutes=ZONE_CAP_DEFAULT_MIN)
-        except (ValueError, TypeError, KeyError):
-            logger.exception("schedule zone cap failed")
+        if status in ("not_found", "failed"):
+            return jsonify({"success": False, "message": "Не удалось запустить зону"}), 400
         try:
             db.clear_scheduled_for_zone_group_peers(int(zone_id), int(group_id))
         except (sqlite3.Error, OSError) as e:
-            logger.debug("Handled exception in line_249: %s", e)
-        try:
-            scheduler = get_scheduler()
-            if scheduler:
-                try:
-                    zrec = db.get_zone(int(zone_id)) or {}
-                    db.update_zone(int(zone_id), {"watering_start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-                    dur = int(zrec.get("duration") or 0)
-                    if dur > 0:
-                        db.update_zone(
-                            int(zone_id),
-                            {
-                                "planned_end_time": (datetime.now() + timedelta(minutes=dur)).strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                )
-                            },
-                        )
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Handled exception in line_260: %s", e)
-                if not current_app.config.get("TESTING"):
-                    try:
-                        dur = int((db.get_zone(int(zone_id)) or {}).get("duration") or 0)
-                        if dur > 0:
-                            scheduler.schedule_zone_stop(int(zone_id), dur, command_id=str(int(time.time())))
-                            try:
-                                scheduler.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=dur))
-                            except (ValueError, TypeError, KeyError) as e:
-                                logger.debug("Handled exception in line_269: %s", e)
-                    except (sqlite3.Error, OSError):
-                        logger.exception("schedule auto-stop failed")
-        except (sqlite3.Error, OSError):
-            logger.exception("api_start_zone_exclusive: schedule_zone_stop failed")
+            logger.debug("Handled exception in api_start_zone_exclusive: %s", e)
         db.add_log("zone_start_exclusive", json.dumps({"group": group_id, "zone": zone_id}))
         return jsonify({"success": True, "message": f"Зона {zone_id} запущена, остальные остановлены"})
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

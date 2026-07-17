@@ -28,7 +28,7 @@ def test_next_watering_pushes_past_today_when_weather_skip(admin_client, app):
     # Always pick a slot still ahead today (23:55) to remove "already passed" noise.
     _make_program_for_today_at(23, 55, zone["id"], app)
 
-    with patch("routes.zones_crud_api._weather_skip_today", return_value=True):
+    with patch("services.next_watering.weather_skip_today", return_value=True):
         resp = admin_client.get(f"/api/zones/{zone['id']}/next-watering")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -43,7 +43,7 @@ def test_next_watering_returns_today_when_no_weather_skip(admin_client, app):
     zone = app.db.create_zone({"name": "WS-2", "duration": 5, "group_id": 1})
     _make_program_for_today_at(23, 55, zone["id"], app)
 
-    with patch("routes.zones_crud_api._weather_skip_today", return_value=False):
+    with patch("services.next_watering.weather_skip_today", return_value=False):
         resp = admin_client.get(f"/api/zones/{zone['id']}/next-watering")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -56,7 +56,7 @@ def test_next_watering_bulk_pushes_past_today_when_weather_skip(admin_client, ap
     zone = app.db.create_zone({"name": "WS-3", "duration": 5, "group_id": 1})
     _make_program_for_today_at(23, 55, zone["id"], app)
 
-    with patch("routes.zones_crud_api._weather_skip_today", return_value=True):
+    with patch("services.next_watering.weather_skip_today", return_value=True):
         resp = admin_client.post(
             "/api/zones/next-watering-bulk",
             data=json.dumps({"zone_ids": [zone["id"]]}),

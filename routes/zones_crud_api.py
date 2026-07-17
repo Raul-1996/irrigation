@@ -3,13 +3,13 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
 from database import db
 from services.audit import audit_log, debug_audit
-from services.helpers import parse_dt
+from services.duration_conflicts import compute_duration_conflicts
+from services.next_watering import compute_next_watering
 from utils import to_iso_with_tz
 
 logger = logging.getLogger(__name__)
@@ -52,22 +52,6 @@ def _zone_ts_to_iso(zone: dict | None) -> dict | None:
         if out.get(f):
             out[f] = to_iso_with_tz(out[f])
     return out
-
-
-def _weather_skip_today() -> bool:
-    """Issue #34: if today's weather decision is skip, next-watering must not
-    return a same-day slot — scheduler would skip it anyway. Returns False on
-    any error (best-effort: better to show a same-day slot than 'Никогда')."""
-    try:
-        from services.weather_adjustment import get_weather_adjustment
-
-        adj = get_weather_adjustment(db.db_path)
-        if not adj.is_enabled():
-            return False
-        return bool(adj.should_skip().get("skip"))
-    except (ImportError, OSError, sqlite3.Error, ValueError, TypeError) as e:
-        logger.debug("Weather-skip check failed in next-watering: %s", e)
-        return False
 
 
 # ---- Zone CRUD ----
@@ -260,116 +244,30 @@ def api_zone_next_watering(zone_id):
         if not zone:
             return jsonify({"error": "Зона не найдена"}), 404
 
-        programs = db.get_programs()
-        zone_programs = []
-
-        for program in programs:
-            if isinstance(program["zones"], str):
-                program_zones = json.loads(program["zones"])
-            else:
-                program_zones = program["zones"]
-            if zone_id in program_zones:
-                zone_programs.append(program)
-
-        if not zone_programs:
+        info = compute_next_watering([zone_id]).get(int(zone_id)) or {}
+        if not info.get("has_programs"):
             return jsonify(
                 {"zone_id": zone_id, "next_watering": "Никогда", "reason": "Зона не включена ни в одну программу"}
             )
-
-        now = datetime.now()
-        # Issue #34: weather skip in effect → bump lower bound past today so
-        # cards show the next eligible day, not a slot the scheduler will skip.
-        if _weather_skip_today():
-            tomorrow_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            if tomorrow_midnight > now:
-                now = tomorrow_midnight
-        try:
-            pu = zone.get("postpone_until")
-            if pu:
-                pu_dt = parse_dt(pu)
-                if pu_dt and pu_dt > now:
-                    now = pu_dt
-        except (KeyError, TypeError, ValueError) as e:
-            logger.debug("Handled exception in line_240: %s", e)
-        best_dt = None
-        best_payload = None
-
-        for program in zone_programs:
-            program_time = datetime.strptime(program["time"], "%H:%M").time()
-            prog_weekdays = set(int(d) for d in program["days"])
-            program_zones = program["zones"] if isinstance(program["zones"], list) else json.loads(program["zones"])
-            program_zones.sort()
-            zone_position = program_zones.index(zone_id)
-
-            total_duration_before = 0
-            for i in range(zone_position):
-                prev_zone_id = program_zones[i]
-                prev_zone = db.get_zone(prev_zone_id)
-                if prev_zone:
-                    total_duration_before += prev_zone["duration"]
-
-            for add_days in range(0, 14):
-                day_date = now.date() + timedelta(days=add_days)
-                if prog_weekdays and ((day_date.weekday() + 0) % 7) not in prog_weekdays:
-                    continue
-                zone_start_minutes = program_time.hour * 60 + program_time.minute + total_duration_before
-                zone_dt = datetime.combine(day_date, datetime.min.time()) + timedelta(minutes=zone_start_minutes)
-                if zone_dt > now:
-                    try:
-                        gid = int((zone or {}).get("group_id") or 0)
-                        if gid and day_date == datetime.now().date():
-                            run_date = datetime.now().strftime("%Y-%m-%d")
-                            if db.is_program_run_cancelled_for_group(int(program["id"]), run_date, gid):
-                                continue
-                    except (sqlite3.Error, OSError) as e:
-                        logger.debug("Handled exception in line_272: %s", e)
-                    if best_dt is None or zone_dt < best_dt:
-                        best_dt = zone_dt
-                        best_payload = {
-                            "zone_id": zone_id,
-                            "next_watering": zone_dt.strftime("%H:%M"),
-                            "next_datetime": zone_dt.strftime("%Y-%m-%d %H:%M"),
-                            "program_name": program["name"],
-                            "program_time": program["time"],
-                            "zone_position": zone_position + 1,
-                            "total_zones_in_program": len(program_zones),
-                        }
-                    break
-
-        if best_payload is None:
+        best_dt = info.get("next_dt")
+        if best_dt is None:
             return jsonify({"zone_id": zone_id, "next_watering": "Никогда"})
-        return jsonify(best_payload)
+        program = info.get("program") or {}
+        return jsonify(
+            {
+                "zone_id": zone_id,
+                "next_watering": best_dt.strftime("%H:%M"),
+                "next_datetime": best_dt.strftime("%Y-%m-%d %H:%M"),
+                "program_name": program.get("name"),
+                "program_time": program.get("time"),
+                "zone_position": info.get("zone_position"),
+                "total_zones_in_program": info.get("total_zones"),
+            }
+        )
 
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения времени следующего полива для зоны {zone_id}: {e}")
         return jsonify({"error": "Ошибка получения времени полива"}), 500
-
-
-def _first_program_start_after(prog, lower_bound):
-    """Return the first scheduled program-start datetime strictly > lower_bound.
-
-    Mirrors the inline 0..14 day search used by api_zones_next_watering_bulk
-    for prog_info[...]['next_start'], but anchored at *lower_bound* instead of
-    the global *now*.  Returns None if the program has no day list or its
-    time string is malformed.
-    """
-    if not prog:
-        return None
-    try:
-        hh, mm = [int(x) for x in str(prog.get("time") or "00:00").split(":", 1)]
-    except (ValueError, TypeError, KeyError) as e:
-        logger.debug("Exception in _first_program_start_after time parse: %s", e)
-        return None
-    days = prog.get("days") or []
-    if not days:
-        return None
-    for off in range(0, 15):
-        d = lower_bound + timedelta(days=off)
-        if d.weekday() in days:
-            cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if cand > lower_bound:
-                return cand
-    return None
 
 
 @zones_crud_api_bp.route("/api/zones/next-watering-bulk", methods=["POST"])
@@ -377,152 +275,11 @@ def _first_program_start_after(prog, lower_bound):
 def api_zones_next_watering_bulk():
     try:
         data = request.get_json(silent=True) or {}
-        zone_ids = data.get("zone_ids")
-        all_zones = db.get_zones() or []
-        if not zone_ids:
-            zone_ids = [int(z.get("id")) for z in all_zones if int(z.get("group_id") or z.get("group") or 0) != 999]
-        zone_ids = [int(z) for z in zone_ids]
-        duration_by_zone = {int(z["id"]): int(z.get("duration") or 0) for z in all_zones}
-        programs = db.get_programs() or []
-        offset_map_per_program = []
-        for p in programs:
-            try:
-                zones_list = sorted([int(x) for x in (p.get("zones") or [])])
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in api_zones_next_watering_bulk: %s", e)
-                zones_list = []
-            offsets = {}
-            cum = 0
-            for zid in zones_list:
-                offsets[zid] = cum
-                cum += int(duration_by_zone.get(zid, 0))
-            offset_map_per_program.append({"prog": p, "offsets": offsets})
-        now = datetime.now()
-        # Issue #34: weather skip in effect → push baseline past today so all
-        # per-program candidates land on the next eligible day, mirroring the
-        # single-zone endpoint above.
-        if _weather_skip_today():
-            tomorrow_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            if tomorrow_midnight > now:
-                now = tomorrow_midnight
-        # Per-zone postpone lookup — lets us advance the per-zone lower bound
-        # so cards never display a next-run inside an active postpone window.
-        zone_by_id = {int(z["id"]): z for z in all_zones}
-        prog_info = {}
-        for pm in offset_map_per_program:
-            p = pm["prog"]
-            try:
-                hh, mm = [int(x) for x in str(p.get("time") or "00:00").split(":", 1)]
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in api_zones_next_watering_bulk: %s", e)
-                hh, mm = 0, 0
-            best = None
-            days = p.get("days") or []
-            today_start = None
-            if now.weekday() in days:
-                today_start = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            try:
-                zones_list = p.get("zones") or []
-                total_prog_min = sum(int(duration_by_zone.get(int(zid), 0)) for zid in zones_list)
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in line_337: %s", e)
-                total_prog_min = 0
-            in_progress = False
-            elapsed_min = 0
-            if today_start and today_start <= now and total_prog_min > 0:
-                today_end = today_start + timedelta(minutes=total_prog_min)
-                if now < today_end:
-                    in_progress = True
-                    elapsed_min = int((now - today_start).total_seconds() // 60)
-            for off in range(0, 14):
-                d = now + timedelta(days=off)
-                if d.weekday() in days:
-                    cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                    if cand <= now:
-                        continue
-                    best = cand
-                    break
-            prog_info[p.get("id")] = {
-                "next_start": best,
-                "today_start": today_start,
-                "in_progress": in_progress,
-                "elapsed_min": elapsed_min,
-            }
+        zone_ids = data.get("zone_ids") or None
+        results = compute_next_watering(zone_ids)
         items = []
-        for zid in zone_ids:
-            best_dt = None
-            # Per-zone lower bound: if zone has an active postpone_until in the
-            # future, advance zone_now to it so we never display a next-run
-            # that the scheduler would skip.
-            z = zone_by_id.get(int(zid))
-            zone_now = now
-            if z:
-                pu_dt = parse_dt(z.get("postpone_until"))
-                if pu_dt and pu_dt > zone_now:
-                    zone_now = pu_dt
-            for pm in offset_map_per_program:
-                p = pm["prog"]
-                offsets = pm["offsets"]
-                if zid not in offsets:
-                    continue
-                pinfo = prog_info.get(p.get("id")) or {}
-                cancelled_today = False
-                try:
-                    zinfo = next((zz for zz in all_zones if int(zz.get("id")) == int(zid)), None)
-                    gid = int(zinfo.get("group_id") or 0) if zinfo else 0
-                    if gid and pinfo.get("today_start"):
-                        run_date = pinfo["today_start"].strftime("%Y-%m-%d")
-                        cancelled_today = db.is_program_run_cancelled_for_group(int(p.get("id")), run_date, gid)
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Exception in line_376: %s", e)
-                    cancelled_today = False
-
-                # When the zone is postponed (zone_now > now), an in-progress
-                # program for the cohort is irrelevant for THIS zone — the
-                # scheduler will skip it. Fall through to "search future
-                # programs from zone_now".
-                if pinfo.get("in_progress") and pinfo.get("today_start") and not cancelled_today and zone_now <= now:
-                    off_min = int(offsets.get(zid, 0))
-                    if off_min >= int(pinfo.get("elapsed_min") or 0):
-                        cand = pinfo["today_start"] + timedelta(minutes=off_min)
-                    else:
-                        start_dt = pinfo.get("next_start")
-                        if not start_dt:
-                            continue
-                        cand = start_dt + timedelta(minutes=off_min)
-                else:
-                    # Common path: cached next_start (anchored at global now).
-                    # When the zone is postponed (or the start landed inside
-                    # the postpone window), recompute from zone_now.
-                    if zone_now != now:
-                        start_dt = _first_program_start_after(p, zone_now)
-                    else:
-                        start_dt = pinfo.get("next_start")
-                    if not start_dt:
-                        continue
-                    cand = start_dt + timedelta(minutes=int(offsets.get(zid, 0)))
-                    try:
-                        # cancelled_today shifts to next-week's run — but if
-                        # zone is postponed, we already searched from zone_now
-                        # which strictly skips the postpone window, so the
-                        # cancelled_today shift is unnecessary (and would be
-                        # incorrect — it ignores postpone_until).
-                        if p.get("id") is not None and pinfo.get("today_start") and cancelled_today and zone_now == now:
-                            hh, mm = map(int, str(p.get("time") or "00:00").split(":", 1))
-                            ns = None
-                            for off in range(1, 15):
-                                d = now + timedelta(days=off)
-                                if d.weekday() in (p.get("days") or []):
-                                    ns = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                                    break
-                            if ns:
-                                cand = ns + timedelta(minutes=int(offsets.get(zid, 0)))
-                    except (ValueError, TypeError, KeyError) as e:
-                        logger.debug("Handled exception in line_405: %s", e)
-                if cand <= zone_now:
-                    continue
-                if best_dt is None or cand < best_dt:
-                    best_dt = cand
+        for zid, info in results.items():
+            best_dt = info.get("next_dt")
             items.append(
                 {
                     "zone_id": int(zid),
@@ -566,70 +323,8 @@ def api_check_zone_duration_conflicts():
             return jsonify({"success": False, "message": "Зона не найдена"}), 404
 
         programs = db.get_programs()
-        conflicts = []
-
-        def get_zone_group(zid: int):
-            z = db.get_zone(zid)
-            return z["group_id"] if z else None
-
-        for program in programs:
-            prog_days = program["days"] if isinstance(program["days"], list) else json.loads(program["days"])
-            prog_zones = program["zones"] if isinstance(program["zones"], list) else json.loads(program["zones"])
-            if zone_id not in prog_zones:
-                continue
-            try:
-                p_hour, p_min = map(int, program["time"].split(":"))
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in get_zone_group: %s", e)
-                continue
-            start_a = p_hour * 60 + p_min
-            total_duration_a = 0
-            for zid in prog_zones:
-                if zid == zone_id:
-                    total_duration_a += int(new_duration)
-                else:
-                    total_duration_a += int(db.get_zone_duration(zid))
-            end_a = start_a + total_duration_a
-            groups_a = set(filter(lambda g: g is not None, [get_zone_group(zid) for zid in prog_zones]))
-
-            for other in programs:
-                if other["id"] == program["id"]:
-                    continue
-                other_days = other["days"] if isinstance(other["days"], list) else json.loads(other["days"])
-                common_days = set(prog_days) & set(other_days)
-                if not common_days:
-                    continue
-                other_zones = other["zones"] if isinstance(other["zones"], list) else json.loads(other["zones"])
-                common_zones = set(prog_zones) & set(other_zones)
-                groups_b = set(filter(lambda g: g is not None, [get_zone_group(zid) for zid in other_zones]))
-                common_groups = groups_a & groups_b
-                if not common_zones and not common_groups:
-                    continue
-                try:
-                    oh, om = map(int, other["time"].split(":"))
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Exception in line_481: %s", e)
-                    continue
-                start_b = oh * 60 + om
-                total_duration_b = 0
-                for zid in other_zones:
-                    total_duration_b += int(db.get_zone_duration(zid))
-                end_b = start_b + total_duration_b
-                if start_a < end_b and end_a > start_b:
-                    conflicts.append(
-                        {
-                            "checked_program_id": program["id"],
-                            "checked_program_name": program["name"],
-                            "checked_program_time": program["time"],
-                            "other_program_id": other["id"],
-                            "other_program_name": other["name"],
-                            "other_program_time": other["time"],
-                            "common_zones": list(common_zones),
-                            "common_groups": list(common_groups),
-                            "overlap_start": max(start_a, start_b),
-                            "overlap_end": min(end_a, end_b),
-                        }
-                    )
+        zones_cache = {z["id"]: z for z in db.get_zones()}
+        conflicts = compute_duration_conflicts(zone_id, new_duration, programs, zones_cache)
 
         return jsonify({"success": True, "has_conflicts": len(conflicts) > 0, "conflicts": conflicts})
     except (sqlite3.Error, OSError) as e:
@@ -670,75 +365,9 @@ def api_check_zone_duration_conflicts_bulk():
         all_programs = db.get_programs()
         zones_cache = {z["id"]: z for z in db.get_zones()}
 
-        def get_zone_group(zid: int):
-            z = zones_cache.get(zid)
-            return z["group_id"] if z else None
-
-        def get_zone_duration(zid: int):
-            z = zones_cache.get(zid)
-            if not z:
-                return 0
-            try:
-                return int(z.get("duration") or 0)
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in get_zone_duration: %s", e)
-                return 0
-
         results = {}
         for zone_id, new_duration in normalized:
-            conflicts = []
-            for program in all_programs:
-                prog_days = program["days"] if isinstance(program["days"], list) else json.loads(program["days"])
-                prog_zones = program["zones"] if isinstance(program["zones"], list) else json.loads(program["zones"])
-                if zone_id not in prog_zones:
-                    continue
-                try:
-                    p_hour, p_min = map(int, program["time"].split(":"))
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Exception in get_zone_duration: %s", e)
-                    continue
-                start_a = p_hour * 60 + p_min
-                total_duration_a = 0
-                for zid in prog_zones:
-                    total_duration_a += new_duration if zid == zone_id else get_zone_duration(zid)
-                end_a = start_a + total_duration_a
-                groups_a = set(filter(lambda g: g is not None, [get_zone_group(zid) for zid in prog_zones]))
-                for other in all_programs:
-                    if other["id"] == program["id"]:
-                        continue
-                    other_days = other["days"] if isinstance(other["days"], list) else json.loads(other["days"])
-                    if not (set(prog_days) & set(other_days)):
-                        continue
-                    other_zones = other["zones"] if isinstance(other["zones"], list) else json.loads(other["zones"])
-                    common_zones = set(prog_zones) & set(other_zones)
-                    groups_b = set(filter(lambda g: g is not None, [get_zone_group(zid) for zid in other_zones]))
-                    if not common_zones and not (groups_a & groups_b):
-                        continue
-                    try:
-                        oh, om = map(int, other["time"].split(":"))
-                    except (ValueError, TypeError, KeyError) as e:
-                        logger.debug("Exception in line_576: %s", e)
-                        continue
-                    start_b = oh * 60 + om
-                    total_duration_b = 0
-                    for zid in other_zones:
-                        total_duration_b += get_zone_duration(zid)
-                    end_b = start_b + total_duration_b
-                    if start_a < end_b and end_a > start_b:
-                        conflicts.append(
-                            {
-                                "checked_program_id": program["id"],
-                                "checked_program_name": program["name"],
-                                "checked_program_time": program["time"],
-                                "other_program_id": other["id"],
-                                "other_program_name": other["name"],
-                                "other_program_time": other["time"],
-                                "common_zones": list(common_zones),
-                                "common_groups": list(groups_a & groups_b),
-                                "overlap_start": max(start_a, start_b),
-                                "overlap_end": min(end_a, end_b),
-                            }
-                        )
+            conflicts = compute_duration_conflicts(zone_id, new_duration, all_programs, zones_cache)
             results[str(zone_id)] = {"has_conflicts": len(conflicts) > 0, "conflicts": conflicts}
 
         return jsonify({"success": True, "results": results})

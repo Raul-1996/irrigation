@@ -10,7 +10,6 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
 
 from database import db
 
@@ -162,23 +161,10 @@ def _do_group_stop(group_id: int) -> str:
 
 def _do_group_postpone(group_id: int, days: int) -> str:
     try:
-        days = int(days)
-        until_date = datetime.now() + timedelta(days=days)
-        postpone_until = until_date.strftime("%Y-%m-%d 23:59:59")
-        zones = db.get_zones() or []
-        for z in zones:
-            try:
-                if int(z.get("group_id") or 0) == int(group_id):
-                    db.update_zone_postpone(int(z["id"]), postpone_until, "manual")
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("Handled exception in _do_group_postpone: %s", e)
-        try:
-            from services.zone_control import stop_all_in_group
+        from services.postpone import postpone_group
 
-            stop_all_in_group(int(group_id), reason="manual_postpone", force=True)
-        except ImportError as e:
-            logger.debug("Handled exception in _do_group_postpone: %s", e)
-        return f"⏰ Полив отложен на {days} дн. до {postpone_until}"
+        res = postpone_group(int(group_id), int(days), source="telegram")
+        return f"⏰ Полив отложен на {int(days)} дн. до {res['postpone_until']}"
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Exception in _do_group_postpone: %s", e)
         return "Ошибка отложки группы"

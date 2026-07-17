@@ -3,8 +3,7 @@
 import json
 import logging
 import sqlite3
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
@@ -15,11 +14,6 @@ from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from utils import normalize_topic
-
-try:
-    import paho.mqtt.client as mqtt
-except ImportError:
-    mqtt = None
 
 logger = logging.getLogger(__name__)
 
@@ -43,60 +37,14 @@ def start_zone(zone_id):
             return jsonify({"success": False, "message": "Зона не найдена"}), 404
 
         try:
-            scheduler = get_scheduler()
-            if scheduler:
-                scheduler.cancel_group_jobs(int(zone["group_id"]))
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Handled exception in start_zone: %s", e)
+            from services.zone_control import start_zone_orchestrated
 
-        # Turn off all other zones in group
-        try:
-            zones = db.get_zones()
-            group_id = int(zone.get("group_id") or 0)
-            if group_id:
-                group_zones = [z for z in zones if z["group_id"] == group_id and int(z["id"]) != int(zone_id)]
-                for gz in group_zones:
-                    try:
-                        sid = gz.get("mqtt_server_id")
-                        topic = (gz.get("topic") or "").strip()
-                        if mqtt and sid and topic:
-                            t = topic if str(topic).startswith("/") else "/" + str(topic)
-                            server = db.get_mqtt_server(int(sid))
-                            if server:
-                                _publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
-                    except (ConnectionError, TimeoutError, OSError):
-                        logger.exception("Ошибка публикации MQTT '0' при ручном запуске: выключение соседей")
-                    try:
-                        # Manual start of one zone in a group force-stops
-                        # peers — audited so each peer's transition is visible.
-                        from services.zones_state import update_zone_state as _uzs
-
-                        _uzs(
-                            int(gz["id"]),
-                            {"state": "off", "watering_start_time": None},
-                            audit_reason="peer_off_manual_start",
-                        )
-                    except (sqlite3.Error, OSError, ImportError) as e:
-                        logger.debug("Handled exception in line_796: %s", e)
-        except (ConnectionError, TimeoutError, OSError) as e:
-            logger.debug("Handled exception in line_798: %s", e)
-
-        try:
-            from services.zone_control import exclusive_start_zone as _start_central
-
-            ok = _start_central(int(zone_id))
-            if not ok:
-                return jsonify({"success": False, "message": "Не удалось запустить зону"}), 500
+            status, _ctx = start_zone_orchestrated(int(zone_id))
         except (ValueError, TypeError, KeyError):
             logger.exception("start_zone: central start failed")
             return jsonify({"success": False, "message": "Не удалось запустить зону"}), 500
-
-        try:
-            scheduler = get_scheduler()
-            if scheduler:
-                scheduler.schedule_zone_stop(zone_id, int(zone["duration"]), command_id=str(int(time.time())))
-        except (ValueError, TypeError, KeyError) as e:
-            logger.error(f"Ошибка планирования остановки зоны {zone_id}: {e}")
+        if status in ("not_found", "failed"):
+            return jsonify({"success": False, "message": "Не удалось запустить зону"}), 500
 
         group_id = int(zone.get("group_id") or 0)
         db.add_log(
@@ -345,14 +293,14 @@ def api_mqtt_zones_sse():
 @rate_limit("mqtt_control", max_requests=10, window_sec=60)
 @audit_log("zone_mqtt_start", target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def api_zone_mqtt_start(zone_id: int):
-    """Manual MQTT start of a zone — thin shim around services.zone_control.exclusive_start_zone.
+    """Manual MQTT start of a zone — thin shim around services.zone_control.start_zone_orchestrated.
 
     History note: prior to fix/mqtt-start-unify this endpoint duplicated ~258
     lines of start logic (peer-off threadpool, master-valve open, MQTT publish,
     DB writes) and — critically — never called db.create_zone_run. Result:
     UI-initiated starts left zone_runs empty, breaking get_last_watering_time.
-    The sibling endpoint /api/zones/<id>/start (start_zone) was already
-    delegating to exclusive_start_zone, so this is alignment, not invention.
+    The endpoint keeps only HTTP validation (override duration/percent) and
+    response shaping; the orchestration lives in services.zone_control.
     """
     try:
         z = db.get_zone(zone_id)
@@ -362,12 +310,10 @@ def api_zone_mqtt_start(zone_id: int):
             return jsonify({"success": False, "message": "Аварийная остановка активна"}), 400
 
         # ---- Optional one-time duration override (1..120 min) ----
-        # Carry as local only — exclusive_start_zone does NOT consult
-        # z['duration'] for any scheduling, so in-memory mutation would be
-        # invisible. We use override_dur explicitly for schedule_zone_stop /
-        # planned_end_time below; base duration in DB stays untouched.
-        override_dur = None
-        warnings: list = []  # Issue #12 — populated by % branch when applicable
+        # Base duration in DB stays untouched — the override is applied by
+        # start_zone_orchestrated for schedule_zone_stop / planned_end_time.
+        override_duration = None
+        override_percent = None
         body = request.get_json(silent=True) or {}
         # Issue #12 C2: "minutes wins if both sent" must be strict.
         # If `duration` is present in the body AT ALL, that is the user's
@@ -382,12 +328,7 @@ def api_zone_mqtt_start(zone_id: int):
                 return jsonify({"success": False, "message": "duration должен быть целым числом 1..120"}), 400
             if not (1 <= req_d <= 120):
                 return jsonify({"success": False, "message": "duration должен быть в диапазоне 1..120 мин"}), 400
-            override_dur = req_d
-            logger.info(
-                "mqtt_start: zone %s using override duration %s min (base unchanged)",
-                zone_id,
-                req_d,
-            )
+            override_duration = req_d
 
         # ---- Issue #12: %-of-norm override (alternative to `duration`) ----
         # Minutes mode (duration) wins if SENT (validated above). Percent is
@@ -399,171 +340,40 @@ def api_zone_mqtt_start(zone_id: int):
                 req_pct = body.get("duration_percent")
                 if req_pct is not None:
                     from services.zone_control import PERCENT_PRESETS
-                    from services.zone_control import per_zone_dur as _per_zone_dur
 
                     p = int(req_pct)
                     if p in PERCENT_PRESETS:
-                        computed, warns = _per_zone_dur(z, None, p)
-                        override_dur = computed
-                        warnings = warns
-                        logger.info(
-                            "mqtt_start: zone %s using override percent %s%% -> %s min (warnings=%s)",
-                            zone_id,
-                            p,
-                            override_dur,
-                            warnings,
-                        )
+                        override_percent = p
             except (ValueError, TypeError) as e:
                 logger.debug("mqtt_start percent parse: %s", e)
 
-        # ---- Already-ON branch — reschedule stop, do NOT delegate ----
-        # Delegating would peer-off siblings (none changed) and re-publish
-        # ON (no-op with retain). The only useful effect of a re-POST while
-        # ON is updating the auto-stop time, so handle it here without a
-        # new zone_run row.
-        if str(z.get("state") or "") == "on":
-            if override_dur is not None:
-                now_dt = datetime.now()
-                new_end = (now_dt + timedelta(minutes=override_dur)).strftime("%Y-%m-%d %H:%M:%S")
-                db.update_zone(
-                    zone_id,
-                    {
-                        "planned_end_time": new_end,
-                        "watering_start_time": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        "watering_start_source": "manual",
-                    },
-                )
-                try:
-                    sched = get_scheduler()
-                    if sched:
-                        # Remove existing stop jobs for THIS zone only —
-                        # cancel_group_jobs would stop running peers.
-                        try:
-                            for job in sched.scheduler.get_jobs():
-                                if f"zone_stop:{zone_id}:" in str(job.id) or f"zone_hard_stop:{zone_id}" in str(job.id):
-                                    job.remove()
-                        except (RuntimeError, AttributeError, ValueError) as e:
-                            logger.debug("remove old stop jobs: %s", e)
-                        if not current_app.config.get("TESTING", False):
-                            sched.schedule_zone_stop(int(zone_id), override_dur, command_id=str(int(time.time())))
-                            sched.schedule_zone_hard_stop(int(zone_id), now_dt + timedelta(minutes=override_dur))
-                except (ValueError, TypeError, ImportError) as e:
-                    logger.debug("reschedule on override: %s", e)
-                logger.info(
-                    "mqtt_start: zone %s already ON, rescheduled to %s min (end=%s)",
-                    zone_id,
-                    override_dur,
-                    new_end,
-                )
-                return jsonify(
-                    {
-                        "success": True,
-                        "message": f"Зона {zone_id} перезапущена на {override_dur} мин",
-                        "warnings": warnings,
-                    }
-                )
-            return jsonify({"success": True, "message": "Зона уже запущена", "warnings": warnings})
-
-        # ---- Pre-delegate housekeeping: cancel scheduled program/stop jobs ----
-        # cancel_group_jobs sets the cancel-event flag and removes APScheduler
-        # jobs for the group (programs, peer zone_stops). It also calls
-        # stop_all_in_group(force=True) — which the delegate's parallel
-        # peer-off would do anyway, but we still need cancel_group_jobs for
-        # the program/job-removal side effects. Sibling start_zone calls
-        # cancel_group_jobs the same way.
-        gid = int(z.get("group_id") or 0)
-        if gid:
-            try:
-                sched = get_scheduler()
-                if sched:
-                    sched.cancel_group_jobs(int(gid))
-                try:
-                    programs = db.get_programs() or []
-                    now = datetime.now()
-                    today = now.strftime("%Y-%m-%d")
-                    for p in programs:
-                        try:
-                            hh, mm = map(int, str(p.get("time") or "00:00").split(":", 1))
-                        except (ValueError, TypeError, KeyError):
-                            hh, mm = 0, 0
-                        if now.replace(hour=hh, minute=mm, second=0, microsecond=0) <= now:
-                            db.cancel_program_run_for_group(int(p.get("id")), today, int(gid))
-                except (ConnectionError, TimeoutError, OSError, sqlite3.Error) as e:
-                    logger.debug("mqtt_start: cancel programs failed: %s", e)
-                try:
-                    db.reschedule_group_to_next_program(int(gid))
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("mqtt_start: reschedule_group_to_next_program failed: %s", e)
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("mqtt_start pre-delegate housekeeping: %s", e)
-
-        # ---- Delegate to single source of truth ----
-        # exclusive_start_zone does (in order, all under group/zone locks):
-        #   1) state -> 'starting'
-        #   2) db.create_zone_run(...)            <-- the bug fix
-        #   3) master-valve open (if group uses MV)
-        #   4) MQTT publish '1' on zone topic
-        #   5) state -> 'on'
-        #   6) parallel peer-off (publish '0' + finish their zone_runs)
-        # On MQTT failure step 4, the zone_run row stays open and is
-        # aborted by _boot_sync on next boot — that's the documented
-        # invariant, do not reorder.
         try:
-            from services.zone_control import exclusive_start_zone as _start_central
+            from services.zone_control import start_zone_orchestrated
 
-            ok = _start_central(int(zone_id))
-            if not ok:
-                return jsonify({"success": False, "message": "Не удалось запустить зону"}), 500
+            status, ctx = start_zone_orchestrated(
+                int(zone_id), override_duration=override_duration, override_percent=override_percent
+            )
         except (ValueError, TypeError, KeyError):
             logger.exception("api_zone_mqtt_start: central start failed")
             return jsonify({"success": False, "message": "Не удалось запустить зону"}), 500
-
-        # ---- Post-delegate: planned_end_time + source, schedule auto-stop ----
-        # exclusive_start_zone writes state/commanded_state/watering_start_time
-        # but NOT planned_end_time or watering_start_source. Add them here so
-        # the UI auto-stop timer / "manual" badge work the same as before.
-        dur_min = override_dur if override_dur is not None else int(z.get("duration") or 10)
-        now_dt = datetime.now()
-        planned_end = (now_dt + timedelta(minutes=dur_min)).strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            from services.zones_state import update_zone_state as _uzs
-
-            _uzs(
-                int(zone_id),
+        warnings = ctx.get("warnings") or []
+        if status == "not_found":
+            return jsonify({"success": False, "message": "Зона не найдена"}), 404
+        if status == "failed":
+            return jsonify({"success": False, "message": "Не удалось запустить зону"}), 500
+        if status == "rescheduled":
+            return jsonify(
                 {
-                    "planned_end_time": planned_end,
-                    "watering_start_source": "manual",
-                },
-                audit_reason="manual_start_planned_end",
+                    "success": True,
+                    "message": f"Зона {zone_id} перезапущена на {ctx.get('duration')} мин",
+                    "warnings": warnings,
+                }
             )
-        except (sqlite3.Error, OSError, ImportError):
-            logger.exception(
-                "api_zone_mqtt_start: audited planned_end_time update failed zone=%s — falling back to raw update_zone",
-                zone_id,
-            )
-            try:
-                db.update_zone(
-                    int(zone_id),
-                    {
-                        "planned_end_time": planned_end,
-                        "watering_start_source": "manual",
-                    },
-                )
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("mqtt_start: planned_end_time fallback update failed: %s", e)
-
-        # Schedule auto-stop synchronously (sched calls are non-blocking).
-        # Sibling start_zone uses the same pattern at line 85-89.
-        try:
-            sched = get_scheduler()
-            if sched and not current_app.config.get("TESTING", False):
-                sched.schedule_zone_stop(int(zone_id), dur_min, command_id=str(int(time.time())))
-                sched.schedule_zone_hard_stop(int(zone_id), now_dt + timedelta(minutes=dur_min))
-        except (ValueError, TypeError, ImportError) as e:
-            logger.debug("mqtt_start schedule stops: %s", e)
+        if status == "already_on":
+            return jsonify({"success": True, "message": "Зона уже запущена", "warnings": warnings})
 
         try:
-            db.add_log("zone_start_manual", json.dumps({"zone": int(zone_id), "group": gid}))
+            db.add_log("zone_start_manual", json.dumps({"zone": int(zone_id), "group": int(z.get("group_id") or 0)}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("mqtt_start add_log failed: %s", e)
 
