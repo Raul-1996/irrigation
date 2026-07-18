@@ -5,6 +5,39 @@ import time
 from unittest.mock import MagicMock, patch
 
 
+def test_initialize_completes_scheduler_boot_only_after_off_reconciliation(test_db):
+    """The paused scheduler resumes only after boot OFF reconciliation."""
+    import irrigation_scheduler
+    import routes.health_api as health_api
+    import services.systemd_notify as systemd_notify
+    import services.watchdog as watchdog
+    from services import app_init
+
+    events = []
+    scheduler = MagicMock()
+    scheduler.complete_boot_recovery.side_effect = lambda: events.append("complete_boot_recovery")
+    flask_app = MagicMock()
+    flask_app.config = {"TESTING": False}
+
+    app_init.reset_init()
+    with (
+        patch.object(irrigation_scheduler, "init_scheduler", side_effect=lambda _db: events.append("init")),
+        patch.object(irrigation_scheduler, "get_scheduler", return_value=scheduler),
+        patch.object(watchdog, "start_watchdog"),
+        patch.object(app_init, "_boot_sync", side_effect=lambda _app, _db: events.append("boot_sync")),
+        patch.object(app_init, "_start_monitors", side_effect=lambda _app, _db: events.append("monitors")),
+        patch.object(app_init, "_warm_mqtt_clients"),
+        patch.object(app_init, "_register_shutdown_handlers"),
+        patch.object(health_api, "init_metrics"),
+        patch.object(systemd_notify, "start_heartbeat"),
+        patch.object(systemd_notify, "notify_ready"),
+    ):
+        app_init.initialize_app(flask_app, test_db, start_watchdog_fn=MagicMock())
+
+    scheduler.complete_boot_recovery.assert_called_once_with()
+    assert events == ["init", "boot_sync", "complete_boot_recovery", "monitors"]
+
+
 def test_boot_aborts_crash_open_run_before_forced_zone_stop(test_db):
     """A boot OFF sweep must not finalize a pre-crash run as successful."""
     group = test_db.create_group("Crash recovery")

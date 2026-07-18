@@ -79,16 +79,30 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     # ── 4. Boot sync: turn OFF all zones + master valves ────────────
     _boot_sync(app, db)
 
-    # ── 5. Monitors (water, rain, env) ──────────────────────────────
+    # ── 5. Release paused scheduler after physical reconciliation ───
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        complete_boot = getattr(scheduler, "complete_boot_recovery", None)
+        if complete_boot is not None:
+            complete_boot()
+            logger.info("Scheduler boot recovery completed")
+        elif scheduler is not None:
+            logger.warning("Scheduler has no complete_boot_recovery API")
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        logger.exception("Scheduler boot recovery completion failed")
+
+    # ── 6. Monitors (water, rain, env) ──────────────────────────────
     _start_monitors(app, db)
 
-    # ── 6. MQTT publisher warm-up ───────────────────────────────────
+    # ── 7. MQTT publisher warm-up ───────────────────────────────────
     _warm_mqtt_clients(db)
 
-    # ── 7. Graceful shutdown handlers ───────────────────────────────
+    # ── 8. Graceful shutdown handlers ───────────────────────────────
     _register_shutdown_handlers(db)
 
-    # ── 8. Observability metrics (F2) ───────────────────────────────
+    # ── 9. Observability metrics (F2) ───────────────────────────────
     try:
         from routes.health_api import init_metrics as _init_metrics
 
@@ -98,7 +112,7 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     except Exception:
         logger.exception("init_metrics failed")
 
-    # ── 9. systemd sd_notify: watchdog heartbeat + READY=1 ──────────
+    # ── 10. systemd sd_notify: watchdog heartbeat + READY=1 ─────────
     # Must run LAST so that /readyz reflects true readiness before systemd
     # marks the unit active (Type=notify).
     try:
