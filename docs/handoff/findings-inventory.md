@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **54 fixed · 1 deferred · 92 pending · 5 not_applicable**.
+- Phase 2 disposition: **59 fixed · 1 deferred · 87 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -76,7 +76,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Регрессия, при которой recover_missed_runs перестаёт восстанавливать even-odd программы с NULL (частичный revert d7161a5), уходит в main при прогоне CI в чётный день месяца; падение всплывает лишь при следующем прогоне в нечётный день — «мигающий» тест, который выглядит флейком.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Recovery-тест явно проверяет NULL even_odd как odd на нечётной дате и отсутствие запуска на чётной; реализация, всегда отбрасывающая NULL, больше не проходит.
+- **Пакет:** `phase2-test-quality`.
+- **Fix commit:** `9d65cb6f41894ca16712c86e4d54c2a197be8472`.
+- **Regression tests:** `tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_null_means_odd[odd-date]`, `tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_null_means_odd[even-date]`.
 
 ### #7 [low] `tests/unit/test_scheduler_v2.py:163` — test_interval_program_first_run_today: xfail снят, но ассерт тавтологичен — заявленное «первый запуск СЕГОДНЯ» не проверяется
 
@@ -84,7 +88,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Регрессия якорения IntervalTrigger (start_date смещается на interval_days вместо ближайшего 14:30) проходит тест — снятие xfail в 3f9444e создало видимость покрытия фичи «interval first run today», которого фактически нет.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** IntervalTrigger проверяется на точный пятидневный interval и start_date 14:30 сегодня либо завтра под фиксированным временем.
+- **Пакет:** `phase2-test-quality`.
+- **Fix commit:** `9d65cb6f41894ca16712c86e4d54c2a197be8472`.
+- **Regression tests:** `tests/unit/test_scheduler_v2.py::TestScheduleIntervalProgram::test_interval_program_first_run_today[time-still-ahead]`, `tests/unit/test_scheduler_v2.py::TestScheduleIntervalProgram::test_interval_program_first_run_today[time-already-passed]`.
 
 ### #8 [low] `tests/unit/test_scheduler_comprehensive.py:332` — Новые recover-тесты флейкуют при пересечении полуночи: несогласованные выборки datetime.now() между setup и recover_missed_runs
 
@@ -93,7 +101,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Ночной CI-прогон, стартующий за секунды до полуночи (или зависший на fixture setup через полночь), даёт ложное падение TestRecoverMissedRuns без какой-либо регрессии кода. Окно узкое (секунды), поэтому severity low, но паттерн «несколько несинхронизированных now() в одном тесте» присутствует во всех шести новых recover-тестах.
 - **Решение оркестратора:** Previous REFUTED status overturned. The flake window is only the actual midnight crossing, not a ten-minute interval; impact is test reliability only.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Весь TestRecoverMissedRuns использует frozen dates; matching/wrong/NULL parity проверяются симметрично на чётной и нечётной датах без wall-clock drift.
+- **Пакет:** `phase2-test-quality`.
+- **Fix commit:** `9d65cb6f41894ca16712c86e4d54c2a197be8472`.
+- **Regression tests:** `tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_matching_parity[odd-date]`, `tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_matching_parity[even-date]`, `tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_wrong_parity[odd-date]`, `tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_wrong_parity[even-date]`.
 
 ### #9 [low] `tests/integration/test_next_watering_weather_skip.py:52` — test_next_watering_returns_today_when_no_weather_skip ежедневно флейкует в окне 23:55–00:00
 
@@ -101,7 +113,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Любой прогон полного сьюта, попадающий интеграционными тестами в интервал 23:55–00:00 локального времени, даёт ложное падение теста без регрессии кода.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Weather next-watering tests замораживают service time в полдень и требуют точный same-day slot 23:55 либо перенос за сегодня, исключая полуночную flaky границу.
+- **Пакет:** `phase2-test-quality`.
+- **Fix commit:** `9d65cb6f41894ca16712c86e4d54c2a197be8472`.
+- **Regression tests:** `tests/integration/test_next_watering_weather_skip.py::test_next_watering_returns_today_when_no_weather_skip`, `tests/integration/test_next_watering_weather_skip.py::test_next_watering_pushes_past_today_when_weather_skip`, `tests/integration/test_next_watering_weather_skip.py::test_next_watering_bulk_pushes_past_today_when_weather_skip`.
 
 ### #10 [high] `db/programs.py:64` — Сдвиг дней недели на -1 при сохранении программы без понедельника (create_program/update_program)
 
@@ -1353,7 +1369,11 @@
 - **Происхождение:** `branch_test_regression`.
 - **Верификация:** Independent mutation-style checks demonstrated the tests do not distinguish correct triggers.
 - **Репродукция/сценарий:** Replace every constructed trigger with Tuesday 23:59 in a monkeypatch; the three semantic tests still pass.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Weekday/even/odd/main/extra jobs проверяют точные day/day_of_week/hour/minute CronTrigger fields и полный ожидаемый набор job IDs вместо shape-only наличия.
+- **Пакет:** `phase2-test-quality`.
+- **Fix commit:** `9d65cb6f41894ca16712c86e4d54c2a197be8472`.
+- **Regression tests:** `tests/unit/test_scheduler_v2.py::TestScheduleWeekdaysProgram::test_weekdays_program_has_correct_trigger`, `tests/unit/test_scheduler_v2.py::TestScheduleEvenOddProgram::test_even_odd_program_has_correct_cron_days[even]`, `tests/unit/test_scheduler_v2.py::TestScheduleEvenOddProgram::test_even_odd_program_has_correct_cron_days[odd]`, `tests/unit/test_scheduler_v2.py::TestExtraTimes::test_schedule_extra_times`.
 
 ### #143 [medium] `routes/programs_api.py:25-43,113-150; irrigation_scheduler.py:1242-1268` — POST programs принимает невалидный interval_days: отрицательное значение зацикливает APScheduler, ноль даёт интервал 1 секунду
 

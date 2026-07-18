@@ -166,8 +166,17 @@
    - targeted: 80 passed; full gate: 1963 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 54 записи fixed (48 корней + шесть унаследованных дублей),
-1 deferred, 92 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+9. `phase2-test-quality` — #6, #7, #8, #9, #142 `fixed`
+   - fix `9d65cb6f41894ca16712c86e4d54c2a197be8472`;
+   - merge `f987a517399fbe4ad5c5c064bf297f25b4cde6d1`;
+   - recovery/next-watering tests больше не зависят от текущей даты или полуночи;
+   - NULL/matching/wrong even-odd parity проверяются на обеих датах, interval
+     требует точный interval/start_date, CronTrigger — точные fields всех slots;
+   - targeted: 92 passed; full gate: 1968 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 59 записей fixed (53 корня + шесть унаследованных дублей),
+1 deferred, 87 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

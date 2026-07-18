@@ -531,6 +531,70 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-test-quality",
+      "fix_commit": "9d65cb6f41894ca16712c86e4d54c2a197be8472",
+      "merge_commit": "f987a517399fbe4ad5c5c064bf297f25b4cde6d1",
+      "summary": "Scheduler и next-watering tests получили фиксированные часы и точные semantic assertions для parity, IntervalTrigger и всех CronTrigger slots.",
+      "resolutions": [
+        {
+          "id": 6,
+          "disposition": "fixed",
+          "reason": "Recovery-тест явно проверяет NULL even_odd как odd на нечётной дате и отсутствие запуска на чётной; реализация, всегда отбрасывающая NULL, больше не проходит.",
+          "tests": [
+            "tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_null_means_odd[odd-date]",
+            "tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_null_means_odd[even-date]"
+          ]
+        },
+        {
+          "id": 7,
+          "disposition": "fixed",
+          "reason": "IntervalTrigger проверяется на точный пятидневный interval и start_date 14:30 сегодня либо завтра под фиксированным временем.",
+          "tests": [
+            "tests/unit/test_scheduler_v2.py::TestScheduleIntervalProgram::test_interval_program_first_run_today[time-still-ahead]",
+            "tests/unit/test_scheduler_v2.py::TestScheduleIntervalProgram::test_interval_program_first_run_today[time-already-passed]"
+          ]
+        },
+        {
+          "id": 8,
+          "disposition": "fixed",
+          "reason": "Весь TestRecoverMissedRuns использует frozen dates; matching/wrong/NULL parity проверяются симметрично на чётной и нечётной датах без wall-clock drift.",
+          "tests": [
+            "tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_matching_parity[odd-date]",
+            "tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_matching_parity[even-date]",
+            "tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_wrong_parity[odd-date]",
+            "tests/unit/test_scheduler_comprehensive.py::TestRecoverMissedRuns::test_recover_even_odd_program_wrong_parity[even-date]"
+          ]
+        },
+        {
+          "id": 9,
+          "disposition": "fixed",
+          "reason": "Weather next-watering tests замораживают service time в полдень и требуют точный same-day slot 23:55 либо перенос за сегодня, исключая полуночную flaky границу.",
+          "tests": [
+            "tests/integration/test_next_watering_weather_skip.py::test_next_watering_returns_today_when_no_weather_skip",
+            "tests/integration/test_next_watering_weather_skip.py::test_next_watering_pushes_past_today_when_weather_skip",
+            "tests/integration/test_next_watering_weather_skip.py::test_next_watering_bulk_pushes_past_today_when_weather_skip"
+          ]
+        },
+        {
+          "id": 142,
+          "disposition": "fixed",
+          "reason": "Weekday/even/odd/main/extra jobs проверяют точные day/day_of_week/hour/minute CronTrigger fields и полный ожидаемый набор job IDs вместо shape-only наличия.",
+          "tests": [
+            "tests/unit/test_scheduler_v2.py::TestScheduleWeekdaysProgram::test_weekdays_program_has_correct_trigger",
+            "tests/unit/test_scheduler_v2.py::TestScheduleEvenOddProgram::test_even_odd_program_has_correct_cron_days[even]",
+            "tests/unit/test_scheduler_v2.py::TestScheduleEvenOddProgram::test_even_odd_program_has_correct_cron_days[odd]",
+            "tests/unit/test_scheduler_v2.py::TestExtraTimes::test_schedule_extra_times"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "92 passed",
+        "full_pytest": "1968 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }
