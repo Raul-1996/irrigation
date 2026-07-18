@@ -20,6 +20,8 @@ programs_api_bp = Blueprint("programs_api", __name__)
 # приводят к программе без jobs).
 VALID_PROGRAM_TYPES = ("time-based", "smart")
 VALID_SCHEDULE_TYPES = ("weekdays", "interval", "even-odd")
+MIN_INTERVAL_DAYS = 1
+MAX_INTERVAL_DAYS = 30
 
 
 def _validate_program_v2_fields(data: dict) -> str | None:
@@ -36,8 +38,17 @@ def _validate_program_v2_fields(data: dict) -> str | None:
     schedule_type = data.get("schedule_type")
     if schedule_type is not None and schedule_type not in VALID_SCHEDULE_TYPES:
         return f"Invalid schedule_type: {schedule_type!r} (expected one of: {', '.join(VALID_SCHEDULE_TYPES)})"
-    if schedule_type == "interval" and not data.get("interval_days"):
-        return "schedule_type='interval' requires interval_days"
+    if schedule_type == "interval":
+        interval_days = data.get("interval_days")
+        if (
+            isinstance(interval_days, bool)
+            or not isinstance(interval_days, int)
+            or not MIN_INTERVAL_DAYS <= interval_days <= MAX_INTERVAL_DAYS
+        ):
+            return (
+                "schedule_type='interval' requires interval_days "
+                f"as an integer between {MIN_INTERVAL_DAYS} and {MAX_INTERVAL_DAYS}"
+            )
     if schedule_type == "even-odd" and data.get("even_odd") not in ("even", "odd"):
         return "schedule_type='even-odd' requires even_odd ('even' or 'odd')"
     return None
@@ -58,17 +69,32 @@ def api_program(prog_id):
         return jsonify(program) if program else ("Program not found", 404)
 
     elif request.method == "PUT":
-        data = request.get_json() or {}
-        if data.get("schedule_type") == "even_odd":
-            data["schedule_type"] = "even-odd"
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body must be an object"}), 400
+
+        current_program = db.get_program(prog_id)
+        if not current_program:
+            return jsonify({"success": False, "message": "Program not found"}), 404
+
+        effective_data = {**current_program, **data}
+        v2_error = _validate_program_v2_fields(effective_data)
+        if v2_error:
+            return jsonify({"success": False, "message": v2_error}), 400
+        if "schedule_type" in data:
+            data["schedule_type"] = effective_data["schedule_type"]
         try:
             if isinstance(data.get("days"), list):
                 data["days"] = [int(d) for d in data["days"]]
         except (ValueError, TypeError, KeyError) as e:
             logger.debug("Handled exception in api_program: %s", e)
         try:
+            effective_data.update(data)
             conflicts = db.check_program_conflicts(
-                program_id=prog_id, time=data["time"], zones=data["zones"], days=data["days"]
+                program_id=prog_id,
+                time=effective_data["time"],
+                zones=effective_data["zones"],
+                days=effective_data["days"],
             )
             if conflicts:
                 return jsonify(
@@ -110,7 +136,9 @@ def api_program(prog_id):
 @rate_limit("programs", max_requests=20, window_sec=60)
 @audit_log("program_create")
 def api_create_program():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "JSON body must be an object"}), 400
     # Validate required fields
     missing = [f for f in ("name", "time", "zones") if f not in data]
     if missing:
@@ -125,7 +153,10 @@ def api_create_program():
         logger.debug("Handled exception in api_create_program: %s", e)
     try:
         conflicts = db.check_program_conflicts(
-            program_id=None, time=data["time"], zones=data["zones"], days=data.get("days", [])
+            program_id=None,
+            time=data["time"],
+            zones=data["zones"],
+            days=data.get("days", []),
         )
         if conflicts:
             return jsonify(
@@ -155,7 +186,9 @@ def api_create_program():
 def check_program_conflicts():
     """Check watering program conflicts."""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body must be an object"}), 400
         program_id = data.get("program_id")
         time_val = data.get("time")
         zones = data.get("zones", [])
