@@ -1272,6 +1272,80 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-status-frontend",
+      "fix_commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "merge_commit": "468339e9ba5e0a1e65ad8900cfb6bcfd096e877d",
+      "summary": "Status UI сохраняет last-known state при transport errors, сериализует optimistic mutations с polls, ограничивает probes и честно агрегирует control results; status-side #25 sinks escaped, zones-side closure остаётся P11.",
+      "resolutions": [
+        {
+          "id": 20,
+          "disposition": "fixed",
+          "reason": "Zone control soft/server/network failure всегда снимает loading overlay, откатывает только свою optimistic mutation и показывает error.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_zone_control_server_failure_always_hides_loading_overlay"]
+        },
+        {
+          "id": 21,
+          "disposition": "fixed",
+          "reason": "Optimistic watering timestamps сохраняют полный toISOString с explicit Z и больше не становятся ambiguous local strings.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_optimistic_timestamps_keep_their_explicit_utc_designator"]
+        },
+        {
+          "id": 22,
+          "disposition": "fixed",
+          "reason": "Zone/group fetch требует OK JSON array; transport failure сохраняет last-known configuration и включает connection warning вместо подмены на пустой список.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_zone_load_does_not_turn_transport_errors_into_empty_configuration"]
+        },
+        {
+          "id": 23,
+          "disposition": "fixed",
+          "reason": "Zone edit принимает только object response без success=false; soft error не закрывает sheet и показывает server message.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_zone_edit_treats_explicit_soft_error_as_failure"]
+        },
+        {
+          "id": 26,
+          "disposition": "fixed",
+          "reason": "Dial SVG получает document/listener handlers один раз через initialization sentinel.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_dial_drag_handlers_are_installed_only_once"]
+        },
+        {
+          "id": 27,
+          "disposition": "fixed",
+          "reason": "Fast /api/env probe запоминает exhaustion после десяти попыток и перезапускается только после доказанного sensor recovery/new offline period.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_environment_probe_remembers_exhaustion_until_sensor_recovers"]
+        },
+        {
+          "id": 76,
+          "disposition": "fixed",
+          "reason": "Versioned pendingZoneStates не позволяют overlapping poll rollback свежего optimistic start; success reconciliation ждёт server state либо bounded expiry.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_optimistic_zone_state_is_merged_over_overlapping_poll_results"]
+        },
+        {
+          "id": 78,
+          "disposition": "fixed",
+          "reason": "Relevant zone/group control chains имеют catch paths, снимают overlay, восстанавливают server state и сообщают network/non-JSON failures.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_control_fetch_error_paths_surface_failure_and_hide_overlay"]
+        },
+        {
+          "id": 92,
+          "disposition": "fixed",
+          "reason": "Legacy server datetime с пробелом нормализуется в ISO T до WebKit parsing, invalid result не меняет time offset.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_server_time_normalizes_legacy_space_datetime_for_webkit"]
+        },
+        {
+          "id": 124,
+          "disposition": "fixed",
+          "reason": "Все all-groups пути ждут и проверяют каждый response и показывают полный, частичный или total failure вместо безусловного success.",
+          "tests": ["tests/unit/test_phase2_status_frontend.py::test_all_group_run_paths_inspect_each_server_result"]
+        }
+      ],
+      "verification": {
+        "targeted": "125 passed",
+        "full_pytest": "2060 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

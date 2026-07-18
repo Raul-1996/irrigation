@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **116 fixed · 4 deferred · 27 pending · 5 not_applicable**.
+- Phase 2 disposition: **127 fixed · 4 deferred · 16 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -241,7 +241,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь нажимает ⏹/▶ на карточке зоны, сервер отвечает success:false — это штатно: /api/zones/<id>/mqtt/start возвращает 400 при активной аварийной остановке, 404 для отсутствующей зоны, а rate_limit('mqtt_control', 10 req/60s) срабатывает при быстром переключении нескольких зон. Результат: тост с ошибкой показан, но полноэкранный спиннер остаётся и блокирует все элементы главной страницы управления поливом на 15 секунд.
 - **Решение оркестратора:** The overlay remains for the 15-second safety timeout after a server-declared failure.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Zone control soft/server/network failure всегда снимает loading overlay, откатывает только свою optimistic mutation и показывает error.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_zone_control_server_failure_always_hides_loading_overlay`.
 
 ### #21 [medium] `static/js/status.js:1807` — Оптимистичные watering_start_time/planned_end_time пишутся как UTC-naive строка — на не-UTC клиентах таймер сразу показывает 00:00 и прогресс 100%
 
@@ -250,7 +254,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Клиент в любой TZ восточнее UTC (прод — Wirenboard, RU: UTC+3..+12) запускает зону на 10 минут через карточку или run-popup. Оптимистичный planned_end_time получается в прошлом → _remain = max(0, ...) = 0 → таймер мгновенно рисует «00:00», прогресс-бар 100% вместо обратного отсчёта; в сайдбаре «Сейчас поливается» — «осталось 0:00». Исправляется только приходом серверных данных на следующем 5-секундном поллинге. В TZ западнее UTC — обратный эффект: таймер показывает лишние часы.
 - **Решение оркестратора:** The effect is transient until the next 5-second poll, but is visible on non-controller time zones.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Optimistic watering timestamps сохраняют полный toISOString с explicit Z и больше не становятся ambiguous local strings.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_optimistic_timestamps_keep_their_explicit_utc_designator`.
 
 ### #22 [medium] `static/js/status.js:90` — loadZonesData глушит ошибки fetch в пустой массив: при недоступном сервере страница показывает «Зоны не найдены» и прячет баннер потери связи
 
@@ -258,7 +266,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пропадает связь с контроллером (Wi-Fi/рестарт сервиса) или истекает сессия (401 → HTML → json() падает). Вместо баннера «Нет связи с сервером» и последних известных данных пользователь видит пустой список «Зоны не найдены» с нулевой статистикой — выглядит как потеря конфигурации; баннер связи скрыт или мигает.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Zone/group fetch требует OK JSON array; transport failure сохраняет last-known configuration и включает connection warning вместо подмены на пустой список.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_zone_load_does_not_turn_transport_errors_into_empty_configuration`.
 
 ### #23 [low] `static/js/status.js:1975` — saveZoneEdit игнорирует success:false — при отклонённом сервером сохранении показывается «✅ Зона сохранена»
 
@@ -266,7 +278,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь в шторке редактирования стирает название зоны и жмёт «Сохранить». Сервер отвечает 400 «name must be non-empty», но UI закрывает шторку и показывает «✅ Зона сохранена»; после loadZonesData старое имя молча возвращается — изменение потеряно без какого-либо сообщения об ошибке.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Zone edit принимает только object response без success=false; soft error не закрывает sheet и показывает server message.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_zone_edit_treats_explicit_soft_error_as_failure`.
 
 ### #24 [low] `static/js/zones.js:187` — zones.js: имя MQTT-сервера вставляется в innerHTML без escapeHtml в трёх модалках настроек группы — stored XSS
 
@@ -290,7 +306,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Страница статуса — долгоживущая (настенный планшет). После N запусков полива через попап каждое движение пальца/мыши по странице проходит через N touchmove-обработчиков с passive:false, что блокирует композитный скролл на мобильных и постепенно деградирует отзывчивость; после десятков открытий скролл списка зон становится заметно дёрганым.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Dial SVG получает document/listener handlers один раз через initialization sentinel.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_dial_drag_handlers_are_installed_only_once`.
 
 ### #27 [low] `static/js/status.js:265` — env-пробник перезапускается каждым 5-секундным обновлением статуса — вечный опрос /api/env раз в секунду вместо заявленных «до 10 попыток»
 
@@ -298,7 +318,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Датчик температуры/влажности включён в настройках, но физически офлайн (обрыв, MQTT-топик молчит). Каждая открытая вкладка страницы статуса бессрочно шлёт запрос /api/env каждую секунду (плюс штатный поллинг) — лишняя нагрузка на слабый ARM-контроллер Wirenboard, особенно с несколькими открытыми клиентами.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Fast /api/env probe запоминает exhaustion после десяти попыток и перезапускается только после доказанного sensor recovery/new offline period.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_environment_probe_remembers_exhaustion_until_sensor_recovers`.
 
 ### #28 [medium] `services/next_watering.py:141` — compute_next_watering игнорирует extra_times — карточки показывают более поздний слот, чем реально польёт планировщик
 
@@ -690,7 +714,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** На странице «Статус» пользователь открывает лист редактирования зоны, стирает имя, жмёт сохранить → PUT возвращает 400 {success:false} → JS всё равно закрывает лист и показывает «✅ Зона сохранена»; loadZonesData() возвращает старое имя — изменение потеряно без единого сообщения об ошибке.
 - **Дубль:** `#23`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Zone edit принимает только object response без success=false; soft error не закрывает sheet и показывает server message.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_zone_edit_treats_explicit_soft_error_as_failure`.
 
 ### #62 [low] `db/mqtt.py:100` — Сохранение MQTT-сервера из UI молча сбрасывает TLS-настройки (частичный PUT перезаписывает отсутствующие поля дефолтами)
 
@@ -859,7 +887,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь жмёт «Запустить» в момент, когда очередной опрос /api/zones уже в полёте (ответ ещё со state='off', т.к. POST start ещё не обработан). Ответ опроса приходит после оптимистичного рендера → карточка возвращается в «▶ Запустить», таймер исчезает, хотя зона реально запускается. До следующего опроса (до 5с) UI показывает ложное «выключено»; повторный клик пользователя отправляет второй POST /mqtt/start, попадая в подтверждённую ранее backend-гонку двойного старта (второй открытый zone_run).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Versioned pendingZoneStates не позволяют overlapping poll rollback свежего optimistic start; success reconciliation ждёт server state либо bounded expiry.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_optimistic_zone_state_is_merged_over_overlapping_poll_results`.
 
 ### #78 [low] `static/js/status.js:2381` — confirmRunWithDefaults / confirmRun: цепочки fetch без .catch — при сетевой ошибке или не-JSON ответе полноэкранный оверлей блокирует UI на 15с без сообщения
 
@@ -867,7 +899,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Wi-Fi обрыв или nginx 502 (HTML-тело → r.json() бросает) в момент «Запустить с настройками зон»: оверлей с крутилкой висит 15 секунд, блокируя все элементы страницы, никакого сообщения об ошибке; в пути одиночной группы все зоны группы дополнительно остаются в оптимистичном состоянии «on» с таймерами до следующего поллинга.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Relevant zone/group control chains имеют catch paths, снимают overlay, восстанавливают server state и сообщают network/non-JSON failures.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_control_fetch_error_paths_surface_failure_and_hide_overlay`.
 
 ### #79 [low] `templates/programs.html:244` — programs.html: toggleEnabled/duplicateProgram/deleteProgram молча игнорируют не-OK ответы сервера — ни тоста, ни отката UI
 
@@ -1035,7 +1071,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь открывает страницу статуса на iPhone/Safari: syncServerTime() при загрузке получает now_iso, new Date() даёт Invalid Date, _serverTimeOffset=NaN; setInterval(updateDateTime,1000) (status.js:1020) каждую секунду пишет в <span id="datetime"> строку вида «NaN-NaN-NaN NaN:NaN:NaN» — часы в шапке навсегда сломаны, при этом футер (app.js) показывает время корректно.
 - **Решение оркестратора:** Conditional browser support defect. Reproduced for Safari 15-era WebKit; current Safari accepts the non-standard string. No minimum supported browser version is documented, so the legacy path remains real.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Legacy server datetime с пробелом нормализуется в ISO T до WebKit parsing, invalid result не меняет time offset.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_server_time_normalizes_legacy_space_datetime_for_webkit`.
 
 ### #93 [medium] `static/js/history.js:444` — История поливов: zone_runs.start_utc/end_utc хранят ЛОКАЛЬНОЕ naive-время, а history.js трактует их как UTC-ISO — на Safari/iOS список запусков без дат и времени
 
@@ -1367,7 +1407,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** В одной из трёх групп уже идёт сессия полива (или планировщик вернул False, или включён EMERGENCY_STOP между рендером и кликом) → часть/все запросы отвечают 400, но пользователь видит зелёный тост «Все группы запущены: 20 мин» и уходит; фактически группы не политы, никакого признака сбоя нет (в отличие от одиночного и run-selected путей, которые проверяют data.success).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все all-groups пути ждут и проверяют каждый response и показывают полный, частичный или total failure вместо безусловного success.
+- **Пакет:** `phase2-status-frontend`.
+- **Fix commit:** `3a90ff10c943d046499e5b3422984f4a65aec978`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_all_group_run_paths_inspect_each_server_result`.
 
 ### #125 [low] `routes/programs_api.py:62` — PUT /api/programs/<id> не прогоняет _validate_program_v2_fields (в отличие от POST) и обращается к data["time"]/["zones"]/["days"] без .get — асимметричный контракт: апдейтом сохраняется программа, которую планировщик молча не планирует; частичный PUT падает 500
 

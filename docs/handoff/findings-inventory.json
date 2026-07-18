@@ -664,11 +664,13 @@
     "main_or_branch": "main_bug",
     "decision_notes": "The overlay remains for the 15-second safety timeout after a server-declared failure.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Zone control soft/server/network failure всегда снимает loading overlay, откатывает только свою optimistic mutation и показывает error.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_zone_control_server_failure_always_hides_loading_overlay"
+      ]
     }
   },
   {
@@ -693,11 +695,13 @@
     "main_or_branch": "main_bug",
     "decision_notes": "The effect is transient until the next 5-second poll, but is visible on non-controller time zones.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Optimistic watering timestamps сохраняют полный toISOString с explicit Z и больше не становятся ambiguous local strings.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_optimistic_timestamps_keep_their_explicit_utc_designator"
+      ]
     }
   },
   {
@@ -721,11 +725,13 @@
     "reproduction": "Пропадает связь с контроллером (Wi-Fi/рестарт сервиса) или истекает сессия (401 → HTML → json() падает). Вместо баннера «Нет связи с сервером» и последних известных данных пользователь видит пустой список «Зоны не найдены» с нулевой статистикой — выглядит как потеря конфигурации; баннер связи скрыт или мигает.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Zone/group fetch требует OK JSON array; transport failure сохраняет last-known configuration и включает connection warning вместо подмены на пустой список.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_zone_load_does_not_turn_transport_errors_into_empty_configuration"
+      ]
     }
   },
   {
@@ -749,11 +755,13 @@
     "reproduction": "Пользователь в шторке редактирования стирает название зоны и жмёт «Сохранить». Сервер отвечает 400 «name must be non-empty», но UI закрывает шторку и показывает «✅ Зона сохранена»; после loadZonesData старое имя молча возвращается — изменение потеряно без какого-либо сообщения об ошибке.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Zone edit принимает только object response без success=false; soft error не закрывает sheet и показывает server message.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_zone_edit_treats_explicit_soft_error_as_failure"
+      ]
     }
   },
   {
@@ -833,11 +841,13 @@
     "reproduction": "Страница статуса — долгоживущая (настенный планшет). После N запусков полива через попап каждое движение пальца/мыши по странице проходит через N touchmove-обработчиков с passive:false, что блокирует композитный скролл на мобильных и постепенно деградирует отзывчивость; после десятков открытий скролл списка зон становится заметно дёрганым.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Dial SVG получает document/listener handlers один раз через initialization sentinel.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_dial_drag_handlers_are_installed_only_once"
+      ]
     }
   },
   {
@@ -861,11 +871,13 @@
     "reproduction": "Датчик температуры/влажности включён в настройках, но физически офлайн (обрыв, MQTT-топик молчит). Каждая открытая вкладка страницы статуса бессрочно шлёт запрос /api/env каждую секунду (плюс штатный поллинг) — лишняя нагрузка на слабый ARM-контроллер Wirenboard, особенно с несколькими открытыми клиентами.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Fast /api/env probe запоминает exhaustion после десяти попыток и перезапускается только после доказанного sensor recovery/new offline period.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_environment_probe_remembers_exhaustion_until_sensor_recovers"
+      ]
     }
   },
   {
@@ -1912,11 +1924,13 @@
     "main_or_branch": "main_bug",
     "duplicate_of": 23,
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Zone edit принимает только object response без success=false; soft error не закрывает sheet и показывает server message.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_zone_edit_treats_explicit_soft_error_as_failure"
+      ]
     }
   },
   {
@@ -2359,11 +2373,13 @@
     "reproduction": "Пользователь жмёт «Запустить» в момент, когда очередной опрос /api/zones уже в полёте (ответ ещё со state='off', т.к. POST start ещё не обработан). Ответ опроса приходит после оптимистичного рендера → карточка возвращается в «▶ Запустить», таймер исчезает, хотя зона реально запускается. До следующего опроса (до 5с) UI показывает ложное «выключено»; повторный клик пользователя отправляет второй POST /mqtt/start, попадая в подтверждённую ранее backend-гонку двойного старта (второй открытый zone_run).",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Versioned pendingZoneStates не позволяют overlapping poll rollback свежего optimistic start; success reconciliation ждёт server state либо bounded expiry.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_optimistic_zone_state_is_merged_over_overlapping_poll_results"
+      ]
     }
   },
   {
@@ -2416,11 +2432,13 @@
     "reproduction": "Wi-Fi обрыв или nginx 502 (HTML-тело → r.json() бросает) в момент «Запустить с настройками зон»: оверлей с крутилкой висит 15 секунд, блокируя все элементы страницы, никакого сообщения об ошибке; в пути одиночной группы все зоны группы дополнительно остаются в оптимистичном состоянии «on» с таймерами до следующего поллинга.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Relevant zone/group control chains имеют catch paths, снимают overlay, восстанавливают server state и сообщают network/non-JSON failures.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_control_fetch_error_paths_surface_failure_and_hide_overlay"
+      ]
     }
   },
   {
@@ -2846,11 +2864,13 @@
     "main_or_branch": "main_bug",
     "decision_notes": "Conditional browser support defect. Reproduced for Safari 15-era WebKit; current Safari accepts the non-standard string. No minimum supported browser version is documented, so the legacy path remains real.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Legacy server datetime с пробелом нормализуется в ISO T до WebKit parsing, invalid result не меняет time offset.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_server_time_normalizes_legacy_space_datetime_for_webkit"
+      ]
     }
   },
   {
@@ -3798,11 +3818,13 @@
     "reproduction": "В одной из трёх групп уже идёт сессия полива (или планировщик вернул False, или включён EMERGENCY_STOP между рендером и кликом) → часть/все запросы отвечают 400, но пользователь видит зелёный тост «Все группы запущены: 20 мин» и уходит; фактически группы не политы, никакого признака сбоя нет (в отличие от одиночного и run-selected путей, которые проверяют data.success).",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все all-groups пути ждут и проверяют каждый response и показывают полный, частичный или total failure вместо безусловного success.",
+      "package": "phase2-status-frontend",
+      "commit": "3a90ff10c943d046499e5b3422984f4a65aec978",
+      "tests": [
+        "tests/unit/test_phase2_status_frontend.py::test_all_group_run_paths_inspect_each_server_result"
+      ]
     }
   },
   {

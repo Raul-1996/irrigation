@@ -346,8 +346,22 @@
     - targeted: 123 passed, 1 skipped; full gate: 2049 passed, 2 skipped,
       17 deselected; ruff и diff check чисты.
 
-После этих пакетов: 116 записей fixed (107 корней + девять унаследованных дублей),
-4 deferred, 27 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+24. `phase2-status-frontend` — #20, #21, #22, #23, #26, #27, #76, #78,
+    #92, #124 `fixed`; #61 наследует #23; #25 status-side partial
+    - fix `3a90ff10c943d046499e5b3422984f4a65aec978`;
+    - merge `468339e9ba5e0a1e65ad8900cfb6bcfd096e877d`;
+    - transport errors сохраняют last-known zones; loading overlays, soft errors
+      и network/non-JSON failures получают честные recovery/toast paths;
+    - optimistic timestamps сохраняют Z, pending mutations versioned против
+      overlapping polls, server time нормализуется для WebKit;
+    - dial handlers ставятся один раз, env probe bounded, all-groups responses
+      агрегируются как full/partial/total failure;
+    - status.js sinks #25 escaped, но root остаётся pending до P11 `zones.js`;
+    - targeted: 125 passed; full gate: 2060 passed, 2 skipped, 17 deselected;
+      node syntax, ruff и diff check чисты.
+
+После этих пакетов: 127 записей fixed (117 корней + десять унаследованных дублей),
+4 deferred, 16 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
