@@ -78,41 +78,43 @@ class MqttRepository(BaseRepository):
     @retry_on_busy()
     def update_mqtt_server(self, server_id: int, data: dict[str, Any]) -> bool:
         try:
-            # Отсутствующий пароль и маска "***" (GET-ответы API) означают
-            # «не менять» — иначе сохранение строки из UI без поля password
-            # затирало бы сохранённый секрет. Явная пустая строка — «очистить»
-            # (брокер перестал требовать авторизацию).
+            assignments: list[str] = []
+            params: list[Any] = []
+
+            converters = {
+                "name": lambda value: value,
+                "host": lambda value: value,
+                "port": int,
+                "username": lambda value: value,
+                "client_id": lambda value: value,
+                "enabled": lambda value: 1 if value else 0,
+                "tls_enabled": lambda value: 1 if value else 0,
+                "tls_ca_path": lambda value: value,
+                "tls_cert_path": lambda value: value,
+                "tls_key_path": lambda value: value,
+                "tls_insecure": lambda value: 1 if value else 0,
+                "tls_version": lambda value: value,
+            }
+            for field, converter in converters.items():
+                if field in data:
+                    assignments.append(f"{field} = ?")
+                    params.append(converter(data[field]))
+
+            # An absent password and the API mask mean "leave unchanged".
+            # An explicit empty string clears authentication.
             raw_password = data.get("password")
             set_password = "password" in data and raw_password != "***" and raw_password is not None
-            password_sql = "password = ?, " if set_password else ""
-            params: list[Any] = [
-                data.get("name", "MQTT"),
-                data.get("host", "localhost"),
-                int(data.get("port", 1883)),
-                data.get("username"),
-            ]
             if set_password:
+                assignments.append("password = ?")
                 params.append(("ENC:" + encrypt_secret(raw_password)) if raw_password else None)
-            params.extend(
-                [
-                    data.get("client_id"),
-                    1 if data.get("enabled", True) else 0,
-                    1 if data.get("tls_enabled") else 0,
-                    data.get("tls_ca_path"),
-                    data.get("tls_cert_path"),
-                    data.get("tls_key_path"),
-                    1 if data.get("tls_insecure") else 0,
-                    data.get("tls_version"),
-                    server_id,
-                ]
-            )
+
+            assignments.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(server_id)
             with self._connect() as conn:
                 conn.execute(
                     f"""
                     UPDATE mqtt_servers
-                    SET name = ?, host = ?, port = ?, username = ?, {password_sql}client_id = ?, enabled = ?,
-                        tls_enabled = ?, tls_ca_path = ?, tls_cert_path = ?, tls_key_path = ?, tls_insecure = ?, tls_version = ?,
-                        updated_at = CURRENT_TIMESTAMP
+                    SET {", ".join(assignments)}
                     WHERE id = ?
                 """,
                     params,

@@ -70,6 +70,15 @@ def normalize_topic(topic: str | None) -> str:
 # --- Simple symmetric encryption helpers for secrets ---
 
 
+class SecretDecryptionError(RuntimeError):
+    """A stored secret cannot be decrypted with the configured key.
+
+    Callers must treat this as a configuration/recovery error, never as an
+    empty password.  The message is deliberately stable and does not expose
+    cryptographic implementation details.
+    """
+
+
 def _get_hostname_key() -> bytes:
     """Compute the old hostname-based key (for migration only)."""
     try:
@@ -150,9 +159,14 @@ def decrypt_secret(ciphertext: str | None) -> str | None:
             raw = raw[4:]
             iv, tag, ct = raw[:12], raw[12:28], raw[28:]
             key = _get_secret_key()
-            cipher = AES.new(key[:32], AES.MODE_GCM, nonce=iv)
-            pt = cipher.decrypt_and_verify(ct, tag)
-            return pt.decode("utf-8")
+            try:
+                cipher = AES.new(key[:32], AES.MODE_GCM, nonce=iv)
+                pt = cipher.decrypt_and_verify(ct, tag)
+                return pt.decode("utf-8")
+            except (TypeError, UnicodeError, ValueError) as e:
+                raise SecretDecryptionError(
+                    "Stored secret cannot be decrypted; restore the configured secret key"
+                ) from e
     except ImportError as e:
         logger.debug("Handled exception in decrypt_secret: %s", e)
     # xor fallback

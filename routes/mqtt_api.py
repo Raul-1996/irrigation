@@ -2,8 +2,10 @@
 
 import json
 import logging
+import math
 import queue
 import threading
+import uuid
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
@@ -11,7 +13,7 @@ from database import db
 from services.audit import audit_log
 from services.helpers import api_error, api_soft
 from services.security import admin_required
-from utils import normalize_topic
+from utils import SecretDecryptionError, normalize_topic
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +27,47 @@ except ImportError as e:
 _scan_sse_connections: dict[str, int] = {}  # {ip: active_count}
 _scan_sse_lock = threading.Lock()
 MAX_SCAN_SSE_PER_IP = 2
+MAX_PROBE_DURATION_SEC = 30.0
+MAX_SCAN_DURATION_SEC = 300.0
 
 mqtt_api_bp = Blueprint("mqtt_api", __name__)
+
+
+def _mask_server_secret(server: dict | None) -> dict | None:
+    if server and server.get("password"):
+        server["password"] = "***"
+    return server
+
+
+def _secret_unavailable_response():
+    return api_error(
+        "MQTT_SECRET_UNAVAILABLE",
+        "MQTT credentials cannot be decrypted; restore the configured secret key",
+        500,
+    )
+
+
+def _refresh_mqtt_runtime(server_id: int) -> None:
+    """Apply MQTT CRUD changes to both long-lived runtime consumers."""
+    try:
+        from services.mqtt_pub import invalidate_mqtt_server
+
+        invalidate_mqtt_server(server_id)
+    except Exception:
+        logger.exception("MQTT publisher invalidation failed for server %s", server_id)
+    try:
+        from services import sse_hub
+
+        sse_hub.reload_hub()
+    except Exception:
+        logger.exception("MQTT SSE hub reload failed for server %s", server_id)
+
+
+def _new_diagnostic_client(server: dict, purpose: str):
+    """Create a temporary client that cannot take over a saved live session."""
+    purpose_slug = "".join(ch for ch in purpose.lower() if ch.isalnum())[:6] or "diag"
+    client_id = f"wb-{purpose_slug}-{uuid.uuid4().hex[:10]}"
+    return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
 
 
 # ===== MQTT Servers CRUD =====
@@ -37,11 +78,12 @@ mqtt_api_bp = Blueprint("mqtt_api", __name__)
 def api_mqtt_servers_list():
     try:
         servers = db.get_mqtt_servers()
-        # SECURITY FIX (VULN-004): mask passwords in API responses
         for s in servers or []:
-            if s.get("password"):
-                s["password"] = "***"
+            _mask_server_secret(s)
         return jsonify({"success": True, "servers": servers})
+    except SecretDecryptionError:
+        logger.error("MQTT server list unavailable: stored credentials cannot be decrypted")
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка получения MQTT серверов: {e}")
         return jsonify({"success": False, "message": "Ошибка получения списка"}), 500
@@ -60,7 +102,11 @@ def api_mqtt_server_create():
         server = db.create_mqtt_server(data)
         if not server:
             return jsonify({"success": False, "message": "Не удалось создать сервер"}), 400
+        _mask_server_secret(server)
         return jsonify({"success": True, "server": server}), 201
+    except SecretDecryptionError:
+        logger.error("MQTT server create response unavailable: stored credentials cannot be decrypted")
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка создания MQTT сервера: {e}")
         return jsonify({"success": False, "message": "Ошибка создания"}), 500
@@ -73,10 +119,11 @@ def api_mqtt_server_get(server_id: int):
         server = db.get_mqtt_server(server_id)
         if not server:
             return jsonify({"success": False, "message": "Сервер не найден"}), 404
-        # SECURITY FIX (VULN-004): mask password in API response
-        if server.get("password"):
-            server["password"] = "***"
+        _mask_server_secret(server)
         return jsonify({"success": True, "server": server})
+    except SecretDecryptionError:
+        logger.error("MQTT server %s unavailable: stored credentials cannot be decrypted", server_id)
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка получения MQTT сервера {server_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка получения"}), 500
@@ -95,7 +142,13 @@ def api_mqtt_server_update(server_id: int):
         ok = db.update_mqtt_server(server_id, data)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось обновить"}), 400
-        return jsonify({"success": True, "server": db.get_mqtt_server(server_id)})
+        _refresh_mqtt_runtime(server_id)
+        server = db.get_mqtt_server(server_id)
+        _mask_server_secret(server)
+        return jsonify({"success": True, "server": server})
+    except SecretDecryptionError:
+        logger.error("MQTT server %s updated but credentials cannot be decrypted", server_id)
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка обновления MQTT сервера {server_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка обновления"}), 500
@@ -111,7 +164,11 @@ def api_mqtt_server_delete(server_id: int):
         ok = db.delete_mqtt_server(server_id)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось удалить"}), 400
+        _refresh_mqtt_runtime(server_id)
         return ("", 204)
+    except SecretDecryptionError:
+        logger.error("MQTT server %s delete failed: stored credentials cannot be decrypted", server_id)
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"Ошибка удаления MQTT сервера {server_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка удаления"}), 500
@@ -135,6 +192,14 @@ def api_mqtt_probe(server_id: int):
         if mqtt is None:
             return api_soft("PAHO_NOT_INSTALLED", "paho-mqtt not installed", {"items": [], "events": []})
 
+        data = request.get_json(silent=True) or {}
+        try:
+            duration = float(data.get("duration", 3))
+        except (TypeError, ValueError):
+            return api_error("INVALID_DURATION", "duration must be a finite number between 0 and 30", 400)
+        if not math.isfinite(duration) or duration <= 0 or duration > MAX_PROBE_DURATION_SEC:
+            return api_error("INVALID_DURATION", "duration must be a finite number between 0 and 30", 400)
+
         # Return mock data in tests
         if current_app.config.get("TESTING"):
             return jsonify(
@@ -145,15 +210,13 @@ def api_mqtt_probe(server_id: int):
                 }
             )
 
-        data = request.get_json() or {}
         topic_filter = data.get("filter", "#")
-        duration = float(data.get("duration", 3))
 
         received = []
         events = [
             f"probe: connecting to {server.get('host')}:{server.get('port')} filter={topic_filter} duration={duration}s"
         ]
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get("client_id") or None))
+        client = _new_diagnostic_client(server, "probe")
         if server.get("username"):
             client.username_pw_set(server.get("username"), server.get("password") or None)
 
@@ -201,6 +264,9 @@ def api_mqtt_probe(server_id: int):
         if not received:
             events.append("no messages received")
         return jsonify({"success": True, "items": received, "events": events})
+    except SecretDecryptionError:
+        logger.error("MQTT probe unavailable: stored credentials cannot be decrypted")
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"MQTT probe error: {e}")
         return api_soft("PROBE_FAILED", "probe failed", {"items": [], "events": [str(e)]})
@@ -210,6 +276,7 @@ def api_mqtt_probe(server_id: int):
 
 
 @mqtt_api_bp.route("/api/mqtt/<int:server_id>/status", methods=["GET"])
+@admin_required
 def api_mqtt_status(server_id: int):
     try:
         from flask import current_app
@@ -225,7 +292,7 @@ def api_mqtt_status(server_id: int):
             return jsonify({"success": True, "connected": True})
 
         ok = False
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get("client_id") or None))
+        client = _new_diagnostic_client(server, "status")
         if server.get("username"):
             client.username_pw_set(server.get("username"), server.get("password") or None)
         try:
@@ -239,6 +306,9 @@ def api_mqtt_status(server_id: int):
             logger.info(f"MQTT status connection failed for server {server_id}: {_e}")
             ok = False
         return jsonify({"success": True, "connected": ok})
+    except SecretDecryptionError:
+        logger.error("MQTT status unavailable: stored credentials cannot be decrypted")
+        return _secret_unavailable_response()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"MQTT status error: {e}")
         return jsonify({"success": True, "connected": False, "message": "status failed"}), 200
@@ -251,11 +321,11 @@ def api_mqtt_status(server_id: int):
 @admin_required
 def api_mqtt_scan_sse(server_id: int):
     """Stream MQTT messages as SSE for continuous scanning."""
+    ip = request.remote_addr or "0.0.0.0"
     try:
         from flask import current_app
 
         # Per-IP connection limit
-        ip = request.remote_addr or "0.0.0.0"
         with _scan_sse_lock:
             current = _scan_sse_connections.get(ip, 0)
             if current >= MAX_SCAN_SSE_PER_IP:
@@ -291,10 +361,19 @@ def api_mqtt_scan_sse(server_id: int):
         sub_filter = request.args.get("filter", "/devices/#") or "/devices/#"
         msg_queue: queue.Queue[str] = queue.Queue(maxsize=10000)
         stop_event = threading.Event()
+        stream_done = threading.Event()
+
+        def _queue_frame(frame: str) -> None:
+            try:
+                msg_queue.put_nowait(frame)
+            except queue.Full:
+                logger.warning("scan-sse queue full; dropping control frame")
 
         def _run_client():
+            client = None
+            loop_started = False
             try:
-                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(server.get("client_id") or None))
+                client = _new_diagnostic_client(server, "scan")
                 if server.get("username"):
                     client.username_pw_set(server.get("username"), server.get("password") or None)
 
@@ -317,7 +396,7 @@ def api_mqtt_scan_sse(server_id: int):
                         payload = str(msg.payload)
                     data = json.dumps({"topic": normalize_topic(topic), "payload": payload})
                     try:
-                        msg_queue.put_nowait(data)
+                        msg_queue.put_nowait(f"data: {data}\n\n")
                     except queue.Full:
                         logger.debug("scan-sse msg_queue full, dropping message for topic %s", topic)
 
@@ -325,20 +404,50 @@ def api_mqtt_scan_sse(server_id: int):
                 client.on_message = on_message
                 client.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 5)
                 client.loop_start()
+                loop_started = True
                 import time as _t
 
                 _start_ts = _t.time()
                 while not stop_event.is_set():
                     stop_event.wait(0.2)
-                    if _t.time() - _start_ts > 300:
+                    if _t.time() - _start_ts >= MAX_SCAN_DURATION_SEC:
+                        _queue_frame(
+                            "event: end\n"
+                            + 'data: {"success": true, "reason": "scan_timeout"}\n\n'
+                        )
                         break
-                client.loop_stop()
+            except (ConnectionError, TimeoutError, OSError, ValueError):
+                logger.exception("MQTT scan connection failed for server %s", server_id)
+                payload = json.dumps(
+                    {
+                        "success": False,
+                        "error_code": "MQTT_CONNECT_FAILED",
+                        "message": "connect failed",
+                    }
+                )
+                _queue_frame(f"event: error\ndata: {payload}\n\n")
+            except Exception:
+                logger.exception("MQTT scan worker failed for server %s", server_id)
+                payload = json.dumps(
+                    {
+                        "success": False,
+                        "error_code": "MQTT_SCAN_FAILED",
+                        "message": "scan failed",
+                    }
+                )
+                _queue_frame(f"event: error\ndata: {payload}\n\n")
+            finally:
+                if client is not None and loop_started:
+                    try:
+                        client.loop_stop()
+                    except (ConnectionError, TimeoutError, OSError) as e:
+                        logger.debug("scan-sse loop_stop failed: %s", e)
                 try:
-                    client.disconnect()
+                    if client is not None:
+                        client.disconnect()
                 except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.debug("Handled exception in line_240: %s", e)
-            except queue.Full as e:
-                logger.error(f"MQTT SSE thread error: {e}")
+                    logger.debug("scan-sse disconnect failed: %s", e)
+                stream_done.set()
 
         th = threading.Thread(target=_run_client, daemon=True)
         th.start()
@@ -351,13 +460,16 @@ def api_mqtt_scan_sse(server_id: int):
                 import time as _t
 
                 while True:
+                    if stream_done.is_set() and msg_queue.empty():
+                        break
                     try:
-                        data = msg_queue.get(timeout=0.5)
-                        yield f"data: {data}\n\n"
+                        frame = msg_queue.get(timeout=0.5)
+                        yield frame
                     except queue.Empty:
-                        pass  # Expected: poll timeout, no data yet
+                        if stream_done.is_set():
+                            break
                     now = int(_t.time())
-                    if now != last_ping:
+                    if not stream_done.is_set() and now != last_ping:
                         last_ping = now
                         yield "event: ping\n" + "data: {}\n\n"
             finally:
@@ -367,6 +479,10 @@ def api_mqtt_scan_sse(server_id: int):
         return Response(
             _gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
+    except SecretDecryptionError:
+        logger.error("MQTT scan unavailable: stored credentials cannot be decrypted")
+        _decrement_sse(ip)
+        return _secret_unavailable_response()
     except (RuntimeError, OSError) as e:
         logger.error(f"MQTT scan SSE error: {e}")
         _decrement_sse(ip)
