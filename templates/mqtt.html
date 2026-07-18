@@ -22,7 +22,7 @@
       </div>
       <div class="field">
         <label>Port</label>
-        <input id="m_port" type="number" value="1883">
+        <input id="m_port" type="number" value="1883" min="1" max="65535" step="1">
       </div>
       <div class="field">
         <label>Username</label>
@@ -96,6 +96,27 @@
 
 {% block extra_js %}
 <script>
+  let statusPollTimer = null;
+
+  function mqttErrorMessage(response, fallback) {
+    if (response && typeof response === 'object') {
+      return response.message || response.error || fallback;
+    }
+    return fallback;
+  }
+
+  function parseMqttPort(input, fallback) {
+    const raw = String(input.value ?? '').trim();
+    if (!raw && fallback !== undefined) return fallback;
+    const port = Number(raw);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      showNotification('Порт MQTT должен быть целым числом от 1 до 65535', 'error');
+      input.focus();
+      return null;
+    }
+    return port;
+  }
+
   async function loadServers() {
     try {
       const res = await api.get('/api/mqtt/servers');
@@ -107,7 +128,7 @@
           <td><span class="status-dot bad" data-id="${s.id}" title="offline"></span><span class="server-id">${s.id}</span></td>
           <td><input value="${escapeHtml(s.name || '')}" oninput="this.dataset.v=this.value"></td>
           <td><input value="${escapeHtml(s.host || '')}" oninput="this.dataset.v=this.value"></td>
-          <td><input type="number" value="${s.port || 1883}" oninput="this.dataset.v=this.value"></td>
+          <td><input type="number" value="${s.port || 1883}" min="1" max="65535" step="1" oninput="this.dataset.v=this.value"></td>
           <td><input value="${escapeHtml(s.username || '')}" oninput="this.dataset.v=this.value"></td>
           <td><input value="${escapeHtml(s.client_id || '')}" oninput="this.dataset.v=this.value"></td>
           <td>
@@ -134,17 +155,21 @@
         updateSelectedBadge();
       }
       // Обновляем статусы
-      updateStatuses();
+      await updateStatuses();
+      scheduleStatusPolling();
     } catch (e) {
       showNotification('Ошибка загрузки серверов MQTT', 'error');
     }
   }
 
   async function createServer() {
+    const portInput = document.getElementById('m_port');
+    const port = parseMqttPort(portInput, 1883);
+    if (port === null) return;
     const payload = {
       name: document.getElementById('m_name').value,
       host: document.getElementById('m_host').value,
-      port: parseInt(document.getElementById('m_port').value || '1883'),
+      port,
       username: document.getElementById('m_user').value,
       password: document.getElementById('m_pass').value,
       client_id: document.getElementById('m_client').value,
@@ -155,6 +180,8 @@
       if (res && res.success) {
         showNotification('Сервер создан', 'success');
         loadServers();
+      } else {
+        showNotification(mqttErrorMessage(res, 'Не удалось создать сервер'), 'error');
       }
     } catch (e) {
       showNotification('Ошибка создания сервера', 'error');
@@ -164,10 +191,13 @@
   async function updateRow(btn, id) {
     const tds = btn.closest('tr').querySelectorAll('td');
     const [_, name, host, port, username, client_id, enabledCell] = tds;
+    const portInput = port.querySelector('input');
+    const mqttPort = parseMqttPort(portInput);
+    if (mqttPort === null) return;
     const payload = {
       name: name.querySelector('input').dataset.v ?? name.querySelector('input').value,
       host: host.querySelector('input').dataset.v ?? host.querySelector('input').value,
-      port: parseInt(port.querySelector('input').dataset.v ?? port.querySelector('input').value),
+      port: mqttPort,
       username: username.querySelector('input').dataset.v ?? username.querySelector('input').value,
       client_id: client_id.querySelector('input').dataset.v ?? client_id.querySelector('input').value,
       enabled: (enabledCell.querySelector('select').dataset.v ?? enabledCell.querySelector('select').value) === 'true'
@@ -177,6 +207,8 @@
       if (res && res.success) {
         showNotification('Сервер обновлён', 'success');
         loadServers();
+      } else {
+        showNotification(mqttErrorMessage(res, 'Не удалось обновить сервер'), 'error');
       }
     } catch (e) {
       showNotification('Ошибка обновления сервера', 'error');
@@ -216,7 +248,15 @@
         }catch(e){}
       }
     }catch(e){}
-    setTimeout(updateStatuses, 5000);
+  }
+
+  function scheduleStatusPolling() {
+    if (statusPollTimer !== null) clearTimeout(statusPollTimer);
+    statusPollTimer = setTimeout(async () => {
+      statusPollTimer = null;
+      await updateStatuses();
+      scheduleStatusPolling();
+    }, 5000);
   }
 
   // ===== MQTT Topic Browser (simple client via server polling) =====
@@ -234,12 +274,18 @@
     const raw = (filterStr||'').trim();
     if (!raw) return new RegExp('^\/?devices\/');
     // support MQTT wildcards '+' '#', and user '*' as regex '.*'
-    let s = raw;
-    // ensure leading '/'
-    if (s[0] !== '/') s = '/' + s;
-    s = s.replace(/[.*+?^${}()|[\]\\]/g, r=> r==='*' ? r : '\\'+r); // escape regex except '*'
-    s = s.replace(/\+/g, '[^/]+').replace(/#/g, '.*').replace(/\*/g, '.*');
-    return new RegExp('^\/?' + s.replace(/^\//,'/'));
+    const normalized = raw[0] === '/' ? raw : '/' + raw;
+    let pattern = '';
+    for (const char of normalized) {
+      if (char === '+') {
+        pattern += '[^/]+';
+      } else if (char === '#' || char === '*') {
+        pattern += '.*';
+      } else {
+        pattern += char.replace(/[.?^${}()|[\]\\]/g, '\\$&');
+      }
+    }
+    return new RegExp('^\/?' + pattern.replace(/^\//, ''));
   }
   function hasMqttWildcards(str){ return /[#+]/.test(str||''); }
 
@@ -464,5 +510,3 @@
   function stopPolling(){ if (polling){ clearInterval(polling); polling=null; } }
 </script>
 {% endblock %}
-
-
