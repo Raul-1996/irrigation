@@ -758,6 +758,28 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-master-route",
+      "fix_commit": "b519a57e25a92873305d66f26cd09382a8880bc3",
+      "merge_commit": "d227b5552cb214b2852b306c9c3fd872ab41215e",
+      "summary": "Manual master-valve OPEN атомарно отменяет pending delayed close и публикуется под общей topic-level serialization boundary P05.",
+      "resolutions": [
+        {
+          "id": 135,
+          "disposition": "fixed",
+          "reason": "OPEN route входит в P05 master_topic_lock, снимает зарегистрированный pending close и только затем публикует OPEN; firing timer и ручная команда больше не могут пересечься в обратном порядке.",
+          "tests": [
+            "tests/api/test_groups_api.py::TestMasterValveAPI::test_manual_open_cancels_pending_close_inside_master_topic_lock"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "14 passed",
+        "full_pytest": "1995 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

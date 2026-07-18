@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **74 fixed · 2 deferred · 71 pending · 5 not_applicable**.
+- Phase 2 disposition: **75 fixed · 2 deferred · 70 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1352,7 +1352,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Полив зоны закончился в 10:00:00 — stop_zone взводит закрытие мастера на 10:01:00. В 10:00:30 пользователь через UI открывает мастер-клапан вручную (набрать воды из крана за мастером / проверка линии) — API отвечает success, observed='open'. В 10:01:00 отложенный _do_close видит «ни одной зоны on/starting» и закрывает клапан: вода у пользователя пропадает через полминуты без каких-либо действий с его стороны, в UI клапан «сам» становится closed.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** OPEN route входит в P05 master_topic_lock, снимает зарегистрированный pending close и только затем публикует OPEN; firing timer и ручная команда больше не могут пересечься в обратном порядке.
+- **Пакет:** `phase2-master-route`.
+- **Fix commit:** `b519a57e25a92873305d66f26cd09382a8880bc3`.
+- **Regression tests:** `tests/api/test_groups_api.py::TestMasterValveAPI::test_manual_open_cancels_pending_close_inside_master_topic_lock`.
 
 ### #136 [medium] `services/zone_control.py:568` — Перезапуск уже включённой зоны снимает hard-stop джобы ЧУЖИХ зон: substring-матч 'zone_hard_stop:1' совпадает с 'zone_hard_stop:10..19'
 

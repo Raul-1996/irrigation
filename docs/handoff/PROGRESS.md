@@ -208,8 +208,16 @@
     - targeted: 17 passed; full gate: 1994 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 74 записи fixed (68 корней + шесть унаследованных дублей),
-2 deferred, 71 REAL-запись pending; пять `VERIFIED_FALSE` остаются
+12. `phase2-master-route` — #135 `fixed`
+    - fix `b519a57e25a92873305d66f26cd09382a8880bc3`;
+    - merge `d227b5552cb214b2852b306c9c3fd872ab41215e`;
+    - manual OPEN под P05 topic lock атомарно отменяет pending delayed close до
+      публикации, поэтому старый timer больше не закрывает свежую команду;
+    - targeted: 14 passed; full gate: 1995 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 75 записей fixed (69 корней + шесть унаследованных дублей),
+2 deferred, 70 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

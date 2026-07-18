@@ -4055,11 +4055,13 @@
     "reproduction": "Полив зоны закончился в 10:00:00 — stop_zone взводит закрытие мастера на 10:01:00. В 10:00:30 пользователь через UI открывает мастер-клапан вручную (набрать воды из крана за мастером / проверка линии) — API отвечает success, observed='open'. В 10:01:00 отложенный _do_close видит «ни одной зоны on/starting» и закрывает клапан: вода у пользователя пропадает через полминуты без каких-либо действий с его стороны, в UI клапан «сам» становится closed.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "OPEN route входит в P05 master_topic_lock, снимает зарегистрированный pending close и только затем публикует OPEN; firing timer и ручная команда больше не могут пересечься в обратном порядке.",
+      "package": "phase2-master-route",
+      "commit": "b519a57e25a92873305d66f26cd09382a8880bc3",
+      "tests": [
+        "tests/api/test_groups_api.py::TestMasterValveAPI::test_manual_open_cancels_pending_close_inside_master_topic_lock"
+      ]
     }
   },
   {
