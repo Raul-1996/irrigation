@@ -1,84 +1,269 @@
-"""Единый расчёт «следующего полива» зон по программам.
+"""Authoritative display-side projection of scheduled watering runs.
 
-Семантика (согласована с планировщиком irrigation_scheduler):
-- программа с пустым списком days не запускается никогда;
-- weather-skip на сегодня сдвигает нижнюю границу поиска на завтра (Issue #34);
-- postpone_until зоны сдвигает её персональную нижнюю границу поиска;
-- отменённый на сегодня запуск программы для группы зоны пропускается.
+The calculator mirrors the scheduler contract instead of inventing a second
+schedule:
 
-Используется эндпоинтами /api/zones/<id>/next-watering,
-/api/zones/next-watering-bulk и расчётом next_start группы в /api/status.
+* disabled programs and malformed start times create no candidates;
+* every valid ``time``/``extra_times`` slot is considered;
+* weekdays and even/odd dates follow the same calendar rules as APScheduler;
+* interval dates come from the live APScheduler job's ``next_run_time`` (the
+  interval anchor is process/job metadata and cannot be reconstructed from the
+  program row after a restart);
+* a run is considered in progress only while one of its zones is actually in a
+  scheduler-owned active state; current H1 weather duration is used for the
+  remaining offsets, while future-run offsets stay nominal because future
+  weather is unknowable;
+* weather skip, per-zone postpone, and per-group cancellation are applied to
+  the program start that the scheduler would evaluate.
+
+Used by both next-watering endpoints and by group ``next_start`` in
+``/api/status``.
 """
 
+import json
 import logging
+import math
+import re
 import sqlite3
 from datetime import datetime, timedelta
+from typing import Any
 
 from database import db
 from services.helpers import parse_dt
 
 logger = logging.getLogger(__name__)
 
+_INTERVAL_JOB_RE = re.compile(r"^program:(\d+):(main|extra:\d+)$")
+_ACTIVE_SCHEDULE_STATES = {"starting", "on", "stopping"}
+
 
 def weather_skip_today() -> bool:
-    """Issue #34: if today's weather decision is skip, next-watering must not
-    return a same-day slot — scheduler would skip it anyway. Returns False on
-    any error (best-effort: better to show a same-day slot than 'Никогда')."""
+    """Return a fresh-cache-only weather skip decision for the display path.
+
+    ``/api/status`` is polled frequently, so this path must never fetch the
+    network.  If the cache is absent/stale, return ``False`` rather than let an
+    old forecast hide a run that the live-capable scheduler may execute.
+    """
     try:
         from services.weather_adjustment import get_weather_adjustment
 
         adj = get_weather_adjustment(db.db_path)
         if not adj.is_enabled():
             return False
-        # cache_only: /api/status поллится каждые несколько секунд — сетевой
-        # запрос за погодой здесь блокировал бы UI (решение при самом поливе
-        # принимается свежими данными в планировщике).
         return bool(adj.should_skip(cache_only=True).get("skip"))
     except (ImportError, OSError, sqlite3.Error, ValueError, TypeError) as e:
         logger.debug("Weather-skip check failed in next-watering: %s", e)
         return False
 
 
-def program_runs_on(prog, d) -> bool:
-    """Планируется ли запуск программы в календарный день ``d``.
+def _parse_time(value: Any) -> tuple[int, int] | None:
+    """Parse exactly the hour/minute values accepted by scheduler jobs."""
+    try:
+        parts = str(value).split(":")
+        if len(parts) != 2:
+            return None
+        hour, minute = map(int, parts)
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            return None
+        return hour, minute
+    except (ValueError, TypeError):
+        return None
 
-    Семантика планировщика (_schedule_single_time): weekdays — день недели в
-    days (пустой список → никогда); even-odd — чётность числа месяца (NULL в
-    even_odd, как и у CronTrigger планировщика, означает нечётные дни);
-    interval — ежедневная аппроксимация: IntervalTrigger пере-якорится при
-    каждом старте сервиса, точный день заранее неизвестен.
+
+def _program_start_slots(prog: dict[str, Any]) -> list[tuple[str, int, int]]:
+    """Return valid ``(scheduler suffix, hour, minute)`` start slots."""
+    raw_extra = prog.get("extra_times") or []
+    if isinstance(raw_extra, str):
+        try:
+            raw_extra = json.loads(raw_extra)
+        except (json.JSONDecodeError, TypeError):
+            raw_extra = []
+    if not isinstance(raw_extra, (list, tuple)):
+        raw_extra = []
+
+    raw_slots = [("main", prog.get("time"))]
+    raw_slots.extend((f"extra:{idx}", value) for idx, value in enumerate(raw_extra))
+    slots = []
+    for suffix, value in raw_slots:
+        parsed = _parse_time(value)
+        if parsed is None:
+            logger.debug("Ignoring malformed program time program=%s slot=%s value=%r", prog.get("id"), suffix, value)
+            continue
+        slots.append((suffix, parsed[0], parsed[1]))
+    return slots
+
+
+def program_runs_on(prog: dict[str, Any], d: datetime) -> bool:
+    """Whether a calendar-based program fires on ``d``.
+
+    Interval programs deliberately return ``False`` here: their day is defined
+    by the live APScheduler anchor, consumed separately through
+    :func:`_get_interval_next_runs`.
     """
-    st = prog.get("schedule_type") or "weekdays"
-    if st == "interval":
-        return True
-    if st == "even-odd":
+    if not prog.get("enabled", True):
+        return False
+    schedule_type = prog.get("schedule_type") or "weekdays"
+    if schedule_type == "interval":
+        return False
+    if schedule_type == "even-odd":
         want_even = prog.get("even_odd", "even") == "even"
         return (d.day % 2 == 0) == want_even
     return d.weekday() in (prog.get("days") or [])
 
 
-def first_program_start_after(prog, lower_bound):
-    """Return the first scheduled program-start datetime strictly > lower_bound.
+def _local_naive(value: datetime) -> datetime:
+    """Use scheduler wall-clock time in the calculator's naive-local domain."""
+    if value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
 
-    Same 0..14 day search as the per-program ``next_start`` in
-    ``compute_next_watering`` but anchored at *lower_bound* instead of the
-    global *now*.  Returns None if the program never runs (see
-    ``program_runs_on``) or its time string is malformed.
-    """
-    if not prog:
-        return None
+
+def _get_interval_next_runs(programs: list[dict[str, Any]]) -> dict[tuple[int, str], datetime]:
+    """Read all interval ``next_run_time`` values from APScheduler once."""
+    interval_ids = {
+        int(p["id"])
+        for p in programs
+        if p.get("id") is not None and (p.get("schedule_type") or "weekdays") == "interval"
+    }
+    if not interval_ids:
+        return {}
     try:
-        hh, mm = [int(x) for x in str(prog.get("time") or "00:00").split(":", 1)]
-    except (ValueError, TypeError, KeyError) as e:
-        logger.debug("Exception in first_program_start_after time parse: %s", e)
+        from irrigation_scheduler import get_scheduler
+
+        wrapper = get_scheduler()
+        scheduler = getattr(wrapper, "scheduler", None) if wrapper is not None else None
+        if scheduler is None:
+            return {}
+        result: dict[tuple[int, str], datetime] = {}
+        for job in scheduler.get_jobs():
+            match = _INTERVAL_JOB_RE.match(str(getattr(job, "id", "")))
+            if not match:
+                continue
+            program_id = int(match.group(1))
+            if program_id not in interval_ids:
+                continue
+            next_run = getattr(job, "next_run_time", None)
+            if isinstance(next_run, datetime):
+                result[(program_id, match.group(2))] = _local_naive(next_run)
+        return result
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError, AttributeError) as e:
+        logger.debug("Interval scheduler metadata unavailable: %s", e)
+        return {}
+
+
+def _weather_duration_coefficient() -> int:
+    """Return the current legacy (H1) coefficient without network access.
+
+    The scheduler currently applies ``WeatherAdjustment.get_coefficient()``;
+    it does not enable the optional H2 balance coefficient.  A small subclass
+    only changes the input acquisition to fresh-cache-only while reusing the
+    exact H1 coefficient algorithm.
+    """
+    try:
+        from services.weather.adjustment import WeatherAdjustment
+        from services.weather.service import WeatherService
+
+        class _CacheOnlyAdjustment(WeatherAdjustment):
+            def _get_weather(self, cache_only: bool = False):
+                weather = WeatherService(self.db_path).get_weather(cache_only=True)
+                return self._select_input_source(weather) if weather is not None else None
+
+        adjustment = _CacheOnlyAdjustment(db.db_path)
+        if not adjustment.is_enabled():
+            return 100
+        return max(0, min(200, int(adjustment.get_coefficient())))
+    except (ImportError, OSError, sqlite3.Error, ValueError, TypeError, AttributeError) as e:
+        logger.debug("Weather coefficient unavailable in next-watering: %s", e)
+        return 100
+
+
+def _interval_step(prog: dict[str, Any]) -> timedelta | None:
+    try:
+        days = int(prog.get("interval_days"))
+    except (ValueError, TypeError):
         return None
-    for off in range(0, 15):
-        d = lower_bound + timedelta(days=off)
-        if program_runs_on(prog, d):
-            cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if cand > lower_bound:
-                return cand
+    return timedelta(days=days) if days > 0 else None
+
+
+def _first_calendar_start_after(prog: dict[str, Any], hour: int, minute: int, lower_bound: datetime) -> datetime | None:
+    for offset in range(0, 15):
+        day = lower_bound + timedelta(days=offset)
+        if not program_runs_on(prog, day):
+            continue
+        candidate = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate > lower_bound:
+            return candidate
     return None
+
+
+def _latest_calendar_start_not_after(prog: dict[str, Any], hour: int, minute: int, upper_bound: datetime) -> datetime | None:
+    best = None
+    for offset in range(-14, 1):
+        day = upper_bound + timedelta(days=offset)
+        if not program_runs_on(prog, day):
+            continue
+        candidate = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= upper_bound and (best is None or candidate > best):
+            best = candidate
+    return best
+
+
+def first_program_start_after(
+    prog: dict[str, Any],
+    lower_bound: datetime,
+    *,
+    suffix: str = "main",
+    hour: int | None = None,
+    minute: int | None = None,
+    interval_next_runs: dict[tuple[int, str], datetime] | None = None,
+) -> datetime | None:
+    """Return the first scheduler-backed program start strictly after a bound."""
+    if not prog or not prog.get("enabled", True):
+        return None
+    if hour is None or minute is None:
+        parsed = _parse_time(prog.get("time"))
+        if parsed is None:
+            return None
+        hour, minute = parsed
+
+    if (prog.get("schedule_type") or "weekdays") != "interval":
+        return _first_calendar_start_after(prog, hour, minute, lower_bound)
+
+    step = _interval_step(prog)
+    next_run = (interval_next_runs or {}).get((int(prog.get("id")), suffix))
+    if step is None or next_run is None:
+        return None
+    if next_run > lower_bound:
+        return next_run
+    elapsed_steps = math.floor((lower_bound - next_run) / step) + 1
+    return next_run + step * elapsed_steps
+
+
+def _latest_program_start_not_after(
+    prog: dict[str, Any],
+    upper_bound: datetime,
+    *,
+    suffix: str,
+    hour: int,
+    minute: int,
+    interval_next_runs: dict[tuple[int, str], datetime],
+) -> datetime | None:
+    if (prog.get("schedule_type") or "weekdays") != "interval":
+        return _latest_calendar_start_not_after(prog, hour, minute, upper_bound)
+    step = _interval_step(prog)
+    next_run = interval_next_runs.get((int(prog.get("id")), suffix))
+    if step is None or next_run is None:
+        return None
+    if next_run <= upper_bound:
+        elapsed_steps = math.floor((upper_bound - next_run) / step)
+        return next_run + step * elapsed_steps
+    rewind_steps = math.ceil((next_run - upper_bound) / step)
+    return next_run - step * rewind_steps
+
+
+def _adjusted_duration(base_duration: int, coefficient: int) -> int:
+    adjusted = round(base_duration * coefficient / 100.0)
+    return 0 if coefficient == 0 else max(1, adjusted)
 
 
 def compute_next_watering(
@@ -88,179 +273,166 @@ def compute_next_watering(
     programs: list | None = None,
     skip_today: bool | None = None,
 ) -> dict[int, dict]:
-    """Рассчитать ближайший будущий старт полива для набора зон.
-
-    ``zone_ids=None`` → все зоны, кроме служебной группы 999.
-    ``all_zones``/``programs`` — необязательные предзагруженные списки
-    (иначе читаются из БД); ``skip_today`` — предвычисленный результат
-    ``weather_skip_today()`` (иначе вычисляется здесь).
-
-    Возвращает словарь ``{zone_id: entry}``, где entry:
-    ``next_dt`` (datetime | None), ``program`` (dict | None — программа
-    победившего кандидата), ``zone_position``/``total_zones`` (позиция зоны
-    в отсортированном списке зон этой программы), ``has_programs`` (bool —
-    входит ли зона хоть в одну программу).
-    """
+    """Calculate the nearest real scheduler candidate for each requested zone."""
     if all_zones is None:
         all_zones = db.get_zones() or []
     if programs is None:
         programs = db.get_programs() or []
     if zone_ids is None:
-        zone_ids = [int(z.get("id")) for z in all_zones if int(z.get("group_id") or z.get("group") or 0) != 999]
-    zone_ids = [int(z) for z in zone_ids]
-    duration_by_zone = {int(z["id"]): int(z.get("duration") or 0) for z in all_zones}
-    offset_map_per_program = []
-    for p in programs:
+        zone_ids = [
+            int(z.get("id"))
+            for z in all_zones
+            if int(z.get("group_id") or z.get("group") or 0) != 999
+        ]
+    zone_ids = [int(zone_id) for zone_id in zone_ids]
+    zone_by_id = {int(z["id"]): z for z in all_zones}
+    base_duration = {int(z["id"]): int(z.get("duration") or 0) for z in all_zones}
+
+    active_schedule_zones = {
+        int(z["id"])
+        for z in all_zones
+        if str(z.get("state") or "").lower() in _ACTIVE_SCHEDULE_STATES
+        and str(z.get("watering_start_source") or "").lower() == "schedule"
+    }
+    coefficient = _weather_duration_coefficient() if active_schedule_zones else 100
+
+    program_maps = []
+    for program in programs:
+        if not program.get("enabled", True):
+            continue
+        slots = _program_start_slots(program)
+        if not slots:
+            continue
         try:
-            zones_list = sorted([int(x) for x in (p.get("zones") or [])])
+            zones_sorted = sorted(int(value) for value in (program.get("zones") or []))
         except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Exception in compute_next_watering: %s", e)
-            zones_list = []
-        offsets = {}
-        cum = 0
-        for zid in zones_list:
-            offsets[zid] = cum
-            cum += int(duration_by_zone.get(zid, 0))
-        offset_map_per_program.append({"prog": p, "offsets": offsets, "zones_sorted": zones_list})
-    now = datetime.now()
-    # Issue #34: weather skip in effect → push baseline past today so all
-    # per-program candidates land on the next eligible day.
+            logger.debug("Ignoring malformed program zones program=%s: %s", program.get("id"), e)
+            continue
+        if not zones_sorted:
+            continue
+
+        base_offsets: dict[int, int] = {}
+        active_offsets: dict[int, int] = {}
+        base_total = 0
+        active_total = 0
+        for zone_id in zones_sorted:
+            base_offsets[zone_id] = base_total
+            active_offsets[zone_id] = active_total
+            duration = base_duration.get(zone_id, 0)
+            base_total += duration
+            active_total += _adjusted_duration(duration, coefficient)
+        program_maps.append(
+            {
+                "prog": program,
+                "slots": slots,
+                "zones_sorted": zones_sorted,
+                "base_offsets": base_offsets,
+                "active_offsets": active_offsets,
+                "base_total": base_total,
+                "active_total": active_total,
+                "is_active": bool(active_schedule_zones.intersection(zones_sorted)),
+            }
+        )
+
+    actual_now = datetime.now()
     if skip_today is None:
         skip_today = weather_skip_today()
-    if skip_today:
-        tomorrow_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        if tomorrow_midnight > now:
-            now = tomorrow_midnight
-    # Per-zone postpone lookup — lets us advance the per-zone lower bound
-    # so cards never display a next-run inside an active postpone window.
-    zone_by_id = {int(z["id"]): z for z in all_zones}
-    prog_info = {}
-    for pm in offset_map_per_program:
-        p = pm["prog"]
-        try:
-            hh, mm = [int(x) for x in str(p.get("time") or "00:00").split(":", 1)]
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Exception in compute_next_watering: %s", e)
-            hh, mm = 0, 0
-        best = None
-        today_start = None
-        if program_runs_on(p, now):
-            today_start = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        try:
-            zones_list = p.get("zones") or []
-            total_prog_min = sum(int(duration_by_zone.get(int(zid), 0)) for zid in zones_list)
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Exception in compute_next_watering: %s", e)
-            total_prog_min = 0
-        in_progress = False
-        elapsed_min = 0
-        if today_start and today_start <= now and total_prog_min > 0:
-            today_end = today_start + timedelta(minutes=total_prog_min)
-            if now < today_end:
-                in_progress = True
-                elapsed_min = int((now - today_start).total_seconds() // 60)
-        for off in range(0, 14):
-            d = now + timedelta(days=off)
-            if program_runs_on(p, d):
-                cand = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if cand <= now:
-                    continue
-                best = cand
-                break
-        prog_info[p.get("id")] = {
-            "next_start": best,
-            "today_start": today_start,
-            "in_progress": in_progress,
-            "elapsed_min": elapsed_min,
-        }
-    result = {}
-    for zid in zone_ids:
-        best_dt = None
-        best_pm = None
-        # Per-zone lower bound: if zone has an active postpone_until in the
-        # future, advance zone_now to it so we never display a next-run
-        # that the scheduler would skip.
-        z = zone_by_id.get(int(zid))
-        zone_now = now
-        if z:
-            pu_dt = parse_dt(z.get("postpone_until"))
-            if pu_dt and pu_dt > zone_now:
-                zone_now = pu_dt
-        for pm in offset_map_per_program:
-            p = pm["prog"]
-            offsets = pm["offsets"]
-            if zid not in offsets:
-                continue
-            pinfo = prog_info.get(p.get("id")) or {}
-            cancelled_today = False
-            try:
-                gid = int(z.get("group_id") or 0) if z else 0
-                if gid and pinfo.get("today_start"):
-                    run_date = pinfo["today_start"].strftime("%Y-%m-%d")
-                    cancelled_today = db.is_program_run_cancelled_for_group(int(p.get("id")), run_date, gid)
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("Exception in compute_next_watering: %s", e)
-                cancelled_today = False
+    interval_next_runs = _get_interval_next_runs([item["prog"] for item in program_maps])
 
-            # When the zone is postponed (zone_now > now), an in-progress
-            # program for the cohort is irrelevant for THIS zone — the
-            # scheduler will skip it. Fall through to "search future
-            # programs from zone_now".
-            if pinfo.get("in_progress") and pinfo.get("today_start") and not cancelled_today and zone_now <= now:
-                off_min = int(offsets.get(zid, 0))
-                if off_min >= int(pinfo.get("elapsed_min") or 0):
-                    cand = pinfo["today_start"] + timedelta(minutes=off_min)
-                else:
-                    start_dt = pinfo.get("next_start")
-                    if not start_dt:
-                        continue
-                    cand = start_dt + timedelta(minutes=off_min)
-            else:
-                # Common path: cached next_start (anchored at global now).
-                # When the zone is postponed (or the start landed inside
-                # the postpone window), recompute from zone_now. Якорь
-                # сдвигается на offset зоны: postpone, истекающий между
-                # стартом программы и слотом зоны, не должен уводить показ
-                # на следующий запуск — планировщик польёт в сегодняшний
-                # слот (job зоны стреляет в start+offset, когда postpone
-                # уже истёк).
-                off_min = int(offsets.get(zid, 0))
-                if zone_now != now:
-                    start_dt = first_program_start_after(p, zone_now - timedelta(minutes=off_min))
-                else:
-                    start_dt = pinfo.get("next_start")
-                if not start_dt:
-                    continue
-                cand = start_dt + timedelta(minutes=off_min)
-                try:
-                    # cancelled_today shifts to next-week's run — but if
-                    # zone is postponed, we already searched from zone_now
-                    # which strictly skips the postpone window, so the
-                    # cancelled_today shift is unnecessary (and would be
-                    # incorrect — it ignores postpone_until).
-                    if p.get("id") is not None and pinfo.get("today_start") and cancelled_today and zone_now == now:
-                        hh, mm = map(int, str(p.get("time") or "00:00").split(":", 1))
-                        ns = None
-                        for off in range(1, 15):
-                            d = now + timedelta(days=off)
-                            if program_runs_on(p, d):
-                                ns = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                                break
-                        if ns:
-                            cand = ns + timedelta(minutes=int(offsets.get(zid, 0)))
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Handled exception in compute_next_watering: %s", e)
-            if cand <= zone_now:
+    cancellation_cache: dict[tuple[int, str, int], bool] = {}
+
+    def is_cancelled(program: dict[str, Any], start: datetime, group_id: int) -> bool:
+        if not group_id or program.get("id") is None:
+            return False
+        key = (int(program["id"]), start.strftime("%Y-%m-%d"), int(group_id))
+        if key not in cancellation_cache:
+            try:
+                cancellation_cache[key] = bool(db.is_program_run_cancelled_for_group(*key))
+            except (sqlite3.Error, OSError) as e:
+                logger.debug("Program cancellation lookup failed for %s: %s", key, e)
+                cancellation_cache[key] = False
+        return cancellation_cache[key]
+
+    result: dict[int, dict] = {}
+    for zone_id in zone_ids:
+        zone = zone_by_id.get(zone_id)
+        group_id = int(zone.get("group_id") or 0) if zone else 0
+        zone_lower_bound = actual_now
+        postpone = parse_dt(zone.get("postpone_until")) if zone else None
+        if postpone and postpone > zone_lower_bound:
+            zone_lower_bound = postpone
+
+        best_dt = None
+        best_map = None
+        for item in program_maps:
+            program = item["prog"]
+            if zone_id not in item["base_offsets"]:
                 continue
-            if best_dt is None or cand < best_dt:
-                best_dt = cand
-                best_pm = pm
-        zones_sorted = best_pm["zones_sorted"] if best_pm else []
-        result[int(zid)] = {
+
+            # A nominal in-progress window is not evidence that a program is
+            # still executing.  Require a scheduler-owned active zone, then use
+            # the current H1 coefficient for this run's remaining offsets.
+            if item["is_active"] and item["active_total"] > 0:
+                for suffix, hour, minute in item["slots"]:
+                    start = _latest_program_start_not_after(
+                        program,
+                        actual_now,
+                        suffix=suffix,
+                        hour=hour,
+                        minute=minute,
+                        interval_next_runs=interval_next_runs,
+                    )
+                    if start is None or actual_now >= start + timedelta(minutes=item["active_total"]):
+                        continue
+                    candidate = start + timedelta(minutes=item["active_offsets"][zone_id])
+                    if candidate <= zone_lower_bound or is_cancelled(program, start, group_id):
+                        continue
+                    if best_dt is None or candidate < best_dt:
+                        best_dt = candidate
+                        best_map = item
+
+            # Future weather is intentionally not projected: the scheduler
+            # decides it at run time, so use stable nominal offsets here.
+            offset = item["base_offsets"][zone_id]
+            for suffix, hour, minute in item["slots"]:
+                # Starts at/before ``actual_now`` belong to the current run and
+                # are considered only by the evidence-backed active branch
+                # above.  Without an active scheduler-owned zone, reviving a
+                # passed nominal start creates phantom late-zone slots after a
+                # weather-shortened run has already finished.
+                start_bound = max(actual_now, zone_lower_bound - timedelta(minutes=offset))
+                for _attempt in range(32):
+                    start = first_program_start_after(
+                        program,
+                        start_bound,
+                        suffix=suffix,
+                        hour=hour,
+                        minute=minute,
+                        interval_next_runs=interval_next_runs,
+                    )
+                    if start is None:
+                        break
+                    candidate = start + timedelta(minutes=offset)
+                    if skip_today and start.date() == actual_now.date():
+                        start_bound = start
+                        continue
+                    if is_cancelled(program, start, group_id):
+                        start_bound = start
+                        continue
+                    if candidate <= zone_lower_bound:
+                        start_bound = start
+                        continue
+                    if best_dt is None or candidate < best_dt:
+                        best_dt = candidate
+                        best_map = item
+                    break
+
+        zones_sorted = best_map["zones_sorted"] if best_map else []
+        result[zone_id] = {
             "next_dt": best_dt,
-            "program": best_pm["prog"] if best_pm else None,
-            "zone_position": (zones_sorted.index(int(zid)) + 1) if int(zid) in zones_sorted else None,
-            "total_zones": len(zones_sorted) if best_pm else None,
-            "has_programs": any(int(zid) in pm["offsets"] for pm in offset_map_per_program),
+            "program": best_map["prog"] if best_map else None,
+            "zone_position": zones_sorted.index(zone_id) + 1 if zone_id in zones_sorted else None,
+            "total_zones": len(zones_sorted) if best_map else None,
+            "has_programs": any(zone_id in item["base_offsets"] for item in program_maps),
         }
     return result
