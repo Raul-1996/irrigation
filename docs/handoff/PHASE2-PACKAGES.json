@@ -928,6 +928,96 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-next-watering",
+      "fix_commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "merge_commit": "d256de2b7cc355dc01d2e571bfaf07db205de0c5",
+      "summary": "Next-watering projection исключает disabled/malformed и отменённые запуски, учитывает extra slots, active cross-midnight/H1 offsets и использует live APScheduler anchor для interval.",
+      "resolutions": [
+        {
+          "id": 5,
+          "disposition": "fixed",
+          "reason": "Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed"
+          ]
+        },
+        {
+          "id": 12,
+          "disposition": "fixed",
+          "reason": "Calculator перебирает все валидные main/extra slots с теми же scheduler suffix, поэтому ближайший extra_time может честно победить main.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_extra_time_can_be_the_next_real_start"
+          ]
+        },
+        {
+          "id": 13,
+          "disposition": "fixed",
+          "reason": "Interval cadence читается из next_run_time живых APScheduler jobs и шага interval_days; без job metadata калькулятор не выдумывает календарный anchor.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_interval_uses_live_scheduler_next_run_metadata",
+            "tests/api/test_next_watering_semantics.py::TestScheduleTypesNextWatering::test_interval_program_gives_slot"
+          ]
+        },
+        {
+          "id": 29,
+          "disposition": "fixed",
+          "reason": "Cancellation memoized по program/date/group и проверяется для каждого кандидата даже после сдвига lower bound из-за postpone; отменённый сегодняшний run не воскресает.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_cancelled_run_stays_cancelled_when_postpone_expires_before_zone_slot",
+            "tests/unit/test_phase2_next_watering.py::test_cancellation_lookup_is_memoized_per_program_date_group"
+          ]
+        },
+        {
+          "id": 32,
+          "disposition": "fixed",
+          "reason": "Latest eligible start ищется назад через календарную границу, а in-progress требует реальную scheduler-owned active zone; следующий слот пересекающей полночь программы остаётся видимым.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_cross_midnight_active_program_keeps_upcoming_zone_visible"
+          ]
+        },
+        {
+          "id": 131,
+          "disposition": "fixed",
+          "reason": "Для доказанного активного scheduled run оставшиеся offsets используют текущий H1 weather coefficient; будущие runs остаются nominal, H2 не включался, завершённый shortened run не создаёт phantom slot.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_active_program_offsets_use_current_h1_weather_coefficient",
+            "tests/unit/test_phase2_next_watering.py::test_finished_weather_shortened_program_has_no_phantom_nominal_slot"
+          ]
+        },
+        {
+          "id": 150,
+          "disposition": "fixed",
+          "reason": "Cache-only hot path никогда не идёт в сеть и принимает weather row только в пределах обычного TTL; arbitrarily stale rain/freeze больше не скрывает run, live-failure degraded fallback сохранён отдельно.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_cache_only_weather_rejects_stale_row_without_network"
+          ]
+        },
+        {
+          "id": 151,
+          "disposition": "fixed",
+          "reason": "Weather skip отбрасывает только starts сегодняшней даты, а tomorrow midnight остаётся валидным кандидатом и больше не перескакивает ещё на сутки.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_weather_skip_allows_tomorrow_midnight"
+          ]
+        },
+        {
+          "id": 152,
+          "disposition": "fixed",
+          "reason": "Malformed main time не нормализуется в 00:00 и не публикует phantom run; независимый валидный extra_time остаётся доступен.",
+          "tests": [
+            "tests/unit/test_phase2_next_watering.py::test_malformed_main_time_is_not_invented_as_midnight",
+            "tests/unit/test_phase2_next_watering.py::test_malformed_main_does_not_hide_valid_extra_time"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "285 passed, 1 skipped",
+        "full_pytest": "2023 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

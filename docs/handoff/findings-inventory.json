@@ -159,11 +159,13 @@
     "reproduction": "Пользователь выключает программу тумблером enabled → карточка зоны и /api/status продолжают показывать «следующий полив завтра 06:00», который планировщик никогда не выполнит; scheduled_start_time той же зоны (через db.compute_next_run_for_zone) при этом пуст — два эндпоинта противоречат друг другу. Новый тест-файл tests/api/test_next_watering_semantics.py кейс enabled=False не покрывает.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed"
+      ]
     }
   },
   {
@@ -365,11 +367,13 @@
     "main_or_branch": "main_bug",
     "duplicate_of": 5,
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed"
+      ]
     }
   },
   {
@@ -396,11 +400,13 @@
     "reproduction": "Программа time='06:00', extra_times=['18:00'], сейчас 12:00: планировщик польёт сегодня в 18:00 (джоб extra:0 существует), но /api/zones/<id>/next-watering и bulk показывают «завтра 06:00»; scheduled_start_time (через compute_next_run_for_zone) при этом показывает сегодня 18:00 — UI противоречит сам себе и реальному поведению.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Calculator перебирает все валидные main/extra slots с теми же scheduler suffix, поэтому ближайший extra_time может честно победить main.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_extra_time_can_be_the_next_real_start"
+      ]
     }
   },
   {
@@ -427,11 +433,14 @@
     "reproduction": "Сервис перезапущен в Пн 05:00, программа interval_days=3, time='06:00' → реальные запуски Пн/Чт/Вс. Во Вт /api/zones/next-watering-bulk и next_start в /api/status показывают «Ср 06:00», хотя фактический следующий запуск — Чт 06:00: пользователь ждёт полив на день раньше реального.",
     "main_or_branch": "branch_regression",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Interval cadence читается из next_run_time живых APScheduler jobs и шага interval_days; без job metadata калькулятор не выдумывает календарный anchor.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_interval_uses_live_scheduler_next_run_metadata",
+        "tests/api/test_next_watering_semantics.py::TestScheduleTypesNextWatering::test_interval_program_gives_slot"
+      ]
     }
   },
   {
@@ -493,11 +502,13 @@
     "main_or_branch": "main_bug",
     "duplicate_of": 5,
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed"
+      ]
     }
   },
   {
@@ -882,11 +893,13 @@
     "main_or_branch": "main_bug",
     "duplicate_of": 12,
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Calculator перебирает все валидные main/extra slots с теми же scheduler suffix, поэтому ближайший extra_time может честно победить main.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_extra_time_can_be_the_next_real_start"
+      ]
     }
   },
   {
@@ -914,11 +927,14 @@
     "main_or_branch": "branch_regression",
     "decision_notes": "Real but exact same-day postpone requires API/integration input; normal +1/+2/+3 UI postpones to end of day.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Cancellation memoized по program/date/group и проверяется для каждого кандидата даже после сдвига lower bound из-за postpone; отменённый сегодняшний run не воскресает.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_cancelled_run_stays_cancelled_when_postpone_expires_before_zone_slot",
+        "tests/unit/test_phase2_next_watering.py::test_cancellation_lookup_is_memoized_per_program_date_group"
+      ]
     }
   },
   {
@@ -1011,11 +1027,13 @@
     "reproduction": "Программа только по понедельникам в 23:50, зоны 1(30м) и 2(30м). Во вторник 00:10, пока зона 1 ещё поливается, карточка зоны 2 показывает «следующий полив: следующий понедельник 00:20», хотя её полив начнётся через 10 минут.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Latest eligible start ищется назад через календарную границу, а in-progress требует реальную scheduler-owned active zone; следующий слот пересекающей полночь программы остаётся видимым.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_cross_midnight_active_program_keeps_upcoming_zone_visible"
+      ]
     }
   },
   {
@@ -3961,11 +3979,14 @@
     "reproduction": "Погодный коэффициент 50%, программа 06:00, зоны A/B/C по 20 мин (номинал 60, факт 30). В 06:35 полив уже завершён, но in_progress=True до 07:00: для зоны C (off_min 40 ≥ elapsed 35) карточка показывает «следующий полив сегодня 06:40» — слот, который никогда не наступит; и во время самого полива слоты B/C показываются на 10–20 минут позже реальных стартов. Самокоррекция — только после окончания номинального окна.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Для доказанного активного scheduled run оставшиеся offsets используют текущий H1 weather coefficient; будущие runs остаются nominal, H2 не включался, завершённый shortened run не создаёт phantom slot.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_active_program_offsets_use_current_h1_weather_coefficient",
+        "tests/unit/test_phase2_next_watering.py::test_finished_weather_shortened_program_has_no_phantom_nominal_slot"
+      ]
     }
   },
   {
@@ -4516,11 +4537,13 @@
     "reproduction": "Seed a 10-day rainy cache row, mock live dry weather, compare cache-only display skip with scheduler live skip.",
     "main_or_branch": "branch_regression",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Cache-only hot path никогда не идёт в сеть и принимает weather row только в пределах обычного TTL; arbitrarily stale rain/freeze больше не скрывает run, live-failure degraded fallback сохранён отдельно.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_cache_only_weather_rejects_stale_row_without_network"
+      ]
     }
   },
   {
@@ -4544,11 +4567,13 @@
     "main_or_branch": "main_root_branch_expanded",
     "decision_notes": "The root existed in main bulk; the branch expanded it to single and /api/status consumers.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Weather skip отбрасывает только starts сегодняшней даты, а tomorrow midnight остаётся валидным кандидатом и больше не перескакивает ещё на сутки.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_weather_skip_allows_tomorrow_midnight"
+      ]
     }
   },
   {
@@ -4572,11 +4597,14 @@
     "main_or_branch": "main_root_branch_expanded",
     "decision_notes": "The root existed in main bulk; the branch expanded it to single and /api/status consumers.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Malformed main time не нормализуется в 00:00 и не публикует phantom run; независимый валидный extra_time остаётся доступен.",
+      "package": "phase2-next-watering",
+      "commit": "8c51a0f10e6b2b4166c1bac632ad43eb980d34c6",
+      "tests": [
+        "tests/unit/test_phase2_next_watering.py::test_malformed_main_time_is_not_invented_as_midnight",
+        "tests/unit/test_phase2_next_watering.py::test_malformed_main_does_not_hide_valid_extra_time"
+      ]
     }
   }
 ]

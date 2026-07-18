@@ -251,8 +251,25 @@
     - targeted: 363 passed; full gate: 2011 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 87 записей fixed (81 корень + шесть унаследованных дублей),
-3 deferred, 57 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+16. `phase2-next-watering` — #5, #12, #13, #29, #32, #131, #150, #151,
+    #152 `fixed`; #11/#15 наследуют #5, #28 наследует #12
+    - fix `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`;
+    - merge `d256de2b7cc355dc01d2e571bfaf07db205de0c5`;
+    - disabled/malformed programs и slots не создают phantom runs, extra_times
+      участвуют, interval anchor читается из live APScheduler job metadata;
+    - active cross-midnight run требует scheduler-owned state и использует текущий
+      H1 coefficient для оставшихся offsets; будущая погода остаётся nominal,
+      H2 не включался;
+    - postpone сохраняет per-date cancellation, weather skip не теряет tomorrow
+      midnight, cache-only weather ограничен обычным TTL без сетевого запроса;
+    - cancellation memoized до одного lookup на program/date/group; полное
+      закрытие публичного amplification #139 ожидает single-precompute call-site P09;
+    - targeted: 285 passed, 1 skipped; full gate: 2023 passed, 2 skipped,
+      17 deselected; ruff и diff check чисты. Единичный APScheduler teardown
+      warning не воспроизвёлся в отдельном повторе owning test (1 passed).
+
+После этих пакетов: 99 записей fixed (90 корней + девять унаследованных дублей),
+3 deferred, 45 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

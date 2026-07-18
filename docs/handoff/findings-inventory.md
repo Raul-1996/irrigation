@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **87 fixed · 3 deferred · 57 pending · 5 not_applicable**.
+- Phase 2 disposition: **99 fixed · 3 deferred · 45 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -68,7 +68,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь выключает программу тумблером enabled → карточка зоны и /api/status продолжают показывать «следующий полив завтра 06:00», который планировщик никогда не выполнит; scheduled_start_time той же зоны (через db.compute_next_run_for_zone) при этом пуст — два эндпоинта противоречат друг другу. Новый тест-файл tests/api/test_next_watering_semantics.py кейс enabled=False не покрывает.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed`.
 
 ### #6 [low] `tests/unit/test_scheduler_comprehensive.py:410` — test_recover_even_odd_null_means_odd ассертит разное в зависимости от чётности дня месяца — по чётным дням не ловит потерю recovery NULL-программ
 
@@ -138,7 +142,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь выключает программу (enabled=0). Карточка зоны (/api/zones/<id>/next-watering), bulk-эндпоинт и next_start группы в /api/status продолжают показывать время старта этой программы, хотя полив не произойдёт; scheduled_start_time зоны (через compute_next_run_for_zone) при этом показывает другое значение или «Никогда».
 - **Дубль:** `#5`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed`.
 
 ### #12 [medium] `services/next_watering.py:141` — compute_next_watering игнорирует extra_times — расходится с планировщиком и compute_next_run_for_zone
 
@@ -146,7 +154,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа time='06:00', extra_times=['18:00'], сейчас 12:00: планировщик польёт сегодня в 18:00 (джоб extra:0 существует), но /api/zones/<id>/next-watering и bulk показывают «завтра 06:00»; scheduled_start_time (через compute_next_run_for_zone) при этом показывает сегодня 18:00 — UI противоречит сам себе и реальному поведению.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Calculator перебирает все валидные main/extra slots с теми же scheduler suffix, поэтому ближайший extra_time может честно победить main.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_extra_time_can_be_the_next_real_start`.
 
 ### #13 [low] `services/next_watering.py:52` — Interval-программы в compute_next_watering аппроксимируются как «каждый день» — показ даты на 1..N-1 дней раньше фактического запуска
 
@@ -154,7 +166,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сервис перезапущен в Пн 05:00, программа interval_days=3, time='06:00' → реальные запуски Пн/Чт/Вс. Во Вт /api/zones/next-watering-bulk и next_start в /api/status показывают «Ср 06:00», хотя фактический следующий запуск — Чт 06:00: пользователь ждёт полив на день раньше реального.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Interval cadence читается из next_run_time живых APScheduler jobs и шага interval_days; без job metadata калькулятор не выдумывает календарный anchor.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_interval_uses_live_scheduler_next_run_metadata`, `tests/api/test_next_watering_semantics.py::TestScheduleTypesNextWatering::test_interval_program_gives_slot`.
 
 ### #14 [low] `db/zones.py:68` — Общий builder UPDATE zones молча переназначает group_id 0/NULL в группу 1 при любом обновлении зоны
 
@@ -176,7 +192,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь выключает программу (PUT /api/programs/<id> enabled=0 → планировщик отменяет её jobs). После этого GET /api/zones/<id>/next-watering и POST /api/zones/next-watering-bulk продолжают возвращать конкретное next_datetime по этой программе, а /api/status показывает next_start группы по ней же — UI обещает полив, который никогда не запустится (и наоборот скрывает реальное «Никогда»).
 - **Дубль:** `#5`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Disabled программы исключаются до построения program maps и больше не публикуют несуществующий next watering.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_disabled_program_is_not_displayed`.
 
 ### #17 [medium] `routes/mqtt_api.py:98` — PUT /api/mqtt/servers/<id> возвращает расшифрованный сохранённый пароль брокера, который клиент не присылал
 
@@ -287,7 +307,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа 06:00 с extra_times ['19:00']. В 12:00 карточка зоны и /api/status показывают «следующий полив завтра 06:00», планировщик включает полив сегодня в 19:00 — для пользователя выглядит как самопроизвольный запуск.
 - **Дубль:** `#12`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Calculator перебирает все валидные main/extra slots с теми же scheduler suffix, поэтому ближайший extra_time может честно победить main.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_extra_time_can_be_the_next_real_start`.
 
 ### #29 [low] `services/next_watering.py:229` — Регрессия: отменённый на сегодня запуск снова показывается для зоны с postpone, истекающим между стартом программы и слотом зоны
 
@@ -296,7 +320,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь отменил сегодняшний запуск программы для группы, у одной зоны стоит отложка, истекающая после старта программы, но до слота зоны → карточка этой зоны показывает сегодняшнее время полива, который не состоится; остальные зоны группы показывают завтра.
 - **Решение оркестратора:** Real but exact same-day postpone requires API/integration input; normal +1/+2/+3 UI postpones to end of day.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Cancellation memoized по program/date/group и проверяется для каждого кандидата даже после сдвига lower bound из-за postpone; отменённый сегодняшний run не воскресает.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_cancelled_run_stays_cancelled_when_postpone_expires_before_zone_slot`, `tests/unit/test_phase2_next_watering.py::test_cancellation_lookup_is_memoized_per_program_date_group`.
 
 ### #30 [low] `irrigation_scheduler.py:2293` — recover_missed_runs не восстанавливает запуск, прерванный переходом через полночь
 
@@ -317,7 +345,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа только по понедельникам в 23:50, зоны 1(30м) и 2(30м). Во вторник 00:10, пока зона 1 ещё поливается, карточка зоны 2 показывает «следующий полив: следующий понедельник 00:20», хотя её полив начнётся через 10 минут.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Latest eligible start ищется назад через календарную границу, а in-progress требует реальную scheduler-owned active zone; следующий слот пересекающей полночь программы остаётся видимым.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_cross_midnight_active_program_keeps_upcoming_zone_visible`.
 
 ### #33 [high] `services/sse_hub.py:268` — SSE-hub по эху 'on' снимает все стоп-джобы зоны и перепланирует автостоп на базовую длительность (теряется override и hard-stop)
 
@@ -1353,7 +1385,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Погодный коэффициент 50%, программа 06:00, зоны A/B/C по 20 мин (номинал 60, факт 30). В 06:35 полив уже завершён, но in_progress=True до 07:00: для зоны C (off_min 40 ≥ elapsed 35) карточка показывает «следующий полив сегодня 06:40» — слот, который никогда не наступит; и во время самого полива слоты B/C показываются на 10–20 минут позже реальных стартов. Самокоррекция — только после окончания номинального окна.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Для доказанного активного scheduled run оставшиеся offsets используют текущий H1 weather coefficient; будущие runs остаются nominal, H2 не включался, завершённый shortened run не создаёт phantom slot.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_active_program_offsets_use_current_h1_weather_coefficient`, `tests/unit/test_phase2_next_watering.py::test_finished_weather_shortened_program_has_no_phantom_nominal_slot`.
 
 ### #132 [high] `services/zone_control.py:831` — stop_zone/exclusive_start_zone игнорируют результат publish_mqtt_value — при сбое доставки OFF зона помечается 'off', реле остаётся физически открытым, и все страховочные стоп-слои слепнут
 
@@ -1557,7 +1593,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** A stale-rain/live-dry probe produced opposite display and scheduler decisions.
 - **Репродукция/сценарий:** Seed a 10-day rainy cache row, mock live dry weather, compare cache-only display skip with scheduler live skip.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Cache-only hot path никогда не идёт в сеть и принимает weather row только в пределах обычного TTL; arbitrarily stale rain/freeze больше не скрывает run, live-failure degraded fallback сохранён отдельно.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_cache_only_weather_rejects_stale_row_without_network`.
 
 ### #151 [low] `services/next_watering.py:125-168,209-254` — Weather skip + программа 00:00 показывает первой зоне «Никогда»
 
@@ -1566,7 +1606,11 @@
 - **Верификация:** Frozen-time reproduction returned None with has_programs=True for a valid daily midnight program.
 - **Репродукция/сценарий:** Freeze noon, set skip_today=True and a one-zone daily 00:00 program; compute next_dt returns None.
 - **Решение оркестратора:** The root existed in main bulk; the branch expanded it to single and /api/status consumers.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Weather skip отбрасывает только starts сегодняшней даты, а tomorrow midnight остаётся валидным кандидатом и больше не перескакивает ещё на сутки.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_weather_skip_allows_tomorrow_midnight`.
 
 ### #152 [low] `services/next_watering.py:140-145; irrigation_scheduler.py:1210-1297` — Malformed program.time молча превращается в отображаемый midnight-run, которого scheduler не создаёт
 
@@ -1575,7 +1619,11 @@
 - **Верификация:** The same malformed program produced a midnight display and an empty scheduler job list.
 - **Репродукция/сценарий:** Store time='not-a-time'; calculator returns next midnight while _schedule_single_time creates no jobs.
 - **Решение оркестратора:** The root existed in main bulk; the branch expanded it to single and /api/status consumers.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Malformed main time не нормализуется в 00:00 и не публикует phantom run; независимый валидный extra_time остаётся доступен.
+- **Пакет:** `phase2-next-watering`.
+- **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
+- **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_malformed_main_time_is_not_invented_as_midnight`, `tests/unit/test_phase2_next_watering.py::test_malformed_main_does_not_hide_valid_extra_time`.
 
 ## Отклонённые — 5
 
