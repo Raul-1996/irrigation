@@ -315,8 +315,16 @@
     - targeted: 30 passed; full gate: 2038 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 111 записей fixed (102 корня + девять унаследованных дублей),
-4 deferred, 32 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+21. `phase2-postpone-validation` — #138 `fixed`
+    - fix `640e88264560f8ccf1b34114bdbe30f961634e11`;
+    - merge `314f965baa7b8537b18e66b21f3a818847a668bd`;
+    - malformed и overflowing days получают 400 до первого DB/scheduler write;
+      обычный postpone contract сохранён;
+    - targeted: 19 passed; full gate: 2040 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 112 записей fixed (103 корня + девять унаследованных дублей),
+4 deferred, 31 REAL-запись pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

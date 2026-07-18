@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **111 fixed · 4 deferred · 32 pending · 5 not_applicable**.
+- Phase 2 disposition: **112 fixed · 4 deferred · 31 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1510,7 +1510,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Клиент (за nginx basic-auth, роль guest) шлёт POST /api/postpone {"action":"postpone","group_id":1,"days":"abc"} или days:99999999999999 → 500 Internal Server Error вместо контрактного 400. Значение postpone_date вычисляется до записей в БД, поэтому частичного состояния нет, но эндпоинт тривиально роняется в 500 некорректным вводом.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** int conversion и timedelta выполняются до чтения/записи зон; TypeError, ValueError и OverflowError переводятся в HTTP 400 BadRequest без postpone side effects.
+- **Пакет:** `phase2-postpone-validation`.
+- **Fix commit:** `640e88264560f8ccf1b34114bdbe30f961634e11`.
+- **Regression tests:** `tests/api/test_system_api.py::TestPostponeAPI::test_postpone_rejects_invalid_days_without_writes[abc]`, `tests/api/test_system_api.py::TestPostponeAPI::test_postpone_rejects_invalid_days_without_writes[100000000000000]`.
 
 ### #139 [medium] `routes/system_status_api.py:318-385; services/next_watering.py:177-200; db/programs.py:460-471` — Публичный /api/status создаёт Z×P отдельных SQLite-запросов отмен программ
 

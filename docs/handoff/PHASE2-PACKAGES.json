@@ -1183,6 +1183,29 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-postpone-validation",
+      "fix_commit": "640e88264560f8ccf1b34114bdbe30f961634e11",
+      "merge_commit": "314f965baa7b8537b18e66b21f3a818847a668bd",
+      "summary": "Postpone day conversion и date arithmetic валидируются до первой DB/scheduler mutation и дают client error при malformed/overflow input.",
+      "resolutions": [
+        {
+          "id": 138,
+          "disposition": "fixed",
+          "reason": "int conversion и timedelta выполняются до чтения/записи зон; TypeError, ValueError и OverflowError переводятся в HTTP 400 BadRequest без postpone side effects.",
+          "tests": [
+            "tests/api/test_system_api.py::TestPostponeAPI::test_postpone_rejects_invalid_days_without_writes[abc]",
+            "tests/api/test_system_api.py::TestPostponeAPI::test_postpone_rejects_invalid_days_without_writes[100000000000000]"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "19 passed",
+        "full_pytest": "2040 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }
