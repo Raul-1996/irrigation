@@ -1,11 +1,29 @@
 """Tests for Scheduler v2: new schedule types (interval, even-odd), extra_times, enabled field."""
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
 os.environ["TESTING"] = "1"
+
+
+def _cron_fields(trigger):
+    """Return CronTrigger fields in a stable, semantic form."""
+    return {field.name: str(field) for field in trigger.fields}
+
+
+def _frozen_datetime(now: datetime):
+    """Return a datetime subclass whose ``now()`` is deterministic."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return now
+            return now.astimezone(tz)
+
+    return FrozenDateTime
 
 
 @pytest.fixture
@@ -70,12 +88,18 @@ class TestScheduleWeekdaysProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        jobs_by_id = {job.id: job for job in prog_jobs}
+        expected_days = {f"program:{prog['id']}:main:d{day}": day for day in (0, 2, 4)}
+        assert jobs_by_id.keys() == expected_days.keys()
 
-        job = prog_jobs[0]
-        assert isinstance(job.trigger, CronTrigger)
-        # Проверяем что день недели соответствует 0,2,4 (mon,wed,fri)
-        # CronTrigger использует: mon=0, tue=1, wed=2, thu=3, fri=4, sat=5, sun=6
+        for job_id, day in expected_days.items():
+            trigger = jobs_by_id[job_id].trigger
+            assert isinstance(trigger, CronTrigger)
+            fields = _cron_fields(trigger)
+            assert fields["day_of_week"] == str(day)
+            assert fields["hour"] == "6"
+            assert fields["minute"] == "0"
+            assert fields["second"] == "0"
 
 
 class TestScheduleIntervalProgram:
@@ -132,8 +156,26 @@ class TestScheduleIntervalProgram:
         job = prog_jobs[0]
         assert isinstance(job.trigger, IntervalTrigger)
 
-    def test_interval_program_first_run_today(self, test_scheduler):
-        """Interval программа: первый запуск СЕГОДНЯ в указанное время."""
+    @pytest.mark.parametrize(
+        ("now", "expected_start"),
+        [
+            pytest.param(
+                datetime(2030, 1, 15, 10, 0),
+                datetime(2030, 1, 15, 14, 30),
+                id="time-still-ahead",
+            ),
+            pytest.param(
+                datetime(2030, 1, 15, 16, 0),
+                datetime(2030, 1, 16, 14, 30),
+                id="time-already-passed",
+            ),
+        ],
+    )
+    def test_interval_program_first_run_today(self, test_scheduler, monkeypatch, now, expected_start):
+        """Interval starts at the nearest requested wall-clock time."""
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        monkeypatch.setattr("irrigation_scheduler.datetime", _frozen_datetime(now))
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
@@ -153,14 +195,12 @@ class TestScheduleIntervalProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        assert len(prog_jobs) == 1
 
         job = prog_jobs[0]
-        next_run = job.next_run_time
-
-        # Следующий запуск должен быть сегодня в 14:30 (если ещё не прошло) или через interval_days
-        today = datetime.now().date()
-        assert next_run.date() >= today
+        assert isinstance(job.trigger, IntervalTrigger)
+        assert job.trigger.interval == timedelta(days=5)
+        assert job.trigger.start_date.replace(tzinfo=None) == expected_start
 
 
 class TestScheduleEvenOddProgram:
@@ -212,18 +252,25 @@ class TestScheduleEvenOddProgram:
 
         assert any(f"program:{prog['id']}:" in job_id for job_id in job_ids)
 
-    def test_even_odd_program_has_correct_cron_days(self, test_scheduler):
-        """Even-odd программа имеет CronTrigger с правильными днями месяца."""
+    @pytest.mark.parametrize(
+        ("parity", "expected_days"),
+        [
+            pytest.param("even", ",".join(str(day) for day in range(2, 31, 2)), id="even"),
+            pytest.param("odd", ",".join(str(day) for day in range(1, 32, 2)), id="odd"),
+        ],
+    )
+    def test_even_odd_program_has_correct_cron_days(self, test_scheduler, parity, expected_days):
+        """Even-odd CronTrigger preserves parity and requested start time."""
         from apscheduler.triggers.cron import CronTrigger
 
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
             {
-                "name": "Even Days",
-                "time": "06:00",
+                "name": f"{parity.title()} Days",
+                "time": "06:45",
                 "schedule_type": "even-odd",
-                "even_odd": "even",
+                "even_odd": parity,
                 "days": [],
                 "zones": [1],
                 "enabled": 1,
@@ -235,20 +282,25 @@ class TestScheduleEvenOddProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        assert len(prog_jobs) == 1
 
         job = prog_jobs[0]
         assert isinstance(job.trigger, CronTrigger)
-
-        # Проверяем что day содержит чётные дни: 2,4,6,8,...
-        # trigger.fields[2] обычно day field в CronTrigger
+        fields = _cron_fields(job.trigger)
+        assert fields["day"] == expected_days
+        assert fields["day_of_week"] == "*"
+        assert fields["hour"] == "6"
+        assert fields["minute"] == "45"
+        assert fields["second"] == "0"
 
 
 class TestExtraTimes:
     """Tests for extra_times field (multiple start times per day)."""
 
     def test_schedule_extra_times(self, test_scheduler):
-        """Программа с extra_times создаёт несколько jobs."""
+        """Each weekday/extra-time pair gets the requested CronTrigger."""
+        from apscheduler.triggers.cron import CronTrigger
+
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
@@ -267,9 +319,21 @@ class TestExtraTimes:
         jobs = test_scheduler.scheduler.get_jobs()
         prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        # Для weekdays job создаётся на каждую пару (время × день):
-        # 3 времени (06:00, 12:00, 18:00) × 3 дня = 9 jobs
-        assert len(prog_jobs) == 9
+        expected = {}
+        for day in (0, 2, 4):
+            expected[f"program:{prog['id']}:main:d{day}"] = (day, 6, 0)
+            expected[f"program:{prog['id']}:extra:0:d{day}"] = (day, 12, 0)
+            expected[f"program:{prog['id']}:extra:1:d{day}"] = (day, 18, 0)
+
+        jobs_by_id = {job.id: job for job in prog_jobs}
+        assert jobs_by_id.keys() == expected.keys()
+        for job_id, (day, hour, minute) in expected.items():
+            trigger = jobs_by_id[job_id].trigger
+            assert isinstance(trigger, CronTrigger)
+            fields = _cron_fields(trigger)
+            assert fields["day_of_week"] == str(day)
+            assert fields["hour"] == str(hour)
+            assert fields["minute"] == str(minute)
 
     def test_extra_times_jobs_have_correct_ids(self, test_scheduler):
         """Jobs для extra_times имеют правильные ID (main, extra0, extra1, ...)."""
