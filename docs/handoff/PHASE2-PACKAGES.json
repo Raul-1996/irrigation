@@ -35,6 +35,56 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-db-programs",
+      "fix_commit": "ee453c30039997f7bf5ff74b671a96eea030b100",
+      "merge_commit": "702b1ee02a09d38429840c0373a0b9a39e6ef366",
+      "summary": "Исправлены инварианты хранения программ: zero-based weekdays больше не сдвигаются, JSON null отклоняется атомарно, выключенные программы не блокируют конфликты, duplicate сохраняет дни.",
+      "resolutions": [
+        {
+          "id": 10,
+          "disposition": "fixed",
+          "reason": "Удалена неоднозначная legacy-эвристика 1-based дней из create/update; новые записи сохраняют переданные UI zero-based weekdays. Уже сохранённые строки намеренно не мигрируются.",
+          "tests": [
+            "tests/unit/test_phase2_db_programs.py::test_create_program_preserves_zero_based_weekdays_without_monday",
+            "tests/unit/test_phase2_db_programs.py::test_update_program_preserves_zero_based_weekdays_without_monday"
+          ]
+        },
+        {
+          "id": 41,
+          "disposition": "fixed",
+          "reason": "Repository отклоняет zones/extra_times со значением JSON null до INSERT/UPDATE, поэтому отравленная программа не сохраняется и не ломает последующий startup.",
+          "tests": [
+            "tests/unit/test_phase2_db_programs.py::test_create_program_rejects_json_null_list_fields[zones]",
+            "tests/unit/test_phase2_db_programs.py::test_create_program_rejects_json_null_list_fields[extra_times]",
+            "tests/unit/test_phase2_db_programs.py::test_update_program_rejects_json_null_list_fields_atomically[zones]",
+            "tests/unit/test_phase2_db_programs.py::test_update_program_rejects_json_null_list_fields_atomically[extra_times]"
+          ]
+        },
+        {
+          "id": 70,
+          "disposition": "fixed",
+          "reason": "Conflict query исключает programs.enabled=0, поэтому выключенная программа больше не блокирует пересекающееся расписание.",
+          "tests": [
+            "tests/unit/test_phase2_db_programs.py::test_conflict_check_ignores_disabled_programs"
+          ]
+        },
+        {
+          "id": 71,
+          "disposition": "fixed",
+          "reason": "duplicate_program использует тот же zero-based writer без повторного сдвига дней копии.",
+          "tests": [
+            "tests/unit/test_phase2_db_programs.py::test_duplicate_program_preserves_stored_zero_based_weekdays"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "79 passed",
+        "full_pytest": "1883 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

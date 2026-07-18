@@ -84,8 +84,21 @@
    - targeted: 12 passed; full gate: 1873 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 1 finding fixed, 0 deferred, 146 REAL-записей pending;
-пять `VERIFIED_FALSE` остаются `not_applicable` и не исправляются.
+3. `phase2-db-programs` — findings #10, #41, #70, #71 (`fixed`), #59 наследует #10
+   - fix `ee453c30039997f7bf5ff74b671a96eea030b100`;
+   - merge `702b1ee02a09d38429840c0373a0b9a39e6ef366`;
+   - удалена legacy-эвристика сдвига weekday; существующие строки не мигрировались,
+     потому что корректные и ранее повреждённые значения неразличимы;
+   - `zones`/`extra_times` JSON null отклоняются атомарно, disabled-программы не
+     участвуют в конфликте, duplicate сохраняет zero-based days;
+   - repository умеет сравнивать stored/candidate extra slots; полное закрытие
+     #100/#129 ожидает интеграции route wiring из следующего P02-пакета;
+   - targeted: 79 passed; full gate: 1883 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 6 записей fixed (5 корней + точный дубль #59), 0 deferred,
+141 REAL-запись pending; пять `VERIFIED_FALSE` остаются `not_applicable` и не
+исправляются.
 
 ## Осознанно отложенные категории
 

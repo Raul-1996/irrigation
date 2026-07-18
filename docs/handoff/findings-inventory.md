@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **1 fixed · 0 deferred · 146 pending · 5 not_applicable**.
+- Phase 2 disposition: **6 fixed · 0 deferred · 141 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -93,7 +93,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь в мастере программ выбирает Вт+Ср (payload days=[1,2]) → в БД сохраняется [0,1] → CronTrigger(day_of_week=0/1) поливает в Пн+Вт, на день раньше выбранного. Любая программа без понедельника систематически сдвигается на день назад.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Удалена неоднозначная legacy-эвристика 1-based дней из create/update; новые записи сохраняют переданные UI zero-based weekdays. Уже сохранённые строки намеренно не мигрируются.
+- **Пакет:** `phase2-db-programs`.
+- **Fix commit:** `ee453c30039997f7bf5ff74b671a96eea030b100`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_create_program_preserves_zero_based_weekdays_without_monday`, `tests/unit/test_phase2_db_programs.py::test_update_program_preserves_zero_based_weekdays_without_monday`.
 
 ### #11 [medium] `services/next_watering.py:113` — compute_next_watering игнорирует program.enabled — выключенные программы показываются как «следующий полив»
 
@@ -334,7 +338,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** PUT /api/programs/<id> с {"zones": null, "time": "06:00", "days": [0]} → 200 OK (route не валидирует, check_program_conflicts при zones=None возвращает []), яд сохранён в БД → при следующем рестарте контроллера импорт app.py падает с TypeError → hypercorn не стартует, весь полив и веб-интерфейс мертвы до ручной правки БД. То же с {"extra_times": null} (enumerate(None) в schedule_program:1200). Также ломается compute_next_run_for_zone (`zone_id not in None` → TypeError, подтверждено скриптом).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Repository отклоняет zones/extra_times со значением JSON null до INSERT/UPDATE, поэтому отравленная программа не сохраняется и не ломает последующий startup.
+- **Пакет:** `phase2-db-programs`.
+- **Fix commit:** `ee453c30039997f7bf5ff74b671a96eea030b100`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_create_program_rejects_json_null_list_fields[zones]`, `tests/unit/test_phase2_db_programs.py::test_create_program_rejects_json_null_list_fields[extra_times]`, `tests/unit/test_phase2_db_programs.py::test_update_program_rejects_json_null_list_fields_atomically[zones]`, `tests/unit/test_phase2_db_programs.py::test_update_program_rejects_json_null_list_fields_atomically[extra_times]`.
 
 ### #42 [medium] `db/zones.py:68` — update_zone: int()-касты в новом _build_zone_update_fields бросают непойманный ValueError/TypeError — 500 вместо контрактного None
 
@@ -481,7 +489,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь в мастере выбирает дни без понедельника, напр. «Вт, Чт» ([1,3]) → в БД сохраняется [0,2] → полив реально запускается в Пн и Ср, а после перезагрузки страницы в UI подсвечены Пн/Ср вместо выбранных. Выбор «только Вс» ([6]) превращается в субботу. Конфликт-чек при этом сравнивает несдвинутый ввод со сдвинутыми хранимыми днями.
 - **Дубль:** `#10`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Удалена неоднозначная legacy-эвристика 1-based дней из create/update; новые записи сохраняют переданные UI zero-based weekdays. Уже сохранённые строки намеренно не мигрируются.
+- **Пакет:** `phase2-db-programs`.
+- **Fix commit:** `ee453c30039997f7bf5ff74b671a96eea030b100`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_create_program_preserves_zero_based_weekdays_without_monday`, `tests/unit/test_phase2_db_programs.py::test_update_program_preserves_zero_based_weekdays_without_monday`.
 
 ### #60 [medium] `static/js/zones.js:1052` — Удаление зоны: ответ 204 с пустым телом трактуется api.delete как falsy — UI молча не обновляется
 
@@ -571,7 +583,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь выключает старую программу «Вечер 23:00» и создаёт вместо неё новую на то же время с теми же зонами → API отказывает («Обнаружены конфликты программ»), хотя выключенная программа никогда не запустится; единственный обход — удалить старую программу, потеряв её настройки.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Conflict query исключает programs.enabled=0, поэтому выключенная программа больше не блокирует пересекающееся расписание.
+- **Пакет:** `phase2-db-programs`.
+- **Fix commit:** `ee453c30039997f7bf5ff74b671a96eea030b100`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_conflict_check_ignores_disabled_programs`.
 
 ### #71 [medium] `db/programs.py:186` — duplicate_program молча сдвигает дни недели копии на день назад, если в днях оригинала нет понедельника
 
@@ -579,7 +595,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь дублирует программу «Вт/Чт/Сб 06:00», меняет в копии только время — копия сразу планируется и поливает по Пн/Ср/Пт: полив идёт не в те дни без каких-либо ошибок в UI. Тот же корень, что у ранее найденной эвристики 1-базных дней, но отдельная точка входа: чистый server-side round-trip без участия UI-формата.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** duplicate_program использует тот же zero-based writer без повторного сдвига дней копии.
+- **Пакет:** `phase2-db-programs`.
+- **Fix commit:** `ee453c30039997f7bf5ff74b671a96eea030b100`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_duplicate_program_preserves_stored_zero_based_weekdays`.
 
 ### #72 [low] `db/zones.py:738` — finish_zone_run: чтение confirmed и UPDATE статуса не атомарны — поздний echo реле помечает реальный полив как 'failed'
 
