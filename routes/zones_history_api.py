@@ -17,7 +17,7 @@ import contextlib
 import csv
 import io
 import sqlite3
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from flask import Blueprint, Response, jsonify, request
@@ -30,6 +30,7 @@ from services.history_calc import (
     date_range,
     zone_has_active_program,
 )
+from utils import to_iso_with_tz
 
 zones_history_api_bp = Blueprint("zones_history_api", __name__)
 
@@ -62,18 +63,14 @@ def _fetch_runs_for_zones(zone_ids: list[int], from_local: date, to_local: date)
     """Return zone_runs rows for ``zone_ids`` whose start_utc falls in the
     [from_local, to_local] local-date range (inclusive on both ends).
 
-    We use a half-open UTC window slightly wider than the local range to
-    account for timezone offsets, then filter precisely by local date.
+    ``zone_runs`` uses the controller-local naive timestamp convention of its
+    production writers.  Keep SQL bounds in that same sortable representation;
+    UTC RFC 3339 bounds would compare incorrectly against SQLite TEXT values.
     """
     if not zone_ids:
         return []
-    # Half-open UTC window covering [from_local 00:00 local, to_local+1 00:00 local].
-    start_local = datetime.combine(from_local, datetime.min.time()).astimezone()
-    end_local = datetime.combine(to_local + timedelta(days=1), datetime.min.time()).astimezone()
-    start_utc = start_local.astimezone().astimezone(tz=None).utctimetuple()
-    # We just need ISO strings for the SQL parameters.
-    start_iso = start_local.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    end_iso = end_local.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    start_text = datetime.combine(from_local, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
+    end_text = datetime.combine(to_local + timedelta(days=1), datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
 
     placeholders = ",".join("?" * len(zone_ids))
     sql = (
@@ -84,7 +81,7 @@ def _fetch_runs_for_zones(zone_ids: list[int], from_local: date, to_local: date)
         f"  AND start_utc >= ? AND start_utc < ? "
         f"ORDER BY start_utc DESC"
     )
-    params = [*list(zone_ids), start_iso, end_iso]
+    params = [*list(zone_ids), start_text, end_text]
     try:
         with sqlite3.connect(db.db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
@@ -116,8 +113,12 @@ def _build_daily(
 def _serialize_run(run: dict[str, Any], zone_lookup: dict[int, dict[str, Any]]) -> dict[str, Any]:
     z = zone_lookup.get(int(run.get("zone_id") or 0)) or {}
     duration_min = 0
-    s = run.get("start_utc")
-    e = run.get("end_utc")
+    # Despite their legacy column names, production writers store naive
+    # controller-local wall time.  Add the controller offset at the API
+    # boundary so RFC 3339 parsing is reliable and remote browsers can render
+    # the same instant in their own timezone.
+    s = to_iso_with_tz(run.get("start_utc"))
+    e = to_iso_with_tz(run.get("end_utc"))
     if s and e:
         try:
             sdt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
@@ -131,8 +132,8 @@ def _serialize_run(run: dict[str, Any], zone_lookup: dict[int, dict[str, Any]]) 
         "zone_id": int(run.get("zone_id") or 0),
         "zone_name": z.get("name"),
         "group_id": int(run.get("group_id") or 0),
-        "start_utc": run.get("start_utc"),
-        "end_utc": run.get("end_utc"),
+        "start_utc": s,
+        "end_utc": e,
         "duration_min": duration_min,
         "liters": run.get("total_liters"),
         "status": run.get("status"),
