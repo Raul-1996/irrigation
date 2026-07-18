@@ -12,6 +12,8 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 
+from werkzeug.exceptions import BadRequest
+
 from database import db
 from services.mqtt_pub import publish_mqtt_value
 from utils import normalize_topic
@@ -30,8 +32,15 @@ def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     Возвращает {"postpone_until": str-до-конца-дня, "postpone_date": datetime}.
     """
     group_id = int(group_id)
-    days = int(days)
-    postpone_date = datetime.now() + timedelta(days=days)
+    try:
+        days = int(days)
+        postpone_date = datetime.now() + timedelta(days=days)
+    except (TypeError, ValueError, OverflowError) as exc:
+        # Validate the entire date calculation before the first DB write.  The
+        # HTTP caller has no route-level exception translation, so use the
+        # framework's client-error type instead of leaking conversion errors
+        # as a 500 response.
+        raise BadRequest("Некорректное количество дней") from exc
     postpone_until = postpone_date.strftime("%Y-%m-%d 23:59:59")
     zones = db.get_zones() or []
     group_zones = [z for z in zones if int(z.get("group_id") or 0) == group_id]
