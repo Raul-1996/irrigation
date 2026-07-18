@@ -1,9 +1,24 @@
 """Regression coverage for the documented merged-weather compatibility API."""
 
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 from services.weather import get_merged_weather as package_get_merged_weather
 from services.weather_merged import get_merged_weather as legacy_get_merged_weather
+
+
+def _assert_isolated_import(script: str) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _extended_payload() -> dict:
@@ -45,6 +60,22 @@ def _env_state(*, online: bool) -> dict:
 
 def test_package_and_legacy_module_export_same_stable_callable() -> None:
     assert package_get_merged_weather is legacy_get_merged_weather
+
+
+def test_isolated_legacy_import_before_package_import() -> None:
+    _assert_isolated_import(
+        "from services.weather_merged import SENSOR_STALE_TIMEOUT, get_merged_weather as legacy; "
+        "from services.weather import get_merged_weather as package; "
+        "assert legacy is package; assert SENSOR_STALE_TIMEOUT == 600"
+    )
+
+
+def test_isolated_package_import_before_legacy_import() -> None:
+    _assert_isolated_import(
+        "from services.weather import get_merged_weather as package; "
+        "from services.weather_merged import get_merged_weather as legacy; "
+        "assert package is legacy"
+    )
 
 
 @patch("services.weather_merged.time.time", return_value=1300.0)

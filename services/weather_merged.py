@@ -8,13 +8,35 @@ that is not part of that service payload.
 
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from services.weather.merge import _get_env_state
-from services.weather.models import SENSOR_STALE_TIMEOUT
-from services.weather.singletons import get_weather_service
+if TYPE_CHECKING:
+    from services.weather.models import SENSOR_STALE_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+
+def __getattr__(name: str):
+    """Resolve package constants lazily so legacy-first imports cannot cycle."""
+    if name == "SENSOR_STALE_TIMEOUT":
+        from services.weather.models import SENSOR_STALE_TIMEOUT
+
+        return SENSOR_STALE_TIMEOUT
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get_weather_service(db_path: str):
+    """Resolve the canonical singleton lazily to keep legacy-first imports safe."""
+    from services.weather.singletons import get_weather_service as get_service
+
+    return get_service(db_path)
+
+
+def _get_env_state(now: float) -> dict[str, Any]:
+    """Delegate to the canonical sensor snapshot helper after import completes."""
+    from services.weather.merge import _get_env_state as get_state
+
+    return get_state(now)
 
 
 def _get_rain_state() -> dict[str, Any]:
