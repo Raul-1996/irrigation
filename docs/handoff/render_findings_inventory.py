@@ -40,6 +40,10 @@ def _default_implementation(finding: dict) -> dict:
 
 
 def apply_packages(inventory: list[dict], package_doc: dict) -> None:
+    schema_version = package_doc.get("schema_version")
+    if schema_version not in {1, 2}:
+        raise ValueError("unsupported PHASE2-PACKAGES schema")
+
     for finding in inventory:
         finding["implementation"] = _default_implementation(finding)
 
@@ -50,11 +54,23 @@ def apply_packages(inventory: list[dict], package_doc: dict) -> None:
         if slug in package_slugs:
             raise ValueError(f"duplicate package slug: {slug}")
         package_slugs.add(slug)
+        decision_only = package.get("decision_only", False)
+        if not isinstance(decision_only, bool):
+            raise ValueError(f"package {slug}: decision_only must be boolean")
+        if decision_only and schema_version < 2:
+            raise ValueError(f"package {slug}: decision-only package requires schema 2")
         commit = package["fix_commit"]
-        if not COMMIT_RE.fullmatch(commit):
-            raise ValueError(f"package {slug}: invalid fix_commit")
-        if not COMMIT_RE.fullmatch(package["merge_commit"]):
-            raise ValueError(f"package {slug}: invalid merge_commit")
+        merge_commit = package["merge_commit"]
+        if decision_only:
+            if commit is not None or merge_commit is not None:
+                raise ValueError(f"package {slug}: decision-only commits must be null")
+            if not package["resolutions"]:
+                raise ValueError(f"package {slug}: decision-only package must resolve findings")
+        else:
+            if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+                raise ValueError(f"package {slug}: invalid fix_commit")
+            if not isinstance(merge_commit, str) or not COMMIT_RE.fullmatch(merge_commit):
+                raise ValueError(f"package {slug}: invalid merge_commit")
         for resolution in package["resolutions"]:
             finding_id = resolution["id"]
             if finding_id in seen_roots:
@@ -64,8 +80,12 @@ def apply_packages(inventory: list[dict], package_doc: dict) -> None:
             if finding.get("duplicate_of") is not None:
                 raise ValueError(f"finding #{finding_id} is a duplicate, resolve its root")
             disposition = resolution["disposition"]
+            if decision_only and disposition != "deferred":
+                raise ValueError(f"finding #{finding_id}: decision-only package may only defer")
             resolution_commit = resolution.get("commit", commit)
-            if disposition == "fixed" and not COMMIT_RE.fullmatch(resolution_commit):
+            if disposition == "fixed" and (
+                not isinstance(resolution_commit, str) or not COMMIT_RE.fullmatch(resolution_commit)
+            ):
                 raise ValueError(f"finding #{finding_id}: invalid resolution commit")
             implementation = {
                 "disposition": disposition,
@@ -88,9 +108,6 @@ def validate(inventory: list[dict], package_doc: dict) -> Counter:
     status_counts = Counter(item["status"] for item in inventory)
     if status_counts != Counter({"VERIFIED_REAL": 147, "VERIFIED_FALSE": 5}):
         raise ValueError(f"unexpected status counts: {status_counts}")
-    if package_doc.get("schema_version") != 1:
-        raise ValueError("unsupported PHASE2-PACKAGES schema")
-
     for finding_id, finding in enumerate(inventory, start=1):
         implementation = finding["implementation"]
         disposition = implementation["disposition"]
