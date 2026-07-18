@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **99 fixed · 3 deferred · 45 pending · 5 not_applicable**.
+- Phase 2 disposition: **103 fixed · 3 deferred · 41 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -877,7 +877,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** У MQTT-сервера в настройках заполнен client_id → хаб подключён с ним. Админ открывает страницу MQTT и жмёт «проверить» (/status) или запускает скан (/scan-sse, до 300 с): временный клиент коннектится с тем же client_id → брокер выкидывает клиента хаба → paho-реконнект (1–30 с) снова выбивает сканер — ping-pong на всё время скана. Подписки clean-session: все эхо реле за окно разрыва теряются → mark_zone_run_confirmed не вызывается, реальный полив записывается в историю как 'failed', ant-restart/emergency-контроль эха и master_valve_observed молча не работают.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Короткоживущий MQTT health probe генерирует уникальный wb-status client_id и больше не вытесняет long-lived hub session сохранённым идентификатором сервера.
+- **Пакет:** `phase2-system-status`.
+- **Fix commit:** `8e18b552430e58f4ea9af437120f9cb084c12c7e`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py::test_finding_80_status_probe_uses_unique_ephemeral_mqtt_client_id`.
 
 ### #81 [medium] `services/sse_hub.py:173` — SSE-хаб игнорирует TLS-настройки MQTT-сервера — для tls_enabled=1 брокера эхо реле не приходит вообще (как и probe/status/scan)
 
@@ -1108,7 +1112,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** На проде logs пополняется каждым стартом/стопом зоны, импортом и т.п. — 1000 записей накапливаются за считанные дни. Запрос журнала событий за прошлый месяц (?from=2026-06-01&to=2026-06-15) возвращает пустой список, хотя записи есть в таблице; пользователь делает вывод, что событий не было — журнал бесполезен для расследований старше пары дней.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** type/date predicates выполняются repository SQL до LIMIT 1000; date(timestamp,'localtime') сохраняет прежний controller-local calendar contract на UTC-naive storage и rendered timestamps.
+- **Пакет:** `phase2-system-status`.
+- **Fix commit:** `8e18b552430e58f4ea9af437120f9cb084c12c7e`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py::test_finding_102_logs_apply_filters_before_repository_limit`, `tests/api/test_phase2_system_status.py::test_finding_102_log_dates_use_controller_local_calendar`.
 
 ### #103 [medium] `templates/mqtt.html:219` — mqtt.html: updateStatuses запускает новую вечную цепочку опроса при каждом loadServers — опрос /api/mqtt/*/status умножается после каждого сохранения сервера
 
@@ -1477,7 +1485,11 @@
 - **Верификация:** Independent instrumentation reproduced the exact query count through the real blueprint.
 - **Репродукция/сценарий:** Create 32 zones and 16 all-zone interval programs, GET /api/status, count is_program_run_cancelled_for_group calls: 512.
 - **Решение оркестратора:** New diff finding; not a duplicate of the anonymous MQTT status endpoint.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Route вычисляет один all-zone next-watering snapshot на request, а P08 memoizes cancellation по program/date/group; 32 zones × 16 programs дают не более 16 запросов вместо 512.
+- **Пакет:** `phase2-system-status`.
+- **Fix commit:** `8e18b552430e58f4ea9af437120f9cb084c12c7e`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py::test_finding_139_status_deduplicates_program_cancellation_queries`, `tests/unit/test_phase2_next_watering.py::test_cancellation_lookup_is_memoized_per_program_date_group`.
 
 ### #140 [low] `routes/programs_api.py:294-327; tests/api/test_programs_api_v2.py:396-459` — Program log/stats API остаются заглушками, но ветка сняла xfail ложными shape-only тестами
 
@@ -1573,7 +1585,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent probes reproduced the persistent set event and prog_skipped_manual_running.
 - **Репродукция/сценарий:** Health-cancel a standalone manual zone, then run a scheduled program for its group; it skips and the event remains.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Health cancel делегирует scheduler cancel_group_jobs и больше не создаёт Event для idle group; только настоящий runner владеет session event.
+- **Пакет:** `phase2-system-status`.
+- **Fix commit:** `8e18b552430e58f4ea9af437120f9cb084c12c7e`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py::test_finding_148_health_cancel_does_not_create_ownerless_group_session`.
 
 ### #149 [high] `services/app_init.py:284-305; services/shutdown.py:83-167; irrigation_scheduler.py:436` — Shutdown выполняет финальный OFF без quiesce планировщика — worker может отправить retained ON после OFF
 

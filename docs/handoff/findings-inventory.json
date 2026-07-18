@@ -2469,11 +2469,13 @@
     "reproduction": "У MQTT-сервера в настройках заполнен client_id → хаб подключён с ним. Админ открывает страницу MQTT и жмёт «проверить» (/status) или запускает скан (/scan-sse, до 300 с): временный клиент коннектится с тем же client_id → брокер выкидывает клиента хаба → paho-реконнект (1–30 с) снова выбивает сканер — ping-pong на всё время скана. Подписки clean-session: все эхо реле за окно разрыва теряются → mark_zone_run_confirmed не вызывается, реальный полив записывается в историю как 'failed', ant-restart/emergency-контроль эха и master_valve_observed молча не работают.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Короткоживущий MQTT health probe генерирует уникальный wb-status client_id и больше не вытесняет long-lived hub session сохранённым идентификатором сервера.",
+      "package": "phase2-system-status",
+      "commit": "8e18b552430e58f4ea9af437120f9cb084c12c7e",
+      "tests": [
+        "tests/api/test_phase2_system_status.py::test_finding_80_status_probe_uses_unique_ephemeral_mqtt_client_id"
+      ]
     }
   },
   {
@@ -3125,11 +3127,14 @@
     "reproduction": "На проде logs пополняется каждым стартом/стопом зоны, импортом и т.п. — 1000 записей накапливаются за считанные дни. Запрос журнала событий за прошлый месяц (?from=2026-06-01&to=2026-06-15) возвращает пустой список, хотя записи есть в таблице; пользователь делает вывод, что событий не было — журнал бесполезен для расследований старше пары дней.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "type/date predicates выполняются repository SQL до LIMIT 1000; date(timestamp,'localtime') сохраняет прежний controller-local calendar contract на UTC-naive storage и rendered timestamps.",
+      "package": "phase2-system-status",
+      "commit": "8e18b552430e58f4ea9af437120f9cb084c12c7e",
+      "tests": [
+        "tests/api/test_phase2_system_status.py::test_finding_102_logs_apply_filters_before_repository_limit",
+        "tests/api/test_phase2_system_status.py::test_finding_102_log_dates_use_controller_local_calendar"
+      ]
     }
   },
   {
@@ -4219,11 +4224,14 @@
     "main_or_branch": "branch_regression",
     "decision_notes": "New diff finding; not a duplicate of the anonymous MQTT status endpoint.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Route вычисляет один all-zone next-watering snapshot на request, а P08 memoizes cancellation по program/date/group; 32 zones × 16 programs дают не более 16 запросов вместо 512.",
+      "package": "phase2-system-status",
+      "commit": "8e18b552430e58f4ea9af437120f9cb084c12c7e",
+      "tests": [
+        "tests/api/test_phase2_system_status.py::test_finding_139_status_deduplicates_program_cancellation_queries",
+        "tests/unit/test_phase2_next_watering.py::test_cancellation_lookup_is_memoized_per_program_date_group"
+      ]
     }
   },
   {
@@ -4478,11 +4486,13 @@
     "reproduction": "Health-cancel a standalone manual zone, then run a scheduled program for its group; it skips and the event remains.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Health cancel делегирует scheduler cancel_group_jobs и больше не создаёт Event для idle group; только настоящий runner владеет session event.",
+      "package": "phase2-system-status",
+      "commit": "8e18b552430e58f4ea9af437120f9cb084c12c7e",
+      "tests": [
+        "tests/api/test_phase2_system_status.py::test_finding_148_health_cancel_does_not_create_ownerless_group_session"
+      ]
     }
   },
   {

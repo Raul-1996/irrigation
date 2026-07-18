@@ -1018,6 +1018,54 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-system-status",
+      "fix_commit": "8e18b552430e58f4ea9af437120f9cb084c12c7e",
+      "merge_commit": "7c4bea54e2975eb0a7b926a9d019bf6b5943c05f",
+      "summary": "Public status использует request-wide next-watering snapshot и unique probe IDs, logs фильтруются по controller-local дате до LIMIT, а idle cancel не создаёт ownerless scheduler session.",
+      "resolutions": [
+        {
+          "id": 80,
+          "disposition": "fixed",
+          "reason": "Короткоживущий MQTT health probe генерирует уникальный wb-status client_id и больше не вытесняет long-lived hub session сохранённым идентификатором сервера.",
+          "tests": [
+            "tests/api/test_phase2_system_status.py::test_finding_80_status_probe_uses_unique_ephemeral_mqtt_client_id"
+          ]
+        },
+        {
+          "id": 102,
+          "disposition": "fixed",
+          "reason": "type/date predicates выполняются repository SQL до LIMIT 1000; date(timestamp,'localtime') сохраняет прежний controller-local calendar contract на UTC-naive storage и rendered timestamps.",
+          "tests": [
+            "tests/api/test_phase2_system_status.py::test_finding_102_logs_apply_filters_before_repository_limit",
+            "tests/api/test_phase2_system_status.py::test_finding_102_log_dates_use_controller_local_calendar"
+          ]
+        },
+        {
+          "id": 139,
+          "disposition": "fixed",
+          "reason": "Route вычисляет один all-zone next-watering snapshot на request, а P08 memoizes cancellation по program/date/group; 32 zones × 16 programs дают не более 16 запросов вместо 512.",
+          "tests": [
+            "tests/api/test_phase2_system_status.py::test_finding_139_status_deduplicates_program_cancellation_queries",
+            "tests/unit/test_phase2_next_watering.py::test_cancellation_lookup_is_memoized_per_program_date_group"
+          ]
+        },
+        {
+          "id": 148,
+          "disposition": "fixed",
+          "reason": "Health cancel делегирует scheduler cancel_group_jobs и больше не создаёт Event для idle group; только настоящий runner владеет session event.",
+          "tests": [
+            "tests/api/test_phase2_system_status.py::test_finding_148_health_cancel_does_not_create_ownerless_group_session"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "274 passed on combined P08+P09 tree",
+        "full_pytest": "2028 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

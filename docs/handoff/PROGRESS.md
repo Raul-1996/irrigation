@@ -268,8 +268,23 @@
       17 deselected; ruff и diff check чисты. Единичный APScheduler teardown
       warning не воспроизвёлся в отдельном повторе owning test (1 passed).
 
-После этих пакетов: 99 записей fixed (90 корней + девять унаследованных дублей),
-3 deferred, 45 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+17. `phase2-system-status` — #80, #102, #139, #148 `fixed`
+    - fixes `4409dea6e78cdb010a5ef695984330fe619a3537` и
+      `8e18b552430e58f4ea9af437120f9cb084c12c7e`;
+    - merge `7c4bea54e2975eb0a7b926a9d019bf6b5943c05f`;
+    - `/api/status` делает один all-zone P08 snapshot; cancellation memo даёт
+      максимум 16 program/date/group lookup для regression 32 zones × 16 programs;
+    - status health probe использует уникальный ephemeral MQTT client_id и не
+      вытесняет permanent hub session;
+    - logs type/date filters выполняются до LIMIT 1000 и используют
+      `date(timestamp,'localtime')`, поэтому UTC storage и controller-local UI
+      совпадают на границе суток;
+    - idle health cancel не создаёт ownerless Event и делегирует P03 scheduler;
+    - targeted combined P08+P09: 274 passed; full gate: 2028 passed, 2 skipped,
+      17 deselected; ruff и diff check чисты.
+
+После этих пакетов: 103 записи fixed (94 корня + девять унаследованных дублей),
+3 deferred, 41 REAL-запись pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
