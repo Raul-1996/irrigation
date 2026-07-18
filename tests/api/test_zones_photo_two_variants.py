@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import os
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -122,6 +123,25 @@ class TestUploadSizeLimit:
             content_type="multipart/form-data",
         )
         assert resp.status_code == 200, resp.data
+
+    def test_upload_returns_safe_4xx_for_decompression_bomb(self, admin_client, app):
+        zone = app.db.create_zone({"name": "Bomb", "duration": 10, "group_id": 1})
+        bomb = Image.DecompressionBombError("unsafe dimensions")
+
+        with patch("services.image_pipeline.Image.open", side_effect=bomb):
+            resp = admin_client.post(
+                f"/api/zones/{zone['id']}/photo",
+                data={"photo": (io.BytesIO(b"bomb header"), "bomb.png")},
+                content_type="multipart/form-data",
+            )
+
+        assert resp.status_code == 400
+        assert resp.get_json() == {
+            "success": False,
+            "message": "Изображение слишком большое",
+            "error_code": "IMAGE_TOO_LARGE",
+        }
+        assert app.db.get_zone(zone["id"])["photo_path"] is None
 
 
 class TestExifOrientation:
