@@ -58,7 +58,7 @@ class TestMQTTZoneControl:
         app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
-        with patch("services.mqtt_pub.publish_mqtt_value", return_value=True):
+        with patch("services.zone_control.publish_mqtt_value", return_value=True):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/start")
         assert resp.status_code == 200
 
@@ -69,6 +69,6 @@ class TestMQTTZoneControl:
         app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
-        with patch("services.mqtt_pub.publish_mqtt_value", return_value=True):
+        with patch("services.zone_control.publish_mqtt_value", return_value=True):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/stop")
         assert resp.status_code == 200

@@ -73,6 +73,43 @@ def per_zone_dur(
 # scheduled close supersedes a pending one for the same topic.
 _PENDING_CLOSE_TIMERS = {}  # type: dict[str, threading.Timer]
 _PENDING_CLOSE_LOCK = threading.Lock()
+_MASTER_TOPIC_LOCKS: dict[str, threading.RLock] = {}
+_MASTER_TOPIC_LOCKS_LOCK = threading.Lock()
+
+
+def master_topic_lock(topic: str) -> threading.RLock:
+    """Return the process-local serialization lock for a master topic.
+
+    Groups may intentionally share a master valve.  The topic, rather than a
+    group id, is therefore the command-serialization boundary.
+    """
+    try:
+        normalized = normalize_topic(topic)
+    except (ValueError, TypeError, OSError):
+        normalized = str(topic or "").strip()
+    with _MASTER_TOPIC_LOCKS_LOCK:
+        lock = _MASTER_TOPIC_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.RLock()
+            _MASTER_TOPIC_LOCKS[normalized] = lock
+        return lock
+
+
+def cancel_pending_master_close(topic: str) -> bool:
+    """Atomically disarm the registered delayed close for ``topic``."""
+    try:
+        normalized = normalize_topic(topic)
+    except (ValueError, TypeError, OSError):
+        normalized = str(topic or "").strip()
+    with _PENDING_CLOSE_LOCK:
+        pending = _PENDING_CLOSE_TIMERS.pop(normalized, None)
+        if pending is not None:
+            try:
+                pending.cancel()
+            except (RuntimeError, OSError):
+                logger.debug("pending master close cancel failed topic=%s", normalized)
+            return True
+    return False
 
 
 def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
@@ -126,7 +163,7 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             immediate,
         )
 
-        def _do_close():
+        def _do_close_locked():
             try:
                 # Check ON or STARTING zones across all groups sharing the same master topic
                 any_on = False
@@ -210,33 +247,29 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
             except Exception:
                 logger.exception("master valve delayed close failed (topic=%s)", t_norm)
 
-        # Cancel any pending close for this topic (covers both delayed and immediate paths)
+        def _do_close():
+            # The scan and close publish are one master-topic transaction.
+            # A concurrent start either becomes visible as state=starting and
+            # blocks this close, or publishes master-open after this close.
+            with master_topic_lock(t_norm):
+                _do_close_locked()
+
+        # Replacement is one registry transaction.  Keeping timer creation
+        # and start inside the lock prevents two callers from both observing
+        # an empty slot and leaving an untracked live timer behind.
         with _PENDING_CLOSE_LOCK:
             prev = _PENDING_CLOSE_TIMERS.pop(t_norm, None)
-        if prev is not None:
-            try:
-                prev.cancel()
-            except (RuntimeError, OSError):
-                pass
-
-        if TESTING:
-            return
-
-        if delay <= 0:
-            # Run inline-but-non-blocking on a daemon thread to keep semantics
-            # consistent (callers don't expect to block on master close).
-            t = threading.Timer(0.0, _do_close)
-            t.daemon = True
-            with _PENDING_CLOSE_LOCK:
-                _PENDING_CLOSE_TIMERS[t_norm] = t
-            t.start()
-            return
-
-        timer = threading.Timer(float(delay), _do_close)
-        timer.daemon = True
-        with _PENDING_CLOSE_LOCK:
+            if prev is not None:
+                try:
+                    prev.cancel()
+                except (RuntimeError, OSError):
+                    logger.debug("pending master close cancel failed topic=%s", t_norm)
+            if TESTING:
+                return
+            timer = threading.Timer(0.0 if delay <= 0 else float(delay), _do_close)
+            timer.daemon = True
             _PENDING_CLOSE_TIMERS[t_norm] = timer
-        timer.start()
+            timer.start()
     except (RuntimeError, OSError, ValueError, TypeError):
         logger.exception("schedule master close failed")
 
@@ -273,6 +306,116 @@ def _is_valid_stop_state(state: str) -> bool:
     return s in ("on", "starting")
 
 
+def mark_zone_command_fault(zone_id: int, expected: str, *, reason: str) -> None:
+    """Persist a physically-unknown command result without claiming success.
+
+    This is the synchronous command-side complement to StateVerifier's
+    timeout fault.  It is public so scheduler/group command owners can use the
+    same state contract when they migrate to the centralized primitives.
+    """
+    zone = db.get_zone(int(zone_id)) or {}
+    fields = {
+        "state": "fault",
+        "commanded_state": "on" if str(expected).lower() in ("on", "1") else "off",
+        "fault_count": int(zone.get("fault_count") or 0) + 1,
+        "last_fault": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if "observed_state" in zone:
+        fields["observed_state"] = "unconfirmed"
+    try:
+        state_verifier.register_command(int(zone_id), expected)
+    except (AttributeError, ValueError, TypeError):
+        logger.debug("command-fault verifier invalidation failed zone=%s", zone_id)
+    _update_zone_state(
+        int(zone_id),
+        fields,
+        audit_reason=f"mqtt_publish_failed_{reason}",
+    )
+    logger.critical(
+        "zone command publish failed: zone=%s expected=%s reason=%s; state pinned to fault",
+        zone_id,
+        expected,
+        reason,
+    )
+
+
+def _finish_open_zone_run_failed(zone_id: int) -> None:
+    """Close a command-created run as failed without inventing water stats."""
+    try:
+        run = db.get_open_zone_run(int(zone_id))
+        if not run:
+            return
+        db.finish_zone_run(
+            int(run["id"]),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            time.monotonic(),
+            None,
+            None,
+            None,
+            status="failed",
+        )
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+        logger.exception("failed to close unsuccessful zone_run zone=%s", zone_id)
+
+
+def cancel_group_program_execution(group_id: int, scheduler=None) -> bool:
+    """Cancel the in-memory sequencer without stopping the selected zone.
+
+    Daily ``program_cancellations`` cannot represent an individual main or
+    ``extra_times`` slot, so this primitive intentionally targets only the
+    active runtime session.  It is used when an already-on program zone is
+    manually extended: the program thread stops, while the selected relay is
+    kept on and receives a fresh stop deadline.
+    """
+    gid = int(group_id)
+    if scheduler is None:
+        try:
+            from irrigation_scheduler import get_scheduler
+
+            scheduler = get_scheduler()
+        except ImportError:
+            scheduler = None
+    if scheduler is None:
+        return False
+    cancelled = False
+    try:
+        event = getattr(scheduler, "group_cancel_events", {}).get(gid)
+        if event is not None:
+            event.set()
+            cancelled = True
+    except (AttributeError, KeyError, TypeError, ValueError):
+        logger.exception("cancel active program event failed group=%s", gid)
+    try:
+        backend = getattr(scheduler, "scheduler", None)
+        if backend is not None:
+            for job in backend.get_jobs():
+                if str(job.id).startswith(f"group_seq:{gid}:"):
+                    job.remove()
+                    cancelled = True
+    except (AttributeError, RuntimeError, ValueError, KeyError):
+        logger.debug("cancel active group sequence jobs failed group=%s", gid)
+    return cancelled
+
+
+def stop_group_peers(zone_id: int, *, reason: str = "manual_restart") -> bool:
+    """Stop every non-selected zone in the selected zone's group."""
+    selected = db.get_zone(int(zone_id))
+    if not selected:
+        return False
+    gid = int(selected.get("group_id") or 0)
+    ok = True
+    for peer in db.get_zones_by_group(gid) or []:
+        try:
+            peer_id = int(peer.get("id"))
+        except (ValueError, TypeError, KeyError):
+            continue
+        if peer_id == int(zone_id) or str(peer.get("state") or "").lower() == "off":
+            continue
+        if not stop_zone(peer_id, reason=reason, force=True):
+            ok = False
+    return ok
+
+
 def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
     """Start zone and stop others in its group. Returns True on success.
 
@@ -295,14 +438,17 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
             # Start current with state-machine: off/stopping -> starting -> on
             with zone_lock(zone_id):
                 cur_state = str((db.get_zone(zone_id) or {}).get("state") or "").lower()
+                if cur_state == "fault":
+                    logger.warning("exclusive_start_zone blocked fault zone=%s", zone_id)
+                    return False
                 if cur_state in ("on", "starting"):
-                    pass
-                else:
-                    _versioned_update(
-                        zone_id,
-                        {"state": "starting", "commanded_state": "on", "watering_start_time": start_ts},
-                        audit_reason="manual_start",
-                    )
+                    return True
+                _versioned_update(
+                    zone_id,
+                    {"state": "starting", "commanded_state": "on", "watering_start_time": start_ts},
+                    audit_reason="manual_start",
+                )
+            g = None
             try:
                 # Снапшот счётчика воды на старте (если у группы есть счётчик)
                 try:
@@ -345,8 +491,7 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                 sid = z.get("mqtt_server_id")
                 topic = (z.get("topic") or "").strip()
                 gid = int(z.get("group_id") or 0)
-                # Pre-open master valve by group (idempotent, mode-aware)
-                if gid and gid != 999:
+                if gid and gid != 999 and g is None:
                     try:
                         g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == gid), None)
                     except (sqlite3.Error, OSError):
@@ -356,63 +501,101 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                             gid,
                         )
                         g = None
-                    if g and int(g.get("use_master_valve") or 0) == 1:
+                use_master = bool(g and int(g.get("use_master_valve") or 0) == 1)
+                server = db.get_mqtt_server(int(sid)) if sid and topic else None
+
+                if not server and not use_master:
+                    # Explicitly virtual/non-MQTT zones retain their historic
+                    # DB-only behaviour (legacy rows may contain only one half
+                    # of the topic/server pair).  A master-backed zone is
+                    # physical and cannot use this compatibility path.
+                    _versioned_update(zone_id, {"state": "on"}, audit_reason="virtual_zone_on")
+                elif not server:
+                    mark_zone_command_fault(zone_id, "on", reason="missing_zone_channel")
+                    _finish_open_zone_run_failed(zone_id)
+                    return False
+                else:
+                    # Pre-open master only after the selected zone's own
+                    # control channel has been validated.  This prevents an
+                    # uncommandable zone from leaving the main line pressurized.
+                    if use_master:
                         mtopic = (g.get("master_mqtt_topic") or "").strip()
                         msid = g.get("master_mqtt_server_id")
-                        if mtopic and msid:
-                            mserver = db.get_mqtt_server(int(msid))
-                            if mserver:
-                                try:
-                                    mode = (g.get("master_mode") or "NC").strip().upper()
-                                except (ValueError, TypeError, KeyError) as e:
-                                    logger.debug("Exception in line_101: %s", e)
-                                    mode = "NC"
-                                open_val = "0" if mode == "NO" else "1"
-                                publish_mqtt_value(
-                                    mserver, normalize_topic(mtopic), open_val, min_interval_sec=0.0, qos=2, retain=True
-                                )
-                                try:
-                                    db.update_group_fields(int(gid), {"master_valve_observed": "open"})
-                                    import json as _json
-
-                                    from services import sse_hub as _sse_hub
-
-                                    _sse_hub.broadcast(_json.dumps({"mv_group_id": int(gid), "mv_state": "open"}))
-                                except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
-                                    logger.debug("master_valve_observed update (open) failed: %s", e)
-                if sid and topic:
-                    server = db.get_mqtt_server(int(sid))
-                    if server:
-                        publish_mqtt_value(
-                            server,
-                            normalize_topic(topic),
-                            "1",
-                            min_interval_sec=0.0,
-                            qos=2,
-                            retain=True,
-                            meta={
-                                "cmd": str(command_id) if "command_id" in locals() and command_id else None,
-                                "ver": str((z.get("version") or 0) + 1),
-                            },
-                        )
-                        # transition to on
-                        _versioned_update(zone_id, {"state": "on"}, audit_reason="mqtt_ack_on")
-                        # Verify observed_state in background thread
+                        mserver = db.get_mqtt_server(int(msid)) if mtopic and msid else None
+                        if not mtopic or not mserver:
+                            mark_zone_command_fault(zone_id, "on", reason="missing_master_channel")
+                            _finish_open_zone_run_failed(zone_id)
+                            return False
                         try:
-                            state_verifier.verify_async(int(zone_id), "on")
-                        except (ValueError, TypeError, KeyError):
-                            logger.debug("observed_state verify_async(on) launch failed")
+                            mode = (g.get("master_mode") or "NC").strip().upper()
+                        except (ValueError, TypeError, KeyError) as e:
+                            logger.debug("exclusive_start_zone: invalid master mode: %s", e)
+                            mode = "NC"
+                        open_val = "0" if mode == "NO" else "1"
+                        normalized_master = normalize_topic(mtopic)
+                        with master_topic_lock(normalized_master):
+                            cancel_pending_master_close(normalized_master)
+                            master_ok = publish_mqtt_value(
+                                mserver,
+                                normalized_master,
+                                open_val,
+                                min_interval_sec=0.0,
+                                qos=2,
+                                retain=True,
+                            )
+                        if not master_ok:
+                            mark_zone_command_fault(zone_id, "on", reason="master_open")
+                            _finish_open_zone_run_failed(zone_id)
+                            return False
+                        try:
+                            db.update_group_fields(int(gid), {"master_valve_observed": "open"})
+                            import json as _json
+
+                            from services import sse_hub as _sse_hub
+
+                            _sse_hub.broadcast(_json.dumps({"mv_group_id": int(gid), "mv_state": "open"}))
+                        except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as e:
+                            logger.debug("master_valve_observed update (open) failed: %s", e)
+
+                    published = publish_mqtt_value(
+                        server,
+                        normalize_topic(topic),
+                        "1",
+                        min_interval_sec=0.0,
+                        qos=2,
+                        retain=True,
+                        meta={
+                            "cmd": str(command_id) if command_id else None,
+                            "ver": str((z.get("version") or 0) + 1),
+                        },
+                    )
+                    if not published:
+                        mark_zone_command_fault(zone_id, "on", reason="zone_on")
+                        _finish_open_zone_run_failed(zone_id)
+                        if use_master:
+                            _schedule_master_close(g, immediate=True)
+                        return False
+                    _versioned_update(zone_id, {"state": "on"}, audit_reason="mqtt_ack_on")
+                    try:
+                        state_verifier.verify_async(int(zone_id), "on")
+                    except (ValueError, TypeError, KeyError):
+                        logger.debug("observed_state verify_async(on) launch failed")
             except (ConnectionError, TimeoutError, OSError):
                 logger.exception("exclusive_start_zone: mqtt on failed")
+                mark_zone_command_fault(zone_id, "on", reason="exception")
+                _finish_open_zone_run_failed(zone_id)
+                return False
             # Stop others in parallel to reduce latency. _stop_peer is defined
             # before the try so the sequential fallback below can reuse it.
             def _stop_peer(other, log_suffix=""):
                 try:
                     oid = int(other.get("id"))
                     if oid == int(zone_id):
-                        return
+                        return True
                     with zone_lock(oid):
                         ost = str((db.get_zone(oid) or {}).get("state") or "").lower()
+                        if ost == "off":
+                            return True
                         if ost not in ("off",):
                             _versioned_update(
                                 oid, {"state": "stopping", "commanded_state": "off"}, audit_reason="peer_stop"
@@ -422,7 +605,7 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                     if osid and otopic:
                         server_o = db.get_mqtt_server(int(osid))
                         if server_o:
-                            publish_mqtt_value(
+                            published = publish_mqtt_value(
                                 server_o,
                                 normalize_topic(otopic),
                                 "0",
@@ -431,6 +614,9 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                                 retain=True,
                                 meta={"cmd": "peer_off", "ver": str((other.get("version") or 0) + 1)},
                             )
+                            if not published:
+                                mark_zone_command_fault(oid, "off", reason="peer_off")
+                                return False
                             with zone_lock(oid):
                                 # Close the open zone_run before flipping
                                 # state — leaves a clean 'ok' row in
@@ -461,19 +647,30 @@ def exclusive_start_zone(zone_id: int, source: str = "manual") -> bool:
                                 _versioned_update(
                                     oid, {"state": "off", "watering_start_time": None}, audit_reason="peer_off"
                                 )
+                    return True
                 except (ConnectionError, TimeoutError, OSError):
                     logger.exception("exclusive_start_zone: mqtt off peer failed%s", log_suffix)
+                    try:
+                        mark_zone_command_fault(int(other.get("id")), "off", reason="peer_off_exception")
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                    return False
 
+            peers_ok = True
             try:
                 import concurrent.futures
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(group_zones) - 1))) as pool:
-                    pool.map(_stop_peer, group_zones)
+                    peers_ok = all(pool.map(_stop_peer, group_zones))
             except (ImportError, RuntimeError, OSError) as e:
                 logger.warning("Parallel peer stop failed, falling back to sequential: %s", e)
                 # Fallback to sequential if parallelization fails for any reason
                 for other in group_zones:
-                    _stop_peer(other, " (sequential)")
+                    peers_ok = _stop_peer(other, " (sequential)") and peers_ok
+            if not peers_ok:
+                logger.error("exclusive_start_zone: peer OFF failed; rolling back selected zone=%s", zone_id)
+                stop_zone(int(zone_id), reason="peer_stop_failed", force=True)
+                return False
         try:
             # publish event
             from services import events as _ev
@@ -499,7 +696,7 @@ def start_zone_orchestrated(
 
     Единый путь для /api/zones/<id>/start, /api/zones/<id>/mqtt/start и
     /api/groups/<gid>/start-zone/<zid>: снятие заданий группы и отметка
-    сегодняшних программ отменёнными, делегирование ``exclusive_start_zone``
+    активного program-runner, делегирование ``exclusive_start_zone``
     (peer-off, мастер-клапан, MQTT, zone_run), аудируемая запись
     planned_end_time/watering_start_source и планирование auto-stop /
     hard-stop / cap.
@@ -513,6 +710,8 @@ def start_zone_orchestrated(
     z = db.get_zone(zone_id)
     if not z:
         return "not_found", {"warnings": [], "duration": None}
+    if str(z.get("state") or "").lower() == "fault":
+        return "failed", {"warnings": ["zone_fault"], "duration": None}
 
     # ---- Optional one-time duration override ----
     # Carried as a local only — exclusive_start_zone does NOT consult
@@ -542,6 +741,17 @@ def start_zone_orchestrated(
     # перевзводили auto-stop на полную длительность зоны — повторный клик
     # «Старт» продлевает полив, а не делает молчаливый no-op.
     if str(z.get("state") or "") == "on":
+        gid = int(z.get("group_id") or 0)
+        sched = None
+        try:
+            from irrigation_scheduler import get_scheduler
+
+            sched = get_scheduler()
+            cancel_group_program_execution(gid, scheduler=sched)
+        except (ImportError, ValueError, TypeError) as e:
+            logger.debug("cancel active program before zone extension failed: %s", e)
+        if not stop_group_peers(int(zone_id), reason="manual_restart"):
+            return "failed", {"warnings": ["peer_stop_failed"], "duration": None}
         if override_dur is None and restart_if_on:
             override_dur = int(z.get("duration") or 0) or None
         if override_dur is not None:
@@ -556,16 +766,13 @@ def start_zone_orchestrated(
                 },
             )
             try:
-                from irrigation_scheduler import get_scheduler
-
-                sched = get_scheduler()
                 if sched:
                     # Remove existing stop jobs for THIS zone only —
                     # cancel_group_jobs would stop running peers.
                     try:
                         for job in sched.scheduler.get_jobs():
                             jid = str(job.id)
-                            if f"zone_stop:{int(zone_id)}:" in jid or f"zone_hard_stop:{int(zone_id)}" in jid:
+                            if jid.startswith(f"zone_stop:{int(zone_id)}:") or jid == f"zone_hard_stop:{int(zone_id)}":
                                 job.remove()
                     except (RuntimeError, AttributeError, ValueError) as e:
                         logger.debug("remove old stop jobs: %s", e)
@@ -598,19 +805,6 @@ def start_zone_orchestrated(
             if sched:
                 sched.cancel_group_jobs(int(gid))
             try:
-                programs = db.get_programs() or []
-                now = datetime.now()
-                today = now.strftime("%Y-%m-%d")
-                for p in programs:
-                    try:
-                        hh, mm = map(int, str(p.get("time") or "00:00").split(":", 1))
-                    except (ValueError, TypeError, KeyError):
-                        hh, mm = 0, 0
-                    if now.replace(hour=hh, minute=mm, second=0, microsecond=0) <= now:
-                        db.cancel_program_run_for_group(int(p.get("id")), today, int(gid))
-            except (ConnectionError, TimeoutError, OSError, sqlite3.Error) as e:
-                logger.debug("start_zone_orchestrated: cancel programs failed: %s", e)
-            try:
                 db.reschedule_group_to_next_program(int(gid))
             except (sqlite3.Error, OSError) as e:
                 logger.debug("start_zone_orchestrated: reschedule_group_to_next_program failed: %s", e)
@@ -625,9 +819,8 @@ def start_zone_orchestrated(
     #   4) MQTT publish '1' on zone topic
     #   5) state -> 'on'
     #   6) parallel peer-off (publish '0' + finish their zone_runs)
-    # On MQTT failure step 4, the zone_run row stays open and is
-    # aborted by _boot_sync on next boot — that's the documented
-    # invariant, do not reorder.
+    # A failed MQTT command pins the zone to fault and closes the attempted
+    # run as failed; it is never reported as a successful start.
     try:
         ok = exclusive_start_zone(int(zone_id), source=source)
     except (ValueError, TypeError, KeyError):
@@ -768,6 +961,32 @@ def stop_zone(
     master_close_immediately: bool = False,
     skip_master_close: bool = False,
 ) -> bool:
+    """Serialize one complete OFF transition against starts in its group."""
+    try:
+        zone = db.get_zone(int(zone_id))
+        if not zone:
+            return False
+        gid = int(zone.get("group_id") or 0)
+        with group_lock(gid):
+            return _stop_zone_locked(
+                int(zone_id),
+                reason=reason,
+                force=force,
+                master_close_immediately=master_close_immediately,
+                skip_master_close=skip_master_close,
+            )
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, TypeError):
+        logger.exception("stop_zone serialization failed zone=%s", zone_id)
+        return False
+
+
+def _stop_zone_locked(
+    zone_id: int,
+    reason: str = "manual",
+    force: bool = False,
+    master_close_immediately: bool = False,
+    skip_master_close: bool = False,
+) -> bool:
     """Единый стоп зоны. Идемпотентно. Публикует OFF и фиксирует в БД.
     reason: для журналирования; force — останавливать даже если state уже off.
     master_close_immediately: при True мастер-клапан закрывается без задержки
@@ -790,7 +1009,15 @@ def stop_zone(
         if not z:
             logger.info("stop_zone exit: zone_id=%s not found in DB", zone_id)
             return False
-        if (str(z.get("state")).lower() in ("off", "stopping")) and not force:
+        if reason == "auto" and str(z.get("watering_start_source") or "").lower() == "manual":
+            logger.info(
+                "stop_zone ignored stale program owner: zone_id=%s is now manual",
+                zone_id,
+            )
+            return True
+        initial_state = str(z.get("state") or "").lower()
+        was_fault = initial_state == "fault"
+        if initial_state in ("off", "stopping") and not force:
             logger.info(
                 "stop_zone idempotent: zone_id=%s already state=%s reason=%s — "
                 "running water-stats finalisation but no MQTT publish",
@@ -820,33 +1047,47 @@ def stop_zone(
         start_iso = z.get("watering_start_time")
         # Стейт: on/starting -> stopping
         with zone_lock(zone_id):
-            _versioned_update(zone_id, {"state": "stopping", "commanded_state": "off"}, audit_reason=f"stop_{reason}")
+            if was_fault:
+                _versioned_update(zone_id, {"commanded_state": "off"}, audit_reason=f"fault_stop_{reason}")
+            else:
+                _versioned_update(
+                    zone_id,
+                    {"state": "stopping", "commanded_state": "off"},
+                    audit_reason=f"stop_{reason}",
+                )
         sid = z.get("mqtt_server_id")
         topic = (z.get("topic") or "").strip()
         try:
             if sid and topic:
                 server = db.get_mqtt_server(int(sid))
-                if server:
-                    # OFF публикуем с retain=True, чтобы состояние восстанавливалось после перезапуска
-                    publish_mqtt_value(
-                        server,
-                        normalize_topic(topic),
-                        "0",
-                        min_interval_sec=0.0,
-                        qos=2,
-                        retain=True,
-                        meta={"cmd": "stop", "ver": str((z.get("version") or 0) + 1)},
-                    )
-                    # Verify observed_state in background thread
-                    try:
-                        state_verifier.verify_async(int(zone_id), "off")
-                    except (ValueError, TypeError, KeyError):
-                        logger.debug("observed_state verify_async(off) launch failed")
-                    # Delayed master valve close — uses per-group delay
-                    # (master_close_delay_sec) and proper cancellable timer.
-                    _maybe_schedule_master_close(z, master_close_immediately, skip_master_close)
+                if not server:
+                    mark_zone_command_fault(zone_id, "off", reason="missing_zone_server")
+                    return False
+                # OFF публикуем с retain=True, чтобы состояние восстанавливалось после перезапуска
+                published = publish_mqtt_value(
+                    server,
+                    normalize_topic(topic),
+                    "0",
+                    min_interval_sec=0.0,
+                    qos=2,
+                    retain=True,
+                    meta={"cmd": "stop", "ver": str((z.get("version") or 0) + 1)},
+                )
+                if not published:
+                    mark_zone_command_fault(zone_id, "off", reason="zone_off")
+                    return False
+                # Verify observed_state in background thread
+                try:
+                    state_verifier.verify_async(int(zone_id), "off")
+                except (ValueError, TypeError, KeyError):
+                    logger.debug("observed_state verify_async(off) launch failed")
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
             logger.exception("stop_zone: mqtt off failed")
+            mark_zone_command_fault(zone_id, "off", reason="zone_off_exception")
+            return False
+        # Delayed master valve close is a group concern and must run even for
+        # DB-only/misconfigured zone channels after a completed stop path.
+        _maybe_schedule_master_close(z, master_close_immediately, skip_master_close)
         # Завершаем переход: stopping -> off.
         # last_watering_time is no longer a column — the open zone_run
         # row will be finished a few lines below and that becomes the
@@ -854,14 +1095,21 @@ def stop_zone(
         with zone_lock(zone_id):
             _versioned_update(
                 zone_id,
-                {"state": "off", "watering_start_time": None, "planned_end_time": None},
+                {
+                    "state": "fault" if was_fault else "off",
+                    "watering_start_time": None,
+                    "planned_end_time": None,
+                },
                 audit_reason=f"stop_{reason}_complete",
             )
         # Обновим статистику воды для зоны, если группа использует счётчик.
         # NOTE: summarize_run needs the ORIGINAL start time (start_iso)
         # as its lower bound — it integrates pulse counts since then.
         # Do NOT pass end_iso here.
-        _finalize_water_stats(zone_id, z, start_iso)
+        if was_fault:
+            _finish_open_zone_run_failed(zone_id)
+        else:
+            _finalize_water_stats(zone_id, z, start_iso)
         try:
             db.add_log("zone_stop", f"{reason}: zone={int(zone_id)}")
         except (sqlite3.Error, OSError) as e:
