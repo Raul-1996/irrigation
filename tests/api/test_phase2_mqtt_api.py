@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -109,6 +110,75 @@ def test_finding_80_diagnostic_clients_use_unique_ephemeral_ids():
     assert len(ids) == len(set(ids)) == 3
     assert "live-sse-client" not in ids
     assert all(client_id.startswith("wb-") and len(client_id) <= 23 for client_id in ids)
+
+
+@pytest.mark.parametrize("purpose", ["probe", "status", "scan"])
+def test_finding_81_diagnostic_client_applies_tls_before_route_connect(purpose):
+    import routes.mqtt_api as mqtt_api
+
+    events = []
+    client = MagicMock(name=f"{purpose}_client")
+    client.tls_set.side_effect = lambda **kwargs: events.append(("tls_set", kwargs))
+    client.tls_insecure_set.side_effect = lambda value: events.append(("tls_insecure_set", value))
+    client.connect.side_effect = lambda *args: events.append(("connect", args))
+    fake_mqtt = SimpleNamespace(
+        CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+        Client=MagicMock(return_value=client),
+    )
+    server = {
+        "id": 81,
+        "host": "secure-broker",
+        "port": 8883,
+        "username": "mqtt-user",
+        "password": "mqtt-password",
+        "client_id": "live-sse-client",
+        "tls_enabled": 1,
+        "tls_ca_path": "/etc/ssl/ca.pem",
+        "tls_cert_path": "/etc/ssl/client.pem",
+        "tls_key_path": "/etc/ssl/client.key",
+        "tls_insecure": 1,
+        "tls_version": "TLS_CLIENT",
+    }
+
+    with patch.object(mqtt_api, "mqtt", fake_mqtt):
+        configured = mqtt_api._new_diagnostic_client(server, purpose)
+        configured.connect(server["host"], server["port"], 5)
+
+    assert [event[0] for event in events] == ["tls_set", "tls_insecure_set", "connect"]
+    tls_kwargs = events[0][1]
+    assert tls_kwargs == {
+        "ca_certs": "/etc/ssl/ca.pem",
+        "certfile": "/etc/ssl/client.pem",
+        "keyfile": "/etc/ssl/client.key",
+        "tls_version": ssl.PROTOCOL_TLS_CLIENT,
+    }
+    client.username_pw_set.assert_called_once_with("mqtt-user", "mqtt-password")
+    assert fake_mqtt.Client.call_args.kwargs["client_id"] != "live-sse-client"
+
+
+def test_finding_81_tls_setup_failure_aborts_before_plaintext_connect():
+    import routes.mqtt_api as mqtt_api
+
+    client = MagicMock(name="tls_failure_client")
+    client.tls_set.side_effect = OSError("invalid CA")
+    fake_mqtt = SimpleNamespace(
+        CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+        Client=MagicMock(return_value=client),
+    )
+    server = {
+        "id": 81,
+        "host": "secure-broker",
+        "port": 8883,
+        "tls_enabled": 1,
+        "tls_ca_path": "/missing/ca.pem",
+        "tls_version": "TLS_CLIENT",
+    }
+
+    with patch.object(mqtt_api, "mqtt", fake_mqtt), pytest.raises(OSError, match="invalid CA"):
+        configured = mqtt_api._new_diagnostic_client(server, "probe")
+        configured.connect(server["host"], server["port"], 5)
+
+    client.connect.assert_not_called()
 
 
 @pytest.mark.parametrize("duration", ["not-a-number", "1e999", 0, -1, 31])
