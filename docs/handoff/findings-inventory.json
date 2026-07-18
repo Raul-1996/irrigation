@@ -2809,11 +2809,14 @@
     "main_or_branch": "main_bug",
     "decision_notes": "Anonymous JSON mutation is real on the native port. The original drive-by HTML-form scenario is not: form encoding gets 415 and cross-origin JSON normally needs CORS preflight.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "POST /api/env удалён из public/CSRF-exempt списков и требует admin session плюс CSRF; публичный read-only GET сохранён.",
+      "package": "phase2-env-security",
+      "commit": "c030921f2f1b5537c70e71100463455dc358c6b2",
+      "tests": [
+        "tests/api/test_phase2_env_settings.py::test_env_post_requires_admin_and_csrf_but_get_remains_public",
+        "tests/unit/test_csrf_policy.py::test_admin_crud_endpoints_are_NOT_exempt"
+      ]
     }
   },
   {
@@ -3099,11 +3102,14 @@
     "reproduction": "Сохранение настроек env-датчиков с нечисловым/пустым server_id (а /api/env по уже найденной проблеме доступен анонимно и без CSRF): клиент получает 500, при этом датчик температуры уже выключен и его топик заменён наполовину — env_monitor перезапускается с противоречивой конфигурацией, показания температуры пропадают до ручной починки.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Оба sensor objects и server_id валидируются до записи, затем все шесть keys изменяются одним connection/transaction; ошибка одной строки откатывает весь config.",
+      "package": "phase2-env-security",
+      "commit": "c030921f2f1b5537c70e71100463455dc358c6b2",
+      "tests": [
+        "tests/api/test_phase2_env_settings.py::test_set_env_config_rejects_invalid_server_id_without_partial_write",
+        "tests/api/test_phase2_env_settings.py::test_set_env_config_rolls_back_every_key_when_one_write_fails"
+      ]
     }
   },
   {
@@ -3718,11 +3724,13 @@
     "reproduction": "Пользователь по подсказке страницы придумывает 6-символьный пароль, проходит клиентскую валидацию и все три поля, получает от сервера отказ «Пароль должен быть не менее 8 символов» — противоречащий тексту прямо над формой. Любой пароль 4–7 символов гарантированно отбивается вопреки UI-контракту.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Note, HTML minlength и client validation теперь единообразно требуют backend minimum восемь символов.",
+      "package": "phase2-env-security",
+      "commit": "c030921f2f1b5537c70e71100463455dc358c6b2",
+      "tests": [
+        "tests/api/test_phase2_env_settings.py::test_settings_template_matches_backend_password_minimum"
+      ]
     }
   },
   {
@@ -3746,11 +3754,13 @@
     "reproduction": "Русскоязычный пользователь вводит широту «55,7558» (запятая — стандартный десятичный разделитель), жмёт «Сохранить» → сохраняется широта 55.0 (ошибка ~80 км), сообщение — «Настройки погоды сохранены». При нечисловом вводе координата вовсе не записывается, но UI также рапортует успех; погодная коррекция работает по чужой точке или не работает.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Locale comma coordinates нормализуются и проверяются по finite/range; success показывается только после успешных location и weather HTTP/JSON contracts.",
+      "package": "phase2-env-security",
+      "commit": "c030921f2f1b5537c70e71100463455dc358c6b2",
+      "tests": [
+        "tests/api/test_phase2_env_settings.py::test_weather_location_save_validates_locale_numbers_and_server_result"
+      ]
     }
   },
   {

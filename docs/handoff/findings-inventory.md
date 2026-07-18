@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **103 fixed · 3 deferred · 41 pending · 5 not_applicable**.
+- Phase 2 disposition: **107 fixed · 3 deferred · 37 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1012,7 +1012,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** 1) Аноним в LAN (или гость по /login?guest=1) шлёт POST /api/env с JSON {"temp":{"enabled":true,"topic":"/evil","server_id":1}} — без сессии и без X-CSRFToken конфиг датчиков перезаписывается и env_monitor переподписывается на чужой топик; температура/влажность на дашборде начинают браться из подложных данных. 2) Drive-by: страница злоумышленника с <form method=POST action="http://контроллер/api/env"> — CSRF-exempt, request.get_json() по form-urlencoded вернёт None → data={} → set_env_config({}) отключает оба датчика и стирает топики; работает даже из браузера админа за nginx basic-auth.
 - **Решение оркестратора:** Anonymous JSON mutation is real on the native port. The original drive-by HTML-form scenario is not: form encoding gets 415 and cross-origin JSON normally needs CORS preflight.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** POST /api/env удалён из public/CSRF-exempt списков и требует admin session плюс CSRF; публичный read-only GET сохранён.
+- **Пакет:** `phase2-env-security`.
+- **Fix commit:** `c030921f2f1b5537c70e71100463455dc358c6b2`.
+- **Regression tests:** `tests/api/test_phase2_env_settings.py::test_env_post_requires_admin_and_csrf_but_get_remains_public`, `tests/unit/test_csrf_policy.py::test_admin_crud_endpoints_are_NOT_exempt`.
 
 ### #92 [medium] `static/js/status.js:60` — status.js syncServerTime парсит now_iso ('YYYY-MM-DD HH:MM:SS') через new Date() без нормализации — на Safari/iOS шапка «Время:» навсегда показывает NaN
 
@@ -1104,7 +1108,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сохранение настроек env-датчиков с нечисловым/пустым server_id (а /api/env по уже найденной проблеме доступен анонимно и без CSRF): клиент получает 500, при этом датчик температуры уже выключен и его топик заменён наполовину — env_monitor перезапускается с противоречивой конфигурацией, показания температуры пропадают до ручной починки.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Оба sensor objects и server_id валидируются до записи, затем все шесть keys изменяются одним connection/transaction; ошибка одной строки откатывает весь config.
+- **Пакет:** `phase2-env-security`.
+- **Fix commit:** `c030921f2f1b5537c70e71100463455dc358c6b2`.
+- **Regression tests:** `tests/api/test_phase2_env_settings.py::test_set_env_config_rejects_invalid_server_id_without_partial_write`, `tests/api/test_phase2_env_settings.py::test_set_env_config_rolls_back_every_key_when_one_write_fails`.
 
 ### #102 [low] `routes/system_status_api.py:676` — /api/logs: фильтры from/to/type применяются в Python ПОСЛЕ 'LIMIT 1000 новейших' — запросы за старые периоды возвращают пусто при живых данных в БД
 
@@ -1309,7 +1317,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь по подсказке страницы придумывает 6-символьный пароль, проходит клиентскую валидацию и все три поля, получает от сервера отказ «Пароль должен быть не менее 8 символов» — противоречащий тексту прямо над формой. Любой пароль 4–7 символов гарантированно отбивается вопреки UI-контракту.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Note, HTML minlength и client validation теперь единообразно требуют backend minimum восемь символов.
+- **Пакет:** `phase2-env-security`.
+- **Fix commit:** `c030921f2f1b5537c70e71100463455dc358c6b2`.
+- **Regression tests:** `tests/api/test_phase2_env_settings.py::test_settings_template_matches_backend_password_minimum`.
 
 ### #123 [low] `templates/settings.html:421` — Сохранение координат погоды: parseFloat обрезает запятую-десятичную, а результат PUT /api/settings/location игнорируется — «Настройки погоды сохранены» при потерянных/искажённых координатах
 
@@ -1317,7 +1329,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Русскоязычный пользователь вводит широту «55,7558» (запятая — стандартный десятичный разделитель), жмёт «Сохранить» → сохраняется широта 55.0 (ошибка ~80 км), сообщение — «Настройки погоды сохранены». При нечисловом вводе координата вовсе не записывается, но UI также рапортует успех; погодная коррекция работает по чужой точке или не работает.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Locale comma coordinates нормализуются и проверяются по finite/range; success показывается только после успешных location и weather HTTP/JSON contracts.
+- **Пакет:** `phase2-env-security`.
+- **Fix commit:** `c030921f2f1b5537c70e71100463455dc358c6b2`.
+- **Regression tests:** `tests/api/test_phase2_env_settings.py::test_weather_location_save_validates_locale_numbers_and_server_result`.
 
 ### #124 [low] `static/js/status.js:2262` — Запуск «всех групп» показывает «▶ Все группы запущены» безусловно — отказы отдельных групп (400/аварийный режим/занятый секвенсор) проглатываются
 

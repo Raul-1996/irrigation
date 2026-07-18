@@ -283,8 +283,19 @@
     - targeted combined P08+P09: 274 passed; full gate: 2028 passed, 2 skipped,
       17 deselected; ruff и diff check чисты.
 
-После этих пакетов: 103 записи fixed (94 корня + девять унаследованных дублей),
-3 deferred, 41 REAL-запись pending; пять `VERIFIED_FALSE` остаются
+18. `phase2-env-security` — #91, #101, #122, #123 `fixed`
+    - fix `c030921f2f1b5537c70e71100463455dc358c6b2`;
+    - merge `24ecc7e83ee88edbcd420530cac7b811235bffba`;
+    - GET `/api/env` остаётся публичным, POST теперь admin-only и не exempt от CSRF;
+    - temp/hum objects и server IDs валидируются до единой six-key транзакции,
+      ошибка одной записи откатывает весь env config;
+    - password UI соответствует backend minimum 8; locale comma coordinates
+      проходят finite/range validation, success требует удачи location и weather;
+    - targeted: 174 passed; full gate: 2034 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 107 записей fixed (98 корней + девять унаследованных дублей),
+3 deferred, 37 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
