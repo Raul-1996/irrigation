@@ -3,6 +3,8 @@
 import json
 import os
 
+import pytest
+
 os.environ["TESTING"] = "1"
 
 
@@ -83,6 +85,25 @@ class TestSchedulerAPI:
 
 
 class TestPostponeAPI:
+    @pytest.mark.parametrize("days", ["abc", 100_000_000_000_000])
+    def test_postpone_rejects_invalid_days_without_writes(self, guest_client, app, days):
+        zone = app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
+
+        resp = guest_client.post(
+            "/api/postpone",
+            data=json.dumps(
+                {
+                    "group_id": 1,
+                    "days": days,
+                    "action": "postpone",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 400
+        assert app.db.get_zone(zone["id"])["postpone_until"] is None
+
     def test_postpone(self, admin_client, app):
         app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
         resp = admin_client.post(
