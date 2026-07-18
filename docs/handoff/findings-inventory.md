@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **59 fixed · 1 deferred · 87 pending · 5 not_applicable**.
+- Phase 2 disposition: **72 fixed · 2 deferred · 73 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -301,7 +301,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа пн 23:30, 3 зоны по 20 мин. Отключение питания в 23:50, восстановление во вт 00:10 — окно запуска ещё активно (до 00:30), но recovery молча пропускает программу: зоны 2–3 не политы, в логах нет 'Recovery'.
 - **Решение оркестратора:** Previous REFUTED status overturned. A graceful restart after midnight loses a still-running program whose scheduled start belongs to the previous local date.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Recovery рассматривает текущую и предыдущую локальную дату, поэтому окно программы, пересёкшее полночь, восстанавливает правильный хвост.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_30_recovery_considers_previous_local_date_when_window_crosses_midnight`.
 
 ### #32 [low] `services/next_watering.py:147` — Программа, идущая через полночь, невидима для in-progress-логики next-watering — зоны показывают следующую неделю вместо ближайшего слота
 
@@ -630,7 +634,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона 5 физически поливает (реле ON, retained '1', в APScheduler висит её zone_stop). Пользователь жмёт «Запустить группу с первой зоны»: bulk-off ставит зоне 5 state='off' в БД без публикации OFF, её автостоп-джобы удаляются, секвенсор включает зону 1. Реле зоны 5 остаётся запитанным: открыты два клапана одновременно (падение давления, нарушение эксклюзивности группы), причём ни group-exclusivity watchdog, ни ZoneWatchdog этого не видят — в БД только одна зона 'on'. Физический OFF зона 5 получит лишь когда до неё дойдёт очередь секвенса (возможно через десятки минут/часы); в варианте run-selected с подмножеством без зоны 5 состояние двух открытых клапанов чинит только ежесекундный watchdog по чужой ветке, а при отсутствии мастер-клапана вода течёт всё это время.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Group start физически force-останавливает все зоны до снятия jobs; после best-effort stop повторно читает группу и не создаёт sequence, пока каждая зона не подтверждена state=off.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_63_group_start_physically_stops_every_peer_before_planting_sequence`, `tests/unit/test_phase2_scheduler_safety.py::test_63_group_start_aborts_when_peer_remains_fault_after_physical_stop`.
 
 ### #64 [high] `services/observed_state.py:147` — StateVerifier ретраит устаревшую команду: фоновая верификация перекрывает более свежую противоположную команду и может закрыть/открыть клапан вопреки текущему состоянию
 
@@ -650,7 +658,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь дважды жмёт «Запустить группу» с интервалом 2 с (или жмёт её, пока по расписанию идёт программа этой группы). Оба вызова проходят: два треда _run_group_sequence работают параллельно по одному списку зон со сдвигом. Тред A стартует зону 1; тред B делает bulk-off (state='off' в БД у только что включённой зоны), снимает её джобы и снова публикует ON зоны 1, создавая ВТОРОЙ открытый zone_run. Дальше A останавливает зону 1 по своему таймеру и включает зону 2, пока B ещё «поливает» зону 1 → B позже повторно включит зону 2, A остановит её посреди слота B и т.д. Итог: рваные циклы открытия/закрытия клапанов, задвоенные и преждевременно закрытые zone_runs, попеременная борьба с ежесекундным group-exclusivity watchdog.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Group session захватывается до DB/MQTT initialization и второй запуск отклоняется, не переиспользуя и не заменяя Event владельца.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_65_second_group_session_is_rejected_instead_of_reusing_event`.
 
 ### #66 [medium] `irrigation_scheduler.py:2391` — Гонка recover_missed_runs со стартовой зачисткой: восстановленный запуск глушится stop_on_boot_active_zones/_boot_sync, первая зона не поливается, но получает фантомный zone_run 'ok'
 
@@ -658,7 +670,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сервис перезапускается посреди программы. recover_missed_runs запускает остаток: runner пишет зоне state='on', exclusive_start_zone создаёт zone_run, открывает мастер-клапан, публикует ON. Через долю секунды в главном треде stop_on_boot_active_zones видит state='on' и force-стопает зону (finish_zone_run status='ok', retained '0'), а _boot_sync дополнительно публикует OFF по всем топикам и закрывает мастер-клапан, который runner только что открыл. Runner спит duration минут, полагая, что зона поливается: физически клапан закрыт, «восстановленная» зона не получает воду, в истории остаётся фантомная запись 'ok' с нулевым фактическим поливом. Последующие зоны программы включаются уже после boot_sync и поливаются — сбой затрагивает ровно прерванную зону и мастер-клапан, недетерминированно по таймингу тредов.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** APScheduler стартует paused, boot cleanup/OFF выполняются до recovery, а resume разрешён только через complete_boot_recovery после внешней reconciliation.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_66_87_init_stays_paused_until_explicit_boot_completion`.
 
 ### #67 [medium] `services/sse_hub.py:236` — Анти-рестарт-окно SSE-хаба мертво: mark_zone_stopped не вызывается ни одним стоп-путём, recently_stopped всегда False — защита от эхо-включения после ручного стопа недостижима
 
@@ -868,7 +884,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сервис рестартует в 06:20 посреди программы 06:00. recovery-job стартует первую незавершённую зону (~1-3 c: guard → weather-check → state='on' → MV open → MQTT '1'); параллельно основной поток доходит до stop_on_boot_active_zones/_boot_sync, который через секунды публикует retained '0' в топик этой зоны и закрывает все мастер-клапаны. Реле выключено/МВ закрыт, а секвенсер recovery считает, что зона поливается, и ждёт весь её слот (до полной длительности зоны) — первая восстановленная зона остаётся сухой без единой ошибки в логах; в zone_runs при этом остаётся «успешный» ран.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Recovery Date jobs и persistent misfires не могут исполняться до завершения boot OFF: scheduler остаётся paused до явной lifecycle boundary.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_66_87_init_stays_paused_until_explicit_boot_completion`.
 
 ### #88 [medium] `irrigation_scheduler.py:2294` — recover_missed_runs повторно поливает уже завершившийся (укороченный погодой или остановленный вручную) запуск — окно строится по номинальным длительностям без проверки фактического завершения
 
@@ -876,7 +896,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Погодный коэффициент 50%: программа 06:00, 8 зон × 20 мин номинала (окно до 08:40), фактически полив закончился в 07:20. Плановый деплой/рестарт сервиса в 08:00 → окно ещё «активно», зоны выключены → recovery вычисляет start_idx=6 и ПОВТОРНО поливает зоны 7-8, которые уже политы час назад. Аналогично: пользователь остановил идущую программу кнопкой Стоп в 06:30, watchdog/деплой рестартует сервис в 06:40 → recovery «догоняет» остаток программы, которую пользователь сознательно отменил.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Boot recovery требует persisted evidence реально прерванной активной зоны и не воскресит только номинально совпавшее уже завершённое окно.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_88_boot_recovery_requires_evidence_of_an_interrupted_active_zone`.
 
 ### #89 [medium] `services/zone_control.py:609` — Ручной старт одной зоны отменяет на сегодня ВСЕ программы группы, чьё основное время уже прошло — вечерние extra_times-слоты молча пропадают
 
@@ -897,7 +921,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа только по понедельникам в 06:00; рестарт сервиса в четверг в 10:00. Всем зонам программы записывается scheduled_start_time = четверг 06:00 (уже прошедшее сегодня). Карточка группы показывает «Следующая: <зона> → 06:00», хотя реальный ближайший запуск — в понедельник; значение остаётся до первого события, вызывающего reschedule_group_to_next_program. То же после любого сохранения программы из UI.
 - **Решение оркестратора:** Arbitrated REAL with corrected consumer: the false time appears in the global active-zone sidebar, not the group card, and requires another active zone to make the sidebar visible.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** scheduled_start_time строится от минимального настоящего next fire живых trigger jobs и zone offsets, а не от сегодняшнего HH:MM.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_90_scheduled_start_uses_next_real_weekday_not_today`.
 
 ### #91 [high] `app.py:407` — POST /api/env (запись конфигурации env-датчиков) доступен анонимно и освобождён от CSRF — межсайтовая форма стирает конфиг датчиков
 
@@ -1064,7 +1092,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Реле зоны 3 не подтверждает ON (обрыв провода) → StateVerifier ставит state='fault', оператор получает алерт «зона исключена из расписания». В тот же вечер плановая программа вызывает exclusive_start_zone(3): гард видит 'fault' (не on/starting) → перезаписывает в 'starting'→'on', полив «числится идущим», создаётся новый phantom zone_run, fault повторяется — и так каждый день. Либо: пользователь вручную стартует соседнюю зону 2 → cancel_group_jobs → stop_all_in_group(force=True) → stop_zone(3) переводит fault→off, защитный статус исчезает без вмешательства оператора. Заявленная в алерте и в докстринге _record_fault защита не существует.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P05 сохраняет fault и блокирует direct start; P03 удалил scheduler prewrite state=on, вызывает exclusive_start_zone(source=program), учитывает False/fault и не планирует success jobs/logs после отказа.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_110_scheduled_program_never_admits_fault_zone`, `tests/unit/test_phase2_scheduler_safety.py::test_110_program_honors_failed_central_start`, `tests/unit/test_phase2_scheduler_safety.py::test_110_group_sequence_honors_failed_central_start`.
 
 ### #111 [medium] `services/zone_control.py:399` — exclusive_start_zone игнорирует результат publish_mqtt_value: при подтверждённом сбое доставки зона всё равно переводится в 'on' с audit_reason='mqtt_ack_on', API отвечает «started»
 
@@ -1227,7 +1259,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа 5 (Пн–Пт 06:00, зоны [1,2,3], джобы в jobs.db). PUT {"zones": []} → 200, БД обновлена, schedule_program выходит до cancel_program → старые cron-джобы с args=[5,[1,2,3],…] продолжают каждый будний день поливать зоны 1–3, хотя в UI программа без зон. После рестарта load_programs снова выходит рано → program_jobs[5] не заполняется → DELETE программы вызывает cancel_program, который не снимает ни одного джоба: осиротевшие персистентные джобы поливают неограниченно долго, убрать их можно только удалением jobs.db вручную.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Invalid/empty/disabled program update отменяет jobs, а cancel сканирует jobstore по program prefix даже при потере in-memory registry.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_127_invalid_update_removes_existing_persistent_jobs`, `tests/unit/test_phase2_scheduler_safety.py::test_127_cancel_scans_jobstore_when_in_memory_registry_was_lost`.
 
 ### #128 [medium] `irrigation_scheduler.py:2298` — recover_missed_runs: при перекрытии окон main и extra_times берётся max(candidates) — восстанавливается не тот запуск, уже политые зоны поливаются повторно
 
@@ -1235,7 +1271,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа: main 06:00, extra_times ["06:30"], зоны A/B/C по 20 мин (total 60). Краш в 06:20 (зона A полита полностью), рестарт в 06:40. Оба окна (06:00–07:00 и 06:30–07:30) содержат 06:40 → выбран старт 06:30, elapsed=10 → start_idx=0 → recovery заново поливает A, затем B и C со сдвигом на 40 минут. Корректное возобновление прерванного 06:00-запуска (elapsed=40) — с зоны C. До ветки (main учитывал только основное время) такая мисатрибуция была невозможна.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** При overlap main/extra recovery выбирает самое раннее допустимое окно — то, которое владело single session, — и продолжает только его хвост.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_128_overlapping_extra_window_does_not_recover_from_later_skipped_fire`.
 
 ### #129 [medium] `db/programs.py:216` — check_program_conflicts не видит extra_times — пересечение по extra-слоту проходит валидацию, а на fire-time вся программа молча пропускается guard'ом
 
@@ -1283,7 +1323,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** 13:00 — прорвало трубу, пользователь жмёт «Аварийная остановка» (EMERGENCY_STOP=True, всё закрыто), закрывает ноутбук и уезжает за фитингами. 20:00 — cron-джоб программы срабатывает штатно: _run_program_threaded не находит активных сессий (guard пуст), открывает мастер-клапан, публикует ON и последовательно поливает все зоны группы полную длительность. Вода хлещет из разрыва при «активном» аварийном режиме; UI при этом продолжает показывать emergency-баннер и отклонять только РУЧНЫЕ старты.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Cron program/group runners проверяют process-local EMERGENCY_STOP до DB/hardware и повторно перед каждым ON.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_133_emergency_flag_blocks_cron_runner_before_db_or_hardware`.
 
 ### #134 [medium] `services/sse_hub.py:151` — SSE-хаб — единственный подписчик на эхо реле — запускается только при первом открытии страницы: после рестарта сервиса без веб-клиента внешние включения реле невидимы и никогда не останавливаются
 
@@ -1361,7 +1405,9 @@
 - **Происхождение:** `main_bug_with_branch_false_green_tests`.
 - **Верификация:** Code introspection and targeted tests confirmed type is never consumed.
 - **Репродукция/сценарий:** Schedule otherwise identical smart and time-based programs; both execute the same weather path.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `deferred`.
+- **Причина disposition:** В продукте не определено, чем runtime smart должен отличаться от time-based: нет smart decision inputs, scheduling policy или UI promise. Реализация без отдельной спецификации выдумала бы поведение; H2 включать запрещено.
+- **Пакет:** `phase2-scheduler-safety`.
 
 ### #142 [low] `tests/unit/test_scheduler_v2.py:51-78,215-314` — CronTrigger-тесты не проверяют weekday/even-odd/extra-time поля и пропускают полностью неверное расписание
 
@@ -1401,7 +1447,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** A deterministic barrier reproduced a job present while its DB program no longer existed.
 - **Репродукция/сценарий:** Pause PUT after DB commit, complete DELETE/cancel, resume PUT scheduling; observe an orphan program job.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Schedule/cancel сериализованы per scheduler lock, schedule повторно читает DB revision, а job callable валидирует текущую enabled program/zones; DELETE выигрывает у stale PUT continuation.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_145_delete_wins_over_stale_put_scheduler_continuation`.
 
 ### #146 [high] `irrigation_scheduler.py:1552-1663,2130-2180; routes/groups_api.py:194-196` — Stop во время инициализации group start теряется, после успешной остановки создаётся новый sequence job
 
@@ -1409,7 +1459,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** A barrier before event registration reproduced a post-stop unset event and newly created group_seq job.
 - **Репродукция/сценарий:** Pause group start before setdefault, call cancel_group_jobs, then resume; group_seq job appears after stop.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Group Event регистрируется до initialization, cancel видит его немедленно, а все pre-job границы повторно проверяют Event/shutdown/emergency и identity-safe освобождают владельца.
+- **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `a91116a14fea7e6df07bb2869b0ae726fe562edd`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_146_stop_during_group_initialization_prevents_late_sequence_job`, `tests/unit/test_phase2_scheduler_safety.py::test_group_runner_early_exit_releases_owned_session_event[emergency]`.
 
 ### #147 [high] `routes/telegram.py:167-175; irrigation_scheduler.py:1741-2035` — Telegram «Остановить группу» выключает текущую зону, но не отменяет runner — следующая зона запускается снова
 

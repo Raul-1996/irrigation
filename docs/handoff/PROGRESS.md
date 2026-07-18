@@ -175,8 +175,28 @@
    - targeted: 92 passed; full gate: 1968 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 59 записей fixed (53 корня + шесть унаследованных дублей),
-1 deferred, 87 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+10. `phase2-scheduler-safety` — #30, #63, #65, #66, #87, #88, #90, #110,
+    #127, #128, #133, #145, #146 `fixed`; #141 `deferred`
+    - fixes `1aa4406c3088cace9abfe084fda974e0d44bd9de` и
+      `a91116a14fea7e6df07bb2869b0ae726fe562edd`;
+    - merge `81a3676b39ca60015cc81faa394bd13f0c7e7bbd`;
+    - persistent program jobs сериализованы/ревалидируются, invalid update и
+      concurrent DELETE не оставляют orphan jobs;
+    - boot scheduler paused до reconciliation; recovery требует interrupted
+      evidence, учитывает полночь и earliest overlapping slot;
+    - group session захватывается до initialization, физический OFF проверяется
+      до нового sequence, emergency/quiesce fences закрывают поздние ON;
+    - scheduler больше не prewrite'ит `on`: P05 central start решает fault/MQTT/MV
+      и failed result не получает hard-stop, active-state либо success log;
+    - #141 отложен индивидуально: smart/time-based semantics не определена, а
+      включать H2 либо выдумывать decision policy запрещено;
+    - #149 остаётся pending до P15 shutdown call-site, хотя quiesce primitive и
+      его strict-fence regression уже готовы;
+    - targeted: 164 passed; full gate: 1991 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 72 записи fixed (66 корней + шесть унаследованных дублей),
+2 deferred, 73 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

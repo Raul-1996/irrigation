@@ -595,6 +595,135 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-scheduler-safety",
+      "fix_commit": "a91116a14fea7e6df07bb2869b0ae726fe562edd",
+      "merge_commit": "81a3676b39ca60015cc81faa394bd13f0c7e7bbd",
+      "summary": "Scheduler получил persistent-job serialization, безопасный two-phase boot recovery, single group sessions, emergency/quiesce fences и единый P05 central-start contract.",
+      "resolutions": [
+        {
+          "id": 30,
+          "disposition": "fixed",
+          "reason": "Recovery рассматривает текущую и предыдущую локальную дату, поэтому окно программы, пересёкшее полночь, восстанавливает правильный хвост.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_30_recovery_considers_previous_local_date_when_window_crosses_midnight"
+          ]
+        },
+        {
+          "id": 63,
+          "disposition": "fixed",
+          "reason": "Group start физически force-останавливает все зоны до снятия jobs; после best-effort stop повторно читает группу и не создаёт sequence, пока каждая зона не подтверждена state=off.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_63_group_start_physically_stops_every_peer_before_planting_sequence",
+            "tests/unit/test_phase2_scheduler_safety.py::test_63_group_start_aborts_when_peer_remains_fault_after_physical_stop"
+          ]
+        },
+        {
+          "id": 65,
+          "disposition": "fixed",
+          "reason": "Group session захватывается до DB/MQTT initialization и второй запуск отклоняется, не переиспользуя и не заменяя Event владельца.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_65_second_group_session_is_rejected_instead_of_reusing_event"
+          ]
+        },
+        {
+          "id": 66,
+          "disposition": "fixed",
+          "reason": "APScheduler стартует paused, boot cleanup/OFF выполняются до recovery, а resume разрешён только через complete_boot_recovery после внешней reconciliation.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_66_87_init_stays_paused_until_explicit_boot_completion"
+          ]
+        },
+        {
+          "id": 87,
+          "disposition": "fixed",
+          "reason": "Recovery Date jobs и persistent misfires не могут исполняться до завершения boot OFF: scheduler остаётся paused до явной lifecycle boundary.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_66_87_init_stays_paused_until_explicit_boot_completion"
+          ]
+        },
+        {
+          "id": 88,
+          "disposition": "fixed",
+          "reason": "Boot recovery требует persisted evidence реально прерванной активной зоны и не воскресит только номинально совпавшее уже завершённое окно.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_88_boot_recovery_requires_evidence_of_an_interrupted_active_zone"
+          ]
+        },
+        {
+          "id": 90,
+          "disposition": "fixed",
+          "reason": "scheduled_start_time строится от минимального настоящего next fire живых trigger jobs и zone offsets, а не от сегодняшнего HH:MM.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_90_scheduled_start_uses_next_real_weekday_not_today"
+          ]
+        },
+        {
+          "id": 110,
+          "disposition": "fixed",
+          "reason": "P05 сохраняет fault и блокирует direct start; P03 удалил scheduler prewrite state=on, вызывает exclusive_start_zone(source=program), учитывает False/fault и не планирует success jobs/logs после отказа.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_110_scheduled_program_never_admits_fault_zone",
+            "tests/unit/test_phase2_scheduler_safety.py::test_110_program_honors_failed_central_start",
+            "tests/unit/test_phase2_scheduler_safety.py::test_110_group_sequence_honors_failed_central_start"
+          ]
+        },
+        {
+          "id": 127,
+          "disposition": "fixed",
+          "reason": "Invalid/empty/disabled program update отменяет jobs, а cancel сканирует jobstore по program prefix даже при потере in-memory registry.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_127_invalid_update_removes_existing_persistent_jobs",
+            "tests/unit/test_phase2_scheduler_safety.py::test_127_cancel_scans_jobstore_when_in_memory_registry_was_lost"
+          ]
+        },
+        {
+          "id": 128,
+          "disposition": "fixed",
+          "reason": "При overlap main/extra recovery выбирает самое раннее допустимое окно — то, которое владело single session, — и продолжает только его хвост.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_128_overlapping_extra_window_does_not_recover_from_later_skipped_fire"
+          ]
+        },
+        {
+          "id": 133,
+          "disposition": "fixed",
+          "reason": "Cron program/group runners проверяют process-local EMERGENCY_STOP до DB/hardware и повторно перед каждым ON.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_133_emergency_flag_blocks_cron_runner_before_db_or_hardware"
+          ]
+        },
+        {
+          "id": 141,
+          "disposition": "deferred",
+          "reason": "В продукте не определено, чем runtime smart должен отличаться от time-based: нет smart decision inputs, scheduling policy или UI promise. Реализация без отдельной спецификации выдумала бы поведение; H2 включать запрещено.",
+          "tests": []
+        },
+        {
+          "id": 145,
+          "disposition": "fixed",
+          "reason": "Schedule/cancel сериализованы per scheduler lock, schedule повторно читает DB revision, а job callable валидирует текущую enabled program/zones; DELETE выигрывает у stale PUT continuation.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_145_delete_wins_over_stale_put_scheduler_continuation"
+          ]
+        },
+        {
+          "id": 146,
+          "disposition": "fixed",
+          "reason": "Group Event регистрируется до initialization, cancel видит его немедленно, а все pre-job границы повторно проверяют Event/shutdown/emergency и identity-safe освобождают владельца.",
+          "tests": [
+            "tests/unit/test_phase2_scheduler_safety.py::test_146_stop_during_group_initialization_prevents_late_sequence_job",
+            "tests/unit/test_phase2_scheduler_safety.py::test_group_runner_early_exit_releases_owned_session_event[emergency]"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "164 passed",
+        "full_pytest": "1991 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }
