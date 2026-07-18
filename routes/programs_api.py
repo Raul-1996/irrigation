@@ -54,6 +54,43 @@ def _validate_program_v2_fields(data: dict) -> str | None:
     return None
 
 
+def _check_candidate_conflicts(
+    program_id: int | None,
+    time_value: str,
+    zones: list[int],
+    days: list[int],
+    extra_times: object = None,
+) -> list[dict]:
+    """Check the primary and every candidate extra start through the facade.
+
+    The public ``IrrigationDB`` facade exposes the legacy one-start-at-a-time
+    signature. Calling it per candidate remains backward-compatible while the
+    repository compares each candidate against stored primary and extra slots.
+    """
+    candidate_times = [time_value]
+    if isinstance(extra_times, list):
+        candidate_times.extend(extra_times)
+
+    conflicts = []
+    checked_times = []
+    for candidate_time in candidate_times:
+        if candidate_time in checked_times:
+            continue
+        checked_times.append(candidate_time)
+        result = db.check_program_conflicts(
+            program_id=program_id,
+            time=candidate_time,
+            zones=zones,
+            days=days,
+        )
+        if isinstance(result, dict):
+            result = result.get("conflicts", [])
+        for conflict in result or []:
+            if conflict not in conflicts:
+                conflicts.append(conflict)
+    return conflicts
+
+
 @programs_api_bp.route("/api/programs")
 def api_programs():
     programs = db.get_programs()
@@ -90,11 +127,12 @@ def api_program(prog_id):
             logger.debug("Handled exception in api_program: %s", e)
         try:
             effective_data.update(data)
-            conflicts = db.check_program_conflicts(
+            conflicts = _check_candidate_conflicts(
                 program_id=prog_id,
-                time=effective_data["time"],
+                time_value=effective_data["time"],
                 zones=effective_data["zones"],
                 days=effective_data["days"],
+                extra_times=effective_data.get("extra_times"),
             )
             if conflicts:
                 return jsonify(
@@ -152,11 +190,12 @@ def api_create_program():
     except (ValueError, TypeError, KeyError) as e:
         logger.debug("Handled exception in api_create_program: %s", e)
     try:
-        conflicts = db.check_program_conflicts(
+        conflicts = _check_candidate_conflicts(
             program_id=None,
-            time=data["time"],
+            time_value=data["time"],
             zones=data["zones"],
             days=data.get("days", []),
+            extra_times=data.get("extra_times"),
         )
         if conflicts:
             return jsonify(
@@ -193,6 +232,7 @@ def check_program_conflicts():
         time_val = data.get("time")
         zones = data.get("zones", [])
         days = data.get("days", [])
+        extra_times = data.get("extra_times")
 
         if not time_val or not zones or not days:
             # Best-effort debug trace of UI intent — only when debug logging is on.
@@ -207,7 +247,7 @@ def check_program_conflicts():
                 logger.debug("check_program_conflicts: debug_audit failed", exc_info=True)
             return jsonify({"success": False, "message": "Необходимо указать время, дни и зоны"}), 400
 
-        conflicts = db.check_program_conflicts(program_id, time_val, zones, days)
+        conflicts = _check_candidate_conflicts(program_id, time_val, zones, days, extra_times)
         # Debug-level trace — this is read-only intent, useful for triaging
         # "why did the UI block save" without flooding audit_log in prod.
         try:

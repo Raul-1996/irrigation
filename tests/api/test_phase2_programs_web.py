@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from routes import programs_api
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -128,6 +130,77 @@ class TestIntervalDaysValidation:
 
         assert response.status_code == 400
         assert app.db.get_program(program["id"])["interval_days"] == 3
+
+
+class TestCandidateExtraTimesConflictChecks:
+    def test_post_blocks_conflict_found_only_at_candidate_extra_time(self, admin_client, app, monkeypatch):
+        zone = app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
+        calls = []
+
+        def fake_check(program_id, time, zones, days):
+            calls.append(time)
+            return [{"program_id": 99}] if time == "12:00" else []
+
+        monkeypatch.setattr(programs_api.db, "check_program_conflicts", fake_check)
+
+        response = admin_client.post(
+            "/api/programs",
+            json={
+                "name": "Candidate extras",
+                "time": "06:00",
+                "extra_times": ["12:00", "18:00"],
+                "days": [0],
+                "zones": [zone["id"]],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["success"] is False
+        assert calls == ["06:00", "12:00", "18:00"]
+
+    def test_put_blocks_conflict_found_only_at_candidate_extra_time(self, admin_client, app, monkeypatch):
+        program = _create_program(app)
+        calls = []
+
+        def fake_check(program_id, time, zones, days):
+            calls.append(time)
+            return [{"program_id": 99}] if time == "12:00" else []
+
+        monkeypatch.setattr(programs_api.db, "check_program_conflicts", fake_check)
+
+        response = admin_client.put(
+            f"/api/programs/{program['id']}",
+            json={"extra_times": ["12:00"]},
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["success"] is False
+        assert calls == ["06:00", "12:00"]
+        assert app.db.get_program(program["id"])["extra_times"] == []
+
+    def test_conflict_probe_checks_each_candidate_start_time(self, admin_client, monkeypatch):
+        calls = []
+
+        def fake_check(program_id, time, zones, days):
+            calls.append(time)
+            return [{"program_id": 99}] if time == "18:00" else []
+
+        monkeypatch.setattr(programs_api.db, "check_program_conflicts", fake_check)
+
+        response = admin_client.post(
+            "/api/programs/check-conflicts",
+            json={
+                "program_id": None,
+                "time": "06:00",
+                "extra_times": ["12:00", "18:00"],
+                "days": [0],
+                "zones": [1],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["has_conflicts"] is True
+        assert calls == ["06:00", "12:00", "18:00"]
 
 
 class TestProgramsWizardResponseHandling:
