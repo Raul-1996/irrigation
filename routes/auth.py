@@ -33,6 +33,12 @@ def _regenerate_session(new_values: dict) -> None:
 def login_page():
     # Поддержка гостевого входа (viewer — только чтение, без мутаций)
     if request.args.get("guest") == "1":
+        # A guest link must never lower an existing authenticated session.
+        # Keep the GET entry point for published read-only links, but make it
+        # idempotent for viewer/user/admin sessions so a cross-site navigation
+        # cannot silently replace an administrator with a viewer.
+        if session.get("logged_in") and session.get("role") in {"viewer", "user", "admin"}:
+            return redirect(url_for("status_bp.index"))
         # Regenerate session id even for guest login — prevents a stored
         # unauthenticated sid from being re-used later when the same
         # browser authenticates as admin.
