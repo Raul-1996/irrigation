@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **75 fixed · 2 deferred · 70 pending · 5 not_applicable**.
+- Phase 2 disposition: **76 fixed · 2 deferred · 69 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1479,7 +1479,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** A two-zone runner probe produced starts for both zones after Telegram reported success.
 - **Репродукция/сценарий:** Run a two-zone sequence, invoke Telegram group stop during zone one, observe zone two still starts.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Telegram Stop вызывает cancel_group_jobs, который ставит Event активного runner, останавливает текущие zones и снимает jobs; sequencer больше не продолжает следующей зоной.
+- **Пакет:** `phase2-telegram-stop`.
+- **Fix commit:** `40b961f7d3761c8752c25886570b6568c8ec8531`.
+- **Regression tests:** `tests/unit/test_phase2_telegram_stop.py::test_group_stop_cancels_scheduler_session`, `tests/unit/test_phase2_telegram_stop.py::test_group_stop_falls_back_to_zone_control_without_scheduler`.
 
 ### #148 [medium] `routes/system_status_api.py:139-157; irrigation_scheduler.py:733-744,2083,2130-2188` — Health cancel создаёт ownerless group_cancel_event и блокирует будущие cron-программы группы
 

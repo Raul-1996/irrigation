@@ -780,6 +780,29 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-telegram-stop",
+      "fix_commit": "40b961f7d3761c8752c25886570b6568c8ec8531",
+      "merge_commit": "5faec6e9e33da3d7c4a4c3e76021e6ab3b45bfb7",
+      "summary": "Telegram group Stop делегирует scheduler session cancellation и сохраняет direct zone-control fallback только при недоступном scheduler.",
+      "resolutions": [
+        {
+          "id": 147,
+          "disposition": "fixed",
+          "reason": "Telegram Stop вызывает cancel_group_jobs, который ставит Event активного runner, останавливает текущие zones и снимает jobs; sequencer больше не продолжает следующей зоной.",
+          "tests": [
+            "tests/unit/test_phase2_telegram_stop.py::test_group_stop_cancels_scheduler_session",
+            "tests/unit/test_phase2_telegram_stop.py::test_group_stop_falls_back_to_zone_control_without_scheduler"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "11 passed",
+        "full_pytest": "1997 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

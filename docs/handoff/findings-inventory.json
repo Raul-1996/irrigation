@@ -4401,11 +4401,14 @@
     "reproduction": "Run a two-zone sequence, invoke Telegram group stop during zone one, observe zone two still starts.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Telegram Stop вызывает cancel_group_jobs, который ставит Event активного runner, останавливает текущие zones и снимает jobs; sequencer больше не продолжает следующей зоной.",
+      "package": "phase2-telegram-stop",
+      "commit": "40b961f7d3761c8752c25886570b6568c8ec8531",
+      "tests": [
+        "tests/unit/test_phase2_telegram_stop.py::test_group_stop_cancels_scheduler_session",
+        "tests/unit/test_phase2_telegram_stop.py::test_group_stop_falls_back_to_zone_control_without_scheduler"
+      ]
     }
   },
   {

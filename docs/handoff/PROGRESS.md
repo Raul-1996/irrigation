@@ -216,8 +216,16 @@
     - targeted: 14 passed; full gate: 1995 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 75 записей fixed (69 корней + шесть унаследованных дублей),
-2 deferred, 70 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+13. `phase2-telegram-stop` — #147 `fixed`
+    - fix `40b961f7d3761c8752c25886570b6568c8ec8531`;
+    - merge `5faec6e9e33da3d7c4a4c3e76021e6ab3b45bfb7`;
+    - Telegram Stop делегирует P03 `cancel_group_jobs`, поэтому отменяет Event
+      runner и jobs вместе с физической остановкой; fallback сохранён без scheduler;
+    - targeted: 11 passed; full gate: 1997 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 76 записей fixed (70 корней + шесть унаследованных дублей),
+2 deferred, 69 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
