@@ -1150,6 +1150,39 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-image-safety",
+      "fix_commit": "66a6c0a2a8c828630b89eb72ebee3ae1a72641de",
+      "merge_commit": "964f9a26e8d5bddaf883b9c9e17cfae97459d364",
+      "summary": "Image dimension cap выполняется по headers до decode, а Pillow decompression-bomb rejection нормализуется в существующий safe upload contract.",
+      "resolutions": [
+        {
+          "id": 97,
+          "disposition": "fixed",
+          "reason": "50 MP cap проверяет Image.size сразу после header parse и до img.load; oversize image закрывается и отклоняется без полной pixel allocation/decode.",
+          "tests": [
+            "tests/unit/test_image_pipeline.py::TestOptimizeUploadedImage::test_pixel_cap_rejects_over_50mp",
+            "tests/unit/test_image_pipeline.py::TestOptimizeUploadedImage::test_pixel_cap_accepts_at_limit"
+          ]
+        },
+        {
+          "id": 137,
+          "disposition": "fixed",
+          "reason": "Pillow DecompressionBombError из open/load преобразуется в ImageTooLargeError, и map/zone-photo routes возвращают стабильный 400 IMAGE_TOO_LARGE без записи файла/path.",
+          "tests": [
+            "tests/unit/test_image_pipeline.py::TestLoadSafeImage::test_raises_on_pillow_decompression_bomb",
+            "tests/api/test_zones_photo_two_variants.py::TestUploadSizeLimit::test_upload_returns_safe_4xx_for_decompression_bomb",
+            "tests/api/test_map_upload_compression_issue49.py::TestMapUploadInvalid::test_decompression_bomb_returns_image_too_large_400"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "30 passed",
+        "full_pytest": "2038 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

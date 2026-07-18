@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **109 fixed · 4 deferred · 34 pending · 5 not_applicable**.
+- Phase 2 disposition: **111 fixed · 4 deferred · 32 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1077,7 +1077,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ (загрузка фото зоны /api/zones/<id>/photo и карты /api/map требует роль admin) отправляет крафтовый JPEG 12000×12500 (~150 MP, размер файла в пределах 20 MB MAX_FILE_SIZE). Pillow декодирует его в ~450 MB RGB-битмап в памяти на контроллере Wirenboard (обычно 512 MB–1 GB ОЗУ) до того, как проверка 50 MP отбросит файл → риск OOM/деградации сервиса. Заявленная защита от decompression-bomb фактически не срабатывает для 50–178 MP. Требует прав admin (отсюда низкая severity); от изображений >178 MP частично защищает встроенный guard Pillow.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** 50 MP cap проверяет Image.size сразу после header parse и до img.load; oversize image закрывается и отклоняется без полной pixel allocation/decode.
+- **Пакет:** `phase2-image-safety`.
+- **Fix commit:** `66a6c0a2a8c828630b89eb72ebee3ae1a72641de`.
+- **Regression tests:** `tests/unit/test_image_pipeline.py::TestOptimizeUploadedImage::test_pixel_cap_rejects_over_50mp`, `tests/unit/test_image_pipeline.py::TestOptimizeUploadedImage::test_pixel_cap_accepts_at_limit`.
 
 ### #98 [high] `db/migrations.py:267` — Рестарт сервиса с пустой таблицей zones молча сбрасывает пароль администратора на дефолтный "1234"
 
@@ -1494,7 +1498,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ (эндпоинты admin-only) загружает сплошного цвета PNG 20000x10000 = 200M пикс. (сжимается в <1 МБ, проходит 20 МБ лимит) на /api/zones/<id>/photo или /api/map. Ожидается аккуратный 400 IMAGE_TOO_LARGE, но `Image.open()` бросает DecompressionBombError, которое не перехвачено → 500 и шумный трейс в логах; контракт 'enforce a 50 MP decompression-bomb cap' из docstring image_pipeline не выполняется.
 - **Решение оркестратора:** Pillow rejects the image, so this is a 500-vs-400 contract bug, not a successful cap bypass.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Pillow DecompressionBombError из open/load преобразуется в ImageTooLargeError, и map/zone-photo routes возвращают стабильный 400 IMAGE_TOO_LARGE без записи файла/path.
+- **Пакет:** `phase2-image-safety`.
+- **Fix commit:** `66a6c0a2a8c828630b89eb72ebee3ae1a72641de`.
+- **Regression tests:** `tests/unit/test_image_pipeline.py::TestLoadSafeImage::test_raises_on_pillow_decompression_bomb`, `tests/api/test_zones_photo_two_variants.py::TestUploadSizeLimit::test_upload_returns_safe_4xx_for_decompression_bomb`, `tests/api/test_map_upload_compression_issue49.py::TestMapUploadInvalid::test_decompression_bomb_returns_image_too_large_400`.
 
 ### #138 [low] `services/postpone.py:34` — /api/postpone: параметр days не валидируется — ValueError/OverflowError → 500 на гость-доступном CSRF-exempt эндпоинте
 

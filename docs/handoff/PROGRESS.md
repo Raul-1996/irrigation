@@ -305,8 +305,18 @@
     - targeted: 50 passed; full gate: 2036 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 109 записей fixed (100 корней + девять унаследованных дублей),
-4 deferred, 34 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+20. `phase2-image-safety` — #97, #137 `fixed`
+    - fix `66a6c0a2a8c828630b89eb72ebee3ae1a72641de`;
+    - merge `964f9a26e8d5bddaf883b9c9e17cfae97459d364`;
+    - 50 MP guard срабатывает по headers до `img.load()` и не декодирует
+      заведомо oversized bitmap;
+    - Pillow bomb error нормализован в `ImageTooLargeError`; map и zone-photo
+      возвращают `400 / IMAGE_TOO_LARGE` без persistence side effects;
+    - targeted: 30 passed; full gate: 2038 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 111 записей fixed (102 корня + девять унаследованных дублей),
+4 deferred, 32 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
