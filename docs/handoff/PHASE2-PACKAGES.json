@@ -178,6 +178,110 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-mqtt-safety",
+      "fix_commit": "7d750b49fe5612f52d6121bdb4c923f5e42df3ad",
+      "merge_commit": "ec38e36f74863e0cb547267d74b85fe48f1c25b6",
+      "summary": "Укреплены MQTT publisher/API/storage: секреты не возвращаются, lifecycle клиентов сериализован по серверу, diagnostic sessions изолированы, probe/scan ограничены и завершаются.",
+      "resolutions": [
+        {
+          "id": 17,
+          "disposition": "fixed",
+          "reason": "POST и PUT всегда маскируют password в ответе; сохранённый расшифрованный секрет не покидает сервер даже при password-less partial update.",
+          "tests": [
+            "tests/api/test_phase2_mqtt_api.py::test_findings_17_69_create_and_partial_update_never_echo_saved_secret"
+          ]
+        },
+        {
+          "id": 39,
+          "disposition": "fixed",
+          "reason": "Создание клиента сериализуется отдельным lock на server_id, а connect/TLS/loop_start выполняются без глобального registry lock; недоступный брокер не задерживает другой сервер.",
+          "tests": [
+            "tests/unit/test_phase2_mqtt_safety.py::test_finding_39_dead_broker_connect_does_not_hold_global_client_lock"
+          ]
+        },
+        {
+          "id": 49,
+          "disposition": "fixed",
+          "reason": "on_disconnect принимает полный пятиаргументный Paho CallbackAPIVersion.VERSION2 контракт.",
+          "tests": [
+            "tests/unit/test_phase2_mqtt_safety.py::test_finding_49_disconnect_callback_accepts_paho_v2_signature"
+          ]
+        },
+        {
+          "id": 53,
+          "disposition": "fixed",
+          "reason": "Публичная invalidation boundary очищает publisher client/server/debounce caches, а MQTT PUT/DELETE инвалидирует publisher и инициирует безопасный hub reload.",
+          "tests": [
+            "tests/unit/test_phase2_mqtt_safety.py::test_finding_53_public_invalidation_clears_all_publisher_caches",
+            "tests/api/test_phase2_mqtt_api.py::test_finding_53_update_invalidates_publisher_and_reloads_hub"
+          ]
+        },
+        {
+          "id": 55,
+          "disposition": "fixed",
+          "reason": "Каждая QoS republish-попытка, включая последнюю, получает wait_for_publish; успешная последняя доставка больше не возвращает False.",
+          "tests": [
+            "tests/unit/test_phase2_mqtt_safety.py::test_finding_55_last_qos_retry_is_waited_for_and_can_succeed"
+          ]
+        },
+        {
+          "id": 62,
+          "disposition": "fixed",
+          "reason": "MQTT repository строит настоящий partial UPDATE только из переданных полей; отсутствие TLS-полей больше не перезаписывает их дефолтами.",
+          "tests": [
+            "tests/api/test_phase2_mqtt_api.py::test_finding_62_partial_put_preserves_tls_configuration"
+          ]
+        },
+        {
+          "id": 84,
+          "disposition": "fixed",
+          "reason": "Invalidation привязана к generation клиента и откладывает teardown, пока активные publisher leases не освобождены; stale worker не разрушает replacement/shared client.",
+          "tests": [
+            "tests/unit/test_phase2_mqtt_safety.py::test_finding_84_stale_worker_cannot_invalidate_replacement_client",
+            "tests/unit/test_phase2_mqtt_safety.py::test_finding_84_in_use_client_teardown_is_deferred_until_last_release"
+          ]
+        },
+        {
+          "id": 85,
+          "disposition": "fixed",
+          "reason": "Probe принимает только конечную duration в диапазоне 0 < duration <= 30 секунд и отклоняет NaN/Infinity/строки/неположительные/чрезмерные значения до запуска клиента.",
+          "tests": [
+            "tests/api/test_phase2_mqtt_api.py::test_finding_85_probe_duration_is_finite_and_bounded"
+          ]
+        },
+        {
+          "id": 86,
+          "disposition": "fixed",
+          "reason": "По истечении scan timeout worker отправляет terminal end event, завершает generator и освобождает per-IP слот.",
+          "tests": [
+            "tests/api/test_phase2_mqtt_api.py::test_finding_86_scan_timeout_ends_stream_and_releases_slot"
+          ]
+        },
+        {
+          "id": 114,
+          "disposition": "fixed",
+          "reason": "MQTT status endpoint требует admin до чтения сохранённых credentials или попытки подключения.",
+          "tests": [
+            "tests/api/test_phase2_mqtt_api.py::test_finding_114_status_requires_admin_before_loading_credentials"
+          ]
+        },
+        {
+          "id": 116,
+          "disposition": "fixed",
+          "reason": "Ошибки connect в scan worker превращаются в безопасный terminal SSE error, после которого stream заканчивается и слот освобождается.",
+          "tests": [
+            "tests/api/test_phase2_mqtt_api.py::test_finding_116_scan_connect_error_is_reported_and_stream_ends"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "173 passed",
+        "full_pytest": "1923 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

@@ -112,9 +112,24 @@
    - targeted: 130 passed; full gate: 1903 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 14 записей fixed (13 корней + точный дубль #59), 1 deferred,
-132 REAL-записи pending; пять `VERIFIED_FALSE` остаются `not_applicable` и не
-исправляются.
+5. `phase2-mqtt-safety` — #17, #39, #49, #53, #55, #62, #84, #85, #86,
+   #114, #116 `fixed`; #69 наследует #17
+   - fix `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`;
+   - merge `ec38e36f74863e0cb547267d74b85fe48f1c25b6`;
+   - secrets не возвращаются в POST/PUT, partial MQTT update сохраняет TLS;
+   - per-server creation lock исключает глобальную блокировку connect, callback
+     соответствует Paho VERSION2, client invalidation generation/lease-safe;
+   - QoS retry ожидает последнюю отправку, probe/scan validation bounded, scan
+     timeout/connect error завершают SSE и освобождают слот, status admin-only;
+   - #52 остаётся pending до обработки typed SecretDecryptionError владельцем
+     `sse_hub`; #80 остаётся pending до замены последнего temporary client_id в
+     `routes/system_status_api.py`;
+   - targeted: 173 passed; full gate: 1923 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 26 записей fixed (24 корня + два унаследованных дубля),
+1 deferred, 120 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+`not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
 

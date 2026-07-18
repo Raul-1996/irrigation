@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **14 fixed · 1 deferred · 132 pending · 5 not_applicable**.
+- Phase 2 disposition: **26 fixed · 1 deferred · 120 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -148,7 +148,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ в UI редактирует у MQTT-сервера только имя/хост (форма шлёт объект из GET, где password='***') → PUT-ответ содержит реальный пароль брокера в открытом виде; он оседает в devtools/прокси-логах/любом клиенте, который сам секрет не знал. Фикс: маскировать password в ответе PUT так же, как в GET.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** POST и PUT всегда маскируют password в ответе; сохранённый расшифрованный секрет не покидает сервер даже при password-less partial update.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_findings_17_69_create_and_partial_update_never_echo_saved_secret`.
 
 ### #18 [medium] `services/zone_control.py:544` — Повторный «Старт» уже работающей зоны больше не отменяет программу группы — ручное продление молча стирается планировщиком
 
@@ -326,7 +330,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Конфигурация с двумя MQTT-серверами (например, локальный WB + удалённый брокер), удалённый недоступен. StateVerifier/мастер-клапан ретраит publish на мёртвый сервер → тред висит в connect() под _MQTT_CLIENTS_LOCK. В этот момент срабатывает автостоп/watchdog_cap зоны на ЖИВОМ брокере: publish_mqtt_value → get_or_create_mqtt_client → ожидание глобального лока → команда OFF реле задерживается на ~5-10с на каждый цикл ретраев чужого сервера; при систематических ретраях (verify_async каждые старт/стоп) задержки постоянные.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Создание клиента сериализуется отдельным lock на server_id, а connect/TLS/loop_start выполняются без глобального registry lock; недоступный брокер не задерживает другой сервер.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_safety.py::test_finding_39_dead_broker_connect_does_not_hold_global_client_lock`.
 
 ### #40 [low] `services/sse_hub.py:381` — reload_hub выполняет пересборку хаба (blocking connect всех клиентов под _SSE_HUB_LOCK) в треде HTTP-запроса; на время пересборки теряются эхо реле
 
@@ -410,7 +418,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Рестарт mosquitto / обрыв Wi-Fi → брокер рвёт TCP → paho зовёт on_disconnect → TypeError → сетевой тред умирает, авто-reconnect (reconnect_delay_set 1..5с) не срабатывает. Если обрыв случился во время _publish_with_retries: cl.reconnect() (стр. 163) восстанавливает сокет, но обрабатывать входящие PUBACK/PUBCOMP некому → publish rc=0, wait_for_publish молча таймаутится → ~22с задержки (backoff 1+2+4 + 3×5с wait) на каждый топик, затем инвалидация клиента и пересоздание; команда зоны ON/OFF может вернуть False и попасть в audit как mqtt_publish_failure, хотя брокер жив. Каждый дисконнект = спам «Caught exception in on_disconnect» + деградация доставки до следующего publish.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** on_disconnect принимает полный пятиаргументный Paho CallbackAPIVersion.VERSION2 контракт.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_safety.py::test_finding_49_disconnect_callback_accepts_paho_v2_signature`.
 
 ### #50 [high] `services/observed_state.py:199` — Observed-state верификация — тавтология: приложение само пишет retained-значение в report-топик, который затем читает верификатор («ложное подтверждение» реле)
 
@@ -443,7 +455,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Брокер переезжает на новый хост (или админ исправляет опечатку в host, указывавшую на другой живой брокер): админ обновляет сервер через UI → API отвечает success, но кэшированный клиент остаётся подключён к СТАРОМУ брокеру (is_connected()==True) и все команды зон/мастер-клапана уходят туда с подтверждением доставки qos=2; SSE-хаб продолжает слушать эхо на старом брокере. Реальные реле на новом брокере команд не получают, при этом ни одной ошибки в логах — до полного рестарта сервиса.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Публичная invalidation boundary очищает publisher client/server/debounce caches, а MQTT PUT/DELETE инвалидирует publisher и инициирует безопасный hub reload.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_safety.py::test_finding_53_public_invalidation_clears_all_publisher_caches`, `tests/api/test_phase2_mqtt_api.py::test_finding_53_update_invalidates_publisher_and_reloads_hub`.
 
 ### #54 [medium] `services/sse_hub.py:168` — SSE-хаб не создаёт MQTT-клиента для сервера, на котором есть только топик мастер-клапана (без зон) — master_valve_observed никогда не обновляется
 
@@ -459,7 +475,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Кратковременный затык брокера ~7-15с: первые три wait_for_publish таймаутятся, 4-я публикация уходит и успешно доставляется после восстановления — но функция уже вернула False. Для master close это значит ложный «masters_failed_publish» в emergency_stop_all и запись mqtt_publish_failure в аудит при фактически закрытом клапане; плюс гарантированный дубликат команды через пересозданный клиент (для идемпотентных '0'/'1' безвредно, но аудит и счётчики врут, оператор видит несуществующий отказ).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Каждая QoS republish-попытка, включая последнюю, получает wait_for_publish; успешная последняя доставка больше не возвращает False.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_safety.py::test_finding_55_last_qos_retry_is_waited_for_and_can_succeed`.
 
 ### #56 [low] `routes/auth.py:55` — Все Flask-рейт-лимитеры используют request.remote_addr без ProxyFix — за nginx все клиенты схлопываются в одно ведро, блокировка логина затрагивает всех
 
@@ -526,7 +546,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** MQTT-сервер настроен на TLS через прямой вызов API/скрипт (tls_enabled=1, пути к сертификатам заданы). Оператор на странице /mqtt правит, например, имя сервера и жмёт «Сохранить» → PUT /api/mqtt/servers/<id> без tls_* → tls_enabled=0, пути=NULL: TLS отключён молча, соединение с брокером далее идёт открытым текстом или ломается.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** MQTT repository строит настоящий partial UPDATE только из переданных полей; отсутствие TLS-полей больше не перезаписывает их дефолтами.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_finding_62_partial_put_preserves_tls_configuration`.
 
 ### #63 [high] `irrigation_scheduler.py:1552` — start_group_sequence выключает бегущие зоны только в БД: без MQTT OFF и со снятием их стоп-джобов реле остаётся физически открытым и неуправляемым
 
@@ -583,7 +607,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ правит имя или хост MQTT-сервера в настройках → в JSON-ответе PUT приходит {"server": {..., "password": "<реальный пароль брокера>"}} — секрет попадает в devtools/память страницы/прокси-логи; в сочетании с уже найденными stored-XSS в zones.js любой внедрённый скрипт может снять пароль одним fetch'ем сохранения.
 - **Дубль:** `#17`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** POST и PUT всегда маскируют password в ответе; сохранённый расшифрованный секрет не покидает сервер даже при password-less partial update.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_findings_17_69_create_and_partial_update_never_echo_saved_secret`.
 
 ### #70 [medium] `db/programs.py:216` — check_program_conflicts игнорирует enabled: выключенная программа навсегда блокирует создание/сохранение пересекающейся программы
 
@@ -712,7 +740,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Старт зоны в группе из 5+ зон: воркеры параллельно шлют '0' соседям через один кэшированный клиент. У одного воркера доставка QoS2 подвисает → спустя ~20 с он вызывает _invalidate_client и дисконнектит клиента, которым остальные воркеры прямо сейчас ждут PUBACK/PUBCOMP → их wait_for_publish истекает, каждый по цепочке тоже инвалидирует (в т.ч. только что созданный здоровый клиент соседнего воркера) и пере-публикует. Итог: лавина пересозданий клиентов, ложные false от publish_mqtt_value для реально доставленных OFF (плюс дубли команд через новые клиенты), state-машина зон получает «mqtt off failed» на ровном месте.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Invalidation привязана к generation клиента и откладывает teardown, пока активные publisher leases не освобождены; stale worker не разрушает replacement/shared client.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_safety.py::test_finding_84_stale_worker_cannot_invalidate_replacement_client`, `tests/unit/test_phase2_mqtt_safety.py::test_finding_84_in_use_client_teardown_is_deferred_until_last_release`.
 
 ### #85 [low] `routes/mqtt_api.py:150` — /api/mqtt/<id>/probe: duration из тела запроса не валидируется — гигантское значение/『1e999』 навсегда блокирует HTTP-воркер, нечисловое даёт 500
 
@@ -720,7 +752,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** POST /api/mqtt/1/probe {"duration": "1e999"} → float = inf → цикл не завершается, пока не накопится 5000 сообщений (на тихом брокере — никогда): тред hypercorn занят навсегда, MQTT-клиент (с общим client_id — см. отдельную находку) держит сессию и перманентно выбивает SSE-хаб. {"duration": "abc"} → непойманный ValueError → 500 c трейсбеком вместо контрактного api_soft.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Probe принимает только конечную duration в диапазоне 0 < duration <= 30 секунд и отклоняет NaN/Infinity/строки/неположительные/чрезмерные значения до запуска клиента.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_finding_85_probe_duration_is_finite_and_bounded`.
 
 ### #86 [low] `routes/mqtt_api.py:333` — scan-sse: через 300 с MQTT-тред тихо завершается, а SSE-генератор продолжает слать ping вечно — скан «замерзает», слот per-IP-лимита остаётся занят
 
@@ -728,7 +764,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ запускает непрерывный скан топиков и оставляет вкладку: спустя 5 минут сообщения перестают приходить, но UI выглядит «живым» (ping-и идут) — пользователь думает, что в сети тишина, хотя подписка давно снята. Вкладка при этом продолжает занимать один из MAX_SCAN_SSE_PER_IP=2 слотов; две «замёрзшие» вкладки → 429 для нового скана до закрытия старых.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** По истечении scan timeout worker отправляет terminal end event, завершает generator и освобождает per-IP слот.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_finding_86_scan_timeout_ends_stream_and_releases_slot`.
 
 ### #87 [high] `irrigation_scheduler.py:2329` — Recovery-запуск гонится с boot-ремедиацией: первая восстановленная зона молча «поливается» с выключенным реле/закрытым мастер-клапаном
 
@@ -961,7 +1001,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Неаутентифицированный клиент в LAN циклически дёргает GET /api/mqtt/1/status: каждый запрос — блокирующий TCP+MQTT connect (до ~5с paho connect-timeout при чёрной дыре/фильтрации). На Wirenboard с малым числом hypercorn-воркеров несколько параллельных запросов исчерпывают воркеры — статус-страница и управление перестают отвечать. Заодно аноним получает оракул доступности внутреннего брокера (connected true/false) перебором server_id.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** MQTT status endpoint требует admin до чтения сохранённых credentials или попытки подключения.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_finding_114_status_requires_admin_before_loading_credentials`.
 
 ### #115 [low] `services/zone_control.py:568` — Перезапуск уже включённой зоны снимает zone_hard_stop чужой зоны: подстрочное сравнение id джоба без разделителя (зона 5 матчит zone_hard_stop:51)
 
@@ -978,7 +1022,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ открывает «Сканирование топиков» для брокера, который сейчас перезапускается/недоступен: клиенту уходит event:open (успех), тред падает на connect мгновенно и молча. UI показывает идущий скан, данные не приходят, ошибки нет; соединение висит до ручного закрытия вкладки, занимая слот per-IP лимита (2) и HTTP-воркер. Отличается от ранее найденного 300-секундного замерзания: здесь скан мёртв с нулевой секунды из-за слишком узкого except.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Ошибки connect в scan worker превращаются в безопасный terminal SSE error, после которого stream заканчивается и слот освобождается.
+- **Пакет:** `phase2-mqtt-safety`.
+- **Fix commit:** `7d750b49fe5612f52d6121bdb4c923f5e42df3ad`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_finding_116_scan_connect_error_is_reported_and_stream_ends`.
 
 ### #117 [low] `services/sse_hub.py:462` — Эвикция SSE-клиента при полной очереди теряет sentinel: вытесненный клиент навсегда остаётся «живым» зомби-соединением без обновлений
 
