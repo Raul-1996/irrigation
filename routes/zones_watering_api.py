@@ -384,9 +384,11 @@ def api_zone_mqtt_start(zone_id: int):
 
 
 @zones_watering_api_bp.route("/api/zones/<int:zone_id>/mqtt/stop", methods=["POST"])
-@rate_limit("mqtt_control", max_requests=10, window_sec=60)
 @audit_log("zone_mqtt_stop", target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
 def api_zone_mqtt_stop(zone_id: int):
+    # Explicit OFF is a safety action and must remain available even when the
+    # per-IP start bucket is saturated.  Authentication/guest-control policy
+    # is still enforced centrally by app._auth_before_request before this view.
     z = db.get_zone(zone_id)
     if not z:
         return jsonify({"success": False}), 404
