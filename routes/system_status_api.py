@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta
 
 from flask import Blueprint, current_app, jsonify, request, session
@@ -147,12 +148,6 @@ def api_health_cancel_group(group_id):
         if not sched:
             return api_error("scheduler_unavailable", "scheduler unavailable", 503)
         try:
-            if hasattr(sched, "group_cancel_events"):
-                import threading as _th
-
-                ev = sched.group_cancel_events.get(int(group_id)) or _th.Event()
-                ev.set()
-                sched.group_cancel_events[int(group_id)] = ev
             if hasattr(sched, "cancel_group_jobs"):
                 sched.cancel_group_jobs(int(group_id))
         except (ValueError, TypeError, RuntimeError):
@@ -323,6 +318,18 @@ def api_status():
     programs = db.get_programs()
     weather_skip = weather_skip_today()
 
+    # Compute the request-wide snapshot once and slice it per group below.
+    # Besides avoiding repeated schedule work, this lets next_watering's
+    # request-local cancellation cache deduplicate (program, date, group)
+    # lookups across every zone rendered by this status response.
+    watering_zone_ids = [int(z["id"]) for z in zones if int(z.get("group_id") or 0) != 999]
+    next_watering_by_zone = compute_next_watering(
+        watering_zone_ids,
+        all_zones=zones,
+        programs=programs,
+        skip_today=weather_skip,
+    )
+
     zones_by_group = {}
     for zone in zones:
         group_id = zone["group_id"]
@@ -374,13 +381,12 @@ def api_status():
 
         next_start = None
         if group_zones:
-            nw = compute_next_watering(
-                [z["id"] for z in group_zones],
-                all_zones=zones,
-                programs=programs,
-                skip_today=weather_skip,
-            )
-            candidates = [e["next_dt"] for e in nw.values() if e.get("next_dt")]
+            group_zone_ids = {int(z["id"]) for z in group_zones}
+            candidates = [
+                entry["next_dt"]
+                for zone_id, entry in next_watering_by_zone.items()
+                if zone_id in group_zone_ids and entry.get("next_dt")
+            ]
             if candidates:
                 next_start = min(candidates).strftime("%H:%M")
 
@@ -538,7 +544,13 @@ def api_status():
             candidates = enabled_servers if mqtt_enabled_count > 0 else servers
             for s in candidates:
                 try:
-                    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=(s.get("client_id") or None))
+                    # This is a short-lived health probe, not the long-lived
+                    # hub client. Reusing the configured client ID makes the
+                    # broker evict the hub's MQTT session on every status poll.
+                    client = mqtt.Client(
+                        mqtt.CallbackAPIVersion.VERSION2,
+                        client_id=f"wb-status-{uuid.uuid4().hex[:10]}",
+                    )
                     if s.get("username"):
                         client.username_pw_set(s.get("username"), s.get("password") or None)
                     client.connect(s.get("host") or "127.0.0.1", int(s.get("port") or 1883), 3)
@@ -673,28 +685,9 @@ def api_logs():
         from_date = request.args.get("from")
         to_date = request.args.get("to")
         event_type = request.args.get("type")
-        logs = db.get_logs()
-        if from_date or to_date or event_type:
-            filtered_logs = []
-            for log in logs:
-                if event_type and log["type"] != event_type:
-                    continue
-                if from_date or to_date:
-                    try:
-                        log_date = datetime.strptime(log["timestamp"][:10], "%Y-%m-%d").date()
-                        if from_date:
-                            from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-                            if log_date < from_dt:
-                                continue
-                        if to_date:
-                            to_dt = datetime.strptime(to_date, "%Y-%m-%d").date()
-                            if log_date > to_dt:
-                                continue
-                    except (ValueError, TypeError, KeyError) as e:
-                        logger.debug("Bare exception in api_logs: %s", e)
-                        continue
-                filtered_logs.append(log)
-            logs = filtered_logs
+        # The repository applies these predicates before its LIMIT 1000.
+        # Filtering the already-limited result in Python hid older matches.
+        logs = db.get_logs(event_type, from_date, to_date)
         return jsonify(logs)
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения логов: {e}")
