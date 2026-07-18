@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import queue
+import ssl
 import threading
 import uuid
 
@@ -64,10 +65,35 @@ def _refresh_mqtt_runtime(server_id: int) -> None:
 
 
 def _new_diagnostic_client(server: dict, purpose: str):
-    """Create a temporary client that cannot take over a saved live session."""
+    """Create and configure a temporary client without touching a live session."""
     purpose_slug = "".join(ch for ch in purpose.lower() if ch.isalnum())[:6] or "diag"
     client_id = f"wb-{purpose_slug}-{uuid.uuid4().hex[:10]}"
-    return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+    if server.get("username"):
+        client.username_pw_set(server.get("username"), server.get("password") or None)
+    if int(server.get("tls_enabled") or 0) == 1:
+        configured_version = (server.get("tls_version") or "TLS_CLIENT").upper().replace("_", ".").strip()
+        tls_versions = {
+            "TLS": ssl.PROTOCOL_TLS_CLIENT,
+            "TLS.CLIENT": ssl.PROTOCOL_TLS_CLIENT,
+            "TLSV1": ssl.PROTOCOL_TLSv1,
+            "TLSV1.0": ssl.PROTOCOL_TLSv1,
+            "TLSV1.1": ssl.PROTOCOL_TLSv1_1,
+            "TLSV1.2": ssl.PROTOCOL_TLSv1_2,
+        }
+        try:
+            tls_version = tls_versions[configured_version]
+        except KeyError as e:
+            raise ValueError("Unsupported MQTT TLS version") from e
+        client.tls_set(
+            ca_certs=server.get("tls_ca_path") or None,
+            certfile=server.get("tls_cert_path") or None,
+            keyfile=server.get("tls_key_path") or None,
+            tls_version=tls_version,
+        )
+        if int(server.get("tls_insecure") or 0) == 1:
+            client.tls_insecure_set(True)
+    return client
 
 
 # ===== MQTT Servers CRUD =====
@@ -217,8 +243,6 @@ def api_mqtt_probe(server_id: int):
             f"probe: connecting to {server.get('host')}:{server.get('port')} filter={topic_filter} duration={duration}s"
         ]
         client = _new_diagnostic_client(server, "probe")
-        if server.get("username"):
-            client.username_pw_set(server.get("username"), server.get("password") or None)
 
         def on_connect(cl, userdata, flags, reason_code, properties=None):
             try:
@@ -293,8 +317,6 @@ def api_mqtt_status(server_id: int):
 
         ok = False
         client = _new_diagnostic_client(server, "status")
-        if server.get("username"):
-            client.username_pw_set(server.get("username"), server.get("password") or None)
         try:
             client.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 3)
             ok = True
@@ -374,8 +396,6 @@ def api_mqtt_scan_sse(server_id: int):
             loop_started = False
             try:
                 client = _new_diagnostic_client(server, "scan")
-                if server.get("username"):
-                    client.username_pw_set(server.get("username"), server.get("password") or None)
 
                 def on_connect(cl, userdata, flags, reason_code, properties=None):
                     try:
