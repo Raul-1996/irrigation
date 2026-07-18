@@ -803,6 +803,28 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-watering-rate-limit",
+      "fix_commit": "e32125c1c42242858dd4f2f3826eba88212c0462",
+      "merge_commit": "b7827513d721fbab0ded9fd3f54ed7fc1d04f981",
+      "summary": "Start throttling сохраняется, но explicit MQTT OFF исключён из общего bucket и остаётся доступен после насыщения start rate limit.",
+      "resolutions": [
+        {
+          "id": 118,
+          "disposition": "fixed",
+          "reason": "Limiter остаётся на MQTT start, но удалён с explicit stop; central auth/guest policy продолжает выполняться раньше view, поэтому safety OFF нельзя заблокировать серией стартов.",
+          "tests": [
+            "tests/api/test_watering_rate_limit_safety.py::test_start_limit_never_blocks_explicit_zone_stop"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "90 passed",
+        "full_pytest": "1998 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

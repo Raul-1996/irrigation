@@ -224,8 +224,16 @@
     - targeted: 11 passed; full gate: 1997 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 76 записей fixed (70 корней + шесть унаследованных дублей),
-2 deferred, 69 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+14. `phase2-watering-rate-limit` — #118 `fixed`
+    - fix `e32125c1c42242858dd4f2f3826eba88212c0462`;
+    - merge `b7827513d721fbab0ded9fd3f54ed7fc1d04f981`;
+    - start limiter 10/min сохранён, explicit MQTT OFF не использует его bucket;
+      central auth/guest policy и direct-WB network model не менялись;
+    - targeted: 90 passed; full gate: 1998 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 77 записей fixed (71 корень + шесть унаследованных дублей),
+2 deferred, 68 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

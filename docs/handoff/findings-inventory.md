@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **76 fixed · 2 deferred · 69 pending · 5 not_applicable**.
+- Phase 2 disposition: **77 fixed · 2 deferred · 68 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1194,7 +1194,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь с 5+ зонами вручную включает 5 зон (5 запросов) и начинает их выключать: 5 стопов исчерпывают лимит ровно на 10; при 6 зонах или одном рестарте (stop+start) 11-й запрос — команда ВЫКЛЮЧЕНИЯ — получает 429 «Too many requests». UI показывает ошибку и откатывает оптимистичное состояние, реле остаётся открытым до срабатывания auto-stop таймера (до 120 мин), выключить зону из UI нельзя до минуты. За nginx (все клиенты в одном ведре — известная проблема ProxyFix) порог достигается ещё быстрее.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Limiter остаётся на MQTT start, но удалён с explicit stop; central auth/guest policy продолжает выполняться раньше view, поэтому safety OFF нельзя заблокировать серией стартов.
+- **Пакет:** `phase2-watering-rate-limit`.
+- **Fix commit:** `e32125c1c42242858dd4f2f3826eba88212c0462`.
+- **Regression tests:** `tests/api/test_watering_rate_limit_safety.py::test_start_limit_never_blocks_explicit_zone_stop`.
 
 ### #119 [medium] `static/js/zones.js:102` — Таблица зон: select MQTT-сервера без пустой опции — зона с mqtt_server_id=NULL показывается привязанной к первому серверу, и любое автосохранение молча записывает эту привязку
 
