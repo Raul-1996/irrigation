@@ -22,6 +22,7 @@ import pytest
 # blanket-exempt in the old code; re-adding them to the exempt set would
 # be a regression).
 _ADMIN_ONLY_PATHS_REQUIRING_CSRF = [
+    ("POST", "/api/env"),  # environment sensor configuration
     ("POST", "/api/zones"),  # zones CRUD
     ("POST", "/api/zones/import"),  # bulk import
     ("POST", "/api/zones/1/photo"),  # photo upload
@@ -40,7 +41,6 @@ _ADMIN_ONLY_PATHS_REQUIRING_CSRF = [
 # not via Flask session).
 _GUEST_PUBLIC_POSTS = [
     "/api/login",
-    "/api/env",
     "/api/status",
     "/api/postpone",
     "/api/emergency-stop",
@@ -91,7 +91,6 @@ def test_guest_endpoints_are_exempt(app):
     exempt = _csrf_exempt_view_names(app)
     expected_exempt = {
         "api_login",
-        "api_env_config",
         "api_status",
         "api_postpone",
         "api_emergency_stop",
@@ -122,6 +121,7 @@ def test_admin_crud_endpoints_are_NOT_exempt(app):
     exempt = _csrf_exempt_view_names(app)
     # Names that MUST NOT appear in the exempt set.
     forbidden = {
+        "api_env_config",  # /api/env POST — changes environment sensor configuration
         "api_change_password",  # /api/password POST — session-auth only, must require CSRF (review BLOCKER fix)
         "api_create_zone",  # /api/zones POST
         "api_import_zones_bulk",  # /api/zones/import
