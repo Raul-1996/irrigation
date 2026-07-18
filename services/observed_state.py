@@ -28,6 +28,8 @@ class StateVerifier:
     def __init__(self):
         self._db = None
         self._notifier = None
+        self._generation_lock = threading.Lock()
+        self._generations: dict[int, int] = {}
 
     @property
     def db(self):
@@ -52,22 +54,69 @@ class StateVerifier:
         return self._notifier
 
     # ------------------------------------------------------------------
+    def register_command(self, zone_id: int, expected: str) -> int:
+        """Return a new per-zone verifier generation for a relay command.
+
+        A newer command invalidates every older verifier for that zone.  This
+        token is deliberately public so command paths outside zone_control can
+        participate in the same ordering contract instead of spawning an
+        ownerless retry loop.
+        """
+        del expected  # The generation orders commands; DB commanded_state carries the value.
+        zid = int(zone_id)
+        with self._generation_lock:
+            generation = self._generations.get(zid, 0) + 1
+            self._generations[zid] = generation
+        return generation
+
+    @staticmethod
+    def _canonical_state(value: object) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if normalized in ("on", "1", "true"):
+            return "on"
+        if normalized in ("off", "0", "false"):
+            return "off"
+        return None
+
+    def _is_current(self, zone_id: int, expected: str, generation: int) -> bool:
+        """Check both in-process generation and persisted command truth."""
+        zid = int(zone_id)
+        with self._generation_lock:
+            if self._generations.get(zid) != int(generation):
+                return False
+        db = self.db
+        if db is None:
+            return False
+        try:
+            current = db.get_zone(zid)
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            logger.exception("StateVerifier: failed to refresh zone=%s generation=%s", zid, generation)
+            return False
+        if not current:
+            return False
+        commanded = self._canonical_state(current.get("commanded_state"))
+        wanted = self._canonical_state(expected)
+        return commanded is None or commanded == wanted
+
     def verify_async(self, zone_id: int, expected: str) -> None:
         """Fire-and-forget: launch verification in a background thread."""
         from config import TESTING
 
+        generation = self.register_command(zone_id, expected)
         if TESTING:
             return  # Skip async verification in tests
         t = threading.Thread(
             target=self._safe_verify,
-            args=(zone_id, expected),
+            args=(zone_id, expected, generation),
             daemon=True,
         )
         t.start()
 
-    def _safe_verify(self, zone_id: int, expected: str) -> None:
+    def _safe_verify(self, zone_id: int, expected: str, generation: int | None = None) -> None:
         try:
-            self.verify(zone_id, expected)
+            if generation is None:
+                generation = self.register_command(zone_id, expected)
+            self.verify(zone_id, expected, generation=generation)
         except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError):  # catch-all: intentional
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
@@ -78,6 +127,8 @@ class StateVerifier:
         expected: str,
         timeout: float = OBSERVED_STATE_TIMEOUT_SEC,
         retries: int = OBSERVED_STATE_MAX_RETRIES,
+        *,
+        generation: int | None = None,
     ) -> bool:
         """Subscribe to the zone MQTT topic, wait for observed_state == expected.
 
@@ -86,6 +137,9 @@ class StateVerifier:
 
         Returns True if state confirmed, False otherwise.
         """
+        if generation is None:
+            generation = self.register_command(zone_id, expected)
+
         if mqtt is None:
             logger.warning("StateVerifier: paho-mqtt not available, skipping")
             return False
@@ -120,12 +174,29 @@ class StateVerifier:
         expected_payloads = self._expected_payloads(expected)
 
         for attempt in range(1, retries + 1):
+            if not self._is_current(zone_id, expected, generation):
+                logger.info(
+                    "StateVerifier: stale generation abandoned zone=%s expected=%s generation=%s",
+                    zone_id,
+                    expected,
+                    generation,
+                )
+                return False
             confirmed = self._subscribe_and_wait(server, norm_topic, expected_payloads, timeout)
             if confirmed:
+                if not self._is_current(zone_id, expected, generation):
+                    logger.info(
+                        "StateVerifier: stale confirmation ignored zone=%s expected=%s generation=%s",
+                        zone_id,
+                        expected,
+                        generation,
+                    )
+                    return False
                 logger.info("StateVerifier: zone %s confirmed '%s' on attempt %d", zone_id, expected, attempt)
                 # Second, independent source of run-confirmation. The verifier
-                # actively reads the relay state (including the retained value),
-                # so it confirms even when the SSE hub's subscription is down.
+                # actively waits for a fresh relay report, so it confirms even
+                # when the SSE hub's subscription is down. Retained state is
+                # intentionally ineligible because the app writes it itself.
                 # Only an 'on' confirmation means the zone physically watered.
                 if str(expected).lower() in ("on", "1"):
                     try:
@@ -133,6 +204,15 @@ class StateVerifier:
                     except (sqlite3.Error, OSError, AttributeError):
                         logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
                 return True
+
+            if not self._is_current(zone_id, expected, generation):
+                logger.info(
+                    "StateVerifier: newer command superseded retry zone=%s expected=%s generation=%s",
+                    zone_id,
+                    expected,
+                    generation,
+                )
+                return False
 
             logger.warning(
                 "StateVerifier: zone %s timeout waiting for '%s' (attempt %d/%d)", zone_id, expected, attempt, retries
@@ -149,7 +229,8 @@ class StateVerifier:
                     logger.exception("StateVerifier: retry publish failed zone=%s", zone_id)
 
         # All retries exhausted → record fault
-        self._record_fault(zone_id, zone, expected)
+        if self._is_current(zone_id, expected, generation):
+            self._record_fault(zone_id, zone, expected, generation=generation)
         return False
 
     # ------------------------------------------------------------------
@@ -203,7 +284,7 @@ class StateVerifier:
         def on_message(client, userdata, msg):
             try:
                 payload = msg.payload.decode("utf-8", errors="replace").strip()
-                if payload in expected_payloads:
+                if is_command_confirmation_message(msg) and payload in expected_payloads:
                     confirmed[0] = True
                     result.set()
             except (ValueError, TypeError, KeyError) as e:
@@ -232,7 +313,14 @@ class StateVerifier:
 
         return confirmed[0]
 
-    def _record_fault(self, zone_id: int, zone: dict, expected: str) -> None:
+    def _record_fault(
+        self,
+        zone_id: int,
+        zone: dict,
+        expected: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
         """Mark zone as FAULT, increment fault_count, send Telegram alert.
 
         PHYS-1 reconciliation: when the observed-state contract fails
@@ -254,6 +342,14 @@ class StateVerifier:
         """
         db = self.db
         if not db:
+            return
+        if generation is not None and not self._is_current(zone_id, expected, generation):
+            logger.info(
+                "StateVerifier: stale fault suppressed zone=%s expected=%s generation=%s",
+                zone_id,
+                expected,
+                generation,
+            )
             return
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -324,6 +420,25 @@ class StateVerifier:
                     notifier.send_text(int(admin_chat), alert_text)
         except (sqlite3.Error, OSError):
             logger.exception("StateVerifier: Telegram alert failed")
+
+
+def is_command_confirmation_message(message: object) -> bool:
+    """Return whether an MQTT report is fresh evidence for a command.
+
+    The application publishes its desired value retained on the base/report
+    topic before writing the physical ``/on`` control topic.  A subscriber
+    receives that stored application value with ``retain=True``; accepting it
+    would confirm the application to itself without any relay observation.
+    Live relay reports have ``retain=False`` even when the relay publisher asks
+    the broker to retain them.
+
+    This primitive addresses retained replay for a verifier that subscribes
+    after the command.  A long-lived subscriber also sees the application's
+    live base-topic publish with ``retain=False``; that path additionally
+    needs command/report correlation or protocol separation before using a
+    message as physical confirmation.
+    """
+    return not bool(getattr(message, "retain", False))
 
 
 # Module-level singleton
