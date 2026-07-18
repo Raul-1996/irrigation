@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **26 fixed · 1 deferred · 120 pending · 5 not_applicable**.
+- Phase 2 disposition: **38 fixed · 1 deferred · 108 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -36,7 +36,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона 1 (группа A) включена, зона 12 (группа B) поливается с взведённым zone_hard_stop:12. Пользователь повторно жмёт «Старт» на зоне 1 → ветка reschedule удаляет job zone_hard_stop:12. Если штатный zone_stop зоны 12 не сработает (рестарт планировщика, misfire), watchdog-страховки больше нет — зона 12 льёт до zone_cap (240 мин) или бесконечно, если cap не взводился.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Already-on reschedule удаляет zone_stop по точному prefix с разделителем и zone_hard_stop только по полному ID, не затрагивая зоны с общим числовым префиксом.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_3_restart_removes_only_exact_hard_stop`.
 
 ### #4 [medium] `services/sse_hub.py:268` — Гонка paho ON-эха с ручным override-стартом: _on_message затирает override-длительность базовой
 
@@ -160,7 +164,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа поливает зону A (осталось 2 мин из 10). Садовник жмёт «Старт» по зоне A, чтобы вручную полить полные 10 мин → API отвечает 200 «Зона A запущена, остальные остановлены», planned_end_time = now+10мин. Через 2 мин тред программы выключает зону A и включает зону B — ручное продление потеряно без какого-либо сигнала пользователю (на main программа в этот момент отменялась и зона лилась полные 10 мин). Ответ роута start-zone «остальные остановлены» при этом ложный: peer-off в rescheduled-ветке тоже не выполняется.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Ручное продление отменяет активный group runner, сохраняет manual ownership и не позволяет старому auto-stop стереть новое расписание зоны.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_18_restart_cancels_active_group_program`.
 
 ### #19 [low] `routes/programs_api.py:60` — PUT /api/programs/<id> не валидирует v2-поля — некорректный schedule_type молча превращает программу в неработающую
 
@@ -290,7 +298,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Двойной клик «Старт» → два POST /api/zones/<id>/start. Оба читают state='off' (до того как первый записал 'starting') → оба делегируют в exclusive_start_zone. Первый под group_lock стартует зону и открывает zone_run №1; второй, дождавшись лока, видит cur_state='on' → pass → создаёт ВТОРОЙ открытый zone_run №2 и повторно публикует '1'. При стопе get_open_zone_run (ORDER BY id DESC) закрывает только №2; №1 остаётся открытым, и следующий же observed-off в sse_hub (или idempotent-ветка stop_zone) закрывает его как status='ok' с фиктивной длительностью — фантомный полив в истории; иначе строка висит до ребута.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Повторный start под group serialization возвращает существующий результат и не создаёт второй open zone_run.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_34_repeated_exclusive_start_has_one_open_run`.
 
 ### #35 [medium] `services/zone_control.py:793` — stop_zone не сериализован с exclusive_start_zone: проверка state по снапшоту до лока, group_lock не берётся, publish вне локов
 
@@ -298,7 +310,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зависший zone_hard_stop-джоб предыдущего запуска уже выполняет stop_zone(force=True), когда пользователь стартует ту же зону: cancel_group_jobs не может снять уже исполняющийся джоб. Интерливинг: старт (под group_lock) создаёт zone_run, публикует '1', пишет state='on'; параллельно stop публикует '0' (порядок '0' vs '1' на брокере недетерминирован), затем его _finalize_water_stats находит СВЕЖЕсозданный open run нового старта и закрывает его status='ok' с ~нулевой длительностью, после чего пишет state='off'. Итог: реле может остаться в состоянии, противоположном БД (relay ON / DB off — вода течёт при «выключенной» зоне), run нового полива уже закрыт, а самовосстановление через SSE-hub не работает, если ни один SSE-клиент ни разу не подключался (хаб стартует лениво из ensure_hub_started в роуте SSE).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Вся OFF-транзакция stop_zone, включая publish и финальный state, выполняется под тем же group lock, что start, исключая последний физический ON при DB off.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_35_stop_holds_group_serialization_until_off_publish_returns`.
 
 ### #36 [medium] `services/zone_control.py:134` — TOCTOU в _do_close мастер-клапана + неатомарный pop/insert таймеров: закрытие мастера возможно сразу после открытия при старте зоны
 
@@ -306,7 +322,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона A остановлена → таймер close на 60с. На ~60-й секунде пользователь стартует зону B той же группы: _do_close успевает прочитать состояния (все off) ДО записи state='starting', а его publish close ложится на брокер ПОСЛЕ publish open из exclusive_start_zone. Мастер закрыт, зона B «поливает» при перекрытой магистрали — воды нет, но zone_run завершится как 'ok' и history зафиксирует полив. Окно = длительность DB-сканирования+publish (десятки-сотни мс на WB-железе). Осиротевший таймер расширяет окно: он не отменяется ни новым stop_zone, ни emergency_stop_all (Phase C чистит только запись в dict).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Master close scan+publish сериализованы по master topic, open отменяет pending close, а замена timer регистрируется и запускается одной атомарной операцией.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_36_master_open_cancels_pending_close`, `tests/unit/test_phase2_zone_state_safety.py::test_finding_36_concurrent_master_schedules_leave_one_live_timer`, `tests/unit/test_phase2_zone_state_safety.py::test_finding_36_firing_close_finishes_before_concurrent_master_open`.
 
 ### #37 [medium] `db/zones.py:326` — update_zone_versioned не реализует optimistic lock: version читается в той же транзакции, WHERE version=? не может не совпасть; fallback в zones_state дожимает запись при любой ошибке
 
@@ -566,7 +586,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** stop_zone публикует '0', запускает verify_async(zone,'off'). Эхо реле задержалось/потерялось (ровно тот сбой, ради которого существуют ретраи) — верификатор ждёт 10 с. На 3-й секунде пользователь снова запускает зону: publish '1', полив пошёл, БД 'on'. На 10-й секунде отставший верификатор ре-публикует retained '0' (+ '/on') — реле ФИЗИЧЕСКИ закрывается посреди полива, верификатор подтверждает 'off' и завершается. SSE-хаб по эху '0' переводит зону в off и закрывает zone_run как 'ok' — полив молча потерян. Обратный вариант: verify('off') исчерпывает 3 попытки за ~30 с, пока зона уже успешно перезапущена, и _record_fault переводит здоровую поливающую зону в state='fault' (исключение из расписания до вмешательства оператора).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Per-zone generation token и persisted commanded_state прекращают stale retry/confirmation/fault после более новой противоположной команды.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_64_stale_verifier_does_not_republish_or_fault`.
 
 ### #65 [high] `irrigation_scheduler.py:1599` — start_group_sequence не сериализует сессии группы: повторный запуск (или запуск во время идущей программы) порождает два параллельных секвенсора, интерливящих ON/OFF по одним зонам
 
@@ -792,7 +816,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа: основное время 06:00 + extra_times ['20:00'], зоны группы 1. Утренний запуск отработал штатно. В 12:00 пользователь вручную включает одну зону группы тумблером на статус-странице (/api/zones/<id>/mqtt/start). Условие 06:00 <= 12:00 истинно → в program_run_cancellations пишется отмена программы на сегодня для группы 1. В 20:00 планировщик срабатывает по extra-слоту, видит отмену и пропускает все зоны группы — вечерний полив молча не происходит (в UI и логах это выглядит как «отменено», хотя пользователь ничего не отменял).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Ручной старт отменяет только активную runtime session и больше не записывает day-wide program cancellation, поэтому вечерний extra_times slot сохраняется.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_89_manual_start_does_not_cancel_future_extra_slot`.
 
 ### #90 [low] `irrigation_scheduler.py:1177` — schedule_program затирает zones.scheduled_start_time «сегодняшним» временем программы независимо от дней недели и прошедшего времени — карточка группы показывает ложную «Следующая: HH:MM»
 
@@ -976,7 +1004,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Брокер недоступен (рестарт Mosquitto): пользователь жмёт «Старт» → get_or_create_mqtt_client возвращает None, _publish_one×2 = False → код всё равно пишет state='on' с аудитом «mqtt_ack_on» (ack не было), start_zone_orchestrated возвращает "started", UI показывает идущий полив, планируется auto-stop. Реле не получало команду; только через ~30-40с фоновый StateVerifier (3×10с) переведёт зону в fault — всё это время статус, аудит и ответ API лгут. В ветке peer-off: OFF пиру не доставлен → его zone_run закрыт 'ok' (confirmed=1 с реального старта), state='off', а реле физически открыто.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Failed zone ON или peer OFF переводит затронутую зону в fault, закрывает неуспешный run и возвращает failure вместо mqtt_ack_on/HTTP success.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_111_failed_on_publish_is_not_reported_as_started`, `tests/unit/test_phase2_zone_state_safety.py::test_finding_111_failed_peer_off_aborts_exclusive_start`.
 
 ### #112 [medium] `services/zone_control.py:847` — Зона без MQTT-топика/сервера в группе с мастер-клапаном: старт открывает мастер, но stop_zone никогда не планирует его закрытие — клапан остаётся открытым
 
@@ -985,7 +1017,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ создал зону, забыл заполнить topic; группа с use_master_valve=1. Ручной старт зоны: мастер-клапан открывается (publish '1' на master-топик), зона застревает в 'starting' (переход в 'on' тоже под `if sid and topic:`). По истечении длительности auto-stop вызывает stop_zone: state 'starting'→'stopping'→'off', но блок `if sid and topic:` пропущен целиком — _maybe_schedule_master_close не вызван. Мастер-клапан остаётся физически открытым на неопределённый срок (магистраль под давлением), пока кто-то не запустит/остановит другую зону группы или не нажмёт стоп повторно (идемпотентная ветка).
 - **Решение оркестратора:** A later hard-stop normally schedules master close, so indefinite opening requires an early manual stop plus removed/failed safety jobs; the immediate stop path is still wrong.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Master не открывается, если у зоны нет собственного control channel; каждый завершённый stop-path рассматривает master close независимо от zone topic.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_112_missing_zone_topic_never_opens_master`, `tests/unit/test_phase2_zone_state_safety.py::test_finding_112_stop_without_zone_topic_still_schedules_master_close`.
 
 ### #113 [medium] `services/sse_hub.py:206` — SSE-хаб инвертирует master_valve_observed для мастер-клапанов в режиме NO: эхо '1' всегда трактуется как 'open', игнорируя master_mode
 
@@ -1014,7 +1050,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зоны 5 и 51 (разные группы) поливаются одновременно, у обеих взведён zone_hard_stop. Пользователь повторно жмёт «Старт» на уже включённой зоне 5 (restart_if_on/override) → ветка already-ON удаляет и "zone_hard_stop:5", и "zone_hard_stop:51". Зона 51 теряет страховочный hard-stop: если её штатный zone_stop не сработает (снят/упал), полив продолжается до 4-часового cap вместо hard-stop.
 - **Дубль:** `#3`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Already-on reschedule удаляет zone_stop по точному prefix с разделителем и zone_hard_stop только по полному ID, не затрагивая зоны с общим числовым префиксом.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_3_restart_removes_only_exact_hard_stop`.
 
 ### #116 [low] `routes/mqtt_api.py:340` — scan-sse: тред MQTT-клиента обёрнут в `except queue.Full` — сбой connect убивает тред без сообщения, SSE вечно шлёт ping по мёртвому скану
 
@@ -1155,7 +1195,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона поливается; в момент автостопа брокер MQTT недоступен (роутер перезагружается). publish_mqtt_value возвращает False, но stop_zone пишет state='off', watering_start_time=None. Реле физически включено. Далее hard-stop и cap-джобы вызывают stop_zone(force=False) → идемпотентный ранний выход БЕЗ повторной публикации OFF; ZoneWatchdog зону со state='off' не видит; сторожок эксклюзивности считает только 'on'. Единственное окно восстановления — 3 ретрая StateVerifier (~30 с); если брокер лежит дольше, OFF больше никто никогда не переиздаёт — клапан открыт до ручного вмешательства или ребута (перелив/затопление). Зеркальный кейс на старте: ON не доставлен, но state='on' — UI показывает полив, zone_run открывается, грядка сухая.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Failed OFF остаётся state=fault/physically unknown, не закрывает активный run как успех и позволяет последующим safety-stop снова публиковать OFF.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_132_failed_off_publish_stays_fault_and_retries`.
 
 ### #133 [high] `irrigation_scheduler.py:835` — EMERGENCY_STOP не блокирует запуски по расписанию: планировщик не проверяет флаг, а cancel_group_jobs гасит только уже идущие сессии — программа стартует полив во время активного аварийного режима
 
@@ -1189,7 +1233,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зоны с id 1 и 12 в разных группах; зона 12 поливается (взведены zone_stop:12:* и zone_hard_stop:12), зона 1 тоже включена. Пользователь повторно жмёт «Старт» на зоне 1 (restart_if_on → ветка reschedule). Цикл удаления снимает zone_hard_stop:12 вместе с джобами зоны 1 и пересоздаёт их только для зоны 1. Зона 12 остаётся без hard-stop страховки: если её обычный zone_stop сорвётся (исключение в джобе, сбой БД), реле будет работать до cap-лимита 240 минут вместо запланированного времени.
 - **Дубль:** `#3`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Already-on reschedule удаляет zone_stop по точному prefix с разделителем и zone_hard_stop только по полному ID, не затрагивая зоны с общим числовым префиксом.
+- **Пакет:** `phase2-zone-state-safety`.
+- **Fix commit:** `42142ddea539625fe948bdaeb358b338aff58cef`.
+- **Regression tests:** `tests/unit/test_phase2_zone_state_safety.py::test_finding_3_restart_removes_only_exact_hard_stop`.
 
 ### #137 [low] `routes/zones_photo_api.py:223` — Загрузка изображений: PIL DecompressionBombError не перехватывается — 500 вместо 400 (заявленный 50 MP декомпрешн-кап обходится)
 

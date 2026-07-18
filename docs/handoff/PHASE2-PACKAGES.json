@@ -282,6 +282,104 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-zone-state-safety",
+      "fix_commit": "42142ddea539625fe948bdaeb358b338aff58cef",
+      "merge_commit": "622c0d5c2bf7ba5b40b6bf0f1debaed6453e8fba",
+      "summary": "Zone actuation и verifier переведены на правдивый MQTT command contract: failed ON/OFF не маскируются, start/stop сериализованы, stale verifier generations подавлены.",
+      "resolutions": [
+        {
+          "id": 3,
+          "disposition": "fixed",
+          "reason": "Already-on reschedule удаляет zone_stop по точному prefix с разделителем и zone_hard_stop только по полному ID, не затрагивая зоны с общим числовым префиксом.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_3_restart_removes_only_exact_hard_stop"
+          ]
+        },
+        {
+          "id": 18,
+          "disposition": "fixed",
+          "reason": "Ручное продление отменяет активный group runner, сохраняет manual ownership и не позволяет старому auto-stop стереть новое расписание зоны.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_18_restart_cancels_active_group_program"
+          ]
+        },
+        {
+          "id": 34,
+          "disposition": "fixed",
+          "reason": "Повторный start под group serialization возвращает существующий результат и не создаёт второй open zone_run.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_34_repeated_exclusive_start_has_one_open_run"
+          ]
+        },
+        {
+          "id": 35,
+          "disposition": "fixed",
+          "reason": "Вся OFF-транзакция stop_zone, включая publish и финальный state, выполняется под тем же group lock, что start, исключая последний физический ON при DB off.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_35_stop_holds_group_serialization_until_off_publish_returns"
+          ]
+        },
+        {
+          "id": 36,
+          "disposition": "fixed",
+          "reason": "Master close scan+publish сериализованы по master topic, open отменяет pending close, а замена timer регистрируется и запускается одной атомарной операцией.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_36_master_open_cancels_pending_close",
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_36_concurrent_master_schedules_leave_one_live_timer",
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_36_firing_close_finishes_before_concurrent_master_open"
+          ]
+        },
+        {
+          "id": 64,
+          "disposition": "fixed",
+          "reason": "Per-zone generation token и persisted commanded_state прекращают stale retry/confirmation/fault после более новой противоположной команды.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_64_stale_verifier_does_not_republish_or_fault"
+          ]
+        },
+        {
+          "id": 89,
+          "disposition": "fixed",
+          "reason": "Ручной старт отменяет только активную runtime session и больше не записывает day-wide program cancellation, поэтому вечерний extra_times slot сохраняется.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_89_manual_start_does_not_cancel_future_extra_slot"
+          ]
+        },
+        {
+          "id": 111,
+          "disposition": "fixed",
+          "reason": "Failed zone ON или peer OFF переводит затронутую зону в fault, закрывает неуспешный run и возвращает failure вместо mqtt_ack_on/HTTP success.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_111_failed_on_publish_is_not_reported_as_started",
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_111_failed_peer_off_aborts_exclusive_start"
+          ]
+        },
+        {
+          "id": 112,
+          "disposition": "fixed",
+          "reason": "Master не открывается, если у зоны нет собственного control channel; каждый завершённый stop-path рассматривает master close независимо от zone topic.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_112_missing_zone_topic_never_opens_master",
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_112_stop_without_zone_topic_still_schedules_master_close"
+          ]
+        },
+        {
+          "id": 132,
+          "disposition": "fixed",
+          "reason": "Failed OFF остаётся state=fault/physically unknown, не закрывает активный run как успех и позволяет последующим safety-stop снова публиковать OFF.",
+          "tests": [
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_132_failed_off_publish_stays_fault_and_retries"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "98 passed",
+        "full_pytest": "1940 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

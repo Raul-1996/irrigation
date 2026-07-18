@@ -127,8 +127,22 @@
    - targeted: 173 passed; full gate: 1923 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 26 записей fixed (24 корня + два унаследованных дубля),
-1 deferred, 120 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+6. `phase2-zone-state-safety` — #3, #18, #34, #35, #36, #64, #89, #111,
+   #112, #132 `fixed`; #115/#136 наследуют #3
+   - fix `42142ddea539625fe948bdaeb358b338aff58cef`;
+   - merge `622c0d5`;
+   - failed ON/OFF и peer OFF больше не маскируются успешным DB-state; fault
+     сохраняет физическую неопределённость и позволяет повторный safety-stop;
+   - start/stop и master close/open сериализованы, duplicate runs и чужое снятие
+     hard-stop исключены, stale verifier generation не републикует старую команду;
+   - day-wide cancellation заменена отменой только активной runtime session;
+   - #50 остаётся pending до удаления hub-side ложного confirmation в P06;
+     #110 остаётся pending до устранения scheduler bypass в P03;
+   - targeted: 98 passed; full gate: 1940 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 38 записей fixed (34 корня + четыре унаследованных дубля),
+1 deferred, 108 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
