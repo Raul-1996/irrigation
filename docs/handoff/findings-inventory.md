@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **72 fixed · 2 deferred · 73 pending · 5 not_applicable**.
+- Phase 2 disposition: **74 fixed · 2 deferred · 71 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -378,7 +378,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Отключение питания посреди полива (зона state='on', zone_run открыт). После ребута _boot_sync «останавливает» зону и записывает прерванный run как успешный полив, завершившийся во время загрузки — даже если краш был за 10 часов до этого. get_last_watering_time (MAX(end_utc) WHERE status='ok') и карточка зоны показывают ложное «последний полив: <время ребута>»; в истории прерванный полив неотличим от полноценного; данные о литрах/расходе фиктивны.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** _boot_sync сначала атомарно закрывает crash-open zone_runs как aborted с end_utc, и лишь затем вызывает обычные force-stop paths; stale run больше не может стать ok.
+- **Пакет:** `phase2-app-lifecycle`.
+- **Fix commit:** `dcd0e30ecea830f3e09968c40e50ca79da9c0875`.
+- **Regression tests:** `tests/unit/test_phase2_app_lifecycle.py::test_boot_aborts_crash_open_run_before_forced_zone_stop`.
 
 ### #39 [medium] `services/mqtt_pub.py:105` — Блокирующий cl.connect() под глобальным _MQTT_CLIENTS_LOCK: мёртвый брокер задерживает OFF-команды на здоровый брокер
 
@@ -1487,7 +1491,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Independent deterministic traces reproduced OFF, companion OFF, then a late retained ON.
 - **Репродукция/сценарий:** Pause shutdown ACK wait, allow an existing runner to start the next zone, observe final base payload 1.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P03 quiesce закрывает admission, отменяет sessions и ждёт admitted runners; P15 вызывает эту boundary до первой финальной QoS2 retained OFF, исключая поздний scheduler ON после OFF.
+- **Пакет:** `phase2-app-lifecycle`.
+- **Fix commit:** `dcd0e30ecea830f3e09968c40e50ca79da9c0875`.
+- **Regression tests:** `tests/unit/test_phase2_scheduler_safety.py::test_149_quiesce_is_a_strict_fence_for_inflight_program_runner`, `tests/unit/test_phase2_app_lifecycle.py::test_shutdown_quiesces_scheduler_before_final_retained_off`, `tests/unit/test_phase2_app_lifecycle.py::test_initialize_completes_scheduler_boot_only_after_off_reconciliation`.
 
 ### #150 [low] `services/next_watering.py:23-36; services/weather/service.py:113-150; services/weather/cache.py:91-121` — Cache-only next-watering доверяет кэшу погоды любого возраста и расходится с live-решением планировщика
 

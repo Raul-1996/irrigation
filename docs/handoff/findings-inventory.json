@@ -1191,11 +1191,13 @@
     "reproduction": "Отключение питания посреди полива (зона state='on', zone_run открыт). После ребута _boot_sync «останавливает» зону и записывает прерванный run как успешный полив, завершившийся во время загрузки — даже если краш был за 10 часов до этого. get_last_watering_time (MAX(end_utc) WHERE status='ok') и карточка зоны показывают ложное «последний полив: <время ребута>»; в истории прерванный полив неотличим от полноценного; данные о литрах/расходе фиктивны.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "_boot_sync сначала атомарно закрывает crash-open zone_runs как aborted с end_utc, и лишь затем вызывает обычные force-stop paths; stale run больше не может стать ok.",
+      "package": "phase2-app-lifecycle",
+      "commit": "dcd0e30ecea830f3e09968c40e50ca79da9c0875",
+      "tests": [
+        "tests/unit/test_phase2_app_lifecycle.py::test_boot_aborts_crash_open_run_before_forced_zone_stop"
+      ]
     }
   },
   {
@@ -4453,11 +4455,15 @@
     "reproduction": "Pause shutdown ACK wait, allow an existing runner to start the next zone, observe final base payload 1.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "P03 quiesce закрывает admission, отменяет sessions и ждёт admitted runners; P15 вызывает эту boundary до первой финальной QoS2 retained OFF, исключая поздний scheduler ON после OFF.",
+      "package": "phase2-app-lifecycle",
+      "commit": "dcd0e30ecea830f3e09968c40e50ca79da9c0875",
+      "tests": [
+        "tests/unit/test_phase2_scheduler_safety.py::test_149_quiesce_is_a_strict_fence_for_inflight_program_runner",
+        "tests/unit/test_phase2_app_lifecycle.py::test_shutdown_quiesces_scheduler_before_final_retained_off",
+        "tests/unit/test_phase2_app_lifecycle.py::test_initialize_completes_scheduler_boot_only_after_off_reconciliation"
+      ]
     }
   },
   {

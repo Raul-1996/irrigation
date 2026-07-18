@@ -195,8 +195,21 @@
     - targeted: 164 passed; full gate: 1991 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 72 записи fixed (66 корней + шесть унаследованных дублей),
-2 deferred, 73 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+11. `phase2-app-lifecycle` — #38, #149 `fixed`
+    - fixes `dcd0e30ecea830f3e09968c40e50ca79da9c0875` и
+      `3e6b14e67520371f78806722539260984b9ce9f4`;
+    - merge `9f8b2a2e8a5899f4ee22eea9cb43380fd9add505`;
+    - crash-open run получает `end_utc`/`aborted` до обычного force-stop и больше
+      не может быть финализирован как успешный;
+    - после `_boot_sync` вызывается `complete_boot_recovery`, затем стартуют
+      monitors; persistent jobs не выходят из paused раньше physical OFF;
+    - shutdown сначала ставит P03 quiesce fence и ждёт admitted runners, после
+      чего публикует финальные QoS2 retained OFF для зон/мастеров;
+    - targeted: 17 passed; full gate: 1994 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 74 записи fixed (68 корней + шесть унаследованных дублей),
+2 deferred, 71 REAL-запись pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
