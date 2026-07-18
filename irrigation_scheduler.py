@@ -961,6 +961,9 @@ class IrrigationScheduler:
                 if not zone:
                     logger.warning(f"Зона {zone_id} не найдена")
                     continue
+                if str(zone.get("state") or "").lower() == "fault":
+                    logger.warning("Программа %s: fault-зона %s исключена из запуска", program_id, zone_id)
+                    continue
 
                 # Если для группы зоны установлена отмена, пропускаем её
                 group_id = int(zone.get("group_id") or 0)
@@ -1014,124 +1017,42 @@ class IrrigationScheduler:
                     logger.info("Программа %s остановлена перед ON зоны %s", program_id, zone_id)
                     break
 
-                # БЕЗУСЛОВНО выключаем все зоны этой группы перед стартом текущей
+                # The central controller owns the fault guard, state machine,
+                # peer OFF, master valve, MQTT ON, and zone_run creation.  Do
+                # not prewrite state='on': that erases fault and makes the
+                # controller mistake the zone for an already-running no-op.
                 try:
-                    all_zones = self.db.get_zones()
-                    group_peers = [z for z in all_zones if z["group_id"] == group_id and int(z["id"]) != int(zone_id)]
-                    for gz in group_peers:
-                        try:
-                            topic = (gz.get("topic") or "").strip()
-                            sid = gz.get("mqtt_server_id")
-                            if mqtt and topic and sid:
-                                t = normalize_topic(topic)
-                                server = self.db.get_mqtt_server(int(sid))
-                                if server:
-                                    logger.debug(f"SCHED publish OFF peer zone={gz['id']} topic={t}")
-                                    from services.mqtt_pub import publish_mqtt_value as _pub
+                    from services.zone_control import exclusive_start_zone as _start_central
 
-                                    _pub(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
-                        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                            logger.debug("Handled exception in line_383: %s", e)
-                        try:
-                            from services.zones_state import update_zone_state as _uzs
-
-                            _uzs(
-                                int(gz["id"]),
-                                {"state": "off", "watering_start_time": None},
-                                audit_reason="peer_off_scheduled",
-                                db=self.db,
-                            )
-                        except (sqlite3.Error, OSError, ImportError) as e:
-                            logger.debug("Handled exception in line_387: %s", e)
-                except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                    logger.debug("Handled exception in line_389: %s", e)
-                # Старт зоны: фиксируем время начала, чтобы таймер в UI работал
+                    started = bool(_start_central(int(zone_id), source="program"))
+                except (sqlite3.Error, OSError, ImportError, ValueError, TypeError):
+                    logger.exception("Программа %s: central start failed zone=%s", program_id, zone_id)
+                    started = False
+                if not started:
+                    logger.warning("Программа %s: зона %s не стартовала, пропуск success-учёта", program_id, zone_id)
+                    continue
                 try:
-                    start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    okv = False
-                    try:
-                        # update_zone_versioned now returns (ok, prev_zone) —
-                        # legacy ``okv`` boolean is the first element only.
-                        okv, _prev = self.db.update_zone_versioned(
-                            zone_id,
-                            {
-                                "state": "on",
-                                "watering_start_time": start_ts,
-                                "watering_start_source": "schedule",
-                                "commanded_state": "on",
-                            },
-                        )
-                        # Emit zone_state_change for the scheduled start so triage
-                        # can see the program-driven transition (analogous to
-                        # what services.zones_state.update_zone_state does, but
-                        # we keep the explicit versioned call here because the
-                        # caller checks `okv` to decide on the fallback).
-                        if okv and _prev is not None and str(_prev.get("state") or "").lower() != "on":
-                            try:
-                                from services.audit import record_audit
-
-                                record_audit(
-                                    action_type="zone_state_change",
-                                    source="irrigation_scheduler",
-                                    target=f"zone:{int(zone_id)}",
-                                    payload={
-                                        "from": _prev.get("state"),
-                                        "to": "on",
-                                        "reason": "scheduled_start",
-                                        "commanded_state": "on",
-                                    },
-                                    actor="system",
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "irrigation_scheduler: audit emit (scheduled_start) failed zone=%s",
-                                    zone_id,
-                                )
-                    except (sqlite3.Error, OSError) as e:
-                        logger.debug("Exception in line_397: %s", e)
-                        okv = False
-                    if not okv:
-                        try:
-                            from services.zones_state import update_zone_state as _uzs
-
-                            _uzs(
-                                zone_id,
-                                {
-                                    "state": "on",
-                                    "watering_start_time": start_ts,
-                                    "watering_start_source": "schedule",
-                                    "commanded_state": "on",
-                                },
-                                audit_reason="scheduled_start_fallback",
-                                db=self.db,
-                            )
-                        except (sqlite3.Error, OSError, ImportError):
-                            logger.exception(
-                                "irrigation_scheduler: scheduled_start fallback failed zone=%s",
-                                zone_id,
-                            )
-                            self.db.update_zone(
-                                zone_id,
-                                {
-                                    "state": "on",
-                                    "watering_start_time": start_ts,
-                                    "watering_start_source": "schedule",
-                                    "commanded_state": "on",
-                                },
-                            )
-                    # Centralized start to ensure MV logic
-                    try:
-                        from services.zone_control import exclusive_start_zone as _start_central
-
-                        _start_central(int(zone_id), source="program")
-                    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                        logger.debug("Handled exception in line_406: %s", e)
+                    latest_state = str((self.db.get_zone(int(zone_id)) or {}).get("state") or "").lower()
+                    if latest_state == "fault":
+                        logger.error("Программа %s: зона %s перешла в fault при старте", program_id, zone_id)
+                        continue
                     end_time = datetime.now() + timedelta(minutes=duration)
                     self.active_zones[zone_id] = end_time
                     # write planned_end_time for watchdogs/diagnostics
                     try:
                         planned_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-                        self.db.update_zone(zone_id, {"planned_end_time": planned_str})
+                        metadata = {
+                            "planned_end_time": planned_str,
+                            "watering_start_source": "schedule",
+                        }
+                        # Compatibility for legacy DB-only virtual zones on
+                        # older controllers and TESTING synthetic transports.
+                        # Physical state remains owned by exclusive_start_zone;
+                        # most importantly, never turn a fault result back ON.
+                        legacy_virtual_state = latest_state in {"off", "starting"}
+                        if legacy_virtual_state and (not zone.get("mqtt_server_id") or not zone.get("topic")):
+                            metadata["state"] = "on"
+                        self.db.update_zone(zone_id, metadata)
                     except (sqlite3.Error, OSError) as e:
                         logger.debug("Handled exception in line_413: %s", e)
                     # Watchdog job
@@ -1152,7 +1073,7 @@ class IrrigationScheduler:
                             }
                         ),
                     )
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError, sqlite3.Error, OSError) as e:
                     logger.error(f"Ошибка запуска зоны {zone_id}: {e}")
                     continue
 
@@ -1697,6 +1618,14 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
 
+    def _release_group_session(self, group_id: int, owned_event: threading.Event | None) -> None:
+        """Identity-safe release for one group-session claim."""
+        if owned_event is None:
+            return
+        with self._group_session_lock:
+            if self.group_cancel_events.get(int(group_id)) is owned_event:
+                self.group_cancel_events.pop(int(group_id), None)
+
     # ===== Ручной последовательный запуск всех зон в группе =====
     def start_group_sequence(
         self,
@@ -1767,6 +1696,23 @@ class IrrigationScheduler:
                 skip_master_close=True,
             )
             if cancel_event.is_set() or self._shutdown_event.is_set() or self._is_emergency_stop_active():
+                return False
+            # stop_all_in_group is best-effort and returns no aggregate result.
+            # Re-read the full group before deleting safety jobs or planting a
+            # new ON sequence.  P05 pins an OFF publish failure to ``fault``;
+            # any state other than confirmed ``off`` is unsafe admission.
+            refreshed = {int(z["id"]): z for z in (self.db.get_zones() or [])}
+            unsafe_after_stop = [
+                int(z["id"])
+                for z in all_group_zones
+                if str((refreshed.get(int(z["id"])) or z).get("state") or "").lower() != "off"
+            ]
+            if unsafe_after_stop:
+                logger.error(
+                    "Группа %s: sequence aborted, zones not safely off after stop: %s",
+                    group_id,
+                    unsafe_after_stop,
+                )
                 return False
 
             # Считаем и записываем плановые времена стартов для зон группы
@@ -1862,9 +1808,7 @@ class IrrigationScheduler:
             return False
         finally:
             if not sequence_handed_off:
-                with self._group_session_lock:
-                    if self.group_cancel_events.get(group_id) is cancel_event:
-                        self.group_cancel_events.pop(group_id, None)
+                self._release_group_session(group_id, cancel_event)
 
     def _run_group_sequence(
         self,
@@ -1885,8 +1829,11 @@ class IrrigationScheduler:
         """
         from services.zone_control import per_zone_dur as _per_zone_dur
 
+        with self._group_session_lock:
+            cancel_event = self.group_cancel_events.get(int(group_id))
         if self._is_emergency_stop_active():
             logger.warning("Группа %s заблокирована: активен EMERGENCY_STOP", group_id)
+            self._release_group_session(group_id, cancel_event)
             return
 
         # Test-only bypass: when SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ=1
@@ -1902,9 +1849,12 @@ class IrrigationScheduler:
                 from services.zone_control import per_zone_dur as _per_zone_dur
             except ImportError:
                 _per_zone_dur = None
+            synthetic_started = False
             for zone_id in zone_ids:
                 zone = self.db.get_zone(zone_id)
                 if not zone:
+                    continue
+                if str(zone.get("state") or "").lower() == "fault":
                     continue
                 duration, _ = _per_zone_dur(zone, override_duration, override_percent)
                 if duration <= 0:
@@ -1930,15 +1880,15 @@ class IrrigationScheduler:
                     self.db.update_zone(
                         zone_id, {"state": "on", "watering_start_time": start_ts, "planned_end_time": planned_end}
                     )
+                synthetic_started = True
                 break  # Only start the first zone in TESTING mode
+            if not synthetic_started:
+                self._release_group_session(group_id, cancel_event)
             return
         if not self._begin_runner():
             logger.info("Группа %s не запущена: scheduler quiescing", group_id)
+            self._release_group_session(group_id, cancel_event)
             return
-        # Capture the Event identity we'll work with, BEFORE any early-return
-        # so the finally cleanup can do an identity-equality check.  See C2
-        # in specs/issue-16-review.md.
-        cancel_event = self.group_cancel_events.get(group_id)
         try:
             # Weather check before group sequence.
             # Issue #31: manual runs bypass weather skip entirely.
@@ -1991,6 +1941,9 @@ class IrrigationScheduler:
                 if not zone:
                     logger.warning(f"Группа {group_id}: зона {zone_id} не найдена, пропуск")
                     continue
+                if str(zone.get("state") or "").lower() == "fault":
+                    logger.warning("Группа %s: fault-зона %s исключена из запуска", group_id, zone_id)
+                    continue
 
                 # Issue #12: % unfolds per-zone via the helper. Without
                 # override_percent the helper returns the scalar override or
@@ -2011,147 +1964,43 @@ class IrrigationScheduler:
                     logger.info("Группа %s остановлена перед ON зоны %s", group_id, zone_id)
                     break
 
-                # Старт текущей зоны
-                start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Central start is the single owner of fault admission, peer
+                # shutdown, MV/MQTT ON, state transitions, and zone_run rows.
                 try:
-                    planned_end = (datetime.now() + timedelta(minutes=duration)).strftime("%Y-%m-%d %H:%M:%S")
-                    from services.zones_state import update_zone_state as _uzs
+                    from services.zone_control import exclusive_start_zone as _start_central
 
-                    _uzs(
-                        zone_id,
-                        {"state": "on", "watering_start_time": start_ts, "planned_end_time": planned_end},
-                        audit_reason="group_sequence_start",
-                        db=self.db,
+                    started = bool(_start_central(int(zone_id), source="program"))
+                except (sqlite3.Error, OSError, ImportError, ValueError, TypeError):
+                    logger.exception("Группа %s: central start failed zone=%s", group_id, zone_id)
+                    started = False
+                if not started:
+                    logger.warning("Группа %s: зона %s не стартовала, success-учёт пропущен", group_id, zone_id)
+                    continue
+
+                latest_state = str((self.db.get_zone(int(zone_id)) or {}).get("state") or "").lower()
+                if latest_state == "fault":
+                    logger.error("Группа %s: зона %s перешла в fault при старте", group_id, zone_id)
+                    continue
+                end_time = datetime.now() + timedelta(minutes=duration)
+                self.active_zones[int(zone_id)] = end_time
+                try:
+                    metadata = {
+                        "planned_end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "watering_start_source": "schedule",
+                    }
+                    legacy_virtual_state = latest_state in {"off", "starting"}
+                    if legacy_virtual_state and (not zone.get("mqtt_server_id") or not zone.get("topic")):
+                        metadata["state"] = "on"
+                    self.db.update_zone(
+                        int(zone_id),
+                        metadata,
                     )
-                except (sqlite3.Error, OSError, ImportError) as e:
-                    logger.debug("Exception in _run_group_sequence: %s", e)
-                    try:
-                        from services.zones_state import update_zone_state as _uzs2
-
-                        _uzs2(
-                            zone_id,
-                            {"state": "on", "watering_start_time": start_ts},
-                            audit_reason="group_sequence_retry",
-                            db=self.db,
-                        )
-                    except (sqlite3.Error, OSError, ImportError):
-                        logger.exception(
-                            "irrigation_scheduler._run_group_sequence: start retry failed zone=%s",
-                            zone_id,
-                        )
-                        self.db.update_zone(zone_id, {"state": "on", "watering_start_time": start_ts})
+                except (sqlite3.Error, OSError) as e:
+                    logger.debug("group sequence planned end update failed: %s", e)
                 try:
-                    self.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(minutes=duration))
+                    self.schedule_zone_hard_stop(int(zone_id), end_time)
                 except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in _run_group_sequence: %s", e)
-                # MQTT publish: pre-open master valve for the group (idempotent), then zone ON
-                try:
-                    # Pre-open MV if configured for this zone's group
-                    try:
-                        gid = int(zone.get("group_id") or 0)
-                    except (ValueError, TypeError, KeyError) as e:
-                        logger.debug("Exception in line_813: %s", e)
-                        gid = 0
-                    if gid:
-                        try:
-                            groups = self.db.get_groups() or []
-                            g = next((gg for gg in groups if int(gg.get("id")) == gid), None)
-                        except (sqlite3.Error, OSError) as e:
-                            logger.debug("Exception in line_820: %s", e)
-                            g = None
-                        if g:
-                            try:
-                                use_mv = int(g.get("use_master_valve") or 0) == 1
-                            except (ValueError, TypeError, KeyError) as e:
-                                logger.debug("Exception in line_826: %s", e)
-                                use_mv = False
-                            if use_mv:
-                                mtopic = (g.get("master_mqtt_topic") or "").strip()
-                                msid = g.get("master_mqtt_server_id")
-                                if mtopic and msid:
-                                    mserver = self.db.get_mqtt_server(int(msid))
-                                    if mserver:
-                                        try:
-                                            mode = (g.get("master_mode") or "NC").strip().upper()
-                                        except (ValueError, TypeError, KeyError) as e:
-                                            logger.debug("Exception in line_837: %s", e)
-                                            mode = "NC"
-                                        from services.mqtt_pub import publish_mqtt_value as _pub
-
-                                        _pub(
-                                            mserver,
-                                            normalize_topic(mtopic),
-                                            ("0" if mode == "NO" else "1"),
-                                            min_interval_sec=0.0,
-                                            qos=2,
-                                            retain=True,
-                                        )
-                                        try:
-                                            self.db.update_group_fields(int(gid), {"master_valve_observed": "open"})
-                                            import json as _json_o
-
-                                            from services import sse_hub as _sse_hub_o
-
-                                            _sse_hub_o.broadcast(
-                                                _json_o.dumps({"mv_group_id": int(gid), "mv_state": "open"})
-                                            )
-                                        except (sqlite3.Error, OSError, ImportError, ValueError, TypeError) as _e:
-                                            logger.debug("master_valve_observed update (open) failed: %s", _e)
-                    # Publish zone ON
-                    topic = (zone.get("topic") or "").strip()
-                    sid = zone.get("mqtt_server_id")
-                    if mqtt and topic and sid:
-                        t = normalize_topic(topic)
-                        server = self.db.get_mqtt_server(int(sid))
-                        if server:
-                            from services.mqtt_pub import publish_mqtt_value as _pub
-
-                            _pub(server, t, "1", min_interval_sec=0.0, qos=2, retain=True)
-                except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                    logger.debug("Handled exception in line_851: %s", e)
-                # Issue #32: open zone_runs row so "Последний полив" picks it up.
-                # Pre-fix _run_group_sequence published MQTT directly, never calling
-                # create_zone_run — leaving every group-sequence run invisible in UI.
-                try:
-                    gid_for_run = int(zone.get("group_id") or 0)
-                    if gid_for_run and gid_for_run != 999:
-                        raw_pulses: int | None = None
-                        liters_per_pulse: int = 1
-                        base_m3: float | None = None
-                        try:
-                            groups_for_run = self.db.get_groups() or []
-                            g_for_run = next(
-                                (gg for gg in groups_for_run if int(gg.get("id")) == gid_for_run),
-                                None,
-                            )
-                        except (sqlite3.Error, OSError):
-                            g_for_run = None
-                        if g_for_run and int(g_for_run.get("use_water_meter") or 0) == 1:
-                            try:
-                                from services import water_monitor as _wm
-
-                                raw_pulses = _wm.get_pulses_at_or_before(gid_for_run, time.time())
-                                pulse = str(g_for_run.get("water_pulse_size") or "1l")
-                                liters_per_pulse = 100 if pulse == "100l" else 10 if pulse == "10l" else 1
-                                base_m3 = float(g_for_run.get("water_base_value_m3") or 0.0)
-                            except (sqlite3.Error, OSError, ImportError):
-                                logger.exception("_run_group_sequence: meter snapshot failed (continuing)")
-                        self.db.create_zone_run(
-                            int(zone_id),
-                            gid_for_run,
-                            start_ts,
-                            time.monotonic(),
-                            raw_pulses,
-                            liters_per_pulse,
-                            base_m3,
-                            source="program",
-                        )
-                except (sqlite3.Error, OSError, ValueError, TypeError):
-                    logger.exception(
-                        "_run_group_sequence: create_zone_run failed (zone=%s gid=%s)",
-                        zone_id,
-                        zone.get("group_id"),
-                    )
                 try:
                     _zs_payload = {
                         "group_id": group_id,
@@ -2267,10 +2116,7 @@ class IrrigationScheduler:
             # own Event between our setdefault and now, or vice-versa),
             # leave that Event alone — its planter owns the cleanup.
             try:
-                with self._group_session_lock:
-                    if cancel_event is not None and self.group_cancel_events.get(group_id) is cancel_event:
-                        cancel_event.clear()
-                        self.group_cancel_events.pop(group_id, None)
+                self._release_group_session(group_id, cancel_event)
             except (KeyError, TypeError, ValueError) as e:
                 logger.debug("_run_group_sequence cleanup gid=%s: %s", group_id, e)
             try:

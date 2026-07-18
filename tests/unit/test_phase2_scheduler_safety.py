@@ -86,8 +86,14 @@ def test_63_group_start_physically_stops_every_peer_before_planting_sequence(saf
     with (
         patch.object(scheduler_module, "TESTING", False),
         patch("services.zone_control.db", test_db),
-        patch("services.zone_control.stop_all_in_group", side_effect=lambda *a, **k: order.append("physical-off"))
-        as stop_all,
+        patch(
+            "services.zone_control.stop_all_in_group",
+            side_effect=lambda *a, **k: (
+                order.append("physical-off"),
+                test_db.update_zone(selected["id"], {"state": "off"}),
+                test_db.update_zone(peer["id"], {"state": "off"}),
+            ),
+        ) as stop_all,
     ):
         assert safety_scheduler.start_group_sequence(group["id"], zone_ids=[selected["id"]]) is True
 
@@ -98,6 +104,25 @@ def test_63_group_start_physically_stops_every_peer_before_planting_sequence(saf
         skip_master_close=True,
     )
     assert order == ["physical-off", "sequence"]
+
+
+def test_63_group_start_aborts_when_peer_remains_fault_after_physical_stop(safety_scheduler, test_db):
+    group = test_db.create_group("failed-physical-off")
+    selected = test_db.create_zone({"name": "selected", "duration": 3, "group_id": group["id"]})
+    peer = test_db.create_zone({"name": "fault-peer", "duration": 3, "group_id": group["id"]})
+    test_db.update_zone(peer["id"], {"state": "fault", "commanded_state": "off"})
+    safety_scheduler.scheduler = MagicMock()
+    safety_scheduler.scheduler.get_jobs.return_value = []
+
+    with (
+        patch.object(scheduler_module, "TESTING", False),
+        patch("services.zone_control.stop_all_in_group"),
+    ):
+        assert safety_scheduler.start_group_sequence(group["id"], zone_ids=[selected["id"]]) is False
+
+    safety_scheduler.scheduler.add_job.assert_not_called()
+    assert test_db.get_zone(peer["id"])["state"] == "fault"
+    assert group["id"] not in safety_scheduler.group_cancel_events
 
 
 def test_65_second_group_session_is_rejected_instead_of_reusing_event(safety_scheduler, test_db):
@@ -333,3 +358,165 @@ def test_149_quiesce_is_a_strict_fence_for_inflight_program_runner(safety_schedu
 
     assert test_db.get_zone(zone["id"])["state"] == "off"
     assert safety_scheduler.active_runner_count == 0
+
+
+def test_110_scheduled_program_never_admits_fault_zone(safety_scheduler, test_db):
+    group = test_db.create_group("program-fault")
+    zone = test_db.create_zone({"name": "fault", "duration": 1, "group_id": group["id"]})
+    test_db.update_zone(zone["id"], {"state": "fault", "commanded_state": "on"})
+
+    with (
+        patch.object(safety_scheduler, "_check_weather_skip", return_value={"skip": False}),
+        patch.object(safety_scheduler, "_get_weather_adjusted_duration", return_value=1),
+        patch.object(safety_scheduler._shutdown_event, "wait", return_value=True),
+        patch.object(safety_scheduler, "schedule_zone_hard_stop") as hard_stop,
+        patch("services.zone_control.exclusive_start_zone", return_value=True) as start_zone,
+        patch("services.zone_control.stop_zone"),
+    ):
+        safety_scheduler._run_program_threaded(110, [zone["id"]], "fault-program")
+
+    start_zone.assert_not_called()
+    hard_stop.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+    assert zone["id"] not in safety_scheduler.active_zones
+
+
+def test_110_program_honors_failed_central_start(safety_scheduler, test_db):
+    group = test_db.create_group("program-rejected")
+    zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
+
+    with (
+        patch.object(safety_scheduler, "_check_weather_skip", return_value={"skip": False}),
+        patch.object(safety_scheduler, "_get_weather_adjusted_duration", return_value=1),
+        patch.object(safety_scheduler._shutdown_event, "wait", return_value=True),
+        patch.object(safety_scheduler, "schedule_zone_hard_stop") as hard_stop,
+        patch("services.zone_control.exclusive_start_zone", return_value=False) as start_zone,
+        patch("services.zone_control.stop_zone"),
+    ):
+        safety_scheduler._run_program_threaded(110, [zone["id"]], "rejected-program")
+
+    start_zone.assert_called_once_with(zone["id"], source="program")
+    hard_stop.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "off"
+    assert zone["id"] not in safety_scheduler.active_zones
+
+
+def test_110_program_does_not_overwrite_fault_reported_during_central_start(safety_scheduler, test_db):
+    group = test_db.create_group("program-command-fault")
+    zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
+
+    def fault_during_start(zone_id, *, source):
+        assert source == "program"
+        test_db.update_zone(zone_id, {"state": "fault", "commanded_state": "on"})
+        return True
+
+    with (
+        patch.object(safety_scheduler, "_check_weather_skip", return_value={"skip": False}),
+        patch.object(safety_scheduler, "_get_weather_adjusted_duration", return_value=1),
+        patch.object(safety_scheduler, "schedule_zone_hard_stop") as hard_stop,
+        patch("services.zone_control.exclusive_start_zone", side_effect=fault_during_start),
+    ):
+        safety_scheduler._run_program_threaded(110, [zone["id"]], "fault-during-start")
+
+    hard_stop.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+    assert zone["id"] not in safety_scheduler.active_zones
+
+
+def test_110_group_sequence_never_admits_fault_zone(safety_scheduler, test_db, monkeypatch):
+    group = test_db.create_group("group-fault")
+    zone = test_db.create_zone({"name": "fault", "duration": 1, "group_id": group["id"]})
+    test_db.update_zone(zone["id"], {"state": "fault", "commanded_state": "on"})
+    safety_scheduler.group_cancel_events[group["id"]] = threading.Event()
+    monkeypatch.setenv("SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ", "1")
+
+    with (
+        patch.object(safety_scheduler, "_check_weather_skip", return_value={"skip": False}),
+        patch.object(safety_scheduler, "schedule_zone_hard_stop") as hard_stop,
+        patch("services.zone_control.exclusive_start_zone", return_value=True) as start_zone,
+        patch("services.zone_control.stop_zone"),
+    ):
+        safety_scheduler._run_group_sequence(group["id"], [zone["id"]])
+
+    start_zone.assert_not_called()
+    hard_stop.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+    assert group["id"] not in safety_scheduler.group_cancel_events
+
+
+def test_110_group_sequence_honors_failed_central_start(safety_scheduler, test_db, monkeypatch):
+    group = test_db.create_group("group-rejected")
+    zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
+    safety_scheduler.group_cancel_events[group["id"]] = threading.Event()
+    monkeypatch.setenv("SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ", "1")
+
+    with (
+        patch.object(safety_scheduler, "_check_weather_skip", return_value={"skip": False}),
+        patch.object(safety_scheduler, "schedule_zone_hard_stop") as hard_stop,
+        patch("services.zone_control.exclusive_start_zone", return_value=False) as start_zone,
+        patch("services.zone_control.stop_zone"),
+    ):
+        safety_scheduler._run_group_sequence(group["id"], [zone["id"]])
+
+    start_zone.assert_called_once_with(zone["id"], source="program")
+    hard_stop.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "off"
+    assert group["id"] not in safety_scheduler.group_cancel_events
+
+
+def test_110_group_sequence_does_not_overwrite_fault_reported_during_start(
+    safety_scheduler, test_db, monkeypatch
+):
+    group = test_db.create_group("group-command-fault")
+    zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
+    safety_scheduler.group_cancel_events[group["id"]] = threading.Event()
+    monkeypatch.setenv("SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ", "1")
+
+    def fault_during_start(zone_id, *, source):
+        assert source == "program"
+        test_db.update_zone(zone_id, {"state": "fault", "commanded_state": "on"})
+        return True
+
+    with (
+        patch.object(safety_scheduler, "_check_weather_skip", return_value={"skip": False}),
+        patch.object(safety_scheduler, "schedule_zone_hard_stop") as hard_stop,
+        patch("services.zone_control.exclusive_start_zone", side_effect=fault_during_start),
+    ):
+        safety_scheduler._run_group_sequence(group["id"], [zone["id"]])
+
+    hard_stop.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+    assert zone["id"] not in safety_scheduler.active_zones
+    assert group["id"] not in safety_scheduler.group_cancel_events
+
+
+@pytest.mark.parametrize("early_exit", ["emergency", "quiescing"])
+def test_group_runner_early_exit_releases_owned_session_event(safety_scheduler, early_exit):
+    group_id = 110_001
+    owned = threading.Event()
+    safety_scheduler.group_cancel_events[group_id] = owned
+    if early_exit == "quiescing":
+        safety_scheduler._accepting_runs = False
+
+    with (
+        patch.object(scheduler_module, "TESTING", False),
+        patch.object(
+            safety_scheduler,
+            "_is_emergency_stop_active",
+            return_value=early_exit == "emergency",
+        ),
+    ):
+        safety_scheduler._run_group_sequence(group_id, [1])
+
+    assert group_id not in safety_scheduler.group_cancel_events
+
+
+def test_group_session_release_does_not_delete_replacement_event(safety_scheduler):
+    group_id = 110_002
+    owned = threading.Event()
+    replacement = threading.Event()
+    safety_scheduler.group_cancel_events[group_id] = replacement
+
+    safety_scheduler._release_group_session(group_id, owned)
+
+    assert safety_scheduler.group_cancel_events[group_id] is replacement
