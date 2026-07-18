@@ -166,9 +166,15 @@ def _do_group_start(group_id: int) -> str:
 
 def _do_group_stop(group_id: int) -> str:
     try:
-        from services.zone_control import stop_all_in_group
+        from irrigation_scheduler import get_scheduler
 
-        stop_all_in_group(int(group_id), reason="telegram", force=True)
+        scheduler = get_scheduler()
+        if scheduler:
+            scheduler.cancel_group_jobs(int(group_id))
+        else:
+            from services.zone_control import stop_all_in_group
+
+            stop_all_in_group(int(group_id), reason="telegram", force=True)
         return "⏹ Полив группы остановлен"
     except ImportError as e:
         logger.debug("Exception in _do_group_stop: %s", e)
