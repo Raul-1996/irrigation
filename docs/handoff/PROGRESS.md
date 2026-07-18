@@ -373,8 +373,20 @@
     - targeted: 178 passed; full gate: 2067 passed, 2 skipped, 17 deselected;
       node syntax, ruff и diff check чисты.
 
-После этих пакетов: 135 записей fixed (125 корней + десять унаследованных дублей),
-4 deferred, 8 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+26. `phase2-mqtt-frontend` — #103, #104, #109, #121 `fixed`; #120 наследует #103
+    - fix `1ea701ca4305e46fd0ccfc8671a5683acc5ea771`;
+    - merge `88d9162784494a4ca23866c336ebe024a3e1aa3f`;
+    - MQTT status использует одну replaceable polling chain; `+/#/*` display
+      wildcards компилируются в правильном порядке;
+    - create/update ports валидируются как integer 1..65535 до API, а
+      `{success:false}`/structured server errors показываются пользователю;
+    - #121 закрыт для верифицированного UI path; crafted direct API payload не
+      выдаётся за часть этой frontend-находки;
+    - targeted/runtime probes прошли; full gate: 2071 passed, 2 skipped,
+      17 deselected; ruff и diff check чисты.
+
+После этих пакетов: 140 записей fixed (129 корней + одиннадцать унаследованных дублей),
+4 deferred, 3 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

@@ -1411,6 +1411,47 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-mqtt-frontend",
+      "fix_commit": "1ea701ca4305e46fd0ccfc8671a5683acc5ea771",
+      "merge_commit": "88d9162784494a4ca23866c336ebe024a3e1aa3f",
+      "summary": "MQTT settings page поддерживает одну polling chain, корректные topic wildcards, bounded integer ports и видимые structured API failures.",
+      "resolutions": [
+        {
+          "id": 103,
+          "disposition": "fixed",
+          "reason": "updateStatuses больше не порождает recursive timeout; loadServers заменяет единственный statusPollTimer и следующая итерация планируется после завершения текущей.",
+          "tests": ["tests/unit/test_phase2_mqtt_frontend.py::test_status_polling_has_one_replaceable_timer_chain"]
+        },
+        {
+          "id": 104,
+          "disposition": "fixed",
+          "reason": "Display regex компилирует MQTT + как single-level wildcard до escaping literals; # и user * становятся multi-level matches.",
+          "tests": ["tests/unit/test_phase2_mqtt_frontend.py::test_display_regex_compiles_plus_before_escaping_literals"]
+        },
+        {
+          "id": 109,
+          "disposition": "fixed",
+          "reason": "Create/update success=false показывает message/error вместо молчаливого no-op; transport exceptions сохраняют отдельное network error сообщение.",
+          "tests": ["tests/unit/test_phase2_mqtt_frontend.py::test_create_and_update_surface_structured_api_errors"]
+        },
+        {
+          "id": 121,
+          "disposition": "fixed",
+          "reason": "UI create/update отклоняет blank/non-integer/out-of-range port до API и принимает только 1..65535; server validation errors также видимы. Direct crafted malformed API hardening остаётся вне подтверждённого UI scenario.",
+          "tests": [
+            "tests/unit/test_phase2_mqtt_frontend.py::test_port_parser_rejects_invalid_values_before_api_calls",
+            "tests/unit/test_phase2_mqtt_frontend.py::test_create_and_update_surface_structured_api_errors"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "6 targeted tests and inline JavaScript runtime probes passed",
+        "full_pytest": "2071 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

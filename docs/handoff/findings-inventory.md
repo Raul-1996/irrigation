@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **135 fixed · 4 deferred · 8 pending · 5 not_applicable**.
+- Phase 2 disposition: **140 fixed · 4 deferred · 3 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1218,7 +1218,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ на странице MQTT сохраняет 3 строки серверов и создаёт один новый → 5 параллельных вечных цепочек. Каждая цепочка каждые 5 с последовательно дергает GET /api/mqtt/<id>/status по всем серверам, а бэкенд на каждый такой запрос делает реальный blocking client.connect() к брокеру с НАСТОЯЩИМ client_id сервера (routes/mqtt_api.py:228-232). Итог: постоянный шторм подключений к брокеру (усиливает уже известный takeover live-подписки SSE-хаба по совпадающему client_id в N раз), лишняя нагрузка на медленный ARM-контроллер и мигающие/ложные индикаторы offline из-за гонок параллельных проверок. Лечится только перезагрузкой страницы.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** updateStatuses больше не порождает recursive timeout; loadServers заменяет единственный statusPollTimer и следующая итерация планируется после завершения текущей.
+- **Пакет:** `phase2-mqtt-frontend`.
+- **Fix commit:** `1ea701ca4305e46fd0ccfc8671a5683acc5ea771`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_frontend.py::test_status_polling_has_one_replaceable_timer_chain`.
 
 ### #104 [low] `templates/mqtt.html:241` — mqtt.html: buildDisplayRegex ломает MQTT-wildcard '+' — сканер топиков показывает пустое дерево при фильтре с '+'
 
@@ -1226,7 +1230,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь в браузере топиков вводит фильтр с MQTT-wildcard '+', например '/devices/+/controls/K1', и нажимает «Сканировать топики». Подписка на брокер уходит корректно (subFilter = uiFilter), события по SSE приходят, но клиентский displayRe не матчит ни один реальный топик — дерево топиков остаётся пустым, как будто сообщений нет. То же в startScanLoop (строка 416). Фильтры с '#' и '*' работают, только '+' сломан.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Display regex компилирует MQTT + как single-level wildcard до escaping literals; # и user * становятся multi-level matches.
+- **Пакет:** `phase2-mqtt-frontend`.
+- **Fix commit:** `1ea701ca4305e46fd0ccfc8671a5683acc5ea771`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_frontend.py::test_display_regex_compiles_plus_before_escaping_literals`.
 
 ### #106 [medium] `static/js/zones.js:1500` — zones.js: SSE zones-sse — только дельты без снапшота и без ресинка при реконнекте; пропущенные события оставляют кнопки старт/стоп в противоположном состоянии навсегда
 
@@ -1268,7 +1276,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ вводит некорректный порт/пустой host и жмёт «Сохранить»: бэкенд отвечает 400 {success:false, message}. UI не показывает ничего — ни тоста, ни отката; строка таблицы продолжает отображать невалидные значения, админ уверен, что сохранил, а публикация продолжает идти по старым параметрам.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Create/update success=false показывает message/error вместо молчаливого no-op; transport exceptions сохраняют отдельное network error сообщение.
+- **Пакет:** `phase2-mqtt-frontend`.
+- **Fix commit:** `1ea701ca4305e46fd0ccfc8671a5683acc5ea771`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_frontend.py::test_create_and_update_surface_structured_api_errors`.
 
 ### #110 [high] `services/zone_control.py:298` — Контракт state='fault' не реализован: fault-зона свободно стартует по расписанию, а любой stop_zone молча сбрасывает fault в 'off'
 
@@ -1399,7 +1411,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ на странице MQTT сохраняет настройки сервера 5 раз → 6 параллельных вечных циклов; при 2 серверах это 12 реальных TCP-коннектов к брокерам каждые 5 секунд с одного вкладки, каждый занимает воркер hypercorn (до 5 с на мёртвом брокере) и каждый коннект с client_id боевого сервера дополнительно выбивает live-подписку SSE-хаба (session takeover). Деградация растёт с каждым сохранением до перезагрузки страницы.
 - **Дубль:** `#103`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** updateStatuses больше не порождает recursive timeout; loadServers заменяет единственный statusPollTimer и следующая итерация планируется после завершения текущей.
+- **Пакет:** `phase2-mqtt-frontend`.
+- **Fix commit:** `1ea701ca4305e46fd0ccfc8671a5683acc5ea771`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_frontend.py::test_status_polling_has_one_replaceable_timer_chain`.
 
 ### #121 [low] `templates/mqtt.html:154` — mqtt.html: создание/сохранение MQTT-сервера молча проглатывает ошибку сервера; нечисловой порт даёт непойманный TypeError → 500
 
@@ -1407,7 +1423,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь вводит в поле Port значение «abc» (или вставляет строку с пробелом) и жмёт «Создать»: запрос падает 500, в UI нет ни тоста, ни ошибки — кнопка просто «не работает», сервер не создан, причина не видна. То же при любом отклонённом сохранении строки таблицы.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** UI create/update отклоняет blank/non-integer/out-of-range port до API и принимает только 1..65535; server validation errors также видимы. Direct crafted malformed API hardening остаётся вне подтверждённого UI scenario.
+- **Пакет:** `phase2-mqtt-frontend`.
+- **Fix commit:** `1ea701ca4305e46fd0ccfc8671a5683acc5ea771`.
+- **Regression tests:** `tests/unit/test_phase2_mqtt_frontend.py::test_port_parser_rejects_invalid_values_before_api_calls`, `tests/unit/test_phase2_mqtt_frontend.py::test_create_and_update_surface_structured_api_errors`.
 
 ### #122 [low] `templates/settings.html:209` — Контракт минимальной длины пароля разъехался: UI обещает и валидирует «≥ 4 символа», бэкенд требует MIN_PASSWORD_LENGTH = 8
 

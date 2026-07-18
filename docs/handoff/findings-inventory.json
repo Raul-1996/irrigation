@@ -3209,11 +3209,13 @@
     "reproduction": "Админ на странице MQTT сохраняет 3 строки серверов и создаёт один новый → 5 параллельных вечных цепочек. Каждая цепочка каждые 5 с последовательно дергает GET /api/mqtt/<id>/status по всем серверам, а бэкенд на каждый такой запрос делает реальный blocking client.connect() к брокеру с НАСТОЯЩИМ client_id сервера (routes/mqtt_api.py:228-232). Итог: постоянный шторм подключений к брокеру (усиливает уже известный takeover live-подписки SSE-хаба по совпадающему client_id в N раз), лишняя нагрузка на медленный ARM-контроллер и мигающие/ложные индикаторы offline из-за гонок параллельных проверок. Лечится только перезагрузкой страницы.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "updateStatuses больше не порождает recursive timeout; loadServers заменяет единственный statusPollTimer и следующая итерация планируется после завершения текущей.",
+      "package": "phase2-mqtt-frontend",
+      "commit": "1ea701ca4305e46fd0ccfc8671a5683acc5ea771",
+      "tests": [
+        "tests/unit/test_phase2_mqtt_frontend.py::test_status_polling_has_one_replaceable_timer_chain"
+      ]
     }
   },
   {
@@ -3237,11 +3239,13 @@
     "reproduction": "Пользователь в браузере топиков вводит фильтр с MQTT-wildcard '+', например '/devices/+/controls/K1', и нажимает «Сканировать топики». Подписка на брокер уходит корректно (subFilter = uiFilter), события по SSE приходят, но клиентский displayRe не матчит ни один реальный топик — дерево топиков остаётся пустым, как будто сообщений нет. То же в startScanLoop (строка 416). Фильтры с '#' и '*' работают, только '+' сломан.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Display regex компилирует MQTT + как single-level wildcard до escaping literals; # и user * становятся multi-level matches.",
+      "package": "phase2-mqtt-frontend",
+      "commit": "1ea701ca4305e46fd0ccfc8671a5683acc5ea771",
+      "tests": [
+        "tests/unit/test_phase2_mqtt_frontend.py::test_display_regex_compiles_plus_before_escaping_literals"
+      ]
     }
   },
   {
@@ -3384,11 +3388,13 @@
     "reproduction": "Админ вводит некорректный порт/пустой host и жмёт «Сохранить»: бэкенд отвечает 400 {success:false, message}. UI не показывает ничего — ни тоста, ни отката; строка таблицы продолжает отображать невалидные значения, админ уверен, что сохранил, а публикация продолжает идти по старым параметрам.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Create/update success=false показывает message/error вместо молчаливого no-op; transport exceptions сохраняют отдельное network error сообщение.",
+      "package": "phase2-mqtt-frontend",
+      "commit": "1ea701ca4305e46fd0ccfc8671a5683acc5ea771",
+      "tests": [
+        "tests/unit/test_phase2_mqtt_frontend.py::test_create_and_update_surface_structured_api_errors"
+      ]
     }
   },
   {
@@ -3719,11 +3725,13 @@
     "main_or_branch": "main_bug",
     "duplicate_of": 103,
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "updateStatuses больше не порождает recursive timeout; loadServers заменяет единственный statusPollTimer и следующая итерация планируется после завершения текущей.",
+      "package": "phase2-mqtt-frontend",
+      "commit": "1ea701ca4305e46fd0ccfc8671a5683acc5ea771",
+      "tests": [
+        "tests/unit/test_phase2_mqtt_frontend.py::test_status_polling_has_one_replaceable_timer_chain"
+      ]
     }
   },
   {
@@ -3747,11 +3755,14 @@
     "reproduction": "Пользователь вводит в поле Port значение «abc» (или вставляет строку с пробелом) и жмёт «Создать»: запрос падает 500, в UI нет ни тоста, ни ошибки — кнопка просто «не работает», сервер не создан, причина не видна. То же при любом отклонённом сохранении строки таблицы.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "UI create/update отклоняет blank/non-integer/out-of-range port до API и принимает только 1..65535; server validation errors также видимы. Direct crafted malformed API hardening остаётся вне подтверждённого UI scenario.",
+      "package": "phase2-mqtt-frontend",
+      "commit": "1ea701ca4305e46fd0ccfc8671a5683acc5ea771",
+      "tests": [
+        "tests/unit/test_phase2_mqtt_frontend.py::test_port_parser_rejects_invalid_values_before_api_calls",
+        "tests/unit/test_phase2_mqtt_frontend.py::test_create_and_update_surface_structured_api_errors"
+      ]
     }
   },
   {
