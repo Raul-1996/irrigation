@@ -48,6 +48,45 @@
 - `services/mqtt_pub.py` + `routes/mqtt_api.py` — callbacks, client lifecycle, validation and secret response.
 - отдельные frontend/web owners — `status.js`, `zones.js`, `mqtt.html`, auth/security and image paths.
 
+## Фаза 2 — локальная интеграция
+
+Начало: 2026-07-19. Интеграцию выполняет только главный оркестратор; push запрещён,
+пока origin публичный. Каждый fix-пакет проходит полный серийный pytest и полный
+`uvx ruff check .` перед переходом к следующему merge.
+
+Учёт disposition теперь детерминирован:
+
+- `findings-inventory.json` остаётся источником истины и хранит для каждой записи
+  `implementation` с disposition, причиной, пакетом, fix commit и regression tests;
+- `PHASE2-PACKAGES.json` хранит интеграционный ledger пакетов и полных проверок;
+- `render_findings_inventory.py` применяет ledger, наследует disposition точным
+  дублям, валидирует 152 неизменяемых позиционных ID и целиком регенерирует Markdown.
+
+### Интегрированные пакеты
+
+1. `phase2-baseline-history`
+   - fix `458dab2afb138870a01614223ee9d9a5ad228b78`;
+   - merge `65493eaed00b036ffd7d6aad0580a3a8a6dd9c33`;
+   - production-код истории корректно относит запуск к локальной дате старта;
+     baseline-тест больше не предполагает, что «45 минут назад» всегда сегодня;
+   - targeted: 14 passed; full gate: 1872 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+2. `phase2-migration-password` — finding #98 (`fixed`)
+   - fix `29708009a2a14ea59d82160b1aa69bddbe05e389`;
+   - merge `2b8981209d68bf8d4b3e811c3872fbc09e7a3427`;
+   - это узкое явно разрешённое исключение для замороженного `db/migrations.py`:
+     только bootstrap-вставка `password_hash` изменена с `INSERT OR REPLACE` на
+     `INSERT OR IGNORE`; свежая БД всё ещё получает начальный пароль, а существующий
+     hash больше не сбрасывается при рестарте с пустой таблицей `zones`;
+   - regression:
+     `tests/unit/test_phase2_migration_password.py::test_restart_with_empty_zones_preserves_existing_admin_password`;
+   - targeted: 12 passed; full gate: 1873 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 1 finding fixed, 0 deferred, 146 REAL-записей pending;
+пять `VERIFIED_FALSE` остаются `not_applicable` и не исправляются.
+
 ## Осознанно отложенные категории
 
 Финальное решение об отложении принимается после fix-веток, но заранее не планируется рискованный широкий рефакторинг:

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "slug": "phase2-baseline-history",
+      "fix_commit": "458dab2afb138870a01614223ee9d9a5ad228b78",
+      "merge_commit": "65493eaed00b036ffd7d6aad0580a3a8a6dd9c33",
+      "summary": "Стабилизирован baseline-тест истории зоны на границе локальных суток; production-код корректно группировал запуск по локальной дате старта.",
+      "resolutions": [],
+      "verification": {
+        "targeted": "14 passed",
+        "full_pytest": "1872 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
+    },
+    {
+      "slug": "phase2-migration-password",
+      "fix_commit": "29708009a2a14ea59d82160b1aa69bddbe05e389",
+      "merge_commit": "2b8981209d68bf8d4b3e811c3872fbc09e7a3427",
+      "summary": "Узкое исключение для замороженного db/migrations.py: рестарт с пустой zones больше не заменяет уже настроенный пароль администратора дефолтным.",
+      "resolutions": [
+        {
+          "id": 98,
+          "disposition": "fixed",
+          "reason": "Bootstrap пароля теперь использует INSERT OR IGNORE: свежая БД по-прежнему получает начальный пароль, а существующий password_hash сохраняется независимо от количества зон.",
+          "tests": [
+            "tests/unit/test_phase2_migration_password.py::test_restart_with_empty_zones_preserves_existing_admin_password"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "12 passed",
+        "full_pytest": "1873 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
+    }
+  ]
+}
