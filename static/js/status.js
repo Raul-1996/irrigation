@@ -49,6 +49,78 @@
     let mqttNoConnection = false;
     let envProbeTimer = null;
     let envProbeAttempts = 0;
+    let envProbeExhausted = false;
+    let zonesDataRevision = 0;
+    const pendingZoneStates = Object.create(null);
+
+    function assertJsonResponse(response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+    }
+
+    function optimisticTimestamp(timestamp) {
+        return new Date(timestamp === undefined ? Date.now() : timestamp).toISOString();
+    }
+
+    function rememberOptimisticZoneState(zone, state, wateringStart, plannedEnd) {
+        if (!zone) return null;
+        var token = ++zonesDataRevision;
+        pendingZoneStates[zone.id] = {
+            token: token,
+            state: state,
+            watering_start_time: wateringStart,
+            planned_end_time: plannedEnd,
+            previous: {
+                state: zone.state,
+                watering_start_time: zone.watering_start_time,
+                planned_end_time: zone.planned_end_time,
+            },
+            confirmed: false,
+            expires_at: 0,
+        };
+        zone.state = state;
+        zone.watering_start_time = wateringStart;
+        zone.planned_end_time = plannedEnd;
+        return token;
+    }
+
+    function applyPendingZoneStates(zones) {
+        var now = Date.now();
+        var reconciled = false;
+        (zones || []).forEach(function(zone) {
+            var pending = pendingZoneStates[zone.id];
+            if (!pending) return;
+            if (pending.confirmed && (zone.state === pending.state || now >= pending.expires_at)) {
+                delete pendingZoneStates[zone.id];
+                reconciled = true;
+                return;
+            }
+            zone.state = pending.state;
+            zone.watering_start_time = pending.watering_start_time;
+            zone.planned_end_time = pending.planned_end_time;
+        });
+        if (reconciled) zonesDataRevision += 1;
+    }
+
+    function revertOptimisticZoneState(zoneId, token) {
+        var pending = pendingZoneStates[zoneId];
+        if (!pending || pending.token !== token) return;
+        delete pendingZoneStates[zoneId];
+        zonesDataRevision += 1;
+        var zone = (zonesData || []).find(function(item) { return item.id === zoneId; });
+        if (!zone) return;
+        zone.state = pending.previous.state;
+        zone.watering_start_time = pending.previous.watering_start_time;
+        zone.planned_end_time = pending.previous.planned_end_time;
+    }
+
+    function reconcileOptimisticZoneState(zoneId, token) {
+        var pending = pendingZoneStates[zoneId];
+        if (!pending || pending.token !== token) return Promise.resolve();
+        pending.confirmed = true;
+        pending.expires_at = Date.now() + 15000;
+        return loadZonesData();
+    }
     
     // Функция обновления времени (локальное, без fetch)
     var _serverTimeOffset = 0;
@@ -57,8 +129,8 @@
             const r = await fetch('/api/server-time?ts=' + Date.now(), { cache: 'no-store' });
             const j = await r.json();
             if (j && j.now_iso) {
-                var serverMs = new Date(j.now_iso).getTime();
-                _serverTimeOffset = serverMs - Date.now();
+                var serverMs = new Date(String(j.now_iso).replace(' ','T')).getTime();
+                if (Number.isFinite(serverMs)) _serverTimeOffset = serverMs - Date.now();
             }
         } catch (e) {}
     }
@@ -83,21 +155,25 @@
     }
     
     async function loadZonesData() {
+        var requestRevision = zonesDataRevision;
         try {
             // Fetch zones + groups in PARALLEL
             var needGroups = !zoneGroupsCache || !zoneGroupsCache.length;
             var promises = [
-                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(function(r){return r.json();}).catch(function(){return [];}),
+                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(assertJsonResponse),
             ];
             if (needGroups) {
-                promises.push(fetch('/api/groups').then(function(r){return r.json();}).catch(function(){return [];}));
+                promises.push(fetch('/api/groups').then(assertJsonResponse));
             }
             var results = await Promise.all(promises);
+            if (requestRevision !== zonesDataRevision) return false;
+            if (!Array.isArray(results[0])) throw new Error('Invalid zones response');
             var prevNW = {};
             (zonesData || []).forEach(function(z) { if (z && z._nextWatering) prevNW[z.id] = z._nextWatering; });
-            zonesData = Array.isArray(results[0]) ? results[0] : [];
+            applyPendingZoneStates(results[0]);
+            zonesData = results[0];
             zonesData.forEach(function(z) { if (prevNW[z.id]) z._nextWatering = prevNW[z.id]; });
-            if (needGroups && results[1]) zoneGroupsCache = results[1];
+            if (needGroups && Array.isArray(results[1])) zoneGroupsCache = results[1];
 
             // Render V2 zones IMMEDIATELY
             renderGroupTabs();
@@ -134,9 +210,11 @@
             try { updateWaterMeter(zonesData); } catch(e) {}
 
             hideConnectionError();
+            return true;
         } catch (error) {
             console.error('Ошибка загрузки зон:', error);
             showConnectionError();
+            return false;
         }
     }
 
@@ -261,11 +339,22 @@
             rv.textContent = (s.indexOf('идёт дожд') !== -1 || s.indexOf('идет дожд') !== -1) ? 'дождь идет' : 'нет дождя';
         })();
 
-        // Быстрый пробник: если сейчас отображается "нет данных", опрашиваем /api/env чаще (до 10 попыток)
-        if ((tv.textContent === 'нет данных' || hv.textContent === 'нет данных') && !envProbeTimer) {
+        // Быстрый пробник: если включённый датчик показывает "нет данных",
+        // опрашиваем /api/env чаще, но не более десяти раз за один offline-период.
+        var envNeedsProbe = statusData.temperature === 'нет данных' || statusData.humidity === 'нет данных';
+        if (!envNeedsProbe) {
+            envProbeExhausted = false;
+            if (envProbeTimer) { clearInterval(envProbeTimer); envProbeTimer = null; }
+        }
+        if (envNeedsProbe && !envProbeTimer && !envProbeExhausted) {
             envProbeAttempts = 0;
             envProbeTimer = setInterval(async () => {
                 try {
+                    if (envProbeAttempts >= 10) {
+                        envProbeExhausted = true;
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                        return;
+                    }
                     envProbeAttempts += 1;
                     const resp = await fetch(`/api/env?ts=${Date.now()}`, { cache: 'no-store' });
                     const js = await resp.json();
@@ -278,12 +367,23 @@
                         hb.style.display = 'inline-block';
                         hv.textContent = String(Math.round(Number(val.hum)));
                     }
-                    if (tv.textContent !== 'нет данных' && hv.textContent !== 'нет данных') {
+                    var tempReady = statusData.temperature === null
+                        || typeof statusData.temperature === 'undefined'
+                        || tv.textContent !== 'нет данных';
+                    var humReady = statusData.humidity === null
+                        || typeof statusData.humidity === 'undefined'
+                        || hv.textContent !== 'нет данных';
+                    if (tempReady && humReady) {
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                    } else if (envProbeAttempts >= 10) {
+                        envProbeExhausted = true;
                         clearInterval(envProbeTimer); envProbeTimer = null;
                     }
-                    if (envProbeAttempts >= 10) { clearInterval(envProbeTimer); envProbeTimer = null; }
                 } catch (e) {
-                    if (envProbeAttempts >= 10) { clearInterval(envProbeTimer); envProbeTimer = null; }
+                    if (envProbeAttempts >= 10) {
+                        envProbeExhausted = true;
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                    }
                 }
             }, 1000);
         }
@@ -1623,10 +1723,10 @@
                 html += '<img src="' + _thumbUrl + '" alt="Фото зоны ' + escapeHtml(z.name || '') + '" onerror="this.style.display=\'none\'">';
                 html += '</div>';
             } else {
-                html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
+                html += '<div class="zc-icon" style="background:' + t.bg + '">' + escapeHtml(z.icon || '🌿') + '</div>';
             }
             html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + escapeHtml(z.name || '') + '</div>';
-            html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
+            html += '<div class="zc-meta"><span>' + escapeHtml(t.label) + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
             if (!showSections) html += '<span style="color:#ddd">·</span><span>' + escapeHtml(gName2) + '</span>';
             html += '</div></div>';
             html += nextHtml;
@@ -1798,31 +1898,33 @@
     function toggleZoneRun(id) {
         showLoading(((zonesData||[]).find(function(z){return z.id===id;})||{}).state==='on' ? 'Остановка...' : 'Запуск...');
         var z = (zonesData || []).find(function(z) { return z.id === id; });
-        if (!z) return;
+        if (!z) { hideLoading(); return; }
         var wantOn = z.state !== 'on';
         var url = wantOn ? '/api/zones/' + id + '/mqtt/start' : '/api/zones/' + id + '/mqtt/stop';
         // Optimistic: set state + times BEFORE fetch for instant timer
-        z.state = wantOn ? 'on' : 'off';
-        if (wantOn) {
-            z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-            z.planned_end_time = new Date(Date.now() + (z.duration||10) * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
-        }
+        var optimisticStart = wantOn ? optimisticTimestamp() : null;
+        var optimisticEnd = wantOn ? optimisticTimestamp(Date.now() + (z.duration||10) * 60 * 1000) : null;
+        var mutationToken = rememberOptimisticZoneState(
+            z, wantOn ? 'on' : 'off', optimisticStart, optimisticEnd
+        );
         renderZoneCards();
         renderGroupTabs();
         fetch(url, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
             if (data && data.success) {
                 hideLoading();
                 showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
+                reconcileOptimisticZoneState(id, mutationToken);
                 // Light refresh status (groups) after 2 sec
                 setTimeout(function() { loadStatusData(); }, 2000);
             } else {
-                z.state = wantOn ? 'off' : 'on';
+                hideLoading();
+                revertOptimisticZoneState(id, mutationToken);
                 renderZoneCards();
                 showZoneToast((data && data.message) || 'Ошибка', 'error');
             }
         }).catch(function() {
             hideLoading();
-            z.state = wantOn ? 'off' : 'on';
+            revertOptimisticZoneState(id, mutationToken);
             renderZoneCards();
             showZoneToast('Ошибка сети', 'error');
         });
@@ -1892,11 +1994,13 @@
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             }).catch(function() { showZoneToast('Ошибка', 'error'); });
         } else {
-            (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
-                fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function() {});
+            showLoading('Запуск всех групп...');
+            runAllGroups(null).then(function(results) {
+                reportGroupRunResults(results, 'с настройками зон');
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
             });
-            showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
         }
     }
     window.runGroupWithDefaults = runGroupWithDefaults;
@@ -1973,6 +2077,10 @@
             group_id: parseInt(document.getElementById('editZoneGroup').value) || 1,
         };
         api.put('/api/zones/' + editingZoneId, payload).then(function(data) {
+            if (!data || typeof data !== 'object' || data.success === false) {
+                showZoneToast((data && data.message) || 'Ошибка сохранения', 'error');
+                return;
+            }
             closeZoneSheet();
             showZoneToast('✅ Зона сохранена', 'success');
             loadZonesData();
@@ -2110,6 +2218,8 @@
     function initDialDrag() {
         var svg = document.getElementById('dialSvg');
         if (!svg) return;
+        if (svg.__dialDragInitialized) return;
+        svg.__dialDragInitialized = true;
         var dragging = false;
         function angleFromEvent(e) {
             var rect = svg.getBoundingClientRect();
@@ -2184,6 +2294,44 @@
         runPopupPct = p;
         _refreshRunPopupModeUI();
     }
+
+    function runAllGroups(groupBody) {
+        var allGroups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
+        return Promise.all(allGroups.map(function(group) {
+            var options = { method: 'POST' };
+            if (groupBody) {
+                options.headers = {'Content-Type': 'application/json'};
+                options.body = JSON.stringify(groupBody);
+            }
+            return fetch('/api/groups/' + group.id + '/start-from-first', options)
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    return {
+                        id: group.id,
+                        ok: !!(data && data.success),
+                        message: data && data.message,
+                    };
+                })
+                .catch(function() {
+                    return { id: group.id, ok: false, message: 'Ошибка сети' };
+                });
+        }));
+    }
+
+    function reportGroupRunResults(results, successLabel) {
+        hideLoading();
+        var okCount = results.filter(function(result) { return result.ok; }).length;
+        if (results.length > 0 && okCount === results.length) {
+            showZoneToast('▶ Все группы запущены' + (successLabel ? ': ' + successLabel : ''), 'success');
+        } else if (okCount > 0) {
+            showZoneToast('▶ Запущены ' + okCount + ' из ' + results.length + ' групп', 'warning');
+        } else {
+            var firstMessage = results[0] && results[0].message;
+            showZoneToast(firstMessage || 'Не удалось запустить группы', 'error');
+        }
+        setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+    }
+
     function confirmRun() {
         // _runPopupAllGroups flag: true when "all groups" was selected (gid=null)
         if (!runPopupZoneId && !runPopupGroupId && !_runPopupAllGroups && !_runPopupSelectedZones) return;
@@ -2257,17 +2405,11 @@
             if (savedAllGroups && !savedGroupId) {
                 // All groups: start each group with override
                 showLoading('Запуск всех групп...');
-                var allGroups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
-                Promise.all(allGroups.map(function(g) {
-                    return fetch('/api/groups/' + g.id + '/start-from-first', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(groupBody)
-                    }).catch(function() {});
-                })).then(function() {
+                runAllGroups(groupBody).then(function(results) {
+                    reportGroupRunResults(results, label);
+                }).catch(function() {
                     hideLoading();
-                    showZoneToast('▶ Все группы запущены: ' + label, 'success');
-                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                    showZoneToast('Ошибка сети', 'error');
                 });
                 return;
             }
@@ -2283,8 +2425,8 @@
                     pdur = Math.max(1, Math.min(240, Math.ceil(base * pct / 100)));
                 }
                 z.state = 'on';
-                z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-                z.planned_end_time = new Date(Date.now() + pdur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                z.watering_start_time = optimisticTimestamp();
+                z.planned_end_time = optimisticTimestamp(Date.now() + pdur * 60 * 1000);
             });
             renderZoneCards();
             renderGroupTabs();
@@ -2309,7 +2451,12 @@
                     });
                     setTimeout(function() { showZoneToast('⚠ ' + msgs.join('; '), 'error'); }, 600);
                 }
+                if (!data || !data.success) loadZonesData();
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
+                loadZonesData();
             });
             return;
         }
@@ -2322,6 +2469,7 @@
         // If already running — stop first, then restart
         var zName = (z && z.name) ? ' ' + z.name : '';
         showLoading('Запуск зоны #' + id + zName + '...');
+        var mutationToken = null;
         var startFn = function() {
             // Optimistic: set state + times BEFORE fetch for instant timer.
             // % mode: pre-compute the same way the server will (best-effort).
@@ -2331,9 +2479,12 @@
                 optDur = Math.max(1, Math.min(240, Math.ceil(base * pct / 100)));
             }
             if (z) {
-                z.state = 'on';
-                z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-                z.planned_end_time = new Date(Date.now() + optDur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                mutationToken = rememberOptimisticZoneState(
+                    z,
+                    'on',
+                    optimisticTimestamp(),
+                    optimisticTimestamp(Date.now() + optDur * 60 * 1000)
+                );
             }
             renderZoneCards();
             renderGroupTabs();
@@ -2343,6 +2494,7 @@
                 if (data && data.success) {
                     hideLoading();
                     showZoneToast('▶ #' + id + zName + ' запущена: ' + label, 'success');
+                    reconcileOptimisticZoneState(id, mutationToken);
                     // Issue #12: surface server-side warnings as toast text.
                     if (data.warnings && data.warnings.length) {
                         var msgs = data.warnings.map(function(w) {
@@ -2357,18 +2509,37 @@
                     initZoneTimer(z);
                     setTimeout(function() { loadStatusData(); }, 2000);
                 } else {
-                    if (z) z.state = 'off';
+                    revertOptimisticZoneState(id, mutationToken);
                     renderZoneCards();
                     hideLoading();
                     showZoneToast((data && data.message) || 'Ошибка', 'error');
                 }
-            }).catch(function() { hideLoading(); showZoneToast('Ошибка сети', 'error'); });
+            }).catch(function() {
+                revertOptimisticZoneState(id, mutationToken);
+                renderZoneCards();
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
+            });
         };
         
         if (wasRunning) {
             fetch('/api/zones/' + id + '/mqtt/stop', { method: 'POST' })
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
+                if (!data || !data.success) throw new Error((data && data.message) || 'stop failed');
+                if (z) {
+                    z.state = 'off';
+                    z.watering_start_time = null;
+                    z.planned_end_time = null;
+                }
+            })
             .then(function() { return new Promise(function(r) { setTimeout(r, 500); }); })
-            .then(startFn);
+            .then(startFn)
+            .catch(function() {
+                hideLoading();
+                showZoneToast('Не удалось перезапустить зону', 'error');
+                loadZonesData();
+            });
         } else {
             startFn();
         }
@@ -2382,16 +2553,22 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 hideLoading();
-                showZoneToast(data && data.success ? '▶ Группа запущена с настройками зон' : 'Ошибка', data && data.success ? 'success' : 'error');
+                showZoneToast(
+                    data && data.success ? '▶ Группа запущена с настройками зон' : ((data && data.message) || 'Ошибка'),
+                    data && data.success ? 'success' : 'error'
+                );
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
             });
         } else {
-            (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
-                fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function(){});
+            runAllGroups(null).then(function(results) {
+                reportGroupRunResults(results, 'с настройками зон');
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
             });
-            hideLoading();
-            showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
         }
     }
     window.confirmRunWithDefaults = confirmRunWithDefaults;
