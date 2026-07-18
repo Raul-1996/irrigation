@@ -524,8 +524,34 @@ def api_master_valve_toggle(group_id, action):
                 ), 400
         val = ("0" if want_open else "1") if mode == "NO" else ("1" if want_open else "0")
         try:
-            ok = _publish_mqtt_value(server, normalize_topic(topic), val, min_interval_sec=0.0, qos=2, retain=True)
-        except (ConnectionError, TimeoutError, OSError):
+            normalized_topic = normalize_topic(topic)
+            if want_open:
+                # A zone stop may have armed a delayed master close for this
+                # shared topic.  Serialize with the close callback and disarm
+                # it before publishing OPEN so a successful manual command
+                # remains authoritative.
+                from services.zone_control import cancel_pending_master_close, master_topic_lock
+
+                with master_topic_lock(normalized_topic):
+                    cancel_pending_master_close(normalized_topic)
+                    ok = _publish_mqtt_value(
+                        server,
+                        normalized_topic,
+                        val,
+                        min_interval_sec=0.0,
+                        qos=2,
+                        retain=True,
+                    )
+            else:
+                ok = _publish_mqtt_value(
+                    server,
+                    normalized_topic,
+                    val,
+                    min_interval_sec=0.0,
+                    qos=2,
+                    retain=True,
+                )
+        except (ConnectionError, ImportError, TimeoutError, OSError):
             logger.exception("master valve publish failed")
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
         # Issue #38: publish_mqtt_value returns False if the base topic or
