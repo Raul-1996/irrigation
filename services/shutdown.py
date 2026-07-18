@@ -14,6 +14,34 @@ _shutdown_done = False
 _shutdown_lock = threading.Lock()
 
 
+def _quiesce_scheduler(timeout_sec: float) -> bool:
+    """Fence new watering starts and drain active scheduler runners.
+
+    ``IrrigationScheduler.quiesce`` is the scheduler-owned lifecycle boundary.
+    Older scheduler versions do not expose it, so ``stop`` remains a best-effort
+    compatibility fallback until the scheduler package is integrated.
+    """
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        if scheduler is None:
+            return True
+        quiesce = getattr(scheduler, "quiesce", None)
+        if quiesce is not None:
+            drained = bool(quiesce(timeout_seconds=timeout_sec))
+            if not drained:
+                logger.error("Shutdown: scheduler quiesce timed out after %.1fs", timeout_sec)
+            return drained
+
+        logger.warning("Shutdown: scheduler has no quiesce API; using non-draining stop fallback")
+        scheduler.stop()
+        return False
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("Shutdown: scheduler quiesce failed: %s", exc)
+        return False
+
+
 def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     """Send OFF (QoS 2, retain) to every zone and close master valves.
 
@@ -40,6 +68,11 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> None:
     except ImportError:
         logger.warning("Shutdown: cannot import database")
         return
+
+    # A retained OFF is only final after every scheduler worker capable of
+    # publishing ON has crossed a strict drain fence. Do this before reading
+    # zones or sending the first safety command.
+    _quiesce_scheduler(timeout_sec)
 
     try:
         from services.master_valve import iter_master_close_targets
