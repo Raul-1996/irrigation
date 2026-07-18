@@ -46,7 +46,7 @@ def user_required(view_func):
             return view_func(*args, **kwargs)
         # Разрешаем доступ гостю для пользовательских страниц (Статус, карта),
         # а также для всех действий на странице Статус по требованию.
-        if session.get("role") not in ["guest", "user", "admin"]:
+        if session.get("role") not in ["guest", "viewer", "user", "admin"]:
             if _is_api_path():
                 return jsonify({"success": False, "error_code": "UNAUTHENTICATED"}), 401
             return redirect(url_for("auth_bp.login_page"))
