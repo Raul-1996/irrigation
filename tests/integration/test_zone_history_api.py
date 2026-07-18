@@ -9,22 +9,27 @@ import pytest
 os.environ["TESTING"] = "1"
 
 
-def _utc_iso_now_minus(minutes: int) -> str:
+def _utc_iso_now_minus(minutes: int, now_utc: datetime | None = None) -> str:
     """ISO-8601 UTC string for ``now - minutes``."""
-    t = datetime.now(UTC) - timedelta(minutes=minutes)
+    t = (now_utc or datetime.now(UTC)) - timedelta(minutes=minutes)
     return t.isoformat().replace("+00:00", "Z")
 
 
-def _today_local_iso() -> str:
-    return datetime.now().astimezone().date().isoformat()
-
-
 def _create_run(
-    app, zone_id: int, group_id: int, start_min_ago: int, end_min_ago: int, liters=None, status="ok", source=None
+    app,
+    zone_id: int,
+    group_id: int,
+    start_min_ago: int,
+    end_min_ago: int,
+    liters=None,
+    status="ok",
+    source=None,
+    now_utc: datetime | None = None,
 ):
     """Insert a finished zone_run row directly."""
-    start = _utc_iso_now_minus(start_min_ago)
-    end = _utc_iso_now_minus(end_min_ago) if end_min_ago is not None else None
+    now_utc = now_utc or datetime.now(UTC)
+    start = _utc_iso_now_minus(start_min_ago, now_utc)
+    end = _utc_iso_now_minus(end_min_ago, now_utc) if end_min_ago is not None else None
     with sqlite3.connect(app.db.db_path) as conn:
         cur = conn.execute(
             "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
@@ -87,15 +92,26 @@ class TestPerZoneJson:
 
     def test_completed_run_in_range_appears_in_daily_and_runs(self, app, client, seeded_zone):
         # Run finished 30 minutes ago, lasted 15 minutes (started 45m ago).
-        _create_run(app, seeded_zone["id"], 1, 45, 30, liters=12.5, source="program")
+        now_utc = datetime.now(UTC)
+        _create_run(
+            app,
+            seeded_zone["id"],
+            1,
+            45,
+            30,
+            liters=12.5,
+            source="program",
+            now_utc=now_utc,
+        )
         resp = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7")
         assert resp.status_code == 200
         data = resp.get_json()
-        # Today entry has actual_minutes >= 14 (15 min run, ±rounding tolerance).
-        today_iso = _today_local_iso()
-        today = next(d for d in data["daily"] if d["date"] == today_iso)
-        assert today["actual_minutes"] >= 14
-        assert today["runs"] == 1
+        # Runs are bucketed by their local start date, which may be yesterday
+        # when this test executes shortly after local midnight.
+        run_date_iso = (now_utc - timedelta(minutes=45)).astimezone().date().isoformat()
+        run_day = next(d for d in data["daily"] if d["date"] == run_date_iso)
+        assert run_day["actual_minutes"] >= 14
+        assert run_day["runs"] == 1
         # One run in list.
         assert len(data["runs"]) == 1
         assert data["runs"][0]["source"] == "program"
