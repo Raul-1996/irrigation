@@ -95,8 +95,8 @@ class TestZonesDeep:
         assert nxt == expected
 
     def test_compute_next_run_interval_schedule(self, test_db):
-        # interval programs have empty days but must still yield a next run
-        # (nearest occurrence of HH:MM — scheduler re-anchors on each boot).
+        # Daily interval programs have an unambiguous next occurrence even
+        # without access to APScheduler's in-memory interval anchor.
         z = test_db.create_zone({"name": "NRI", "duration": 10, "group_id": 1})
         test_db.create_program(
             {
@@ -105,7 +105,7 @@ class TestZonesDeep:
                 "days": [],
                 "zones": [z["id"]],
                 "schedule_type": "interval",
-                "interval_days": 3,
+                "interval_days": 1,
             }
         )
         result = test_db.compute_next_run_for_zone(z["id"])

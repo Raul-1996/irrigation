@@ -1,4 +1,3 @@
-import contextlib
 import json
 import logging
 import sqlite3
@@ -37,11 +36,10 @@ class ZoneRepository(BaseRepository):
     ) -> tuple[list[str], list[Any]]:
         """Собрать SET-часть UPDATE zones по единому whitelist'у колонок.
 
-        ``merged`` — текущая строка с наложенным поверх payload'ом: штатные
-        колонки всегда присутствуют в строке и попадают в SET с актуальным
-        значением. State-machine/verifier-поля (PHYS-1 / MASTER-C1:
-        StateVerifier._record_fault и пр.) берутся только из ``payload`` —
-        merged-путь не должен трогать их неявно.
+        Only keys explicitly present in ``payload`` are written.  ``merged``
+        remains in the signature for compatibility with the bulk callers, but
+        must never be used as a source of SET values: replaying a previously
+        read full-row snapshot can overwrite concurrent runtime state.
 
         ``allowed`` дополнительно сужает список колонок (SEC-004: импорт).
         Имена колонок здесь всегда литеральные, значения идут только через
@@ -56,39 +54,39 @@ class ZoneRepository(BaseRepository):
             fields.append(f"{column} = ?")
             params.append(value)
 
-        if "name" in merged:
-            add("name", merged["name"])
-        if "icon" in merged:
-            add("icon", merged["icon"])
-        # int(): нечисловой duration/group_id должен падать ValueError у
-        # вызывающего (как в старых bulk-путях), а не молча писать TEXT в БД.
-        if "duration" in merged:
-            add("duration", int(merged["duration"]))
-        if ("group_id" in merged) or ("group" in merged):
-            add("group_id", int(merged.get("group_id", merged.get("group", 1)) or 1))
-        if "topic" in merged:
-            add("topic", (merged.get("topic") or "").strip())
-        if "state" in merged:
-            add("state", merged["state"])
-        if "postpone_until" in merged:
-            add("postpone_until", merged["postpone_until"])
-        if "postpone_reason" in merged:
-            add("postpone_reason", merged["postpone_reason"])
-        if "photo_path" in merged:
-            add("photo_path", merged["photo_path"])
-        if "watering_start_time" in merged:
-            add("watering_start_time", merged["watering_start_time"])
-        if "scheduled_start_time" in merged:
-            add("scheduled_start_time", merged["scheduled_start_time"])
+        if "name" in payload:
+            add("name", payload["name"])
+        if "icon" in payload:
+            add("icon", payload["icon"])
+        if "duration" in payload:
+            add("duration", int(payload["duration"]))
+        if "group_id" in payload:
+            add("group_id", int(payload["group_id"]))
+        elif "group" in payload:
+            add("group_id", int(payload["group"]))
+        if "topic" in payload:
+            add("topic", (payload.get("topic") or "").strip())
+        if "state" in payload:
+            add("state", payload["state"])
+        if "postpone_until" in payload:
+            add("postpone_until", payload["postpone_until"])
+        if "postpone_reason" in payload:
+            add("postpone_reason", payload["postpone_reason"])
+        if "photo_path" in payload:
+            add("photo_path", payload["photo_path"])
+        if "watering_start_time" in payload:
+            add("watering_start_time", payload["watering_start_time"])
+        if "scheduled_start_time" in payload:
+            add("scheduled_start_time", payload["scheduled_start_time"])
         # 'last_watering_time' is no longer a column on zones — it is derived
         # from zone_runs.end_utc and injected at read time. Silently ignore
         # the key so legacy callers that still pass it don't crash.
-        if "last_avg_flow_lpm" in merged:
-            add("last_avg_flow_lpm", merged["last_avg_flow_lpm"])
-        if "last_total_liters" in merged:
-            add("last_total_liters", merged["last_total_liters"])
-        if "mqtt_server_id" in merged:
-            add("mqtt_server_id", merged.get("mqtt_server_id"))
+        if "last_avg_flow_lpm" in payload:
+            add("last_avg_flow_lpm", payload["last_avg_flow_lpm"])
+        if "last_total_liters" in payload:
+            add("last_total_liters", payload["last_total_liters"])
+        if "mqtt_server_id" in payload:
+            add("mqtt_server_id", payload.get("mqtt_server_id"))
         for column in (
             "planned_end_time",
             "watering_start_source",
@@ -247,17 +245,13 @@ class ZoneRepository(BaseRepository):
 
     @retry_on_busy()
     def update_zone(self, zone_id: int, zone_data: dict[str, Any]) -> dict[str, Any] | None:
-        """Обновить зону."""
+        """Обновить только явно переданные поля зоны."""
         try:
             with self._connect() as conn:
-                current_zone = self.get_zone(zone_id)
-                if not current_zone:
+                if conn.execute("SELECT 1 FROM zones WHERE id = ?", (zone_id,)).fetchone() is None:
                     return None
 
-                updated_data = current_zone.copy()
-                updated_data.update(zone_data)
-
-                sql_fields, params = self._build_zone_update_fields(updated_data, zone_data)
+                sql_fields, params = self._build_zone_update_fields(zone_data, zone_data)
                 params.append(zone_id)
 
                 sql = f"""
@@ -268,7 +262,9 @@ class ZoneRepository(BaseRepository):
                 conn.execute(sql, params)
 
                 # Если зону переводят в группу 999 — исключаем из всех программ
-                target_group_id = updated_data.get("group_id", updated_data.get("group"))
+                target_group_id = None
+                if "group_id" in zone_data or "group" in zone_data:
+                    target_group_id = int(zone_data.get("group_id", zone_data.get("group")))
                 if target_group_id == 999:
                     cursor = conn.execute("SELECT id, zones FROM programs")
                     for row in cursor.fetchall():
@@ -286,6 +282,9 @@ class ZoneRepository(BaseRepository):
 
                 conn.commit()
                 return self.get_zone(zone_id)
+        except (TypeError, ValueError) as e:
+            logger.warning("Некорректные данные обновления зоны %s: %s", zone_id, e)
+            return None
         except sqlite3.Error as e:
             logger.error("Ошибка обновления зоны %s: %s", zone_id, e)
             return None
@@ -317,17 +316,11 @@ class ZoneRepository(BaseRepository):
                 # Without this, two concurrent versioned updates can both
                 # observe the same prev_state and emit duplicate / wrong
                 # zone_state_change audit rows.
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                except sqlite3.Error:
-                    # Already in a transaction (e.g. nested) — fall through
-                    # and rely on the implicit one.
-                    pass
+                conn.execute("BEGIN IMMEDIATE")
                 cur = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,))
                 row = cur.fetchone()
                 if not row:
-                    with contextlib.suppress(sqlite3.Error):
-                        conn.commit()
+                    conn.commit()
                     return (False, None)
                 prev_zone = dict(row)
                 old_version = int(prev_zone.get("version") or 0)
@@ -371,7 +364,12 @@ class ZoneRepository(BaseRepository):
                     current = dict(zip([d[0] for d in cur.description], row))
                     merged = current.copy()
                     merged.update(upd)
-                    fields, params = self._build_zone_update_fields(merged, upd)
+                    try:
+                        fields, params = self._build_zone_update_fields(merged, upd)
+                    except (TypeError, ValueError) as e:
+                        logger.warning("Некорректные данные bulk-обновления зоны %s: %s", zone_id, e)
+                        failed.append(zone_id)
+                        continue
                     params.append(zone_id)
                     sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ?"
                     try:
@@ -454,7 +452,7 @@ class ZoneRepository(BaseRepository):
                                 ),
                             )
                             created += 1
-                    except sqlite3.Error as e:
+                    except (sqlite3.Error, TypeError, ValueError) as e:
                         logger.warning("Ошибка upsert зоны: %s", e)
                         failed += 1
                 conn.commit()
@@ -730,20 +728,16 @@ class ZoneRepository(BaseRepository):
             with self._connect() as conn:
                 # History truth: 'ok' is only honest if the relay's physical
                 # 'on' was confirmed (confirmed=1) at least once during the run.
-                # Downgrade an unconfirmed run to 'failed' so history never
-                # claims a watering that didn't physically happen. An explicit
-                # non-'ok' status (e.g. 'aborted') is left as-is.
-                if status == "ok":
-                    try:
-                        row = conn.execute(
-                            "SELECT confirmed FROM zone_runs WHERE id = ?", (int(run_id),)
-                        ).fetchone()
-                        if row is not None and not row[0]:
-                            status = "failed"
-                    except sqlite3.Error:
-                        pass
-                fields = ["end_utc = ?", "end_monotonic = ?", "status = ?", "updated_at = CURRENT_TIMESTAMP"]
-                params: list = [str(end_utc), float(end_monotonic), str(status)]
+                # Evaluate confirmation in the same UPDATE that closes the row;
+                # a relay echo committed before this write therefore cannot be
+                # overwritten with a status computed from a stale pre-read.
+                fields = [
+                    "end_utc = ?",
+                    "end_monotonic = ?",
+                    "status = CASE WHEN ? = 'ok' AND COALESCE(confirmed, 0) = 0 THEN 'failed' ELSE ? END",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                params: list = [str(end_utc), float(end_monotonic), str(status), str(status)]
                 if end_raw_pulses is not None:
                     fields.append("end_raw_pulses = ?")
                     params.append(int(end_raw_pulses))
@@ -822,10 +816,17 @@ class ZoneRepository(BaseRepository):
 
         Семантика повторяет планировщик (irrigation_scheduler._schedule_single_time):
         weekdays — по дням недели (пустые days — никогда), even-odd — по чётности
-        числа месяца, interval — ближайшее HH:MM (планировщик заново привязывает
-        IntervalTrigger к сегодня/завтра при каждом старте сервиса).
+        числа месяца. Для interval_days > 1 точный якорь живёт только внутри
+        APScheduler, поэтому репозиторий возвращает None вместо заведомо ложной
+        ежедневной даты.
         """
         schedule_type = prog.get("schedule_type") or "weekdays"
+        if schedule_type == "interval":
+            try:
+                if int(prog.get("interval_days") or 1) > 1:
+                    return None
+            except (TypeError, ValueError):
+                return None
         for offset in range(0, 14):
             d = lower_bound + timedelta(days=offset)
             if schedule_type == "even-odd":
@@ -849,10 +850,10 @@ class ZoneRepository(BaseRepository):
         (weekdays / interval / even-odd) и все времена старта (``time`` +
         ``extra_times``) — та же семантика, что у живого планировщика.
 
-        Если у зоны установлен ``postpone_until`` в будущем, нижняя граница
-        поиска (``now``) сдвигается вперёд до конца окна отложки — иначе UI
-        показывал бы ближайший старт программы внутри отложенного окна, хотя
-        реальный планировщик его пропустит.
+        Нижняя граница относится к слоту самой зоны, а перед поиском старта
+        программы сдвигается назад на накопленный offset предыдущих зон. Так
+        программа, уже начавшаяся до ``postpone_until``, остаётся кандидатом,
+        если конкретный слот зоны наступит после окончания отложки.
         """
         try:
             zone = self.get_zone(zone_id)
@@ -863,30 +864,32 @@ class ZoneRepository(BaseRepository):
                 return None
             now = datetime.now()
             postpone_dt = self._parse_postpone_dt(zone.get("postpone_until"))
-            if postpone_dt and postpone_dt > now:
-                now = postpone_dt
+            slot_lower_bound = max(now, postpone_dt) if postpone_dt else now
             best_dt: datetime | None = None
             for prog in programs:
                 if not prog.get("enabled", True):
                     continue
                 if zone_id not in prog.get("zones", []):
                     continue
+                cumulative_minutes = 0
+                for zid in sorted(prog["zones"]):
+                    if zid == zone_id:
+                        break
+                    cumulative_minutes += self.get_zone_duration(zid)
+                else:
+                    continue
+                program_lower_bound = slot_lower_bound - timedelta(minutes=cumulative_minutes)
                 for time_str in self._program_start_times(prog):
                     try:
                         hour, minute = map(int, time_str.split(":", 1))
                     except (ValueError, TypeError):
                         continue
-                    start_dt = self._first_program_start_after(prog, hour, minute, now)
+                    start_dt = self._first_program_start_after(prog, hour, minute, program_lower_bound)
                     if not start_dt:
                         continue
-                    cum = 0
-                    for zid in sorted(prog["zones"]):
-                        if zid == zone_id:
-                            candidate = start_dt + timedelta(minutes=cum)
-                            if best_dt is None or candidate < best_dt:
-                                best_dt = candidate
-                            break
-                        cum += self.get_zone_duration(zid)
+                    candidate = start_dt + timedelta(minutes=cumulative_minutes)
+                    if best_dt is None or candidate < best_dt:
+                        best_dt = candidate
             if best_dt:
                 return best_dt.strftime("%Y-%m-%d %H:%M:%S")
             return None
