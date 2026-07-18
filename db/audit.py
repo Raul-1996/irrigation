@@ -7,11 +7,39 @@ Separate from the existing ``logs`` table — additive, not replacing.
 import json
 import logging
 import sqlite3
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_filter_bound(value: str, *, inclusive_local_day_end: bool = False) -> tuple[str, bool]:
+    """Translate a controller-local filter value to the UTC storage format.
+
+    Date-only ``until`` values become the exclusive start of the following
+    local day.  That avoids both fractional-second gaps and DST assumptions.
+    The boolean result tells callers to use ``<`` instead of ``<=``.
+    Invalid legacy values are left untouched, preserving the repository's
+    best-effort filtering behaviour.
+    """
+    text = str(value).strip()
+    try:
+        if len(text) == 10:
+            local_day = date.fromisoformat(text)
+            if inclusive_local_day_end:
+                local_day += timedelta(days=1)
+            parsed = datetime.combine(local_day, datetime.min.time()).astimezone()
+            exclusive = inclusive_local_day_end
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.astimezone()
+            exclusive = False
+        return parsed.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S"), exclusive
+    except (TypeError, ValueError):
+        return text, False
 
 
 class AuditRepository(BaseRepository):
@@ -97,11 +125,13 @@ class AuditRepository(BaseRepository):
             )
             params: list[Any] = []
             if since:
-                query += " AND ts >= ?"
-                params.append(since)
+                since_utc, _ = _utc_filter_bound(since)
+                query += " AND audit_log.ts >= ?"
+                params.append(since_utc)
             if until:
-                query += " AND ts <= ?"
-                params.append(f"{until} 23:59:59" if len(str(until)) <= 10 else until)
+                until_utc, exclusive = _utc_filter_bound(until, inclusive_local_day_end=True)
+                query += " AND audit_log.ts < ?" if exclusive else " AND audit_log.ts <= ?"
+                params.append(until_utc)
             if action_type:
                 query += " AND action_type = ?"
                 params.append(action_type)
@@ -143,11 +173,13 @@ class AuditRepository(BaseRepository):
             query = "SELECT COUNT(*) FROM audit_log WHERE 1=1"
             params: list[Any] = []
             if since:
-                query += " AND ts >= ?"
-                params.append(since)
+                since_utc, _ = _utc_filter_bound(since)
+                query += " AND audit_log.ts >= ?"
+                params.append(since_utc)
             if until:
-                query += " AND ts <= ?"
-                params.append(f"{until} 23:59:59" if len(str(until)) <= 10 else until)
+                until_utc, exclusive = _utc_filter_bound(until, inclusive_local_day_end=True)
+                query += " AND audit_log.ts < ?" if exclusive else " AND audit_log.ts <= ?"
+                params.append(until_utc)
             if action_type:
                 query += " AND action_type = ?"
                 params.append(action_type)
