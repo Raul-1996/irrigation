@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **38 fixed · 1 deferred · 108 pending · 5 not_applicable**.
+- Phase 2 disposition: **53 fixed · 1 deferred · 93 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -20,7 +20,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ меняет topic зоны (PUT /api/zones/<id> → reload_hub), в этот же момент EventSource браузера переподключается (обычное авто-переподключение SSE) → ensure_hub_started стартует новые клиенты при ещё не остановленных старых. Пришедшее в окне ON/OFF-эхо реле обрабатывается дважды: по OFF оба _on_message берут один и тот же open zone_run (get_open_zone_run без zone_lock) и дважды вызывают finish_zone_run; по ON дважды выполняются cancel_zone_jobs + schedule_zone_stop; SSE-клиенты получают дубли событий.
 - **Решение оркестратора:** Previous REFUTED status overturned. The race is conditional on a concurrent SSE start during hub shutdown and an MQTT message in the overlap, but both are reachable through the normal zones page.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Rebuild сериализован поколениями, registry и topic maps публикуются атомарно, а callback вытесненного клиента отклоняется как stale; перекрывающихся активных обработчиков одного server generation больше нет.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_stale_client_callback_is_terminal_after_reload`, `tests/unit/test_phase2_sse_hub.py::test_new_client_is_published_as_current_before_network_loop_starts`.
 
 ### #2 [medium] `services/sse_hub.py:430` — reload_hub из HTTP-хендлеров выполняет блокирующий client.connect() под глобальным _SSE_HUB_LOCK — стопорит broadcast/register_client и сами запросы
 
@@ -28,7 +32,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** MQTT-брокер выключен/недоступен (типовая ситуация при отладке): сохранение зоны с изменённым topic висит ~5 с на server; одновременно нажатый «Стоп»/«Старт» другой зоны зависает внутри broadcast() (он ждёт _SSE_HUB_LOCK, у exclusive_start_zone — под group_lock, т.е. каскадно блокируется и группа), новые SSE-коннекты не устанавливаются. При нескольких MQTT-серверах задержка суммируется.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Connect/setup и terminal loop_stop выполняются асинхронным rebuild worker вне hub lock и HTTP request thread, поэтому broadcast/register и route save не ждут сетевой таймаут.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_connect_does_not_hold_hub_lock`, `tests/unit/test_phase2_sse_hub.py::test_reload_returns_while_terminal_client_shutdown_is_blocked`, `tests/unit/test_phase2_sse_hub.py::test_startup_prefers_nonblocking_paho_connect_async`.
 
 ### #3 [medium] `services/zone_control.py:568` — Снятие stop-джобов по подстроке без разделителя: рестарт зоны N удаляет zone_hard_stop чужих зон с id, начинающимся на N
 
@@ -48,7 +56,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона с базовой длительностью 10 мин запускается с duration_percent=200 (override 20 мин). ON-эхо реле приходит через ~100 мс, до post-delegate планирования → в планировщике остаётся ранний 10-мин стоп — полив завершается вдвое раньше запрошенного. Обратный порядок (эхо позже, override 5 мин на базе 30) — стоп на 5 мин снят, зона льёт 30 мин. Существует и на main (тот же _on_message + тот же post-delegate порядок в api_zone_mqtt_start); ветка поведение не меняла, но добавила override-путь также в /start-зависимые эндпоинты.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** ON для уже активной зоны обновляет только observation и больше не отменяет/перевзводит override stop либо hard-stop; retained replay также не продлевает полив.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_active_retained_on_does_not_reset_override_or_hard_stop`.
 
 ### #5 [medium] `services/next_watering.py:113` — next-watering показывает полив от выключенной (enabled=0) программы — compute_next_watering не фильтрует enabled
 
@@ -290,7 +302,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** 1) Пользователь стартует зону с override 2 мин (start_zone_orchestrated планирует stop@2мин + hard_stop@2мин ПОСЛЕ возврата exclusive_start_zone, т.е. после параллельного peer-off с QoS2-ожиданиями). Если MQTT-эхо '1' обрабатывается тредом paho ПОЗЖЕ этого планирования (эхо-латентность против длительности peer-off — гонка 50/50), cancel_zone_jobs удаляет и override-stop, и hard-stop, а взамен ставится stop на базовые 30 мин → зона льёт 30 мин вместо 2. 2) Детерминированный вариант: реконнект хаба к брокеру посреди полива (рестарт mosquitto, wifi-blip) — on_connect пересабскрайбит топики, брокер доставляет retained '1' → таймер стопа сбрасывается на ПОЛНУЮ базовую длительность от текущего момента, hard-stop удаляется навсегда → полив продлевается вплоть до удвоения, страховка остаётся только у cap-watchdog (240 мин).
 - **Дубль:** `#4`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** ON для уже активной зоны обновляет только observation и больше не отменяет/перевзводит override stop либо hard-stop; retained replay также не продлевает полив.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_active_retained_on_does_not_reset_override_or_hard_stop`.
 
 ### #34 [medium] `services/zone_control.py:298` — Гонка двойного старта: ветка 'on/starting → pass' в exclusive_start_zone всё равно создаёт второй открытый zone_run
 
@@ -362,7 +378,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ сохраняет зону, у которой mqtt-сервер недоступен (или брокер временно лежит): ensure_hub_started висит в connect() до сокет-таймаута на каждый сервер, всё это время под _SSE_HUB_LOCK → параллельные stop_zone/emergency-треды блокируются в broadcast() на секунды, SSE-запросы браузеров зависают на register_client. Если в момент reload_hub шёл полив и реле прислало эхо '0'/'1' в окно «клиенты остановлены → подписки ещё не восстановлены», хаб его не увидит: observed_state не обновится, mark_zone_run_confirmed не вызовется, открытый run не закроется по observed-off.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Reload возвращает сразу, переиспользует живое соединение при неизменных credentials и меняет subscriptions без teardown-gap либо повторной подписки на retained topic.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_reload_reuses_connection_and_unsubscribes_removed_topic`, `tests/unit/test_phase2_sse_hub.py::test_unchanged_reload_does_not_resubscribe_retained_topics`.
 
 ### #41 [high] `db/programs.py:122` — JSON-null в programs.zones/extra_times принимается без валидации и валит старт всего сервиса
 
@@ -450,7 +470,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** RS-485 модуль реле физически отключён (или wb-mqtt-serial упал). Пользователь стартует зону: publish '1' уходит на брокер, реле молчит. verify('on') подписывается на базовый топик, получает retained '1', записанный самим приложением → «confirmed on attempt 1», mark_zone_run_confirmed фиксирует «физически подтверждённый» полив. _record_fault недостижим: fault_count не растёт, state='fault' не ставится, Telegram-алерт не уходит — весь контракт PHYS-1 (стр. 235-254) мёртв. История показывает успешные поливы, грядки сухие.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P05 сделал command-scoped verifier единственным владельцем physical confirmation, а P06 удалил hub-side подтверждение по неразличимому live base-topic ON; retained/self-publish больше не создают тавтологическое подтверждение.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_live_base_topic_on_does_not_self_confirm_physical_watering`, `tests/unit/test_phase2_zone_state_safety.py::test_finding_64_stale_verifier_does_not_republish_or_fault`.
 
 ### #51 [high] `services/sse_hub.py:268` — sse_hub._on_message на каждом наблюдаемом 'on' безусловно отменяет и перевзводит автостоп на БАЗОВУЮ длительность — override-длительность затирается, retained '1' при реконнекте продлевает полив
 
@@ -459,7 +483,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** (a) Зона с базовой длительностью 10 мин стартуется через POST /api/zones/N/mqtt/start с duration=30. start_zone_orchestrated взводит стоп на +30 мин, но эхо '1' (loopback собственной публикации) заставляет хаб сделать cancel_zone_jobs + schedule_zone_stop(10): либо 30-мин job отменён и остался 10-мин, либо оба живы и первый (10 мин) срабатывает раньше, либо новый job молча выпал по ConflictingIdError — во всех раскладах полив останавливается через 10 мин вместо 30, hard-stop при этом снят и не перевзведён. (b) Обрыв/реконнект MQTT хаба (или reload_hub при правке зоны) на 55-й минуте 60-минутного полива: retained '1' передоставляется при resubscribe → стоп перевзводится на +60 мин от текущего момента → зона льёт до 115 мин (ограничено только zone_cap_stop 240 мин, который для программных запусков может отсутствовать).
 - **Дубль:** `#4`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** ON для уже активной зоны обновляет только observation и больше не отменяет/перевзводит override stop либо hard-stop; retained replay также не продлевает полив.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_active_retained_on_does_not_reset_override_or_hard_stop`.
 
 ### #52 [medium] `utils.py:154` — decrypt_secret: при смене/утере ключа AES-ветка бросает ValueError('MAC check failed') — рушатся get_mqtt_server, все publish-пути и список серверов в API
 
@@ -467,7 +495,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сервис запущен с другим WorkingDirectory (правка systemd-юнита, запуск из другого каталога, перенос БД на новый контроллер без файла ключа) → тихо создаётся НОВЫЙ ключ → все пароли ENC: в mqtt_servers перестают расшифровываться. Итог: GET /api/mqtt/servers и /api/mqtt/servers/<id> отдают 500 (except в routes/mqtt_api.py:45 не ловит ValueError) — страница настроек MQTT недоступна; exclusive_start_zone/stop_zone падают по ValueError (старт возвращает failed/500); SSE-хаб не может стартовать. Управление поливом полностью теряется без единого понятного сообщения о причине.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P07 ввёл typed secret failure и безопасные API/publisher boundaries; P06 изолирует нечитаемый server record, продолжает запуск остальных серверов и сохраняет уже живой client при неуспешном reload.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_unreadable_server_credential_does_not_abort_other_server_startup`, `tests/unit/test_phase2_sse_hub.py::test_unreadable_credential_during_reload_preserves_live_client`.
 
 ### #53 [medium] `services/mqtt_pub.py:50` — Правка MQTT-сервера (host/port/пароль) не инвалидирует ни кэш клиентов публикатора, ни подписки SSE-хаба — команды продолжают уходить на старый брокер до рестарта
 
@@ -487,7 +519,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Группа настроена так, что реле зон висят на сервере A, а мастер-клапан — на отдельном сервере B (master_mqtt_server_id=B). Хаб подключается только к A. Эхо мастер-клапана с B никогда не принимается: master_valve_observed в БД и mv_state в SSE навсегда отражают лишь оптимистичные записи из zone_control (update_group_fields сразу после publish), реальное залипание/ручное переключение мастер-клапана в UI не видно.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Набор MQTT clients строится по объединению server IDs зон и master valves, поэтому master-only сервер получает отдельную подписку.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode`.
 
 ### #55 [low] `services/mqtt_pub.py:216` — _publish_with_retries: последняя републикация в backoff-цикле отправляется, но никогда не ожидается — функция возвращает False после фактически ушедшей команды и провоцирует дубль через новый клиент
 
@@ -614,7 +650,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь останавливает зону; в этот момент MQTT-линк SSE-хаба рвётся и paho переподключается. На переподписке (_on_connect, qos=1) брокер доставляет retained/недоставленный 'on' старее команды стопа. Задуманная защита recently_stopped(zid, 5s) должна была проигнорировать эхо и опубликовать '0', но окно никогда не взводится: хаб принимает 'on', снова помечает зону поливающей (state='on', watering_start_time=now), взводит автостоп на полную базовую длительность и в конце пишет фантомный zone_run 'ok' — остановленная пользователем зона до конца «виртуального» полива отображается как работающая, а история фиксирует полив, которого не было.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Observed OFF записывает anti-restart timestamp, а свежий persisted commanded_state=off/state=off|stopping закрывает остановки, случившиеся во время disconnect hub; поздний ON получает контркоманду.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_recent_commanded_stop_blocks_late_on_without_external_marker_call`.
 
 ### #68 [medium] `db/zones.py:260` — update_zone: полная перезапись строки из несвежего снапшота — read-modify-write без транзакции затирает конкурентные изменения state/postpone/watering_start_time
 
@@ -748,7 +788,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Приходит эхо 'on' при активном EMERGENCY_STOP (или в анти-рестарт-окне): _on_message синхронно публикует контр-команду '0'; если кэшированный publish-клиент заклинен, ветка ретраев занимает ~20-30 с. Всё это время сетевой тред paho не шлёт PINGREQ; при keepalive=5 брокер рвёт соединение через ~7.5 с. Подписка clean-session → сообщения за время разрыва потеряны: пропущенные эхо 'on' → полив записан 'failed', пропущенные 'off' → зона висит «on» в UI до следующего события.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Keepalive увеличен до 60 секунд, а DB/scheduler/publish обработка перенесена из paho callback в упорядоченный background worker, переживающий ошибочный event.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_paho_callback_returns_before_blocking_database_work_finishes`, `tests/unit/test_phase2_sse_hub.py::test_event_worker_survives_unexpected_handler_exception`.
 
 ### #83 [medium] `services/sse_hub.py:229` — Контр-команда OFF при EMERGENCY_STOP/анти-рестарте — fire-and-forget QoS0 без retain, а observed_state='off' пишется независимо от успеха публикации
 
@@ -756,7 +800,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** EMERGENCY_STOP активен, реле зоны включено извне (wb-панель/retained '1' при реконнекте). Хаб видит 'on', переписывает new_state='off', пишет в БД state='off' и observed_state='off', и отправляет '0' с QoS0. При транзиентном сбое publish (клиент-паблишер не подключён — get_or_create вернул None, «client unavailable, dropping») команда молча теряется, ретраев нет, нового эха не будет (реле состояние не меняло). Итог: во время аварийного стопа клапан физически открыт и льёт воду, а БД/UI показывают off с «подтверждённым» observed_state.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Emergency/anti-bounce OFF публикуется QoS 2 retained без debounce и с проверкой результата; broker ack не выдаётся за физический OFF, observed state остаётся ON до настоящего OFF-эхо.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_emergency_counter_off_is_reliable_and_observation_stays_truthful_on_failure`.
 
 ### #84 [medium] `services/mqtt_pub.py:291` — _publish_one/_invalidate_client разрушает разделяемый MQTT-клиент, которым в этот момент публикуют другие треды — каскад ложных сбоев OFF-команд
 
@@ -1029,7 +1077,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Группа с master_mode='NO'. _do_close публикует '1' (закрыть), пишет master_valve_observed='closed' и рассылает mv_state='closed'; через мгновение реле эхо-репортит '1' → sse_hub перезаписывает observed='closed'→'open' и шлёт клиентам mv_state='open'. Статус-страница постоянно показывает мастер-клапан «открыт», когда он закрыт, и «закрыт», когда открыт — оператор видит ложную тревогу/ложное спокойствие по всем NO-группам, а последнее слово всегда за инвертированным эхом.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Master echo интерпретируется с учётом NC/NO mode; для NO relay-high означает closed, а relay-low — open.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode`.
 
 ### #114 [medium] `routes/mqtt_api.py:213` — GET /api/mqtt/<id>/status — единственный MQTT-эндпоинт без @admin_required: аноним инициирует блокирующие подключения к брокеру с сохранёнными креденшалами
 
@@ -1074,7 +1126,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** 20 вкладок/устройств, подключается 21-я: вытесняется самый старый клиент, чья очередь как раз забита бурстом событий. put_nowait(None) → queue.Full → pass. Вкладка-жертва держит SSE-соединение, получает только пинги: состояние зон в этом UI молча перестаёт обновляться навсегда (EventSource не реконнектится — соединение формально здорово), плюс HTTP-воркер занят зомби-стримом. Лечится только ручной перезагрузкой страницы.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Полная очередь вытесненного SSE-клиента дренируется и немедленно получает terminal sentinel, поэтому generator завершается вместо вечного zombie connection.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_evicted_full_client_queue_gets_immediate_terminal_sentinel`.
 
 ### #118 [medium] `routes/zones_watering_api.py:293` — Общий rate-limit-бакет «mqtt_control» (10 req/мин на IP) объединяет старт и СТОП зоны — ручная остановка получает 429, зона продолжает поливать
 
@@ -1216,7 +1272,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Контроллер перезагрузился ночью (обновление/сбой питания); веб-интерфейс никто не открывал. Утром садовник включает реле зоны кнопкой на Wirenboard (или приходит retained '1' со старого брокера). Ни один компонент не подписан на топик: в БД зона остаётся 'off', «удалённый» автостоп, который обязан взвести хаб, не планируется, ZoneWatchdog зону не видит. Реле остаётся включённым неограниченно — до ручного выключения или следующего ребута. Дополнительно до первого открытия UI не работают emergency-override и обновление observed_state/master_valve_observed.
 - **Решение оркестратора:** The hub is the only permanent semantics-aware subscriber; temporary verifier/scan clients do not close this gap.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Hub запускает постоянного safety subscriber при init приложения без ожидания первого browser SSE client; connect остаётся асинхронным и не задерживает boot.
+- **Пакет:** `phase2-sse-safety`.
+- **Fix commit:** `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`.
+- **Regression tests:** `tests/unit/test_phase2_sse_hub.py::test_init_starts_hub_without_waiting_for_first_sse_client`.
 
 ### #135 [medium] `routes/groups_api.py:527` — Ручное открытие мастер-клапана не отменяет взведённый таймер отложенного закрытия — клапан молча закрывается через delay после открытия
 

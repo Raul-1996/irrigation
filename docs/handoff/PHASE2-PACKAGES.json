@@ -380,6 +380,131 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-sse-safety",
+      "fix_commit": "b4797a5cc8f4ff2f9738274dfa617a786d2a1527",
+      "merge_commit": "fb9a3efa1e85c1d1dbdd20be5064e1a109014783",
+      "summary": "Постоянный MQTT→SSE safety hub получил неблокирующий generation lifecycle, правдивую обработку relay echo, TLS/master subscriptions и гарантированное завершение вытесненных SSE-клиентов.",
+      "resolutions": [
+        {
+          "id": 1,
+          "disposition": "fixed",
+          "reason": "Rebuild сериализован поколениями, registry и topic maps публикуются атомарно, а callback вытесненного клиента отклоняется как stale; перекрывающихся активных обработчиков одного server generation больше нет.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_stale_client_callback_is_terminal_after_reload",
+            "tests/unit/test_phase2_sse_hub.py::test_new_client_is_published_as_current_before_network_loop_starts"
+          ]
+        },
+        {
+          "id": 2,
+          "disposition": "fixed",
+          "reason": "Connect/setup и terminal loop_stop выполняются асинхронным rebuild worker вне hub lock и HTTP request thread, поэтому broadcast/register и route save не ждут сетевой таймаут.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_connect_does_not_hold_hub_lock",
+            "tests/unit/test_phase2_sse_hub.py::test_reload_returns_while_terminal_client_shutdown_is_blocked",
+            "tests/unit/test_phase2_sse_hub.py::test_startup_prefers_nonblocking_paho_connect_async"
+          ]
+        },
+        {
+          "id": 4,
+          "disposition": "fixed",
+          "reason": "ON для уже активной зоны обновляет только observation и больше не отменяет/перевзводит override stop либо hard-stop; retained replay также не продлевает полив.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_active_retained_on_does_not_reset_override_or_hard_stop"
+          ]
+        },
+        {
+          "id": 40,
+          "disposition": "fixed",
+          "reason": "Reload возвращает сразу, переиспользует живое соединение при неизменных credentials и меняет subscriptions без teardown-gap либо повторной подписки на retained topic.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_reload_reuses_connection_and_unsubscribes_removed_topic",
+            "tests/unit/test_phase2_sse_hub.py::test_unchanged_reload_does_not_resubscribe_retained_topics"
+          ]
+        },
+        {
+          "id": 50,
+          "disposition": "fixed",
+          "reason": "P05 сделал command-scoped verifier единственным владельцем physical confirmation, а P06 удалил hub-side подтверждение по неразличимому live base-topic ON; retained/self-publish больше не создают тавтологическое подтверждение.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_live_base_topic_on_does_not_self_confirm_physical_watering",
+            "tests/unit/test_phase2_zone_state_safety.py::test_finding_64_stale_verifier_does_not_republish_or_fault"
+          ]
+        },
+        {
+          "id": 52,
+          "disposition": "fixed",
+          "reason": "P07 ввёл typed secret failure и безопасные API/publisher boundaries; P06 изолирует нечитаемый server record, продолжает запуск остальных серверов и сохраняет уже живой client при неуспешном reload.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_unreadable_server_credential_does_not_abort_other_server_startup",
+            "tests/unit/test_phase2_sse_hub.py::test_unreadable_credential_during_reload_preserves_live_client"
+          ]
+        },
+        {
+          "id": 54,
+          "disposition": "fixed",
+          "reason": "Набор MQTT clients строится по объединению server IDs зон и master valves, поэтому master-only сервер получает отдельную подписку.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode"
+          ]
+        },
+        {
+          "id": 67,
+          "disposition": "fixed",
+          "reason": "Observed OFF записывает anti-restart timestamp, а свежий persisted commanded_state=off/state=off|stopping закрывает остановки, случившиеся во время disconnect hub; поздний ON получает контркоманду.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_recent_commanded_stop_blocks_late_on_without_external_marker_call"
+          ]
+        },
+        {
+          "id": 82,
+          "disposition": "fixed",
+          "reason": "Keepalive увеличен до 60 секунд, а DB/scheduler/publish обработка перенесена из paho callback в упорядоченный background worker, переживающий ошибочный event.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_paho_callback_returns_before_blocking_database_work_finishes",
+            "tests/unit/test_phase2_sse_hub.py::test_event_worker_survives_unexpected_handler_exception"
+          ]
+        },
+        {
+          "id": 83,
+          "disposition": "fixed",
+          "reason": "Emergency/anti-bounce OFF публикуется QoS 2 retained без debounce и с проверкой результата; broker ack не выдаётся за физический OFF, observed state остаётся ON до настоящего OFF-эхо.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_emergency_counter_off_is_reliable_and_observation_stays_truthful_on_failure"
+          ]
+        },
+        {
+          "id": 113,
+          "disposition": "fixed",
+          "reason": "Master echo интерпретируется с учётом NC/NO mode; для NO relay-high означает closed, а relay-low — open.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode"
+          ]
+        },
+        {
+          "id": 117,
+          "disposition": "fixed",
+          "reason": "Полная очередь вытесненного SSE-клиента дренируется и немедленно получает terminal sentinel, поэтому generator завершается вместо вечного zombie connection.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_evicted_full_client_queue_gets_immediate_terminal_sentinel"
+          ]
+        },
+        {
+          "id": 134,
+          "disposition": "fixed",
+          "reason": "Hub запускает постоянного safety subscriber при init приложения без ожидания первого browser SSE client; connect остаётся асинхронным и не задерживает boot.",
+          "tests": [
+            "tests/unit/test_phase2_sse_hub.py::test_init_starts_hub_without_waiting_for_first_sse_client"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "19 passed",
+        "full_pytest": "1959 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

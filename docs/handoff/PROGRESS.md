@@ -141,8 +141,23 @@
    - targeted: 98 passed; full gate: 1940 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 38 записей fixed (34 корня + четыре унаследованных дубля),
-1 deferred, 108 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+7. `phase2-sse-safety` — #1, #2, #4, #40, #50, #52, #54, #67, #82, #83,
+   #113, #117, #134 `fixed`; #33/#51 наследуют #4
+   - fix `b4797a5cc8f4ff2f9738274dfa617a786d2a1527`;
+   - merge `fb9a3efa1e85c1d1dbdd20be5064e1a109014783`;
+   - generation-based rebuild атомарно меняет clients/topic maps, не держит hub
+     lock или HTTP request на connect/loop_stop и сохраняет живые subscriptions;
+   - MQTT callback перенесён на ordered worker, keepalive увеличен, hub стартует
+     при init даже без браузера, master-only/TLS/NO paths получают корректные echo;
+   - emergency/anti-bounce OFF теперь QoS 2 retained и не маскирует физический ON,
+     retained/self-publish не подтверждает command и не сбрасывает override/hard-stop;
+   - P05+P06 полностью закрыли #50, P07+P06 — #52; #81 остаётся pending,
+     поскольку TLS ещё требуется diagnostic clients в `routes/mqtt_api.py`;
+   - targeted: 19 passed; full gate: 1959 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 53 записи fixed (47 корней + шесть унаследованных дублей),
+1 deferred, 93 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
