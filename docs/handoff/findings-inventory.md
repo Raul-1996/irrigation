@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **127 fixed · 4 deferred · 16 pending · 5 not_applicable**.
+- Phase 2 disposition: **135 fixed · 4 deferred · 8 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -290,7 +290,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Администратор сохраняет MQTT-сервер с именем `</option></select><img src=x onerror=alert(document.cookie)>` на странице /mqtt. При каждом открытии /zones разметка вырывается из <option> и скрипт исполняется в сессии любого администратора, открывшего страницу (HTML внутри <option> не отображается, но парсером обрабатывается при закрывающих тегах).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Имена MQTT servers во всех трёх group modal option lists проходят escapeHtml перед innerHTML insertion.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_untrusted_zone_and_mqtt_labels_are_escaped`.
 
 ### #25 [low] `static/js/status.js:1626` — zone.icon и производный label вставляются в innerHTML без экранирования (status.js карточки зон, zones.js таблица) — stored XSS через API/CSV-импорт
 
@@ -298,7 +302,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Через CSV-импорт зон (колонка icon = `<img src=x onerror=...>`) или прямой PUT /api/zones значение сохраняется в БД. Карточки зон на главной странице рендерятся для ВСЕХ пользователей, включая роль «наблюдатель», — внедрённый скрипт исполняется в их сессиях при каждом открытии и каждые 5 секунд при перерисовке.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P10 экранировал status.js icon/derived label, P11 экранировал zones.js zone.icon; оба описанных stored-XSS sinks закрыты.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_status_frontend.py::test_status_zone_icon_and_derived_label_are_escaped`, `tests/unit/test_phase2_zones_frontend.py::test_untrusted_zone_and_mqtt_labels_are_escaped`.
 
 ### #26 [low] `static/js/status.js:2137` — initDialDrag навешивает новые document-обработчики (в т.ч. non-passive touchmove) при каждом открытии run-popup — утечка слушателей на долгоживущей странице
 
@@ -705,7 +713,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ на /zones жмёт «🗑» → confirm → зона реально удалена на сервере (204), но `if (success)` не срабатывает: строка остаётся в таблице, счётчик зон не меняется, тоста нет. Повторный клик по «🗑» той же строки возвращает 404 текст "Zone not found" → truthy → ложный тост «Зона удалена». Реальное состояние видно только после перезагрузки страницы.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** DELETE использует raw response.ok и корректно принимает empty 204, обновляя local zones/table; non-OK body превращается в видимую ошибку.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_delete_zone_uses_the_http_status_for_empty_204`.
 
 ### #61 [medium] `static/js/status.js:1975` — saveZoneEdit игнорирует success:false — валидационная ошибка 400 показывается как «Зона сохранена»
 
@@ -879,7 +891,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона с именем «Газон, север» экспортируется как `5,Газон, север,🌿,10,...`. При импорте этого же файла: name='Газон', icon=' север', duration=parseInt('🌿')=NaN → JSON.stringify превращает NaN в null → бэкенд получает duration:null (что по смежному багу bulk_upsert_zones откатывает весь импорт с 500; а после его фикса — молча запишет искажённые icon/name). Заявленный round-trip «экспорт → импорт» портит данные всех зон после первой с запятой.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** CSV encoder квотирует comma/quote/CRLF и удваивает quotes; state-machine parser корректно round-trip'ит quoted newlines и BOM header.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_csv_export_round_trips_commas_quotes_and_newlines`.
 
 ### #76 [medium] `static/js/status.js:1804` — Гонка оптимистичного состояния зоны с 5-секундным поллингом: только что запущенная зона визуально откатывается в «off» и приглашает повторный старт
 
@@ -1108,7 +1124,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Вкладка A: админ удаляет MQTT-сервер на /mqtt. Вкладка B (открыта ранее, /zones): админ включает тумблер мастер-клапана группы — клиентская валидация проходит (select ещё содержит старый сервер), сервер отвечает 400 {success:false, message:'Нужен корректный MQTT-сервер для мастер-клапана'}, но UI показывает «Настройки мастер-клапана сохранены» и помечает use_master_valve=true в локальном кэше. Пользователь уверен, что мастер-клапан настроен; фактически в БД ничего не записано, клапан не будет управляться.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Единый putGroupSettings отвергает HTTP non-OK и JSON success=false; group autosave/toggles показывают server errors вместо truthy-object success.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_group_setting_writes_reject_http_and_success_false_errors`.
 
 ### #96 [medium] `services/security.py:49` — user_required отвергает роль "viewer": гостевой просмотр (/login?guest=1) полностью нерабочий — редирект на логин вместо статус-страницы
 
@@ -1215,7 +1235,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ держит открытой страницу «Зоны». SSE-соединение рвётся (пересборка хаба после правки MQTT-сервера / 21-й SSE-клиент / Wi-Fi-блип), в этот момент планировщик включает зону 5. После авто-реконнекта дельта потеряна: в таблице зона 5 показана выключенной (▶). Пользователь жмёт ▶ → startZone шлёт mqtt/start по уже работающей зоне (перезапуск автостопа/таймера), либо наоборот считает зону выключенной, хотя реле открыто. Состояние не самовосстанавливается до ручного F5.
 - **Решение оркестратора:** Stale state lasts until reload, another loadData-triggering action, or a later event; not literally forever.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** SSE onopen загружает authoritative zone snapshot, а per-zone versions не дают resync response перетереть event, пришедший во время fetch.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_sse_open_resynchronizes_zone_state`.
 
 ### #107 [low] `static/js/zones.js:540` — zones.js: openModalById переносит модалку группы в body, а renderGroupsGrid создаёт дубликат с теми же id — открытая модалка «замерзает»: кнопка «Закрыть» и +/- цифр работают по скрытой копии
 
@@ -1223,7 +1247,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Админ меняет длительность зоны в таблице (onchange → scheduleZoneAutoSave, 500 мс) и сразу открывает «Настройки счётчика воды». Через полсекунды saveZone → renderGroupsGrid пересоздаёт карточки. У видимой модалки: кнопки «+»/«−» крутят цифры невидимой копии (визуально ничего не меняется), live-обновление показаний пишет в скрытую копию, кнопка «Закрыть» вызывает closeModalById по скрытой копии — модалка не закрывается (спасает только клик по фону через window.onclick). Введённое показание счётчика при закрытии сохраняется из скрытой копии (нули), а не из того, что видел пользователь. Дубликаты id накапливаются при каждом цикле открытие→ререндер.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Open modal переносится как единственный preserved node; rerender удаляет replacement duplicate и close возвращает тот же node в актуальную card.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_group_modal_identity_is_preserved_across_grid_render`.
 
 ### #108 [low] `static/js/app.js:296` — app.js: Health-панель (клавиша 'h') вставляет сырые строки meta_tail (MQTT topic/payload) в innerHTML — XSS через сообщение брокера
 
@@ -1358,7 +1386,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** В системе 2 MQTT-сервера. Зона создана без сервера (бэкенд явно это допускает и предупреждает). На странице /zones колонка MQTT показывает сервер №1, как будто он назначен. Пользователь исправляет только имя или длительность зоны → debounce-автосохранение отправляет PUT /api/zones/<id> с mqtt_server_id=<первый сервер> — зона молча привязывается к серверу, который никто не выбирал; команды реле пойдут на чужой брокер.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Zone MQTT select имеет explicit empty option, selected при mqtt_server_id NULL, и больше не визуально/автосохранением привязывает первый server.
+- **Пакет:** `phase2-zones-frontend`.
+- **Fix commit:** `27cd91e0b41c61939509b4508367d789ccff0d22`.
+- **Regression tests:** `tests/unit/test_phase2_zones_frontend.py::test_zone_without_mqtt_server_has_an_explicit_empty_option`.
 
 ### #120 [low] `templates/mqtt.html:219` — mqtt.html: каждый вызов loadServers() порождает новую вечную цепочку updateStatuses — поллинг статусов брокеров множится с каждым сохранением сервера
 

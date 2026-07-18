@@ -1346,6 +1346,71 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-zones-frontend",
+      "fix_commit": "27cd91e0b41c61939509b4508367d789ccff0d22",
+      "merge_commit": "99a6cc25b922bce1bd9058e892a1314dac4811df",
+      "summary": "Zones UI экранирует stored labels, понимает empty MQTT/204/soft errors, ресинхронизирует SSE, сохраняет modal identity и round-trip'ит RFC-like CSV quoting.",
+      "resolutions": [
+        {
+          "id": 24,
+          "disposition": "fixed",
+          "reason": "Имена MQTT servers во всех трёх group modal option lists проходят escapeHtml перед innerHTML insertion.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_untrusted_zone_and_mqtt_labels_are_escaped"]
+        },
+        {
+          "id": 25,
+          "disposition": "fixed",
+          "reason": "P10 экранировал status.js icon/derived label, P11 экранировал zones.js zone.icon; оба описанных stored-XSS sinks закрыты.",
+          "tests": [
+            "tests/unit/test_phase2_status_frontend.py::test_status_zone_icon_and_derived_label_are_escaped",
+            "tests/unit/test_phase2_zones_frontend.py::test_untrusted_zone_and_mqtt_labels_are_escaped"
+          ]
+        },
+        {
+          "id": 60,
+          "disposition": "fixed",
+          "reason": "DELETE использует raw response.ok и корректно принимает empty 204, обновляя local zones/table; non-OK body превращается в видимую ошибку.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_delete_zone_uses_the_http_status_for_empty_204"]
+        },
+        {
+          "id": 75,
+          "disposition": "fixed",
+          "reason": "CSV encoder квотирует comma/quote/CRLF и удваивает quotes; state-machine parser корректно round-trip'ит quoted newlines и BOM header.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_csv_export_round_trips_commas_quotes_and_newlines"]
+        },
+        {
+          "id": 95,
+          "disposition": "fixed",
+          "reason": "Единый putGroupSettings отвергает HTTP non-OK и JSON success=false; group autosave/toggles показывают server errors вместо truthy-object success.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_group_setting_writes_reject_http_and_success_false_errors"]
+        },
+        {
+          "id": 106,
+          "disposition": "fixed",
+          "reason": "SSE onopen загружает authoritative zone snapshot, а per-zone versions не дают resync response перетереть event, пришедший во время fetch.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_sse_open_resynchronizes_zone_state"]
+        },
+        {
+          "id": 107,
+          "disposition": "fixed",
+          "reason": "Open modal переносится как единственный preserved node; rerender удаляет replacement duplicate и close возвращает тот же node в актуальную card.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_group_modal_identity_is_preserved_across_grid_render"]
+        },
+        {
+          "id": 119,
+          "disposition": "fixed",
+          "reason": "Zone MQTT select имеет explicit empty option, selected при mqtt_server_id NULL, и больше не визуально/автосохранением привязывает первый server.",
+          "tests": ["tests/unit/test_phase2_zones_frontend.py::test_zone_without_mqtt_server_has_an_explicit_empty_option"]
+        }
+      ],
+      "verification": {
+        "targeted": "178 passed",
+        "full_pytest": "2067 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

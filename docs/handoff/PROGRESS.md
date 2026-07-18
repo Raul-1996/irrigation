@@ -360,8 +360,21 @@
     - targeted: 125 passed; full gate: 2060 passed, 2 skipped, 17 deselected;
       node syntax, ruff и diff check чисты.
 
-После этих пакетов: 127 записей fixed (117 корней + десять унаследованных дублей),
-4 deferred, 16 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+25. `phase2-zones-frontend` — #24, #25, #60, #75, #95, #106, #107,
+    #119 `fixed`
+    - fix `27cd91e0b41c61939509b4508367d789ccff0d22`;
+    - merge `99a6cc25b922bce1bd9058e892a1314dac4811df`;
+    - zone icons и MQTT labels escaped; вместе с P10 полностью закрыт #25;
+    - explicit empty MQTT option, raw 204 DELETE и status-aware group writes
+      устраняют ложные привязки/успехи;
+    - SSE onopen resync versioned против concurrent events, modal node identity
+      сохраняется между rerenders;
+    - CSV encoder/parser round-trip'ит commas, quotes и embedded newlines;
+    - targeted: 178 passed; full gate: 2067 passed, 2 skipped, 17 deselected;
+      node syntax, ruff и diff check чисты.
+
+После этих пакетов: 135 записей fixed (125 корней + десять унаследованных дублей),
+4 deferred, 8 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
