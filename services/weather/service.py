@@ -19,7 +19,7 @@ from typing import Any
 from services.weather import cache as _cache
 from services.weather.client import fetch_api as _fetch_api_impl
 from services.weather.client import fetch_relay as _fetch_relay_impl
-from services.weather.models import WeatherData
+from services.weather.models import _CACHE_TTL_SEC, WeatherData
 
 logger = logging.getLogger(__name__)
 
@@ -116,12 +116,14 @@ class WeatherService:
         Order of fallback:
             1. Fresh cache (age < ``_CACHE_TTL_SEC``), unless ``force_refresh``.
             2. Live API call via ``_fetch_api``.
-            3. Stale cache (any age) — degraded-mode fallback.
+            3. Stale cache (any age) — degraded-mode fallback after a failed
+               live request only.
             4. ``None``.
 
-        ``cache_only=True`` never touches the network (fresh cache → stale
-        cache → None) — for hot paths like /api/status polling, where a
-        synchronous HTTP fetch would block the UI.
+        ``cache_only=True`` never touches the network and never trusts data
+        older than the normal cache TTL.  This is used for display-only
+        decisions on hot paths like /api/status; an arbitrarily stale rain or
+        freeze forecast must not diverge from the live-capable scheduler.
         """
         location = self._get_location()
         if not location:
@@ -137,7 +139,12 @@ class WeatherService:
                 return cached
 
         if cache_only:
-            return _cache.read_stale(self.db_path, lat, lon)
+            return _cache.read_stale(
+                self.db_path,
+                lat,
+                lon,
+                max_age_sec=_CACHE_TTL_SEC,
+            )
 
         raw = self._fetch_api(lat, lon)
         if raw:

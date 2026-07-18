@@ -88,8 +88,14 @@ def read_fresh(db_path: str, lat: float, lon: float) -> WeatherData | None:
     return None
 
 
-def read_stale(db_path: str, lat: float, lon: float) -> WeatherData | None:
-    """Return the most recent cached entry regardless of age.
+def read_stale(
+    db_path: str,
+    lat: float,
+    lon: float,
+    *,
+    max_age_sec: float | None = None,
+) -> WeatherData | None:
+    """Return the most recent cached entry, optionally bounded by age.
 
     Used by the degraded-mode fallback when the API is unreachable — stale
     forecast data is strictly better than no data for the irrigation decision
@@ -101,8 +107,8 @@ def read_stale(db_path: str, lat: float, lon: float) -> WeatherData | None:
         lon: Longitude to key on.
 
     Returns:
-        ``WeatherData`` if any cache row exists for these coordinates, else
-        ``None``.
+        ``WeatherData`` if a matching row exists and satisfies
+        ``max_age_sec`` (when provided), else ``None``.
     """
     try:
         with sqlite3.connect(db_path, timeout=5) as conn:
@@ -115,8 +121,11 @@ def read_stale(db_path: str, lat: float, lon: float) -> WeatherData | None:
             )
             row = cur.fetchone()
             if row:
+                fetched_at = float(row["fetched_at"])
+                if max_age_sec is not None and time.time() - fetched_at >= max_age_sec:
+                    return None
                 data = json.loads(row["data"])
-                data["_fetched_at"] = float(row["fetched_at"])
+                data["_fetched_at"] = fetched_at
                 logger.info("Weather: using stale cache (API unavailable)")
                 return WeatherData(data)
     except (sqlite3.Error, json.JSONDecodeError) as e:

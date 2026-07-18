@@ -10,6 +10,7 @@
 import json
 import os
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 os.environ["TESTING"] = "1"
 
@@ -71,7 +72,7 @@ class TestScheduleTypesNextWatering:
 
     def test_interval_program_gives_slot(self, admin_client, app):
         z = app.db.create_zone({"name": "IntNW", "duration": 10, "group_id": 1})
-        app.db.create_program(
+        program = app.db.create_program(
             {
                 "name": "IntervalNW",
                 "time": "06:00",
@@ -81,7 +82,15 @@ class TestScheduleTypesNextWatering:
                 "interval_days": 2,
             }
         )
-        item = _bulk_item(admin_client, z["id"])
+        # Interval cadence is anchored in the live APScheduler job, not in the
+        # program row.  TESTING deliberately does not start that scheduler, so
+        # inject the same next_run_time metadata production provides.
+        next_run = (datetime.now() + timedelta(days=2)).replace(hour=6, minute=0, second=0, microsecond=0)
+        with patch(
+            "services.next_watering._get_interval_next_runs",
+            return_value={(program["id"], "main"): next_run},
+        ):
+            item = _bulk_item(admin_client, z["id"])
         assert item["next_datetime"] is not None
         assert item["next_watering"] != "Никогда"
 
