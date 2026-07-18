@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **107 fixed · 3 deferred · 37 pending · 5 not_applicable**.
+- Phase 2 disposition: **109 fixed · 4 deferred · 34 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -630,7 +630,9 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** За nginx любой пользователь (или атакующий за basic-auth) делает 5 неудачных попыток логина → login_limiter заносит lockout для ключа '127.0.0.1' → следующие 900 с (15 мин) ВСЕ пользователи, включая админа с верным паролем, получают 429 на /api/login. Аналогично per-IP изоляция брутфорса на уровне Flask не работает — все запросы считаются как один IP. Первичную защиту даёт nginx limit_req (per real IP), поэтому серьёзность низкая, но Flask-слой деградирует до общего ведра и создаёт self-DoS логина.
 - **Решение оркестратора:** Conditional on an external reverse proxy; the supported native WB deployment exposes Hypercorn directly.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `deferred`.
+- **Причина disposition:** На поддерживаемом production target Hypercorn слушается напрямую под native WB systemd, внешняя reverse-proxy topology не поддерживается. Исправление требует явной trusted-proxy allowlist/config boundary; без неё доверие X-Forwarded-For позволит клиенту подменить IP и ослабит rate/security controls.
+- **Пакет:** `phase2-auth-roles`.
 
 ### #57 [low] `routes/auth.py:39` — GET /login?guest=1 меняет сессию (сброс + role=viewer) без CSRF — можно принудительно понизить/разлогинить авторизованного админа
 
@@ -638,7 +640,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Авторизованный админ (role=admin) открывает страницу/письмо с `<img src="https://controller/login?guest=1">`. Браузер шлёт GET с cookie админа; Flask очищает сессию и в ответе ставит cookie viewer. Админ молча понижается до read-only viewer и теряет доступ к мутациям до повторного входа. CSRF-даунгрейд/логаут (тот же класс, что задокументированный SEC-008 GET-logout), эскалации привилегий нет.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Guest GET entry point остаётся для read-only links, но для уже logged-in viewer/user/admin возвращает status redirect без изменения role/session.
+- **Пакет:** `phase2-auth-roles`.
+- **Fix commit:** `dce0f8d9c1ad824f3f214a27955c98bf76c70197`.
+- **Regression tests:** `tests/unit/test_phase2_auth_roles.py::test_guest_login_does_not_downgrade_authenticated_admin`.
 
 ### #58 [high] `templates/programs.html:630` — Мастер программ трактует конфликтный ответ 200 {success:false} как успешное сохранение
 
@@ -1059,7 +1065,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Оператор публикует ссылку `https://controller/login?guest=1` для садовника, чтобы тот в режиме «только чтение» видел статус зон без админ-пароля. Садовник открывает ссылку → сессия становится role=viewer → GET / (index) под @user_required видит role не из [guest,user,admin] → 302 redirect на /login. Read-only просмотр, ради которого существует роль viewer, недоступен вообще: пользователь бесконечно возвращается на форму логина. (Дополнительно: механизм усиливает известную ?guest=1-атаку — принудительный downgrade авторизованного админа в viewer лишает его доступа не только к мутациям, но и ко всем страницам приложения.)
 - **Решение оркестратора:** Only /login?guest=1 viewer mode is broken; the current /?guest=1 button uses role=guest and works.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** user_required включает viewer в разрешённые read-only роли, поэтому explicit guest viewer flow действительно достигает status page.
+- **Пакет:** `phase2-auth-roles`.
+- **Fix commit:** `dce0f8d9c1ad824f3f214a27955c98bf76c70197`.
+- **Regression tests:** `tests/unit/test_phase2_auth_roles.py::test_guest_login_viewer_can_open_status_page`.
 
 ### #97 [low] `services/image_pipeline.py:48` — Decompression-bomb cap (50 MP) проверяется ПОСЛЕ полного декодирования img.load() — не предотвращает выделение памяти при загрузке изображений
 

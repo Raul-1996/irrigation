@@ -1760,9 +1760,9 @@
     "main_or_branch": "main_bug",
     "decision_notes": "Conditional on an external reverse proxy; the supported native WB deployment exposes Hypercorn directly.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
+      "disposition": "deferred",
+      "reason": "На поддерживаемом production target Hypercorn слушается напрямую под native WB systemd, внешняя reverse-proxy topology не поддерживается. Исправление требует явной trusted-proxy allowlist/config boundary; без неё доверие X-Forwarded-For позволит клиенту подменить IP и ослабит rate/security controls.",
+      "package": "phase2-auth-roles",
       "commit": null,
       "tests": []
     }
@@ -1788,11 +1788,13 @@
     "reproduction": "Авторизованный админ (role=admin) открывает страницу/письмо с `<img src=\"https://controller/login?guest=1\">`. Браузер шлёт GET с cookie админа; Flask очищает сессию и в ответе ставит cookie viewer. Админ молча понижается до read-only viewer и теряет доступ к мутациям до повторного входа. CSRF-даунгрейд/логаут (тот же класс, что задокументированный SEC-008 GET-logout), эскалации привилегий нет.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Guest GET entry point остаётся для read-only links, но для уже logged-in viewer/user/admin возвращает status redirect без изменения role/session.",
+      "package": "phase2-auth-roles",
+      "commit": "dce0f8d9c1ad824f3f214a27955c98bf76c70197",
+      "tests": [
+        "tests/unit/test_phase2_auth_roles.py::test_guest_login_does_not_downgrade_authenticated_admin"
+      ]
     }
   },
   {
@@ -2955,11 +2957,13 @@
     "main_or_branch": "main_bug",
     "decision_notes": "Only /login?guest=1 viewer mode is broken; the current /?guest=1 button uses role=guest and works.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "user_required включает viewer в разрешённые read-only роли, поэтому explicit guest viewer flow действительно достигает status page.",
+      "package": "phase2-auth-roles",
+      "commit": "dce0f8d9c1ad824f3f214a27955c98bf76c70197",
+      "tests": [
+        "tests/unit/test_phase2_auth_roles.py::test_guest_login_viewer_can_open_status_page"
+      ]
     }
   },
   {

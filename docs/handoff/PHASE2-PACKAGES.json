@@ -1114,6 +1114,42 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-auth-roles",
+      "fix_commit": "dce0f8d9c1ad824f3f214a27955c98bf76c70197",
+      "merge_commit": "1cdd724445155bf956c0faafda01ed5aafb012b6",
+      "summary": "Guest link не понижает authenticated session, viewer получает заявленный read-only user access, а неподдерживаемый proxy-IP режим отложен без небезопасного доверия forwarding headers.",
+      "resolutions": [
+        {
+          "id": 56,
+          "disposition": "deferred",
+          "reason": "На поддерживаемом production target Hypercorn слушается напрямую под native WB systemd, внешняя reverse-proxy topology не поддерживается. Исправление требует явной trusted-proxy allowlist/config boundary; без неё доверие X-Forwarded-For позволит клиенту подменить IP и ослабит rate/security controls.",
+          "tests": []
+        },
+        {
+          "id": 57,
+          "disposition": "fixed",
+          "reason": "Guest GET entry point остаётся для read-only links, но для уже logged-in viewer/user/admin возвращает status redirect без изменения role/session.",
+          "tests": [
+            "tests/unit/test_phase2_auth_roles.py::test_guest_login_does_not_downgrade_authenticated_admin"
+          ]
+        },
+        {
+          "id": 96,
+          "disposition": "fixed",
+          "reason": "user_required включает viewer в разрешённые read-only роли, поэтому explicit guest viewer flow действительно достигает status page.",
+          "tests": [
+            "tests/unit/test_phase2_auth_roles.py::test_guest_login_viewer_can_open_status_page"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "50 passed",
+        "full_pytest": "2036 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

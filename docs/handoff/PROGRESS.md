@@ -294,8 +294,19 @@
     - targeted: 174 passed; full gate: 2034 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 107 записей fixed (98 корней + девять унаследованных дублей),
-3 deferred, 37 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+19. `phase2-auth-roles` — #57, #96 `fixed`; #56 `deferred`
+    - fix `dce0f8d9c1ad824f3f214a27955c98bf76c70197`;
+    - merge `1cdd724445155bf956c0faafda01ed5aafb012b6`;
+    - guest link сохраняет существующую viewer/user/admin session и не может
+      downgrade администратора; viewer допущен к заявленному read-only status;
+    - #56 отложен индивидуально: supported WB target работает direct Hypercorn,
+      а proxy-aware IP требует explicit trusted-proxy allowlist; слепое доверие
+      forwarding headers создало бы spoofing уязвимость;
+    - targeted: 50 passed; full gate: 2036 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 109 записей fixed (100 корней + девять унаследованных дублей),
+4 deferred, 34 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
