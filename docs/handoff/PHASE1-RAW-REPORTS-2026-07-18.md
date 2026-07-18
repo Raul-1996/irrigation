@@ -1151,3 +1151,159 @@ Extra-times тест проходит только потому, что ключ
 
 Рабочее дерево не изменялось; pytest не запускался.
 
+---
+
+## Продолжение Фазы 1 в Codex Multi-Agent V2
+
+Дата: 2026-07-18. Проверяемый production-code HEAD: `ef830fa7d05c2f07590dfd87462327e68b8abf44`;
+документационный parent-checkpoint: `42dda0a1ae1ca4f17b78d5fdb48ca52b29565e36`.
+
+Все агенты работали read-only: production-код, тесты, ветки и коммиты не изменялись;
+полный pytest не запускался. Использовались только точечные тесты с
+`-p no:cacheprovider`, временные SQLite-БД и локальные mock/barrier probes.
+
+### Недостающие опровергатели
+
+- `/root/refuter_r1`: #20, #21, #23, #24, #25, #26, #27 — все REAL, сужены impact/guards.
+- `/root/refuter_r2`: #58, #60, #61, #74, #75, #78 — REAL; #77 — FALSE как branch regression.
+- `/root/refuter_r3`: #79, #93, #95, #106 — REAL; #105 — FALSE; #92 — условный REAL для Safari 15-era.
+- `/root/refuter_r4`: #107, #119, #122, #123, #124 — REAL; #108 — REAL только для подписанного `/meta`/wildcard topic.
+
+### Практики для исходных UNVERIFIED
+
+Финальные покрытия по фактически проверенным 1-based inventory entries:
+
+- `/root/pract_a1`: #63, #65, #87, #127, #133 — REAL.
+- `/root/pract_a2`: #66, #88, #90, #128 — REAL; #126 — FALSE.
+- `/root/pract_b2`: #35, #89, #111, #112, #115, #136 — REAL; #115 duplicate #136.
+- `/root/pract_c1`: #41, #45, #59, #70, #71, #98, #99, #100 — REAL.
+- `/root/pract_c2`: #37, #42, #43, #44, #68, #101, #129 — REAL.
+- `/root/pract_d1`: #39, #49, #51, #53, #69, #80, #114 — REAL.
+- `/root/pract_d3`: #55, #82, #85, #86, #103, #116 — REAL.
+- `/root/pract_d4`: #40, #104, #109, #117, #120, #121 — REAL; #120 duplicate #103.
+- `/root/pract_e2`: #94, #97, #102, #125, #131, #137, #138 — REAL.
+- `/root/pract_f1`: #22, #58, #74, #76, #92, #93 — REAL; #105 — FALSE.
+- `/root/pract_f2`: #20, #21, #60, #61, #75, #106, #119 — REAL.
+- `/root/pract_f3` (исправленный отчёт): #23, #25, #26, #27, #108, #124 — REAL; #77 — FALSE.
+- `/root/pract_f4`: #24, #78, #79, #95, #107, #122, #123 — REAL.
+
+Четыре исходных practitioner-отчёта использовали переданный номер как zero-based
+JSON index и фактически проверили соседние записи. Оркестратор не засчитал эти
+отчёты механически и запустил gap-fill по точному `jq '.[N-1]'`:
+
+- `/root/pract_gap_b1`: #34, #36, #38, #50, #64, #110, #132 — все REAL.
+- `/root/pract_gap_c3`: #46, #62, #72, #130 — все REAL.
+- `/root/pract_gap_d2`: #54, #67, #81, #83, #113, #134 — все REAL.
+- `/root/pract_gap_e1`: #52, #56, #91, #96, #118 — все REAL с оговорками ниже.
+
+Ключевые уточнения gap-fill:
+
+- #34: already-on/starting path действительно создаёт новый open `zone_run`.
+- #36: master close scan/publish и pending timer registry не атомарны.
+- #38: boot forced-stop закрывает crash-run как ok/failed до aborted mop-up.
+- #50: retained base-topic loopback подтверждает команду без физического relay.
+- #64: verifier не имеет generation token и ретраит устаревшее состояние.
+- #110: `fault` не блокирует scheduler/start и сбрасывается обычным stop.
+- #132: failed OFF/ON publish всё равно фиксируется как успешное DB-состояние.
+- #46: строковый `"999"` сохраняется как 999, но не исключает зону из программ.
+- #62: UI-shaped PUT MQTT server обнуляет отсутствующие TLS fields.
+- #72: поздний echo может дать `confirmed=1,status=failed`.
+- #130: postpone anchor не учитывает zone offset и уводит metadata на сутки.
+- #54: server только с master topic не получает SSE MQTT client.
+- #67: `mark_zone_stopped` не вызывается production stop paths.
+- #81: hub/probe/status/scan не применяют TLS settings.
+- #83: emergency counter-OFF — QoS0/non-retained, результат игнорируется.
+- #113: NO master echo интерпретируется инвертированно.
+- #134: постоянный echo hub стартует только после открытия `/zones`.
+- #52: wrong/lost AES key пробрасывает `ValueError: MAC check failed`.
+- #56: shared rate-limit bucket реален за внешним proxy, но не на native direct port.
+- #91: anonymous JSON mutation реальна; обычная cross-site HTML form получает 415.
+- #96: сломан viewer-route `/login?guest=1`, но текущий `/ ?guest=1` guest flow работает.
+- #118: общий start/stop bucket может вернуть 429 на Stop; существуют альтернативные emergency/group stop paths.
+
+### Перепроверка старых CONFIRMED
+
+- `/root/confirmed_sse`: #2, #4, #33 — REAL; #4/#33 один root cause.
+- `/root/confirmed_next_enabled`: #5 REAL; #11/#15 duplicates #5.
+- `/root/confirmed_next_slots`: #12 REAL; #28 duplicate #12; #13 REAL.
+- `/root/confirmed_tests`: #6, #7, #9 — REAL test-quality defects.
+- `/root/confirmed_api_db`: #10, #17, #19 — REAL.
+- `/root/confirmed_next_edges`: #29, #32 — REAL.
+- `/root/confirmed_zone`: #3, #18 — REAL.
+
+### Попытка опровергнуть старые REFUTED
+
+- `/root/refuted_challenge_1`: #1, #8, #14 — прежний REFUTED отменён, все три REAL.
+- `/root/refuted_challenge_2`: #30 — прежний REFUTED отменён, REAL; #16/#31 — окончательно FALSE.
+
+### Арбитраж расхождений
+
+- `/root/arb_90`: #90 — REAL после исправления consumer-сценария. Ложное время видно
+  в глобальном active-zone sidebar, а не в group card; баг есть на main.
+- `/root/arb_100`: #100 — REAL для group 999, которую wizard ошибочно разрешает
+  выбрать и scheduler исключает из session guard. Для обычных групп результат —
+  полный skip из #129. Искусственный TOCTOU-barrier отдельной находкой не признан.
+- #92 классифицирован REAL условно: Safari 15-era не парсит пробельный datetime;
+  современный Safari парсит, а minimum browser policy в проекте отсутствует.
+
+### Пять diff-review линз и независимая перепроверка новых находок
+
+#### Security
+
+`/root/diff_security` + `/root/arb_status_db_amp`:
+
+- #139 REAL/medium/branch: публичный `/api/status` вызывает cancellation lookup для
+  каждой пары zone×program. Реальный blueprint с 32 зонами и 16 программ выполнил
+  512 SQLite connections/SELECT; UI status+bulk способен создавать около 205
+  соединений/с на вкладку в этой конфигурации.
+
+#### Test quality
+
+`/root/diff_test_quality` + `/root/arb_diff_test_gaps`:
+
+- #140 REAL/low: program log/stats всегда пустые/нулевые; снятые xfail проверяют форму.
+- #141 REAL/medium: smart/time-based не читаются scheduler/runner и ведут себя одинаково.
+- #142 REAL/low: weekday/even-odd/extra-time tests пропустили mutation «всё Tuesday 23:59».
+
+#### Contracts
+
+`/root/diff_contracts` + `/root/arb_contract_new`:
+
+- #143 REAL/medium: POST принимает отрицательный/нулевой/строковый `interval_days`;
+  отрицательный interval делает APScheduler `_get_run_times` неограниченным, ноль
+  нормализуется до 1 секунды.
+- #144 REAL/low/branch: удалены явно stable `get_merged_weather` export и
+  backward-compatibility `services.weather_merged`, хотя актуальная spec их документирует.
+
+#### Concurrency
+
+`/root/diff_concurrency`, `/root/arb_runtime_invariants_a`,
+`/root/arb_runtime_invariants_b`, `/root/arb_conc_health_shutdown`:
+
+- #145 REAL/high: concurrent PUT/DELETE оставляет orphan persistent program job.
+- #146 REAL/high: Stop до регистрации group-start event/job теряется; start продолжает.
+- #147 REAL/high: Telegram Stop не ставит cancel event, runner запускает следующую зону.
+- #148 REAL/medium: Health cancel ручной зоны оставляет ownerless set Event и блокирует cron.
+- #149 REAL/high: shutdown OFF-sweep не quiesce workers; late retained ON возможен после OFF.
+
+#### Correctness
+
+`/root/diff_correctness` + `/root/arb_correctness_new`:
+
+- #150 REAL/low/branch: cache-only next-watering принимает weather cache любого возраста
+  и может расходиться с live scheduler decision.
+- #151 REAL/low: weather skip + daily 00:00 даёт первой зоне `next_dt=None`.
+- #152 REAL/low: malformed program time отображается как midnight, scheduler jobs не создаёт.
+
+### Финальный арбитраж оркестратора
+
+- Исходные 138: `VERIFIED_REAL=133`, `VERIFIED_FALSE=5`, `UNVERIFIED=0`.
+- Окончательно FALSE: #16, #31, #77, #105, #126.
+- Новые diff findings: #139–#152, все `VERIFIED_REAL`.
+- Финальный inventory: 152 записи, 147 REAL, 5 FALSE.
+- Exact duplicates сохранены через `duplicate_of`: #11→#5, #15→#5, #28→#12,
+  #31→#16, #33→#4, #51→#4, #59→#10, #61→#23, #69→#17,
+  #115→#3, #120→#103, #136→#3.
+
+На момент завершения всех сабагентов tracked diff отсутствовал, единственный status
+entry — исходный пользовательский `?? AGENTS.md`.
