@@ -385,8 +385,16 @@
     - targeted/runtime probes прошли; full gate: 2071 passed, 2 skipped,
       17 deselected; ruff и diff check чисты.
 
-После этих пакетов: 140 записей fixed (129 корней + одиннадцать унаследованных дублей),
-4 deferred, 3 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+27. `phase2-health-panel-xss` — #108 `fixed`
+    - fix `49f0670784c3923b4f9cfe2d855ac7aa3dbb50b3`;
+    - merge `bc9c42a14194331d03d34bbfffd03b361e0a63e1`;
+    - health metadata остаётся текстом при создании cancel actions через DOM;
+      broker-controlled MQTT topic/payload больше не декодируются в `innerHTML`;
+    - targeted: 36 passed; `node --check` чист; full gate: 2072 passed,
+      2 skipped, 17 deselected; ruff и diff check чисты.
+
+После этих пакетов: 141 запись fixed (130 корней + одиннадцать унаследованных дублей),
+4 deferred, 2 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

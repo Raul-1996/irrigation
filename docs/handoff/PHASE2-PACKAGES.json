@@ -1452,6 +1452,28 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-health-panel-xss",
+      "fix_commit": "49f0670784c3923b4f9cfe2d855ac7aa3dbb50b3",
+      "merge_commit": "bc9c42a14194331d03d34bbfffd03b361e0a63e1",
+      "summary": "Health panel сохраняет broker-controlled metadata как текст при создании action controls и больше не декодирует её обратно в innerHTML.",
+      "resolutions": [
+        {
+          "id": 108,
+          "disposition": "fixed",
+          "reason": "wireActions строит строки и cancel actions через text nodes, textContent и dataset; MQTT topic/payload и остальные health details не возвращаются в HTML parser.",
+          "tests": [
+            "tests/unit/test_xss_fix.py::TestInnerHTMLEscaping::test_app_js_health_panel_actions_preserve_meta_as_text"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "36 passed; node --check passed",
+        "full_pytest": "2072 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

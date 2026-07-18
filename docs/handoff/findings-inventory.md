@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **140 fixed · 4 deferred · 3 pending · 5 not_applicable**.
+- Phase 2 disposition: **141 fixed · 4 deferred · 2 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1268,7 +1268,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Любой, кто может публиковать в настроенный брокер (соседнее скомпрометированное WB-устройство, брокер без пароля в LAN), шлёт в отслеживаемый meta-топик payload вида `<img src=x onerror=fetch('/api/zones/1/mqtt/start',{method:'POST'})>`. Админ открывает Health-панель клавишей 'h' (панель авто-рефрешится каждые 2.5 с) — скрипт исполняется в его авторизованной сессии со всеми admin-правами (CSRF-токен доступен через мета-тег).
 - **Решение оркестратора:** XSS requires a configured subscribed topic ending in /meta (or matching wildcard); normal WB relay topics do not.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** wireActions строит строки и cancel actions через text nodes, textContent и dataset; MQTT topic/payload и остальные health details не возвращаются в HTML parser.
+- **Пакет:** `phase2-health-panel-xss`.
+- **Fix commit:** `49f0670784c3923b4f9cfe2d855ac7aa3dbb50b3`.
+- **Regression tests:** `tests/unit/test_xss_fix.py::TestInnerHTMLEscaping::test_app_js_health_panel_actions_preserve_meta_as_text`.
 
 ### #109 [low] `templates/mqtt.html:177` — mqtt.html: createServer/updateRow молча игнорируют ответ {success:false} — валидационная ошибка сервера не показывается вообще
 
