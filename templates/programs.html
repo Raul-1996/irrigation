@@ -92,6 +92,14 @@ function apiHeaders(json = true) {
   return h;
 }
 
+async function readResponseJson(resp) {
+  try {
+    return await resp.json();
+  } catch (_) {
+    return {};
+  }
+}
+
 // Load data
 async function loadPrograms() {
   try {
@@ -240,12 +248,15 @@ async function toggleEnabled(id) {
       headers: apiHeaders(),
       body: JSON.stringify({enabled: newEnabled})
     });
-    
-    if (resp.ok) {
-      prog.enabled = newEnabled;
-      renderList();
-      showToast(newEnabled ? '✅ Программа включена' : '⏸ Программа выключена', 'success');
+
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка переключения программы');
+      return;
     }
+    prog.enabled = newEnabled;
+    renderList();
+    showToast(newEnabled ? '✅ Программа включена' : '⏸ Программа выключена', 'success');
   } catch (err) {
     console.error('Toggle enabled error:', err);
     showToast('Ошибка переключения программы');
@@ -255,10 +266,13 @@ async function toggleEnabled(id) {
 async function duplicateProgram(id) {
   try {
     const resp = await fetch(`/api/programs/${id}/duplicate`, {method: 'POST', headers: apiHeaders(false)});
-    if (resp.ok) {
-      await loadPrograms();
-      showToast('📋 Программа скопирована', 'success');
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка дублирования');
+      return;
     }
+    await loadPrograms();
+    showToast('📋 Программа скопирована', 'success');
   } catch (err) {
     console.error('Duplicate error:', err);
     showToast('Ошибка дублирования');
@@ -294,11 +308,14 @@ async function deleteProgram(id) {
   
   try {
     const resp = await fetch(`/api/programs/${id}`, {method: 'DELETE', headers: apiHeaders(false)});
-    if (resp.ok) {
-      programs = programs.filter(p => p.id !== id);
-      renderList();
-      showToast('🗑 Программа удалена', 'success');
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка удаления');
+      return;
     }
+    programs = programs.filter(p => p.id !== id);
+    renderList();
+    showToast('🗑 Программа удалена', 'success');
   } catch (err) {
     console.error('Delete error:', err);
     showToast('Ошибка удаления');
@@ -486,7 +503,7 @@ function renderWizardStep() {
         <div class="zone-row ${wizardData.zones.includes(z.id) ? 'enabled' : 'disabled'}">
           <span class="zone-icon">💧</span>
           <div class="zone-info">
-            <div>${z.name}</div>
+            <div>${escapeHtml(z.name)}</div>
             <div class="zone-number">Зона ${z.id}</div>
           </div>
           <div class="toggle-switch ${wizardData.zones.includes(z.id) ? 'active' : ''}" 
@@ -626,15 +643,15 @@ async function saveWizard() {
       headers: apiHeaders(),
       body: JSON.stringify(wizardData)
     });
-    
-    if (resp.ok) {
-      closeWizard();
-      await loadPrograms();
-      showToast(editingId ? '✅ Программа обновлена' : '✅ Программа создана', 'success');
-    } else {
-      const data = await resp.json();
+
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
       showToast(data.message || 'Ошибка сохранения программы');
+      return;
     }
+    closeWizard();
+    await loadPrograms();
+    showToast(editingId ? '✅ Программа обновлена' : '✅ Программа создана', 'success');
   } catch (err) {
     console.error('Save error:', err);
     showToast('Ошибка сохранения программы');
