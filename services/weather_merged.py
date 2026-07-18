@@ -1,0 +1,181 @@
+"""Compatibility adapter for the documented merged-weather public API.
+
+The canonical weather package now builds forecasts and astronomy through
+``WeatherService.get_weather_extended``.  This module keeps the historical
+``services.weather_merged`` import path and adds only the local-sensor merge
+that is not part of that service payload.
+"""
+
+import logging
+import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from services.weather.models import SENSOR_STALE_TIMEOUT
+
+logger = logging.getLogger(__name__)
+
+
+def __getattr__(name: str):
+    """Resolve package constants lazily so legacy-first imports cannot cycle."""
+    if name == "SENSOR_STALE_TIMEOUT":
+        from services.weather.models import SENSOR_STALE_TIMEOUT
+
+        return SENSOR_STALE_TIMEOUT
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get_weather_service(db_path: str):
+    """Resolve the canonical singleton lazily to keep legacy-first imports safe."""
+    from services.weather.singletons import get_weather_service as get_service
+
+    return get_service(db_path)
+
+
+def _get_env_state(now: float) -> dict[str, Any]:
+    """Delegate to the canonical sensor snapshot helper after import completes."""
+    from services.weather.merge import _get_env_state as get_state
+
+    return get_state(now)
+
+
+def _get_rain_state() -> dict[str, Any]:
+    """Return the optional RainMonitor state without making it a dependency."""
+    try:
+        from services.monitors import rain_monitor
+
+        config = rain_monitor._cfg or {}
+        return {
+            "enabled": bool(config.get("enabled", False)),
+            "is_rain": rain_monitor.is_rain,
+        }
+    except Exception as exc:
+        logger.debug("RainMonitor state unavailable: %s", exc)
+        return {"enabled": False, "is_rain": None}
+
+
+def _api_field(current: dict[str, Any], name: str, *, unit: str | None = None) -> dict[str, Any]:
+    """Copy a field from the canonical payload and normalize its source."""
+    field = dict(current.get(name) or {})
+    field["source"] = "api"
+    if unit is not None:
+        field.setdefault("unit", unit)
+    return field
+
+
+def _merge_env_field(
+    api_field: dict[str, Any],
+    *,
+    enabled: bool,
+    online: bool,
+    local_value: Any,
+) -> dict[str, Any]:
+    """Prefer a usable local reading and annotate API fallback otherwise."""
+    if online and local_value is not None:
+        return {
+            "value": local_value,
+            "source": "local",
+            "unit": api_field.get("unit"),
+        }
+
+    result = dict(api_field)
+    result["source"] = "api_fallback" if enabled else "api"
+    return result
+
+
+def _api_rain(precipitation: Any) -> bool:
+    try:
+        return precipitation is not None and float(precipitation) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def get_merged_weather(db_path: str) -> dict[str, Any]:
+    """Return the stable local-sensor-first weather payload.
+
+    Forecast parsing, astronomy, weather codes, and cache age are delegated to
+    the live ``WeatherService`` implementation.  Fresh local temperature,
+    humidity, and rain observations override API values; enabled but offline
+    sensors are explicitly marked ``api_fallback``.
+    """
+    try:
+        extended = get_weather_service(db_path).get_weather_extended()
+    except Exception as exc:
+        logger.warning("Failed to get extended weather: %s", exc)
+        return {"available": False}
+
+    if not extended.get("available"):
+        return {"available": False}
+
+    now = time.time()
+    current = extended.get("current") or {}
+    stats = extended.get("stats") or {}
+    env_state = _get_env_state(now)
+    rain_state = _get_rain_state()
+
+    temperature_api = _api_field(current, "temperature", unit="°C")
+    humidity_api = _api_field(current, "humidity", unit="%")
+    temperature = _merge_env_field(
+        temperature_api,
+        enabled=bool(env_state.get("temp_enabled")),
+        online=bool(env_state.get("temp_online")),
+        local_value=env_state.get("temp_value"),
+    )
+    humidity = _merge_env_field(
+        humidity_api,
+        enabled=bool(env_state.get("hum_enabled")),
+        online=bool(env_state.get("hum_online")),
+        local_value=env_state.get("hum_value"),
+    )
+
+    rain_enabled = bool(rain_state.get("enabled"))
+    rain_value = rain_state.get("is_rain")
+    rain_online = rain_enabled and rain_value is not None
+    if rain_online:
+        rain = {"value": bool(rain_value), "source": "local"}
+    else:
+        precipitation = (current.get("precipitation_mm") or {}).get("value")
+        rain = {
+            "value": _api_rain(precipitation),
+            "source": "api_fallback" if rain_enabled else "api",
+        }
+
+    sensors = {
+        "temperature": {
+            "enabled": bool(env_state.get("temp_enabled")),
+            "online": bool(env_state.get("temp_online")),
+            "last_rx": env_state.get("temp_last_rx", 0),
+        },
+        "humidity": {
+            "enabled": bool(env_state.get("hum_enabled")),
+            "online": bool(env_state.get("hum_online")),
+            "last_rx": env_state.get("hum_last_rx", 0),
+        },
+        "rain": {
+            "enabled": rain_enabled,
+            "online": rain_online,
+            "value": rain_value,
+        },
+    }
+
+    return {
+        "available": True,
+        "temperature": temperature,
+        "humidity": humidity,
+        "rain": rain,
+        "wind_speed": _api_field(current, "wind_speed"),
+        "precipitation_mm": _api_field(current, "precipitation_mm"),
+        "precipitation_24h": stats.get("precipitation_24h", 0.0),
+        "precipitation_forecast_6h": stats.get("precipitation_forecast_6h", 0.0),
+        "daily_et0": stats.get("daily_et0"),
+        "weather_code": current.get("weather_code"),
+        "forecast_24h": extended.get("forecast_24h") or [],
+        "forecast_3d": extended.get("forecast_3d") or [],
+        "astronomy": extended.get("astronomy") or {"sunrise": None, "sunset": None},
+        "sensors": sensors,
+        "timestamp": now,
+        "cache_age_sec": extended.get("cache_age_sec", 0.0),
+    }
+
+
+__all__ = ["SENSOR_STALE_TIMEOUT", "get_merged_weather"]
