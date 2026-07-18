@@ -79,16 +79,30 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     # ── 4. Boot sync: turn OFF all zones + master valves ────────────
     _boot_sync(app, db)
 
-    # ── 5. Monitors (water, rain, env) ──────────────────────────────
+    # ── 5. Release paused scheduler after physical reconciliation ───
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        complete_boot = getattr(scheduler, "complete_boot_recovery", None)
+        if complete_boot is not None:
+            complete_boot()
+            logger.info("Scheduler boot recovery completed")
+        elif scheduler is not None:
+            logger.warning("Scheduler has no complete_boot_recovery API")
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        logger.exception("Scheduler boot recovery completion failed")
+
+    # ── 6. Monitors (water, rain, env) ──────────────────────────────
     _start_monitors(app, db)
 
-    # ── 6. MQTT publisher warm-up ───────────────────────────────────
+    # ── 7. MQTT publisher warm-up ───────────────────────────────────
     _warm_mqtt_clients(db)
 
-    # ── 7. Graceful shutdown handlers ───────────────────────────────
+    # ── 8. Graceful shutdown handlers ───────────────────────────────
     _register_shutdown_handlers(db)
 
-    # ── 8. Observability metrics (F2) ───────────────────────────────
+    # ── 9. Observability metrics (F2) ───────────────────────────────
     try:
         from routes.health_api import init_metrics as _init_metrics
 
@@ -98,7 +112,7 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     except Exception:
         logger.exception("init_metrics failed")
 
-    # ── 9. systemd sd_notify: watchdog heartbeat + READY=1 ──────────
+    # ── 10. systemd sd_notify: watchdog heartbeat + READY=1 ─────────
     # Must run LAST so that /readyz reflects true readiness before systemd
     # marks the unit active (Type=notify).
     try:
@@ -127,6 +141,29 @@ def _boot_sync(app, db):
     from utils import normalize_topic
 
     try:
+        # Mark any zone_runs left open by a previous (crashed / killed)
+        # process as 'aborted' before any ordinary stop path can finalize
+        # them as 'ok'/'failed'. Closing end_utc also removes them from
+        # get_open_zone_run, so stop_all_in_group cannot overwrite the
+        # crash outcome while forcing the physical relays OFF below.
+        # get_last_watering_time filters status='ok', so without this the
+        # aborted row remains excluded from successful watering history.
+        try:
+            import sqlite3 as _sq
+
+            with _sq.connect(db.db_path, timeout=5) as conn:
+                conn.execute(
+                    "UPDATE zone_runs SET end_utc = CURRENT_TIMESTAMP, "
+                    "status = 'aborted', "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE end_utc IS NULL "
+                    "AND (status IS NULL OR status = '')"
+                )
+                conn.commit()
+            logger.info("boot_sync: aborted open zone_runs from prior run")
+        except (sqlite3.Error, OSError) as e:
+            logger.warning("boot_sync: aborted-run cleanup failed: %s", e)
+
         # Centralised OFF via zone_control (if available)
         try:
             from services.zone_control import stop_all_in_group as _stop_all
@@ -139,27 +176,6 @@ def _boot_sync(app, db):
                     logger.debug("Handled exception in _boot_sync: %s", e)
         except ImportError as e:
             logger.debug("Handled exception in _boot_sync: %s", e)
-
-        # Mark any zone_runs left open by a previous (crashed / killed)
-        # process as 'aborted' so they don't shadow real history.
-        # get_last_watering_time filters status='ok', so without this the
-        # MAX(end_utc) would still skip them — but stale-open rows still
-        # confuse get_open_zone_run, which would then try to finish a
-        # run from before the reboot. Cheaper to mop them up here.
-        try:
-            import sqlite3 as _sq
-
-            with _sq.connect(db.db_path, timeout=5) as conn:
-                conn.execute(
-                    "UPDATE zone_runs SET status = 'aborted', "
-                    "updated_at = CURRENT_TIMESTAMP "
-                    "WHERE end_utc IS NULL "
-                    "AND (status IS NULL OR status = '')"
-                )
-                conn.commit()
-            logger.info("boot_sync: aborted open zone_runs from prior run")
-        except (sqlite3.Error, OSError) as e:
-            logger.warning("boot_sync: aborted-run cleanup failed: %s", e)
 
         # Direct MQTT OFF publish per zone (secondary safety net with retries)
         try:
