@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **77 fixed · 2 deferred · 68 pending · 5 not_applicable**.
+- Phase 2 disposition: **87 fixed · 3 deferred · 57 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -163,7 +163,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона создана с group_id=0 (импорт/API «без группы»). Любое последующее обновление — переименование, запись planned_end_time планировщиком, PUT /api/zones/<id> — молча переносит её в группу 1: зона начинает участвовать в последовательностях группы 1, peer-off и master-valve логике группы 1.
 - **Решение оркестратора:** Previous REFUTED status overturned. Standard CSV import can create group_id=0 and a later ordinary zone update silently rewrites it to group 1.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Partial update пишет только явно переданные поля, поэтому ранее сохранённый group_id=0 или NULL не нормализуется обратно в 1 через stale full-row merge.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_partial_zone_update_preserves_zero_or_null_group`.
 
 ### #15 [medium] `services/next_watering.py:113` — Единый калькулятор next-watering игнорирует флаг enabled программ — выключенные программы показывают время следующего полива
 
@@ -370,7 +374,9 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Любая пара конкурирующих писателей state (watchdog_cap stop vs ручной рестарт, peer_off vs mqtt_observed_change из sse_hub) завершается победой хронологически последней записи независимо от того, чьё представление о версии/состоянии устарело — «versioned» механизм не отсекает ни одну из гонок из находок выше, хотя модульные комментарии (zones_state.py: «eliminates the TOCTOU race», «optimistic-lock version match») обещают обратное. Конкретно: stop_zone завис между publish '0' и финальной записью 'off'; за это время sse_hub по эху записал 'off' и обнулил watering_start_time, затем пришёл рестарт и записал 'on' + start_time; поздняя запись stop_zone 'off'+start_time=None перетирает активный старт — зона физически включена ('1' переиздан рестартом), в БД 'off'.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `deferred`.
+- **Причина disposition:** Настоящий caller-owned optimistic CAS требует передавать expected_version через database facade, zones_state, zone_control и scheduler и запрещать raw fallback после CAS failure. В рамках единственного владельца db/zones.py P04 устранил проглатывание BEGIN IMMEDIATE/BUSY, но локальная транзакция не может отличить устаревшее намерение вызывающего без cross-layer version contract; такой протокол требует отдельного сериализованного safety-пакета.
+- **Пакет:** `phase2-zone-db`.
 
 ### #38 [medium] `services/app_init.py:137` — _boot_sync: stop_all_in_group(force=True) закрывает «крашнутые» открытые zone_runs как status='ok' ДО mop-up'а в 'aborted'
 
@@ -426,7 +432,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** PUT /api/zones/5 {"group_id": "abc"} (или group_id-объект/список от кривого клиента) → необработанный ValueError → HTTP 500 вместо 4xx/контрактного None; docstring/контракт update_zone «None при ошибке» нарушен для всех ~15 внутренних вызовов (scheduler, sse_hub, zone_control ловят только sqlite3.Error/OSError). На main тот же вход молча писал текст в INTEGER-колонку — ветка сменила режим отказа на исключение, не добавив обработку ни в одном вызывающем.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Некорректный duration/group integer перехватывается на repository boundary и возвращает контрактный None без частичной записи.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_update_zone_returns_none_for_invalid_integer_field`.
 
 ### #43 [medium] `db/zones.py:414` — bulk_upsert_zones: одна строка с нечисловым/null duration откатывает ВЕСЬ импорт с 500 вместо инкремента failed
 
@@ -434,7 +444,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** CSV-импорт зон: фронтенд (static/js/zones.js:1901) делает parseInt(duration) → NaN для «10 мин»/пустых ячеек → JSON null → int(None) TypeError → весь импорт из N зон откачен, пользователь получает 500 «Ошибка импорта» без указания проблемной строки, счётчики created/updated/failed не возвращаются.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Bulk upsert изолирует TypeError/ValueError одной строки, учитывает её в failed и коммитит валидные строки той же партии.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_bulk_upsert_counts_invalid_row_without_rolling_back_valid_row`.
 
 ### #44 [medium] `db/zones.py:323` — update_zone_versioned: `except sqlite3.Error: pass` вокруг BEGIN IMMEDIATE глотает lock-ошибку — TOCTOU-защита молча отключается, retry_on_busy не срабатывает
 
@@ -442,7 +456,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Конкурентная запись (WAL checkpoint, bulk-импорт) держит лок дольше busy_timeout → services.zones_state.update_zone_state получает (False, None): смена состояния зоны молча не применяется и не ретраится; при коротком контеншене — prev_zone читается вне транзакции и audit-переход может дублироваться/врать.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** BEGIN IMMEDIATE больше не проглатывает lock error: SQLITE_BUSY/LOCKED выходит к retry boundary, и versioned update повторяется либо честно возвращает исходный OperationalError после исчерпания попыток.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_update_zone_versioned_retries_failed_begin_immediate`.
 
 ### #45 [medium] `db/base.py:21` — retry_on_busy — мёртвый код во всех репозиториях: внутренние except sqlite3.Error глотают BUSY до декоратора
 
@@ -450,7 +468,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Лок держится дольше busy_timeout=30s (checkpoint + бэкап на медленной SD Wirenboard): update_zone возвращает None → routes/zones_crud_api.py:144 отвечает «Zone not found» 404 по существующей зоне; finish_zone_run возвращает False → zone_run навсегда остаётся открытым (end_utc NULL), история и last_watering_time теряют полив. Ретраев, обещанных декоратором, не происходит ни разу.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Retry-scoped connection/cursor translation пропускает только SQLITE_BUSY/LOCKED мимо внутренних sqlite.Error catch к декоратору; после исчерпания попыток восстанавливается исходный OperationalError, а недекорированные методы сохраняют прежний sqlite contract.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_retry_on_busy_bypasses_repository_sqlite_error_catch`, `tests/db/test_phase2_zone_db.py::test_non_decorated_repository_method_keeps_sqlite_error_contract`.
 
 ### #46 [low] `db/zones.py:272` — update_zone: исключение зоны из программ при переводе в группу 999 не срабатывает для строкового group_id
 
@@ -458,7 +480,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Клиент/интеграция передаёт group_id строкой (Telegram-бот, curl, сторонний скрипт): зона попадает в служебную группу 999 «БЕЗ ПОЛИВА», но остаётся во всех программах → планировщик продолжает открывать её клапан по расписанию, хотя UI показывает зону как исключённую из полива.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** group_id нормализуется к integer до проверки special group; строковое '999' атомарно удаляет зону из всех программ.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_string_group_999_removes_zone_from_programs`.
 
 ### #47 [low] `db/zones.py:836` — compute_next_run_for_zone: для interval-программ с interval_days>1 пишется заведомо неверный scheduled_start_time
 
@@ -466,7 +492,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа «каждые 3 дня в 06:00», сервис работает 2-е сутки: reschedule_group_to_next_program записывает в zones.scheduled_start_time «завтра 06:00», UI обещает полив завтра, фактический запуск — через 2 дня. Пользователь принимает решения (отложка/ручной запуск) по ложному времени.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Для interval_days>1 repository возвращает None вместо ежедневной догадки, потому что точный anchor принадлежит живому APScheduler; однодневный interval остаётся вычислимым.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_multi_day_interval_does_not_publish_unrecoverable_daily_guess`, `tests/db/test_db_deep.py::TestZonesDeep::test_compute_next_run_interval_schedule`.
 
 ### #48 [low] `db/audit.py:100` — get_audit_logs/get_logs: фильтры дат сравниваются с UTC-временем, а отображение — localtime (сдвиг на TZ-офсет)
 
@@ -698,7 +728,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь сохраняет правку имени/длительности зоны в момент, когда планировщик стартует полив (zones_state пишет state='on', watering_start_time) или rain-monitor ставит postpone_until: update_zone уже прочитал снапшот со state='off'/postpone_until=NULL, его UPDATE ждёт освобождения лока и коммитит поверх — состояние в БД откатывается на 'off' при физически открытом клапане (UI показывает «выключено», exclusive_start считает зону свободной → возможен второй старт), либо теряется свежепоставленный postpone и зона польёт в дождь.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Zone UPDATE строит SET только из payload и больше не записывает обратно state/timing значения отдельного устаревшего read snapshot.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_partial_update_does_not_replay_stale_runtime_snapshot`, `tests/db/test_phase2_zone_db.py::test_empty_zone_updates_remain_timestamp_only_noops`.
 
 ### #69 [medium] `routes/mqtt_api.py:98` — PUT /api/mqtt/servers/<id> возвращает расшифрованный сохранённый пароль брокера — маскировка VULN-004 есть только в GET, а новая keep-семантика ветки делает утечку регулярной
 
@@ -743,7 +777,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Echo реле 'on' приходит с задержкой (переподключение SSE-хаба к брокеру, retained-сообщение) практически одновременно с автостопом: finish_zone_run читает confirmed=0, SSE-тред коммитит confirmed=1, finish_zone_run записывает status='failed' — история показывает «полив не состоялся» для физически прошедшего полива, статистика воды и last_watering_time (фильтр status='ok') его теряют.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Финальный status вычисляется в одном UPDATE через текущее confirmed, поэтому подтверждение, закоммиченное до закрывающей записи, не затирается результатом stale pre-read.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_finish_zone_run_uses_confirmation_seen_before_atomic_finish`.
 
 ### #73 [low] `db/migrations.py:344` — _recreate_table_without_columns теряет UNIQUE/FK-констрейнты при downgrade: после rollback telegram_add_fsm_and_notif ломается upsert_bot_user (ON CONFLICT без UNIQUE)
 
@@ -1303,7 +1341,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Ежедневная программа 06:00, зоны A(30м), B(30м), C с offset 60 (слот 07:00). Зоне C поставлена отложка до 06:30. Планировщик реально польёт C сегодня в 07:00 (отложка истечёт к её слоту). reschedule_group_to_next_program → compute_next_run_for_zone ищет старт после 06:30 → завтра 06:00 → пишет zones.scheduled_start_time = завтра 07:00. Карточка зоны (/api/zones/<id>/next-watering, через исправленный next_watering) показывает сегодня 07:00 — расписание группы противоречит и карточке, и фактическому поливу.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Postpone lower bound относится к слоту зоны и сдвигается назад на cumulative offset при поиске program start; действительный сегодняшний slot больше не уходит на завтра.
+- **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`.
+- **Regression tests:** `tests/db/test_phase2_zone_db.py::test_postpone_anchor_is_shifted_by_zone_offset`.
 
 ### #131 [low] `services/next_watering.py:157` — next_watering: in-progress-окно программы строится по номинальным длительностям — при погодном коэффициенте <100% зонам показываются слоты, которых не будет
 

@@ -825,6 +825,109 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-zone-db",
+      "fix_commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "merge_commit": "2b91ae47de5b4518c73257ead1d246a5d33cdf69",
+      "summary": "Zone partial writes больше не переигрывают stale runtime snapshot, BUSY действительно доходит до retry boundary, zone-run confirmation закрывается атомарно, а scheduled metadata не выдумывает interval anchor.",
+      "resolutions": [
+        {
+          "id": 14,
+          "disposition": "fixed",
+          "reason": "Partial update пишет только явно переданные поля, поэтому ранее сохранённый group_id=0 или NULL не нормализуется обратно в 1 через stale full-row merge.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_partial_zone_update_preserves_zero_or_null_group"
+          ]
+        },
+        {
+          "id": 37,
+          "disposition": "deferred",
+          "reason": "Настоящий caller-owned optimistic CAS требует передавать expected_version через database facade, zones_state, zone_control и scheduler и запрещать raw fallback после CAS failure. В рамках единственного владельца db/zones.py P04 устранил проглатывание BEGIN IMMEDIATE/BUSY, но локальная транзакция не может отличить устаревшее намерение вызывающего без cross-layer version contract; такой протокол требует отдельного сериализованного safety-пакета.",
+          "tests": []
+        },
+        {
+          "id": 42,
+          "disposition": "fixed",
+          "reason": "Некорректный duration/group integer перехватывается на repository boundary и возвращает контрактный None без частичной записи.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_update_zone_returns_none_for_invalid_integer_field"
+          ]
+        },
+        {
+          "id": 43,
+          "disposition": "fixed",
+          "reason": "Bulk upsert изолирует TypeError/ValueError одной строки, учитывает её в failed и коммитит валидные строки той же партии.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_bulk_upsert_counts_invalid_row_without_rolling_back_valid_row"
+          ]
+        },
+        {
+          "id": 44,
+          "disposition": "fixed",
+          "reason": "BEGIN IMMEDIATE больше не проглатывает lock error: SQLITE_BUSY/LOCKED выходит к retry boundary, и versioned update повторяется либо честно возвращает исходный OperationalError после исчерпания попыток.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_update_zone_versioned_retries_failed_begin_immediate"
+          ]
+        },
+        {
+          "id": 45,
+          "disposition": "fixed",
+          "reason": "Retry-scoped connection/cursor translation пропускает только SQLITE_BUSY/LOCKED мимо внутренних sqlite.Error catch к декоратору; после исчерпания попыток восстанавливается исходный OperationalError, а недекорированные методы сохраняют прежний sqlite contract.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_retry_on_busy_bypasses_repository_sqlite_error_catch",
+            "tests/db/test_phase2_zone_db.py::test_non_decorated_repository_method_keeps_sqlite_error_contract"
+          ]
+        },
+        {
+          "id": 46,
+          "disposition": "fixed",
+          "reason": "group_id нормализуется к integer до проверки special group; строковое '999' атомарно удаляет зону из всех программ.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_string_group_999_removes_zone_from_programs"
+          ]
+        },
+        {
+          "id": 47,
+          "disposition": "fixed",
+          "reason": "Для interval_days>1 repository возвращает None вместо ежедневной догадки, потому что точный anchor принадлежит живому APScheduler; однодневный interval остаётся вычислимым.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_multi_day_interval_does_not_publish_unrecoverable_daily_guess",
+            "tests/db/test_db_deep.py::TestZonesDeep::test_compute_next_run_interval_schedule"
+          ]
+        },
+        {
+          "id": 68,
+          "disposition": "fixed",
+          "reason": "Zone UPDATE строит SET только из payload и больше не записывает обратно state/timing значения отдельного устаревшего read snapshot.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_partial_update_does_not_replay_stale_runtime_snapshot",
+            "tests/db/test_phase2_zone_db.py::test_empty_zone_updates_remain_timestamp_only_noops"
+          ]
+        },
+        {
+          "id": 72,
+          "disposition": "fixed",
+          "reason": "Финальный status вычисляется в одном UPDATE через текущее confirmed, поэтому подтверждение, закоммиченное до закрывающей записи, не затирается результатом stale pre-read.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_finish_zone_run_uses_confirmation_seen_before_atomic_finish"
+          ]
+        },
+        {
+          "id": 130,
+          "disposition": "fixed",
+          "reason": "Postpone lower bound относится к слоту зоны и сдвигается назад на cumulative offset при поиске program start; действительный сегодняшний slot больше не уходит на завтра.",
+          "tests": [
+            "tests/db/test_phase2_zone_db.py::test_postpone_anchor_is_shifted_by_zone_offset"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "363 passed",
+        "full_pytest": "2011 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

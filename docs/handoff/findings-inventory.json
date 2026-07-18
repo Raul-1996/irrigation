@@ -459,11 +459,13 @@
     "main_or_branch": "branch_regression",
     "decision_notes": "Previous REFUTED status overturned. Standard CSV import can create group_id=0 and a later ordinary zone update silently rewrites it to group 1.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Partial update пишет только явно переданные поля, поэтому ранее сохранённый group_id=0 или NULL не нормализуется обратно в 1 через stale full-row merge.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_partial_zone_update_preserves_zero_or_null_group"
+      ]
     }
   },
   {
@@ -1163,9 +1165,9 @@
     "reproduction": "Любая пара конкурирующих писателей state (watchdog_cap stop vs ручной рестарт, peer_off vs mqtt_observed_change из sse_hub) завершается победой хронологически последней записи независимо от того, чьё представление о версии/состоянии устарело — «versioned» механизм не отсекает ни одну из гонок из находок выше, хотя модульные комментарии (zones_state.py: «eliminates the TOCTOU race», «optimistic-lock version match») обещают обратное. Конкретно: stop_zone завис между publish '0' и финальной записью 'off'; за это время sse_hub по эху записал 'off' и обнулил watering_start_time, затем пришёл рестарт и записал 'on' + start_time; поздняя запись stop_zone 'off'+start_time=None перетирает активный старт — зона физически включена ('1' переиздан рестартом), в БД 'off'.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
+      "disposition": "deferred",
+      "reason": "Настоящий caller-owned optimistic CAS требует передавать expected_version через database facade, zones_state, zone_control и scheduler и запрещать raw fallback после CAS failure. В рамках единственного владельца db/zones.py P04 устранил проглатывание BEGIN IMMEDIATE/BUSY, но локальная транзакция не может отличить устаревшее намерение вызывающего без cross-layer version contract; такой протокол требует отдельного сериализованного safety-пакета.",
+      "package": "phase2-zone-db",
       "commit": null,
       "tests": []
     }
@@ -1315,11 +1317,13 @@
     "reproduction": "PUT /api/zones/5 {\"group_id\": \"abc\"} (или group_id-объект/список от кривого клиента) → необработанный ValueError → HTTP 500 вместо 4xx/контрактного None; docstring/контракт update_zone «None при ошибке» нарушен для всех ~15 внутренних вызовов (scheduler, sse_hub, zone_control ловят только sqlite3.Error/OSError). На main тот же вход молча писал текст в INTEGER-колонку — ветка сменила режим отказа на исключение, не добавив обработку ни в одном вызывающем.",
     "main_or_branch": "branch_regression",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Некорректный duration/group integer перехватывается на repository boundary и возвращает контрактный None без частичной записи.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_update_zone_returns_none_for_invalid_integer_field"
+      ]
     }
   },
   {
@@ -1343,11 +1347,13 @@
     "reproduction": "CSV-импорт зон: фронтенд (static/js/zones.js:1901) делает parseInt(duration) → NaN для «10 мин»/пустых ячеек → JSON null → int(None) TypeError → весь импорт из N зон откачен, пользователь получает 500 «Ошибка импорта» без указания проблемной строки, счётчики created/updated/failed не возвращаются.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Bulk upsert изолирует TypeError/ValueError одной строки, учитывает её в failed и коммитит валидные строки той же партии.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_bulk_upsert_counts_invalid_row_without_rolling_back_valid_row"
+      ]
     }
   },
   {
@@ -1371,11 +1377,13 @@
     "reproduction": "Конкурентная запись (WAL checkpoint, bulk-импорт) держит лок дольше busy_timeout → services.zones_state.update_zone_state получает (False, None): смена состояния зоны молча не применяется и не ретраится; при коротком контеншене — prev_zone читается вне транзакции и audit-переход может дублироваться/врать.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "BEGIN IMMEDIATE больше не проглатывает lock error: SQLITE_BUSY/LOCKED выходит к retry boundary, и versioned update повторяется либо честно возвращает исходный OperationalError после исчерпания попыток.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_update_zone_versioned_retries_failed_begin_immediate"
+      ]
     }
   },
   {
@@ -1399,11 +1407,14 @@
     "reproduction": "Лок держится дольше busy_timeout=30s (checkpoint + бэкап на медленной SD Wirenboard): update_zone возвращает None → routes/zones_crud_api.py:144 отвечает «Zone not found» 404 по существующей зоне; finish_zone_run возвращает False → zone_run навсегда остаётся открытым (end_utc NULL), история и last_watering_time теряют полив. Ретраев, обещанных декоратором, не происходит ни разу.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Retry-scoped connection/cursor translation пропускает только SQLITE_BUSY/LOCKED мимо внутренних sqlite.Error catch к декоратору; после исчерпания попыток восстанавливается исходный OperationalError, а недекорированные методы сохраняют прежний sqlite contract.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_retry_on_busy_bypasses_repository_sqlite_error_catch",
+        "tests/db/test_phase2_zone_db.py::test_non_decorated_repository_method_keeps_sqlite_error_contract"
+      ]
     }
   },
   {
@@ -1427,11 +1438,13 @@
     "reproduction": "Клиент/интеграция передаёт group_id строкой (Telegram-бот, curl, сторонний скрипт): зона попадает в служебную группу 999 «БЕЗ ПОЛИВА», но остаётся во всех программах → планировщик продолжает открывать её клапан по расписанию, хотя UI показывает зону как исключённую из полива.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "group_id нормализуется к integer до проверки special group; строковое '999' атомарно удаляет зону из всех программ.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_string_group_999_removes_zone_from_programs"
+      ]
     }
   },
   {
@@ -1455,11 +1468,14 @@
     "reproduction": "Программа «каждые 3 дня в 06:00», сервис работает 2-е сутки: reschedule_group_to_next_program записывает в zones.scheduled_start_time «завтра 06:00», UI обещает полив завтра, фактический запуск — через 2 дня. Пользователь принимает решения (отложка/ручной запуск) по ложному времени.",
     "main_or_branch": "branch_regression",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Для interval_days>1 repository возвращает None вместо ежедневной догадки, потому что точный anchor принадлежит живому APScheduler; однодневный interval остаётся вычислимым.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_multi_day_interval_does_not_publish_unrecoverable_daily_guess",
+        "tests/db/test_db_deep.py::TestZonesDeep::test_compute_next_run_interval_schedule"
+      ]
     }
   },
   {
@@ -2082,11 +2098,14 @@
     "reproduction": "Пользователь сохраняет правку имени/длительности зоны в момент, когда планировщик стартует полив (zones_state пишет state='on', watering_start_time) или rain-monitor ставит postpone_until: update_zone уже прочитал снапшот со state='off'/postpone_until=NULL, его UPDATE ждёт освобождения лока и коммитит поверх — состояние в БД откатывается на 'off' при физически открытом клапане (UI показывает «выключено», exclusive_start считает зону свободной → возможен второй старт), либо теряется свежепоставленный postpone и зона польёт в дождь.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Zone UPDATE строит SET только из payload и больше не записывает обратно state/timing значения отдельного устаревшего read snapshot.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_partial_update_does_not_replay_stale_runtime_snapshot",
+        "tests/db/test_phase2_zone_db.py::test_empty_zone_updates_remain_timestamp_only_noops"
+      ]
     }
   },
   {
@@ -2201,11 +2220,13 @@
     "reproduction": "Echo реле 'on' приходит с задержкой (переподключение SSE-хаба к брокеру, retained-сообщение) практически одновременно с автостопом: finish_zone_run читает confirmed=0, SSE-тред коммитит confirmed=1, finish_zone_run записывает status='failed' — история показывает «полив не состоялся» для физически прошедшего полива, статистика воды и last_watering_time (фильтр status='ok') его теряют.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Финальный status вычисляется в одном UPDATE через текущее confirmed, поэтому подтверждение, закоммиченное до закрывающей записи, не затирается результатом stale pre-read.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_finish_zone_run_uses_confirmation_seen_before_atomic_finish"
+      ]
     }
   },
   {
@@ -3910,11 +3931,13 @@
     "reproduction": "Ежедневная программа 06:00, зоны A(30м), B(30м), C с offset 60 (слот 07:00). Зоне C поставлена отложка до 06:30. Планировщик реально польёт C сегодня в 07:00 (отложка истечёт к её слоту). reschedule_group_to_next_program → compute_next_run_for_zone ищет старт после 06:30 → завтра 06:00 → пишет zones.scheduled_start_time = завтра 07:00. Карточка зоны (/api/zones/<id>/next-watering, через исправленный next_watering) показывает сегодня 07:00 — расписание группы противоречит и карточке, и фактическому поливу.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Postpone lower bound относится к слоту зоны и сдвигается назад на cumulative offset при поиске program start; действительный сегодняшний slot больше не уходит на завтра.",
+      "package": "phase2-zone-db",
+      "commit": "e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5",
+      "tests": [
+        "tests/db/test_phase2_zone_db.py::test_postpone_anchor_is_shifted_by_zone_offset"
+      ]
     }
   },
   {

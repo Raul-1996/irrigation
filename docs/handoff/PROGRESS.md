@@ -232,8 +232,27 @@
     - targeted: 90 passed; full gate: 1998 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 77 записей fixed (71 корень + шесть унаследованных дублей),
-2 deferred, 68 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+15. `phase2-zone-db` — #14, #42, #43, #44, #45, #46, #47, #68, #72,
+    #130 `fixed`; #37 `deferred`
+    - fixes `b803fbf7dc29ec7a4e4edd26f811bc93bc5b319c` и
+      `e1878ce81f4cc3ea8adeaf51eb926b6db2f00df5`;
+    - merge `2b91ae47de5b4518c73257ead1d246a5d33cdf69`;
+    - partial zone UPDATE пишет только payload и не переигрывает stale state/timing;
+      string group 999 исключает зону из программ, invalid integer и import row
+      сохраняют repository/bulk contracts;
+    - BUSY/LOCKED проходит мимо внутренних sqlite catches только внутри
+      `retry_on_busy`, BEGIN IMMEDIATE действительно ретраится, а недекорированные
+      методы по-прежнему получают обычный `sqlite3.OperationalError`;
+    - run confirmation закрывается одним atomic UPDATE; multi-day interval не
+      публикует выдуманный daily anchor, postpone учитывает offset зоны;
+    - #37 отложен индивидуально: честный caller-owned optimistic CAS требует
+      expected_version через facade/services/scheduler и запрета raw fallback;
+      внутри одного `db/zones.py` такого version contract нет;
+    - targeted: 363 passed; full gate: 2011 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 87 записей fixed (81 корень + шесть унаследованных дублей),
+3 deferred, 57 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
