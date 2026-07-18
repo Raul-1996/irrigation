@@ -1517,11 +1517,14 @@
     "reproduction": "Контроллер в UTC+3, фильтр журнала аудита «с 2026-07-18 по 2026-07-18»: события 00:00–02:59 локального 18-го (UTC 17-е 21:00–23:59) не попадают в выборку, а события 00:00–02:59 локального 19-го попадают — страница аудита и /api/logs показывают неполные/чужие сутки.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Audit since/until controller-local bounds преобразуются в UTC storage values; date-only until — exclusive next-local-midnight. Get/count используют идентичные predicates; P09 отдельно исправил local-date contract legacy logs.",
+      "package": "phase2-history-time-contract",
+      "commit": "d1759a7a4a8b374076a6c82fa2fd74dddee7248c",
+      "tests": [
+        "tests/unit/test_audit_log.py::TestAuditRepository::test_local_calendar_filter_is_converted_to_utc_for_get_and_count",
+        "tests/api/test_phase2_system_status.py::test_finding_102_log_dates_use_controller_local_calendar"
+      ]
     }
   },
   {
@@ -2872,11 +2875,13 @@
     "main_or_branch": "main_bug",
     "decision_notes": "Modern Safari parses the string, but production writers store controller-local naive values while the frontend contract interprets them as UTC, producing a real timezone shift.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Legacy local-naive zone_runs timestamps получают controller offset через to_iso_with_tz на API boundary; browser Date видит однозначный instant и корректно переводит remote timezone.",
+      "package": "phase2-history-time-contract",
+      "commit": "d1759a7a4a8b374076a6c82fa2fd74dddee7248c",
+      "tests": [
+        "tests/integration/test_history_time_contract.py::test_api_adds_controller_offset_for_remote_browser_rendering"
+      ]
     }
   },
   {
@@ -2900,11 +2905,13 @@
     "reproduction": "Контроллер в TZ UTC+0 (или любой западнее, напр. после сброса TZ в UTC при переустановке): пользователь открывает историю за 7 дней — запуски первого (самого старого) дня отсутствуют в графике, в списке запусков, в summary (total_minutes/total_runs занижены) и в CSV-экспорте (/api/zones/<id>/history.csv), хотя строки лежат в zone_runs. В Москве (UTC+3) дефект замаскирован: граница получает дату на день раньше окна.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "History SQL bounds строятся в том же controller-local naive sortable format, который фактически пишут zone_control writers; первая локальная дата больше не исключается UTC RFC comparison.",
+      "package": "phase2-history-time-contract",
+      "commit": "d1759a7a4a8b374076a6c82fa2fd74dddee7248c",
+      "tests": [
+        "tests/integration/test_history_time_contract.py::test_first_local_day_is_not_dropped_by_sql_window"
+      ]
     }
   },
   {

@@ -323,8 +323,20 @@
     - targeted: 19 passed; full gate: 2040 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 112 записей fixed (103 корня + девять унаследованных дублей),
-4 deferred, 31 REAL-запись pending; пять `VERIFIED_FALSE` остаются
+22. `phase2-history-time-contract` — #48, #93, #94 `fixed`
+    - fix `d1759a7a4a8b374076a6c82fa2fd74dddee7248c`;
+    - merge `ff5df9c7520184075e50091ce07eefc2810ea531`;
+    - audit local calendar filters переводятся в UTC storage bounds с exclusive
+      next-local-midnight; get/count идентичны, P09 legacy logs совместимы;
+    - zone_runs production storage признан controller-local naive: SQL bounds
+      остаются в том же domain, API добавляет RFC 3339 controller offset;
+    - remote browser получает однозначный instant, первая локальная дата не
+      выпадает из history window;
+    - targeted: 58 passed; full gate: 2043 passed, 2 skipped, 17 deselected;
+      ruff и diff check чисты.
+
+После этих пакетов: 115 записей fixed (106 корней + девять унаследованных дублей),
+4 deferred, 28 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

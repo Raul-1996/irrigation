@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **112 fixed · 4 deferred · 31 pending · 5 not_applicable**.
+- Phase 2 disposition: **115 fixed · 4 deferred · 28 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -536,7 +536,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Контроллер в UTC+3, фильтр журнала аудита «с 2026-07-18 по 2026-07-18»: события 00:00–02:59 локального 18-го (UTC 17-е 21:00–23:59) не попадают в выборку, а события 00:00–02:59 локального 19-го попадают — страница аудита и /api/logs показывают неполные/чужие сутки.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Audit since/until controller-local bounds преобразуются в UTC storage values; date-only until — exclusive next-local-midnight. Get/count используют идентичные predicates; P09 отдельно исправил local-date contract legacy logs.
+- **Пакет:** `phase2-history-time-contract`.
+- **Fix commit:** `d1759a7a4a8b374076a6c82fa2fd74dddee7248c`.
+- **Regression tests:** `tests/unit/test_audit_log.py::TestAuditRepository::test_local_calendar_filter_is_converted_to_utc_for_get_and_count`, `tests/api/test_phase2_system_status.py::test_finding_102_log_dates_use_controller_local_calendar`.
 
 ### #49 [high] `services/mqtt_pub.py:120` — Публикующий MQTT-клиент: on_disconnect с сигнатурой VERSION1 при CallbackAPIVersion.VERSION2 — TypeError убивает сетевой тред paho, авто-reconnect мёртв
 
@@ -1040,7 +1044,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Открыть модалку «История полива» на iPhone (Safari/iOS-Chrome): в renderRuns (history.js:382-384) utcIsoToLocalDate('2026-07-17 06:00:00')='' — все запуски сваливаются в одну группу с пустым заголовком даты, время каждого запуска — пустая строка ('' вместо '06:00 → 06:30'). Дополнительно: на устройстве с TZ, отличной от контроллера (телефон в поездке), Chromium показывает время контроллера, помечая его как местное — пользователь видит сдвинутые часы запусков.
 - **Решение оркестратора:** Modern Safari parses the string, but production writers store controller-local naive values while the frontend contract interprets them as UTC, producing a real timezone shift.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Legacy local-naive zone_runs timestamps получают controller offset через to_iso_with_tz на API boundary; browser Date видит однозначный instant и корректно переводит remote timezone.
+- **Пакет:** `phase2-history-time-contract`.
+- **Fix commit:** `d1759a7a4a8b374076a6c82fa2fd74dddee7248c`.
+- **Regression tests:** `tests/integration/test_history_time_contract.py::test_api_adds_controller_offset_for_remote_browser_rendering`.
 
 ### #94 [low] `routes/zones_history_api.py:84` — /api/zones/*/history: SQL-окно сравнивает локальные строки 'YYYY-MM-DD HH:MM:SS' с UTC-ISO границами 'YYYY-MM-DDTHH:MM:SSZ' — первый день окна выпадает целиком при TZ контроллера UTC+0 и западнее
 
@@ -1048,7 +1056,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Контроллер в TZ UTC+0 (или любой западнее, напр. после сброса TZ в UTC при переустановке): пользователь открывает историю за 7 дней — запуски первого (самого старого) дня отсутствуют в графике, в списке запусков, в summary (total_minutes/total_runs занижены) и в CSV-экспорте (/api/zones/<id>/history.csv), хотя строки лежат в zone_runs. В Москве (UTC+3) дефект замаскирован: граница получает дату на день раньше окна.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** History SQL bounds строятся в том же controller-local naive sortable format, который фактически пишут zone_control writers; первая локальная дата больше не исключается UTC RFC comparison.
+- **Пакет:** `phase2-history-time-contract`.
+- **Fix commit:** `d1759a7a4a8b374076a6c82fa2fd74dddee7248c`.
+- **Regression tests:** `tests/integration/test_history_time_contract.py::test_first_local_day_is_not_dropped_by_sql_window`.
 
 ### #95 [low] `static/js/zones.js:446` — zones.js настройки группы: ответы 4xx с {success:false} — истинные объекты для truthiness-проверок, UI показывает «Сохранено» при отклонённом сервером сохранении
 

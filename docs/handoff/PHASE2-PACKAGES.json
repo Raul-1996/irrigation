@@ -1206,6 +1206,45 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-history-time-contract",
+      "fix_commit": "d1759a7a4a8b374076a6c82fa2fd74dddee7248c",
+      "merge_commit": "ff5df9c7520184075e50091ce07eefc2810ea531",
+      "summary": "Audit/date filters и irrigation history используют явный controller-local/UTC storage contract, а history API публикует RFC 3339 offsets для remote browsers.",
+      "resolutions": [
+        {
+          "id": 48,
+          "disposition": "fixed",
+          "reason": "Audit since/until controller-local bounds преобразуются в UTC storage values; date-only until — exclusive next-local-midnight. Get/count используют идентичные predicates; P09 отдельно исправил local-date contract legacy logs.",
+          "tests": [
+            "tests/unit/test_audit_log.py::TestAuditRepository::test_local_calendar_filter_is_converted_to_utc_for_get_and_count",
+            "tests/api/test_phase2_system_status.py::test_finding_102_log_dates_use_controller_local_calendar"
+          ]
+        },
+        {
+          "id": 93,
+          "disposition": "fixed",
+          "reason": "Legacy local-naive zone_runs timestamps получают controller offset через to_iso_with_tz на API boundary; browser Date видит однозначный instant и корректно переводит remote timezone.",
+          "tests": [
+            "tests/integration/test_history_time_contract.py::test_api_adds_controller_offset_for_remote_browser_rendering"
+          ]
+        },
+        {
+          "id": 94,
+          "disposition": "fixed",
+          "reason": "History SQL bounds строятся в том же controller-local naive sortable format, который фактически пишут zone_control writers; первая локальная дата больше не исключается UTC RFC comparison.",
+          "tests": [
+            "tests/integration/test_history_time_contract.py::test_first_local_day_is_not_dropped_by_sql_window"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "58 passed",
+        "full_pytest": "2043 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }
