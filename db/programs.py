@@ -61,8 +61,13 @@ class ProgramRepository(BaseRepository):
                 except (TypeError, ValueError, KeyError) as e:
                     logger.debug("create_program days parse: %s", e)
                     norm_days = []
-                if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
-                    norm_days = [max(0, min(6, d - 1)) for d in norm_days]
+
+                null_list_fields = [
+                    field for field in ("zones", "extra_times") if field in program_data and program_data[field] is None
+                ]
+                if null_list_fields:
+                    logger.warning("Отказ создания программы: JSON null в полях %s", ", ".join(null_list_fields))
+                    return None
 
                 # v2 fields with defaults
                 cursor = conn.execute(
@@ -96,6 +101,17 @@ class ProgramRepository(BaseRepository):
     def update_program(self, program_id: int, program_data: dict[str, Any]) -> dict[str, Any] | None:
         """Обновить программу."""
         try:
+            null_list_fields = [
+                field for field in ("zones", "extra_times") if field in program_data and program_data[field] is None
+            ]
+            if null_list_fields:
+                logger.warning(
+                    "Отказ обновления программы %s: JSON null в полях %s",
+                    program_id,
+                    ", ".join(null_list_fields),
+                )
+                return None
+
             with self._connect() as conn:
                 # Build dynamic UPDATE based on provided fields
                 updates = []
@@ -111,8 +127,6 @@ class ProgramRepository(BaseRepository):
                 if "days" in program_data:
                     try:
                         norm_days = [int(d) for d in program_data["days"]]
-                        if norm_days and min(norm_days) >= 1 and max(norm_days) <= 7:
-                            norm_days = [max(0, min(6, d - 1)) for d in norm_days]
                         updates.append("days = ?")
                         params.append(json.dumps(norm_days))
                     except (TypeError, ValueError, KeyError) as e:
@@ -196,8 +210,12 @@ class ProgramRepository(BaseRepository):
         days: list[str] | None = None,
         weather_factor: int | None = None,
         include_weather: bool = False,
+        extra_times: list[str] | None = None,
     ) -> Any:
         """Проверка пересечения программ полива.
+
+        ``time`` is the primary candidate slot. Optional ``extra_times`` are
+        checked as additional candidate slots against every stored slot.
 
         Extended v2 API (when weather_factor or include_weather is used):
             Returns dict {"has_conflicts": bool, "conflicts": [...], "current_weather_coefficient": int}
@@ -213,14 +231,43 @@ class ProgramRepository(BaseRepository):
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
 
-                query = "SELECT id, name, time, days, zones FROM programs"
-                if program_id:
-                    query += " WHERE id != ?"
-                    cursor = conn.execute(query, (program_id,))
+                program_columns = {
+                    str(row["name"]) for row in conn.execute("PRAGMA table_info(programs)").fetchall()
+                }
+                selected_columns = ["id", "name", "time", "days", "zones"]
+                if "extra_times" in program_columns:
+                    selected_columns.append("extra_times")
                 else:
-                    cursor = conn.execute(query)
+                    selected_columns.append("'[]' AS extra_times")
 
-                programs = cursor.fetchall()
+                query = f"SELECT {', '.join(selected_columns)} FROM programs"
+                conditions = []
+                params = []
+                if "enabled" in program_columns:
+                    conditions.append("COALESCE(enabled, 1) != 0")
+                if program_id:
+                    conditions.append("id != ?")
+                    params.append(program_id)
+                if conditions:
+                    query += " WHERE " + " AND ".join(conditions)
+                cursor = conn.execute(query, params)
+
+                stored_programs = cursor.fetchall()
+                programs = []
+                for stored_program in stored_programs:
+                    program_data = dict(stored_program)
+                    try:
+                        stored_extra_times = json.loads(program_data.pop("extra_times") or "[]")
+                    except (TypeError, ValueError) as e:
+                        logger.debug("check_conflicts stored extra_times parse: %s", e)
+                        stored_extra_times = []
+                    stored_slots = [program_data["time"]]
+                    if isinstance(stored_extra_times, list):
+                        stored_slots.extend(stored_extra_times)
+                    for stored_slot in stored_slots:
+                        slot_data = program_data.copy()
+                        slot_data["time"] = stored_slot
+                        programs.append(slot_data)
 
                 # Get current weather coefficient
                 current_coeff = 100
@@ -420,6 +467,21 @@ class ProgramRepository(BaseRepository):
                                     "overlap_end": min(program_end_minutes, existing_end_minutes),
                                 }
                             )
+
+                candidate_extra_times = extra_times if isinstance(extra_times, list) else []
+                for extra_time in candidate_extra_times:
+                    extra_result = self.check_program_conflicts(
+                        program_id=program_id,
+                        time=extra_time,
+                        zones=zones,
+                        days=days,
+                        weather_factor=weather_factor,
+                        include_weather=include_weather,
+                    )
+                    if _v2:
+                        conflicts_v2.extend(extra_result["conflicts"])
+                    else:
+                        conflicts_legacy.extend(extra_result)
 
                 if _v2:
                     return {
