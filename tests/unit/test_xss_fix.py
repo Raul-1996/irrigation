@@ -321,3 +321,17 @@ class TestInnerHTMLEscaping:
                 if "escapeHtml" not in line:
                     violations.append(f"Line {i}: raw ${{message}} in innerHTML: {line.strip()[:100]}")
         assert not violations, "app.js has raw message in innerHTML:\n" + "\n".join(violations)
+
+    def test_app_js_health_panel_actions_preserve_meta_as_text(self):
+        """Health details must not decode text and inject MQTT meta as HTML."""
+        js = read_file("static/js/app.js")
+        match = re.search(r"function wireActions\(d\)\s*\{(.*?)\n\s*async function refresh", js, re.DOTALL)
+        assert match, "Could not locate app.js health-panel wireActions function"
+
+        wire_actions = match.group(1)
+        assert "root.innerHTML" not in wire_actions, (
+            "wireActions must not put decoded health text back into innerHTML; "
+            "meta_tail topic/payload values are broker-controlled"
+        )
+        assert "document.createElement('span')" in wire_actions
+        assert "div.textContent = line" in wire_actions
