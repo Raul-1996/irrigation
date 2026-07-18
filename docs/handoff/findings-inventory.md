@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **6 fixed · 0 deferred · 141 pending · 5 not_applicable**.
+- Phase 2 disposition: **14 fixed · 1 deferred · 132 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -164,7 +164,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** PUT /api/programs/5 {"schedule_type": "daily"} (опечатка клиента/скрипта) → 200 OK, программа сохранена,但 при перепланировании не получает jobs — полив по программе тихо прекращается без ошибок в API и логах. Существовало и на main (там валидации не было нигде); ветка закрыла дыру только для POST, декларировав это как цель (комментарий «другие значения молча приводят к программе без jobs»).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** PUT валидирует эффективные v2-поля тем же helper, что POST, и отклоняет неизвестный schedule_type до сохранения.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c`.
+- **Regression tests:** `tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_put_rejects_invalid_schedule_type_without_persisting_it`.
 
 ### #20 [medium] `static/js/status.js:1818` — toggleZoneRun: при success:false от сервера не вызывается hideLoading — полноэкранный оверлей блокирует UI на 15 секунд
 
@@ -480,7 +484,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь редактирует программу так, что она пересекается с другой (в т.ч. отключённой) программой → PUT /api/programs/<id> возвращает 200 {success:false, has_conflicts:true} → resp.ok=true → мастер закрывается с тостом «✅ Программа обновлена», хотя изменения отброшены; loadPrograms() показывает старые значения. Аналогично при создании: тост «✅ Программа создана», программы в списке нет.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Wizard требует одновременно успешный HTTP-статус и отсутствие success:false; конфликтный 200 больше не закрывает форму и не показывает успех.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c`.
+- **Regression tests:** `tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_mutations_report_http_and_success_false_errors`.
 
 ### #59 [high] `db/programs.py:64` — Эвристика «1-базных» дней в БД портит выбор дней недели из UI, если не выбран понедельник
 
@@ -623,7 +631,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Зона переименована в `<img src=x onerror=alert(document.cookie)>` (через PUT /api/zones/<id>, CSV-импорт или bulk-import). Админ открывает /programs и нажимает «Создать программу» (или «Редактировать») — payload исполняется в админской сессии при первом же renderWizard(), ещё на шаге 1. CSRF-токен доступен из meta-тега.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Имя зоны в шаге выбора мастера проходит escapeHtml перед вставкой в innerHTML.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c`.
+- **Regression tests:** `tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_wizard_escapes_zone_names_before_assigning_inner_html`.
 
 ### #75 [medium] `static/js/zones.js:1862` — CSV-экспорт зон без квотирования: запятая в имени зоны ломает раскладку колонок и портит данные при реимпорте
 
@@ -655,7 +667,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сервер отвечает 500 (или 409) на PATCH /api/programs/<id>/enabled — пользователь кликает тумблер программы, визуально ничего не происходит и не появляется ни одного сообщения; пользователь не понимает, включена программа или нет (аналогично для «Дублировать» и «Удалить»).
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** toggle/duplicate/delete читают безопасный JSON-ответ и показывают ошибку при non-OK или success:false без ложной локальной мутации.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c`.
+- **Regression tests:** `tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_mutations_report_http_and_success_false_errors`.
 
 ### #80 [high] `routes/mqtt_api.py:156` — Совпадающий client_id: probe/status/scan-sse из настроек MQTT выбивают live-подписку SSE-хаба (MQTT session takeover)
 
@@ -834,7 +850,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Пользователь создаёт программу на 20:00 для группы, у которой уже есть программа с extra-слотом 20:00 — валидация пропускает без предупреждения. В 20:00 стартуют две программы по одним зонам/группе одновременно; с учётом несериализованных секвенсоров группы это даёт интерливинг ON/OFF по одним реле и непредсказуемый полив.
 - **Решение оркестратора:** Arbitrated REAL with corrected runtime scope. Ordinary groups normally cause the #129 full skip; group 999 is excluded from the session guard yet is selectable in the wizard, so both same-time jobs run.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P01 сравнивает primary candidate со stored extra slots, P02 проверяет каждый candidate extra slot; группа 999 остаётся участником validation без изменения её runtime-семантики.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `684d0cd4d1ea8fb445c9035dabedadc2a2c70b44`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_conflict_check_includes_stored_extra_times_for_group_999`, `tests/api/test_phase2_programs_web.py::TestCandidateExtraTimesConflictChecks`.
 
 ### #101 [medium] `db/settings.py:167` — set_env_config: неатомарная запись из шести отдельных коммитов + непойманный ValueError на нечисловом server_id — 500 и полуприменённая конфигурация датчиков
 
@@ -1031,7 +1051,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** API-клиент (или будущий фронтенд-код) шлёт PUT {schedule_type:'interval'} без interval_days или с опечаткой 'даily': POST такой payload отбил бы 400, PUT возвращает 200 и обновлённую программу — планировщик молча не создаёт для неё jobs, полив по программе прекращается без какого-либо сигнала. Частичный PUT без поля time (легальный для «обновить только имя») вместо ответа падает 500 KeyError.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Частичный PUT сливается с сохранённой программой перед validation/conflict check и больше не обращается к отсутствующим ключам напрямую.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c`.
+- **Regression tests:** `tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_partial_put_uses_stored_schedule_fields_instead_of_raising_keyerror`, `tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_put_switch_to_interval_requires_interval_days`.
 
 ### #127 [high] `irrigation_scheduler.py:1153` — PUT программы с пустыми zones/days оставляет старые персистентные cron-джобы — «фантомная» программа поливает прежний список зон и не удаляется
 
@@ -1055,7 +1079,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Программа A: 06:00, зоны группы 1, суммарно 60 мин. Программа B: main 21:00, extra_times ["06:30"], зоны той же группы. Конфликт-чекер сравнивает 06:00 с 21:00 → «нет конфликтов», сохранение проходит и в мастере, и на сервере. Каждое утро fire B в 06:30 попадает в guard (сессия A активна) и пропускается ЦЕЛИКОМ (включая зоны B из других групп): утренний полив зон B не происходит, без ретрая и без сигнала в UI — только запись prog_skipped_manual_running в логе.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все primary/extra candidate starts проверяются против всех primary/extra stored starts, поэтому пересечение extra slot блокируется до scheduler fire-time.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `684d0cd4d1ea8fb445c9035dabedadc2a2c70b44`.
+- **Regression tests:** `tests/unit/test_phase2_db_programs.py::test_conflict_check_accepts_candidate_extra_times`, `tests/api/test_phase2_programs_web.py::TestCandidateExtraTimesConflictChecks`.
 
 ### #130 [low] `db/zones.py:867` — compute_next_run_for_zone: postpone-якорь не сдвигается на offset зоны — scheduled_start_time уводит на следующий день, хотя планировщик польёт сегодня
 
@@ -1147,7 +1175,9 @@
 - **Происхождение:** `main_bug_with_branch_false_green_tests`.
 - **Верификация:** Both reviewers reproduced false empty/zero results after completed runs.
 - **Репродукция/сценарий:** Record program_start/program_finish twice; GET log and stats still reports no runs.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `deferred`.
+- **Причина disposition:** Текущие zone_runs не хранят program_id/run identity, а program_start/program_finish logs не связывают overlapping/restarted executions и не содержат требуемых water/duration metrics. Сначала нужно определить semantics, добавить program_runs либо эквивалентный execution identity и scheduler writers; shape-only заглушки не заменяются вымышленными значениями.
+- **Пакет:** `phase2-programs-web`.
 
 ### #141 [medium] `irrigation_scheduler.py:801-880,1140-1294; tests/unit/test_scheduler_v2.py:401-444` — Типы программ smart и time-based фактически не различаются, а тесты проверяют только наличие job
 
@@ -1171,7 +1201,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Safe API probes and APScheduler source/runtime inspection confirmed all invalid conversions and effects.
 - **Репродукция/сценарий:** POST interval_days=-1 or '0' through an admin test client; observe 201 and unsafe stored trigger value.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** POST и PUT принимают только non-boolean integer interval_days в безопасном диапазоне 1..30, исключая секундный trigger и отрицательный APScheduler loop.
+- **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c`.
+- **Regression tests:** `tests/api/test_phase2_programs_web.py::TestIntervalDaysValidation`.
 
 ### #144 [low] `services/weather/__init__.py:3-39; deleted services/weather_merged.py; specs/weather-integration-spec.md` — Ветка удалила объявленный stable weather API get_merged_weather и compatibility-модуль services.weather_merged
 

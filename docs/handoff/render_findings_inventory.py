@@ -64,11 +64,14 @@ def apply_packages(inventory: list[dict], package_doc: dict) -> None:
             if finding.get("duplicate_of") is not None:
                 raise ValueError(f"finding #{finding_id} is a duplicate, resolve its root")
             disposition = resolution["disposition"]
+            resolution_commit = resolution.get("commit", commit)
+            if disposition == "fixed" and not COMMIT_RE.fullmatch(resolution_commit):
+                raise ValueError(f"finding #{finding_id}: invalid resolution commit")
             implementation = {
                 "disposition": disposition,
                 "reason": resolution["reason"],
                 "package": slug,
-                "commit": commit if disposition == "fixed" else None,
+                "commit": resolution_commit if disposition == "fixed" else None,
                 "tests": resolution.get("tests", []),
             }
             finding["implementation"] = implementation

@@ -85,6 +85,99 @@
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
+    },
+    {
+      "slug": "phase2-programs-web",
+      "fix_commit": "684d0cd4d1ea8fb445c9035dabedadc2a2c70b44",
+      "merge_commit": "9d1879aa53133653b16d1f50d47a6968eab4179e",
+      "summary": "Programs PUT/POST и wizard получили единый validation/response contract, XSS-экранирование и полную проверку primary/extra start conflicts.",
+      "resolutions": [
+        {
+          "id": 19,
+          "disposition": "fixed",
+          "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+          "reason": "PUT валидирует эффективные v2-поля тем же helper, что POST, и отклоняет неизвестный schedule_type до сохранения.",
+          "tests": [
+            "tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_put_rejects_invalid_schedule_type_without_persisting_it"
+          ]
+        },
+        {
+          "id": 58,
+          "disposition": "fixed",
+          "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+          "reason": "Wizard требует одновременно успешный HTTP-статус и отсутствие success:false; конфликтный 200 больше не закрывает форму и не показывает успех.",
+          "tests": [
+            "tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_mutations_report_http_and_success_false_errors"
+          ]
+        },
+        {
+          "id": 74,
+          "disposition": "fixed",
+          "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+          "reason": "Имя зоны в шаге выбора мастера проходит escapeHtml перед вставкой в innerHTML.",
+          "tests": [
+            "tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_wizard_escapes_zone_names_before_assigning_inner_html"
+          ]
+        },
+        {
+          "id": 79,
+          "disposition": "fixed",
+          "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+          "reason": "toggle/duplicate/delete читают безопасный JSON-ответ и показывают ошибку при non-OK или success:false без ложной локальной мутации.",
+          "tests": [
+            "tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_mutations_report_http_and_success_false_errors"
+          ]
+        },
+        {
+          "id": 100,
+          "disposition": "fixed",
+          "reason": "P01 сравнивает primary candidate со stored extra slots, P02 проверяет каждый candidate extra slot; группа 999 остаётся участником validation без изменения её runtime-семантики.",
+          "tests": [
+            "tests/unit/test_phase2_db_programs.py::test_conflict_check_includes_stored_extra_times_for_group_999",
+            "tests/api/test_phase2_programs_web.py::TestCandidateExtraTimesConflictChecks"
+          ]
+        },
+        {
+          "id": 125,
+          "disposition": "fixed",
+          "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+          "reason": "Частичный PUT сливается с сохранённой программой перед validation/conflict check и больше не обращается к отсутствующим ключам напрямую.",
+          "tests": [
+            "tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_partial_put_uses_stored_schedule_fields_instead_of_raising_keyerror",
+            "tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_put_switch_to_interval_requires_interval_days"
+          ]
+        },
+        {
+          "id": 129,
+          "disposition": "fixed",
+          "reason": "Все primary/extra candidate starts проверяются против всех primary/extra stored starts, поэтому пересечение extra slot блокируется до scheduler fire-time.",
+          "tests": [
+            "tests/unit/test_phase2_db_programs.py::test_conflict_check_accepts_candidate_extra_times",
+            "tests/api/test_phase2_programs_web.py::TestCandidateExtraTimesConflictChecks"
+          ]
+        },
+        {
+          "id": 140,
+          "disposition": "deferred",
+          "reason": "Текущие zone_runs не хранят program_id/run identity, а program_start/program_finish logs не связывают overlapping/restarted executions и не содержат требуемых water/duration metrics. Сначала нужно определить semantics, добавить program_runs либо эквивалентный execution identity и scheduler writers; shape-only заглушки не заменяются вымышленными значениями.",
+          "tests": []
+        },
+        {
+          "id": 143,
+          "disposition": "fixed",
+          "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+          "reason": "POST и PUT принимают только non-boolean integer interval_days в безопасном диапазоне 1..30, исключая секундный trigger и отрицательный APScheduler loop.",
+          "tests": [
+            "tests/api/test_phase2_programs_web.py::TestIntervalDaysValidation"
+          ]
+        }
+      ],
+      "verification": {
+        "targeted": "130 passed",
+        "full_pytest": "1903 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
     }
   ]
 }

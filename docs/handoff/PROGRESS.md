@@ -96,8 +96,24 @@
    - targeted: 79 passed; full gate: 1883 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 6 записей fixed (5 корней + точный дубль #59), 0 deferred,
-141 REAL-запись pending; пять `VERIFIED_FALSE` остаются `not_applicable` и не
+4. `phase2-programs-web` — #19, #58, #74, #79, #100, #125, #129, #143
+   `fixed`; #140 `deferred`
+   - fixes `d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c` и
+     `684d0cd4d1ea8fb445c9035dabedadc2a2c70b44`;
+   - merge `9d1879aa53133653b16d1f50d47a6968eab4179e`;
+   - PUT использует тот же v2 validation contract, что POST, partial update не
+     даёт KeyError, interval_days ограничен безопасными integer 1..30;
+   - primary и extra candidate slots проходят conflict check против всех stored
+     slots, включая validation для группы 999 без изменения её runtime-семантики;
+   - wizard обрабатывает non-OK/success:false и экранирует имя зоны;
+   - #140 отложен индивидуально: без program/run identity и определённых метрик
+     честно реализовать program log/stats невозможно; требуется новая storage и
+     scheduler-writer модель, а не ложные shape-only значения;
+   - targeted: 130 passed; full gate: 1903 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 14 записей fixed (13 корней + точный дубль #59), 1 deferred,
+132 REAL-записи pending; пять `VERIFIED_FALSE` остаются `not_applicable` и не
 исправляются.
 
 ## Осознанно отложенные категории

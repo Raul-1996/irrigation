@@ -590,11 +590,13 @@
     "reproduction": "PUT /api/programs/5 {\"schedule_type\": \"daily\"} (опечатка клиента/скрипта) → 200 OK, программа сохранена,但 при перепланировании не получает jobs — полив по программе тихо прекращается без ошибок в API и логах. Существовало и на main (там валидации не было нигде); ветка закрыла дыру только для POST, декларировав это как цель (комментарий «другие значения молча приводят к программе без jobs»).",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "PUT валидирует эффективные v2-поля тем же helper, что POST, и отклоняет неизвестный schedule_type до сохранения.",
+      "package": "phase2-programs-web",
+      "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+      "tests": [
+        "tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_put_rejects_invalid_schedule_type_without_persisting_it"
+      ]
     }
   },
   {
@@ -1714,11 +1716,13 @@
     "reproduction": "Пользователь редактирует программу так, что она пересекается с другой (в т.ч. отключённой) программой → PUT /api/programs/<id> возвращает 200 {success:false, has_conflicts:true} → resp.ok=true → мастер закрывается с тостом «✅ Программа обновлена», хотя изменения отброшены; loadPrograms() показывает старые значения. Аналогично при создании: тост «✅ Программа создана», программы в списке нет.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Wizard требует одновременно успешный HTTP-статус и отсутствие success:false; конфликтный 200 больше не закрывает форму и не показывает успех.",
+      "package": "phase2-programs-web",
+      "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+      "tests": [
+        "tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_mutations_report_http_and_success_false_errors"
+      ]
     }
   },
   {
@@ -2172,11 +2176,13 @@
     "reproduction": "Зона переименована в `<img src=x onerror=alert(document.cookie)>` (через PUT /api/zones/<id>, CSV-импорт или bulk-import). Админ открывает /programs и нажимает «Создать программу» (или «Редактировать») — payload исполняется в админской сессии при первом же renderWizard(), ещё на шаге 1. CSRF-токен доступен из meta-тега.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Имя зоны в шаге выбора мастера проходит escapeHtml перед вставкой в innerHTML.",
+      "package": "phase2-programs-web",
+      "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+      "tests": [
+        "tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_wizard_escapes_zone_names_before_assigning_inner_html"
+      ]
     }
   },
   {
@@ -2313,11 +2319,13 @@
     "reproduction": "Сервер отвечает 500 (или 409) на PATCH /api/programs/<id>/enabled — пользователь кликает тумблер программы, визуально ничего не происходит и не появляется ни одного сообщения; пользователь не понимает, включена программа или нет (аналогично для «Дублировать» и «Удалить»).",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "toggle/duplicate/delete читают безопасный JSON-ответ и показывают ошибку при non-OK или success:false без ложной локальной мутации.",
+      "package": "phase2-programs-web",
+      "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+      "tests": [
+        "tests/api/test_phase2_programs_web.py::TestProgramsWizardResponseHandling::test_mutations_report_http_and_success_false_errors"
+      ]
     }
   },
   {
@@ -2912,11 +2920,14 @@
     "main_or_branch": "main_bug",
     "decision_notes": "Arbitrated REAL with corrected runtime scope. Ordinary groups normally cause the #129 full skip; group 999 is excluded from the session guard yet is selectable in the wizard, so both same-time jobs run.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "P01 сравнивает primary candidate со stored extra slots, P02 проверяет каждый candidate extra slot; группа 999 остаётся участником validation без изменения её runtime-семантики.",
+      "package": "phase2-programs-web",
+      "commit": "684d0cd4d1ea8fb445c9035dabedadc2a2c70b44",
+      "tests": [
+        "tests/unit/test_phase2_db_programs.py::test_conflict_check_includes_stored_extra_times_for_group_999",
+        "tests/api/test_phase2_programs_web.py::TestCandidateExtraTimesConflictChecks"
+      ]
     }
   },
   {
@@ -3618,11 +3629,14 @@
     "reproduction": "API-клиент (или будущий фронтенд-код) шлёт PUT {schedule_type:'interval'} без interval_days или с опечаткой 'даily': POST такой payload отбил бы 400, PUT возвращает 200 и обновлённую программу — планировщик молча не создаёт для неё jobs, полив по программе прекращается без какого-либо сигнала. Частичный PUT без поля time (легальный для «обновить только имя») вместо ответа падает 500 KeyError.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Частичный PUT сливается с сохранённой программой перед validation/conflict check и больше не обращается к отсутствующим ключам напрямую.",
+      "package": "phase2-programs-web",
+      "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+      "tests": [
+        "tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_partial_put_uses_stored_schedule_fields_instead_of_raising_keyerror",
+        "tests/api/test_phase2_programs_web.py::TestPutValidationParity::test_put_switch_to_interval_requires_interval_days"
+      ]
     }
   },
   {
@@ -3731,11 +3745,14 @@
     "reproduction": "Программа A: 06:00, зоны группы 1, суммарно 60 мин. Программа B: main 21:00, extra_times [\"06:30\"], зоны той же группы. Конфликт-чекер сравнивает 06:00 с 21:00 → «нет конфликтов», сохранение проходит и в мастере, и на сервере. Каждое утро fire B в 06:30 попадает в guard (сессия A активна) и пропускается ЦЕЛИКОМ (включая зоны B из других групп): утренний полив зон B не происходит, без ретрая и без сигнала в UI — только запись prog_skipped_manual_running в логе.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все primary/extra candidate starts проверяются против всех primary/extra stored starts, поэтому пересечение extra slot блокируется до scheduler fire-time.",
+      "package": "phase2-programs-web",
+      "commit": "684d0cd4d1ea8fb445c9035dabedadc2a2c70b44",
+      "tests": [
+        "tests/unit/test_phase2_db_programs.py::test_conflict_check_accepts_candidate_extra_times",
+        "tests/api/test_phase2_programs_web.py::TestCandidateExtraTimesConflictChecks"
+      ]
     }
   },
   {
@@ -4041,9 +4058,9 @@
     "reproduction": "Record program_start/program_finish twice; GET log and stats still reports no runs.",
     "main_or_branch": "main_bug_with_branch_false_green_tests",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
+      "disposition": "deferred",
+      "reason": "Текущие zone_runs не хранят program_id/run identity, а program_start/program_finish logs не связывают overlapping/restarted executions и не содержат требуемых water/duration metrics. Сначала нужно определить semantics, добавить program_runs либо эквивалентный execution identity и scheduler writers; shape-only заглушки не заменяются вымышленными значениями.",
+      "package": "phase2-programs-web",
       "commit": null,
       "tests": []
     }
@@ -4122,11 +4139,13 @@
     "reproduction": "POST interval_days=-1 or '0' through an admin test client; observe 201 and unsafe stored trigger value.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "POST и PUT принимают только non-boolean integer interval_days в безопасном диапазоне 1..30, исключая секундный trigger и отрицательный APScheduler loop.",
+      "package": "phase2-programs-web",
+      "commit": "d0a30b346c1f520b9368ca39d8b6f97b0b3c0e1c",
+      "tests": [
+        "tests/api/test_phase2_programs_web.py::TestIntervalDaysValidation"
+      ]
     }
   },
   {
