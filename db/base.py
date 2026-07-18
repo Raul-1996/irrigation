@@ -2,11 +2,13 @@ import functools
 import logging
 import sqlite3
 import time
+from contextvars import ContextVar
 from typing import Any, Callable, NoReturn, TypeVar
 
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
+_RETRY_ON_BUSY_ACTIVE: ContextVar[bool] = ContextVar("db_retry_on_busy_active", default=False)
 
 
 def _is_busy_error(error: sqlite3.OperationalError) -> bool:
@@ -31,7 +33,7 @@ class _RetryableBusyError(RuntimeError):
 
 
 def _raise_translated(error: sqlite3.OperationalError) -> NoReturn:
-    if _is_busy_error(error):
+    if _is_busy_error(error) and _RETRY_ON_BUSY_ACTIVE.get():
         raise _RetryableBusyError(error) from error
     raise error
 
@@ -102,17 +104,21 @@ def retry_on_busy(max_retries: int = 3, initial_backoff: float = 0.1) -> Callabl
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             for attempt in range(max_retries + 1):
+                token = _RETRY_ON_BUSY_ACTIVE.set(True)
                 try:
-                    return func(*args, **kwargs)
-                except (_RetryableBusyError, sqlite3.OperationalError) as error:
-                    original = error.original if isinstance(error, _RetryableBusyError) else error
-                    if _is_busy_error(original) and attempt < max_retries:
-                        time.sleep(initial_backoff * (2**attempt))
-                        logger.warning("SQLite BUSY retry %d/%d for %s", attempt + 1, max_retries, func.__name__)
-                    else:
-                        if isinstance(error, _RetryableBusyError):
-                            raise original from error
-                        raise
+                    try:
+                        return func(*args, **kwargs)
+                    except (_RetryableBusyError, sqlite3.OperationalError) as error:
+                        original = error.original if isinstance(error, _RetryableBusyError) else error
+                        if _is_busy_error(original) and attempt < max_retries:
+                            time.sleep(initial_backoff * (2**attempt))
+                            logger.warning("SQLite BUSY retry %d/%d for %s", attempt + 1, max_retries, func.__name__)
+                        else:
+                            if isinstance(error, _RetryableBusyError):
+                                raise original from error
+                            raise
+                finally:
+                    _RETRY_ON_BUSY_ACTIVE.reset(token)
 
         return wrapper  # type: ignore[return-value]
 

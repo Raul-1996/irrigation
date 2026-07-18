@@ -115,6 +115,18 @@ class _BusyProbeRepository(BaseRepository):
         except sqlite3.Error:
             return False
 
+    def write_without_retry_decorator(self) -> bool:
+        """Non-decorated methods must retain their sqlite.Error contract."""
+
+        try:
+            with self._connect() as conn:
+                conn.execute("PRAGMA busy_timeout=0")
+                conn.execute("UPDATE busy_probe SET value = value + 1")
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
 
 def test_retry_on_busy_bypasses_repository_sqlite_error_catch(test_db_path):
     with sqlite3.connect(test_db_path) as conn:
@@ -130,6 +142,33 @@ def test_retry_on_busy_bypasses_repository_sqlite_error_catch(test_db_path):
             probe.write_while_catching_sqlite_errors()
 
     assert probe.attempts == 3
+
+
+def test_non_decorated_repository_method_keeps_sqlite_error_contract(test_db_path):
+    with sqlite3.connect(test_db_path) as conn:
+        conn.execute("CREATE TABLE busy_probe(value INTEGER NOT NULL)")
+        conn.execute("INSERT INTO busy_probe VALUES (0)")
+
+    probe = _BusyProbeRepository(test_db_path)
+    with sqlite3.connect(test_db_path) as blocker:
+        blocker.execute("PRAGMA journal_mode=WAL")
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("UPDATE busy_probe SET value = 10")
+
+        assert probe.write_without_retry_decorator() is False
+
+
+def test_empty_zone_updates_remain_timestamp_only_noops(test_db):
+    zone = test_db.create_zone({"name": "No-op", "duration": 10, "group_id": 1})
+
+    assert test_db.update_zone(zone["id"], {}) is not None
+    assert test_db.bulk_update_zones([{"id": zone["id"]}]) == {"updated": 1, "failed": []}
+    assert test_db.bulk_upsert_zones([{"id": zone["id"]}]) == {"created": 0, "updated": 1, "failed": 0}
+
+    persisted = test_db.get_zone(zone["id"])
+    assert persisted["name"] == "No-op"
+    assert persisted["duration"] == 10
+    assert persisted["group_id"] == 1
 
 
 def test_update_zone_versioned_retries_failed_begin_immediate(test_db, monkeypatch):
