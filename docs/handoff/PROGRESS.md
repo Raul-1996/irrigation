@@ -156,8 +156,18 @@
    - targeted: 19 passed; full gate: 1959 passed, 2 skipped, 17 deselected;
      ruff и diff check чисты.
 
-После этих пакетов: 53 записи fixed (47 корней + шесть унаследованных дублей),
-1 deferred, 93 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+8. `phase2-mqtt-diagnostic-tls` — #81 `fixed`
+   - fix `e71db24703adb6bf70d382bb36cd009f3b978684`;
+   - merge `aadac5e11983f46ef980063676df0b26942d9b46`;
+   - P06 уже применял TLS к permanent hub; follow-up P07 добавил единый TLS setup
+     для probe/status/scan с уникальными ephemeral client IDs;
+   - CA/client cert/key, version и insecure mode применяются до connect, а любая
+     setup-ошибка завершает diagnostic path без попытки plaintext fallback;
+   - targeted: 80 passed; full gate: 1963 passed, 2 skipped, 17 deselected;
+     ruff и diff check чисты.
+
+После этих пакетов: 54 записи fixed (48 корней + шесть унаследованных дублей),
+1 deferred, 92 REAL-записи pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории

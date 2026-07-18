@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **53 fixed · 1 deferred · 93 pending · 5 not_applicable**.
+- Phase 2 disposition: **54 fixed · 1 deferred · 92 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -780,7 +780,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Сервер настроен с tls_enabled=1 (порт 8883). Команды зонам уходят (publisher с TLS), но клиент хаба делает plaintext CONNECT на TLS-порт → рукопожатие падает → warning в лог и continue. Итог: SSE-стрим состояний зон мёртв, master_valve_observed никогда не обновляется, анти-рестарт и подавление ON при EMERGENCY_STOP не работают — молча, без какой-либо индикации в UI. /api/mqtt/<id>/probe|status|scan-sse на том же сервере также всегда «connect failed/не подключён», хотя публикация работает.
 - **Решение оркестратора:** TLS is supported by the publisher/verifier but omitted by the hub and diagnostic MQTT clients.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** P06 добавил TLS permanent SSE hub, а P07 follow-up централизованно применяет CA/client cert/key, version и insecure mode ко всем probe/status/scan clients до connect; ошибка TLS setup исключает plaintext fallback.
+- **Пакет:** `phase2-mqtt-diagnostic-tls`.
+- **Fix commit:** `e71db24703adb6bf70d382bb36cd009f3b978684`.
+- **Regression tests:** `tests/api/test_phase2_mqtt_api.py::test_finding_81_diagnostic_client_applies_tls_before_route_connect[probe]`, `tests/api/test_phase2_mqtt_api.py::test_finding_81_diagnostic_client_applies_tls_before_route_connect[status]`, `tests/api/test_phase2_mqtt_api.py::test_finding_81_diagnostic_client_applies_tls_before_route_connect[scan]`, `tests/api/test_phase2_mqtt_api.py::test_finding_81_tls_setup_failure_aborts_before_plaintext_connect`, `tests/unit/test_phase2_sse_hub.py::test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode`.
 
 ### #82 [medium] `services/sse_hub.py:381` — keepalive=5 c у клиента SSE-хаба + блокирующие DB/publish-вызовы внутри _on_message → брокер сам выкидывает хаб по таймауту пинга
 

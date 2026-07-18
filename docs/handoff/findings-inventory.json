@@ -2433,11 +2433,17 @@
     "main_or_branch": "main_bug",
     "decision_notes": "TLS is supported by the publisher/verifier but omitted by the hub and diagnostic MQTT clients.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "P06 добавил TLS permanent SSE hub, а P07 follow-up централизованно применяет CA/client cert/key, version и insecure mode ко всем probe/status/scan clients до connect; ошибка TLS setup исключает plaintext fallback.",
+      "package": "phase2-mqtt-diagnostic-tls",
+      "commit": "e71db24703adb6bf70d382bb36cd009f3b978684",
+      "tests": [
+        "tests/api/test_phase2_mqtt_api.py::test_finding_81_diagnostic_client_applies_tls_before_route_connect[probe]",
+        "tests/api/test_phase2_mqtt_api.py::test_finding_81_diagnostic_client_applies_tls_before_route_connect[status]",
+        "tests/api/test_phase2_mqtt_api.py::test_finding_81_diagnostic_client_applies_tls_before_route_connect[scan]",
+        "tests/api/test_phase2_mqtt_api.py::test_finding_81_tls_setup_failure_aborts_before_plaintext_connect",
+        "tests/unit/test_phase2_sse_hub.py::test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode"
+      ]
     }
   },
   {
