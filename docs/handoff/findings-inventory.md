@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **141 fixed · 4 deferred · 2 pending · 5 not_applicable**.
+- Phase 2 disposition: **141 fixed · 6 deferred · 0 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -871,7 +871,9 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Оператор откатывает миграцию telegram_add_fsm_and_notif штатным rollback_migration() (задокументированный DOWNGRADE_REGISTRY) → бот продолжает работать, но upsert_bot_user падает на каждом сообщении (логируется и возвращает False), авторизация/учёт пользователей Telegram полностью ломаются до ручного восстановления схемы.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `deferred`.
+- **Причина disposition:** rollback_migration вызывается только тестами; поддерживаемый WB update path делает pre-deploy backup, а безопасный production rollback восстанавливает согласованную DB-копию. Исправление потребует разморозить миграции и выбрать контракт: constraint-preserving in-place downgrade либо удаление неподдерживаемого live-downgrade API в пользу backup restore.
+- **Пакет:** `phase2-frozen-migration-decisions`.
 
 ### #74 [high] `templates/programs.html:489` — Stored XSS: имя зоны вставляется в innerHTML без escapeHtml в мастере программ (шаг 4 «Выбор зон»)
 
@@ -1173,7 +1175,9 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Контроллер в любой не-UTC зоне (Wirenboard в РФ = UTC+3): при первом апгрейде на версию с колонкой source одноразовая миграция необратимо помечает все исторические программные поливы как 'ручные'. Фильтр 'программа/вручную' в истории поливов и любая статистика по source навсегда врут для всей предшествующей истории.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `deferred`.
+- **Причина disposition:** Одноразовый backfill уже применён, а старые zone_runs не содержат program identity/provenance: после edits/deletes легитимные manual и program runs неразличимы. Любая повторная переклассификация необратимо выдумала бы данные; нужен размороженный previewable forward-repair с явно выбранной ambiguity policy либо решение оставить исторические значения как есть.
+- **Пакет:** `phase2-frozen-migration-decisions`.
 
 ### #100 [medium] `db/programs.py:216` — check_program_conflicts полностью игнорирует extra_times: пересечение по дополнительным слотам не детектируется, программы реально накладываются в рантайме
 

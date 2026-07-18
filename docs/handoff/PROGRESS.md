@@ -393,23 +393,37 @@
     - targeted: 36 passed; `node --check` чист; full gate: 2072 passed,
       2 skipped, 17 deselected; ruff и diff check чисты.
 
+28. `phase2-frozen-migration-decisions` — #73, #99 `deferred`, decision-only
+    - `db/migrations.py` не изменялся; фиктивных fix/merge commit нет;
+    - #73: production caller у `rollback_migration` отсутствует, WB update
+      создаёт DB backup; constraint-preserving live downgrade требует отдельного
+      решения о поддерживаемом контракте и разморозки migrations;
+    - #99: one-time backfill уже применён, а исторические записи не хранят
+      program identity; точная повторная классификация после edits/deletes
+      невозможна без ambiguity policy и previewable forward repair;
+    - выполнен read-only caller/migration/deployment evidence review; последний
+      code gate остаётся 2072 passed, 2 skipped, 17 deselected.
+
 После этих пакетов: 141 запись fixed (130 корней + одиннадцать унаследованных дублей),
-4 deferred, 2 REAL-записи pending; пять `VERIFIED_FALSE` остаются
+6 deferred, 0 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
 
-Финальное решение об отложении принимается после fix-веток, но заранее не планируется рискованный широкий рефакторинг:
+Ровно шесть REAL-находок отложены индивидуально: #37 (cross-layer CAS
+contract), #56 (trusted-proxy boundary), #73 (live migration downgrade
+contract), #99 (неразличимая historical provenance), #140 (program-run identity
+для метрик) и #141 (неопределённая smart scheduling semantics). Полные причины
+хранятся у каждой записи inventory; blanket-defer не использовался.
 
-- распил `irrigation_scheduler.py` и `static/js/status.js`;
-- миграция уже сдвинутых weekday-значений (их происхождение неразличимо; нужен post-deploy UI review);
-- изменение special semantics группы 999;
-- включение shadow water-balance H2 в реальный полив;
-- Docker как production target;
-- e2e и `mqtt_real` без физического WB/брокера.
-
-Низкоприоритетные условные сценарии (legacy Safari, ручной downgrade migration, crafted admin-only malformed payloads) могут остаться отложенными только с индивидуальной причиной в финальном inventory; один общий blanket-defer недопустим.
+За рамками находок по-прежнему не выполнялись запрещённые расширения scope:
+распил scheduler/status.js, изменение semantics группы 999, включение H2,
+Docker как production target, e2e и `mqtt_real` без физического WB/брокера.
 
 ## Следующая безопасная точка
 
-После этого документационного checkpoint можно начинать Фазу 2 локально. Перед первым `git push` требуется явное подтверждение пользователя: `PHASE1-RAW-REPORTS-2026-07-18.md` и inventory содержат подробные данные внутреннего аудита и будут экспортированы во внешний настроенный `origin`.
+Все 147 REAL-находок локально получили `fixed` либо индивидуальный `deferred`;
+перед завершением остаются финальный serial gate, сверка ledger и удаление
+изолированных worktrees. `git push` запрещён без отдельного подтверждения:
+`PHASE1-RAW-REPORTS-2026-07-18.md` и inventory содержат подробные данные
+внутреннего аудита и будут экспортированы во внешний настроенный `origin`.

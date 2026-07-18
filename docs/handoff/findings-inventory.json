@@ -2294,9 +2294,9 @@
     "reproduction": "Оператор откатывает миграцию telegram_add_fsm_and_notif штатным rollback_migration() (задокументированный DOWNGRADE_REGISTRY) → бот продолжает работать, но upsert_bot_user падает на каждом сообщении (логируется и возвращает False), авторизация/учёт пользователей Telegram полностью ломаются до ручного восстановления схемы.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
+      "disposition": "deferred",
+      "reason": "rollback_migration вызывается только тестами; поддерживаемый WB update path делает pre-deploy backup, а безопасный production rollback восстанавливает согласованную DB-копию. Исправление потребует разморозить миграции и выбрать контракт: constraint-preserving in-place downgrade либо удаление неподдерживаемого live-downgrade API в пользу backup restore.",
+      "package": "phase2-frozen-migration-decisions",
       "commit": null,
       "tests": []
     }
@@ -3086,9 +3086,9 @@
     "reproduction": "Контроллер в любой не-UTC зоне (Wirenboard в РФ = UTC+3): при первом апгрейде на версию с колонкой source одноразовая миграция необратимо помечает все исторические программные поливы как 'ручные'. Фильтр 'программа/вручную' в истории поливов и любая статистика по source навсегда врут для всей предшествующей истории.",
     "main_or_branch": "main_bug",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
+      "disposition": "deferred",
+      "reason": "Одноразовый backfill уже применён, а старые zone_runs не содержат program identity/provenance: после edits/deletes легитимные manual и program runs неразличимы. Любая повторная переклассификация необратимо выдумала бы данные; нужен размороженный previewable forward-repair с явно выбранной ambiguity policy либо решение оставить исторические значения как есть.",
+      "package": "phase2-frozen-migration-decisions",
       "commit": null,
       "tests": []
     }

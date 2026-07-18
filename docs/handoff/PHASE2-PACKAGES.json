@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "packages": [
     {
       "slug": "phase2-baseline-history",
@@ -1471,6 +1471,33 @@
       "verification": {
         "targeted": "36 passed; node --check passed",
         "full_pytest": "2072 passed, 2 skipped, 17 deselected",
+        "ruff": "All checks passed!",
+        "diff_check": "clean"
+      }
+    },
+    {
+      "slug": "phase2-frozen-migration-decisions",
+      "decision_only": true,
+      "fix_commit": null,
+      "merge_commit": null,
+      "summary": "Две находки в замороженном db/migrations.py получили отдельные deferred-решения без production-изменений и без фиктивных commit-ссылок.",
+      "resolutions": [
+        {
+          "id": 73,
+          "disposition": "deferred",
+          "reason": "rollback_migration вызывается только тестами; поддерживаемый WB update path делает pre-deploy backup, а безопасный production rollback восстанавливает согласованную DB-копию. Исправление потребует разморозить миграции и выбрать контракт: constraint-preserving in-place downgrade либо удаление неподдерживаемого live-downgrade API в пользу backup restore.",
+          "tests": []
+        },
+        {
+          "id": 99,
+          "disposition": "deferred",
+          "reason": "Одноразовый backfill уже применён, а старые zone_runs не содержат program identity/provenance: после edits/deletes легитимные manual и program runs неразличимы. Любая повторная переклассификация необратимо выдумала бы данные; нужен размороженный previewable forward-repair с явно выбранной ambiguity policy либо решение оставить исторические значения как есть.",
+          "tests": []
+        }
+      ],
+      "verification": {
+        "targeted": "read-only caller, migration-history and deployment-backup evidence review",
+        "full_pytest": "2072 passed, 2 skipped, 17 deselected (unchanged from preceding code package)",
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }
