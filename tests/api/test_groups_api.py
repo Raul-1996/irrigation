@@ -2,6 +2,7 @@
 
 import json
 import os
+from unittest.mock import patch
 
 os.environ["TESTING"] = "1"
 
@@ -69,6 +70,65 @@ class TestMasterValveAPI:
             content_type="application/json",
         )
         assert resp.status_code == 200
+
+    def test_manual_open_cancels_pending_close_inside_master_topic_lock(self, admin_client, app):
+        """#135: a delayed close must not land after a successful manual open."""
+        from services import zone_control
+
+        group = app.db.create_group("Manual master open")
+        server = app.db.create_mqtt_server({"name": "S", "host": "127.0.0.1", "port": 1883})
+        topic = "/master/manual"
+        app.db.update_group_fields(
+            group["id"],
+            {
+                "use_master_valve": 1,
+                "master_mqtt_topic": topic,
+                "master_mqtt_server_id": server["id"],
+                "master_mode": "NC",
+            },
+        )
+
+        events = []
+        lock_held = False
+
+        class TrackingLock:
+            def __enter__(self):
+                nonlocal lock_held
+                lock_held = True
+                events.append("lock_enter")
+
+            def __exit__(self, *_exc):
+                nonlocal lock_held
+                events.append("lock_exit")
+                lock_held = False
+
+        def cancel_pending(normalized_topic):
+            assert lock_held
+            assert normalized_topic == topic
+            events.append("cancel")
+            return True
+
+        def publish(_server, normalized_topic, value, **_kwargs):
+            assert lock_held
+            assert normalized_topic == topic
+            assert value == "1"
+            events.append("publish")
+            return True
+
+        with (
+            patch.object(zone_control, "master_topic_lock", return_value=TrackingLock(), create=True),
+            patch.object(zone_control, "cancel_pending_master_close", side_effect=cancel_pending, create=True),
+            patch("routes.groups_api._publish_mqtt_value", side_effect=publish),
+            patch("routes.groups_api.get_scheduler", return_value=None),
+            patch("routes.groups_api._sse_hub.broadcast"),
+        ):
+            resp = admin_client.post(
+                f"/api/groups/{group['id']}/master-valve/open",
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 200
+        assert events == ["lock_enter", "cancel", "publish", "lock_exit"]
 
 
 class TestGroupStopAuditIssue16:
