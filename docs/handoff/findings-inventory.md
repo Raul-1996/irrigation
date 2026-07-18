@@ -7,7 +7,7 @@
 - `VERIFIED_FALSE`: **5**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **115 fixed · 4 deferred · 28 pending · 5 not_applicable**.
+- Phase 2 disposition: **116 fixed · 4 deferred · 27 pending · 5 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1591,7 +1591,11 @@
 - **Происхождение:** `branch_regression`.
 - **Верификация:** Both public import paths were smoke-tested and compared with the explicit main contract.
 - **Репродукция/сценарий:** Import get_merged_weather from services.weather and import services.weather_merged; both fail on the branch.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** services.weather и legacy services.weather_merged экспортируют один callable; adapter делегирует canonical extended weather и sensor helpers. Lazy imports устраняют cold-start cycle без второй weather implementation.
+- **Пакет:** `phase2-weather-compatibility`.
+- **Fix commit:** `af7f2ad73427514b07dd7125ca03c6d2b3a36099`.
+- **Regression tests:** `tests/unit/test_weather_compat.py::test_package_and_legacy_module_export_same_stable_callable`, `tests/unit/test_weather_compat.py::test_isolated_legacy_import_before_package_import`, `tests/unit/test_weather_compat.py::test_isolated_package_import_before_legacy_import`, `tests/unit/test_weather_compat.py::test_merged_weather_prefers_fresh_local_sensors`, `tests/unit/test_weather_compat.py::test_merged_weather_marks_enabled_offline_sensors_as_api_fallback`, `tests/unit/test_weather_compat.py::test_merged_weather_preserves_unavailable_shape`.
 
 ### #145 [high] `routes/programs_api.py:84-102; irrigation_scheduler.py:1165-1203,1299-1313` — Конкурентные PUT/DELETE программы оставляют persistent orphan APScheduler jobs
 

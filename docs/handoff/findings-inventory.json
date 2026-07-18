@@ -4400,11 +4400,18 @@
     "reproduction": "Import get_merged_weather from services.weather and import services.weather_merged; both fail on the branch.",
     "main_or_branch": "branch_regression",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "services.weather и legacy services.weather_merged экспортируют один callable; adapter делегирует canonical extended weather и sensor helpers. Lazy imports устраняют cold-start cycle без второй weather implementation.",
+      "package": "phase2-weather-compatibility",
+      "commit": "af7f2ad73427514b07dd7125ca03c6d2b3a36099",
+      "tests": [
+        "tests/unit/test_weather_compat.py::test_package_and_legacy_module_export_same_stable_callable",
+        "tests/unit/test_weather_compat.py::test_isolated_legacy_import_before_package_import",
+        "tests/unit/test_weather_compat.py::test_isolated_package_import_before_legacy_import",
+        "tests/unit/test_weather_compat.py::test_merged_weather_prefers_fresh_local_sensors",
+        "tests/unit/test_weather_compat.py::test_merged_weather_marks_enabled_offline_sensors_as_api_fallback",
+        "tests/unit/test_weather_compat.py::test_merged_weather_preserves_unavailable_shape"
+      ]
     }
   },
   {

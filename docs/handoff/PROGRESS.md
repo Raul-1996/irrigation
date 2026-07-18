@@ -335,8 +335,19 @@
     - targeted: 58 passed; full gate: 2043 passed, 2 skipped, 17 deselected;
       ruff и diff check чисты.
 
-После этих пакетов: 115 записей fixed (106 корней + девять унаследованных дублей),
-4 deferred, 28 REAL-записей pending; пять `VERIFIED_FALSE` остаются
+23. `phase2-weather-compatibility` — #144 `fixed`
+    - fixes `a17a81d66415404ec63f73159ce841e79fa79fb2` и
+      `af7f2ad73427514b07dd7125ca03c6d2b3a36099`;
+    - merge `97fe06cb807cac0d1556a23b2403c02225444d0c`;
+    - documented package и legacy imports экспортируют один callable, который
+      делегирует canonical weather service/sensor merge без второй реализации;
+    - cold legacy-first и package-first imports проверяются отдельными Python
+      процессами; найденный review import-cycle устранён lazy resolution;
+    - targeted: 123 passed, 1 skipped; full gate: 2049 passed, 2 skipped,
+      17 deselected; ruff и diff check чисты.
+
+После этих пакетов: 116 записей fixed (107 корней + девять унаследованных дублей),
+4 deferred, 27 REAL-записей pending; пять `VERIFIED_FALSE` остаются
 `not_applicable` и не исправляются.
 
 ## Осознанно отложенные категории
