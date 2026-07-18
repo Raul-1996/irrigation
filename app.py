@@ -147,14 +147,13 @@ from routes.groups_api import (
     api_start_zone_exclusive,
     api_stop_group,
 )
-from routes.system_config_api import api_env_config, api_postpone
+from routes.system_config_api import api_postpone
 from routes.system_emergency_api import api_emergency_resume, api_emergency_stop
 from routes.system_status_api import api_status
 from routes.zones_crud_api import api_zones_next_watering_bulk
 from routes.zones_watering_api import api_zone_mqtt_start, api_zone_mqtt_stop, start_zone, stop_zone
 
 for _view in (
-    api_env_config,  # /api/env
     api_postpone,  # /api/postpone
     api_emergency_stop,  # /api/emergency-stop
     api_emergency_resume,  # /api/emergency-resume
@@ -180,7 +179,7 @@ for _view in (
 #   programs_api_bp     (program CRUD)
 #   weather_api_bp      (weather settings / location)
 #   mqtt_api_bp         (MQTT server config)
-#   system_config_api_bp except the three guest endpoints above
+#   system_config_api_bp except /api/postpone above
 #   system_status_api_bp except /api/status
 #   groups_api_bp       (admin group CRUD; control endpoints exempt above)
 
@@ -404,7 +403,6 @@ import re as _re
 _ALLOWED_PUBLIC_POSTS = {
     "/api/login",
     "/api/status",
-    "/api/env",
     "/api/emergency-stop",
     "/api/emergency-resume",
     "/api/postpone",

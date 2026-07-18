@@ -158,20 +158,48 @@ class SettingsRepository(BaseRepository):
 
     @retry_on_busy()
     def set_env_config(self, cfg: dict[str, Any]) -> bool:
-        ok = True
-        temp = cfg.get("temp") or {}
-        hum = cfg.get("hum") or {}
-        ok &= self.set_setting_value("env.temp.enabled", "1" if temp.get("enabled") else "0")
-        ok &= self.set_setting_value("env.temp.topic", temp.get("topic") or "")
-        ok &= self.set_setting_value(
-            "env.temp.server_id", str(int(temp.get("server_id"))) if temp.get("server_id") is not None else None
-        )
-        ok &= self.set_setting_value("env.hum.enabled", "1" if hum.get("enabled") else "0")
-        ok &= self.set_setting_value("env.hum.topic", hum.get("topic") or "")
-        ok &= self.set_setting_value(
-            "env.hum.server_id", str(int(hum.get("server_id"))) if hum.get("server_id") is not None else None
-        )
-        return bool(ok)
+        try:
+            if not isinstance(cfg, dict):
+                raise TypeError("env config must be an object")
+
+            updates: list[tuple[str, str | None]] = []
+            for sensor in ("temp", "hum"):
+                sensor_cfg = cfg.get(sensor)
+                if sensor_cfg is None:
+                    sensor_cfg = {}
+                if not isinstance(sensor_cfg, dict):
+                    raise TypeError(f"env.{sensor} config must be an object")
+
+                server_id = sensor_cfg.get("server_id")
+                if isinstance(server_id, bool):
+                    raise ValueError(f"env.{sensor}.server_id must be an integer")
+                if isinstance(server_id, float) and not server_id.is_integer():
+                    raise ValueError(f"env.{sensor}.server_id must be an integer")
+                normalized_server_id = str(int(server_id)) if server_id is not None else None
+
+                updates.extend(
+                    (
+                        (f"env.{sensor}.enabled", "1" if sensor_cfg.get("enabled") else "0"),
+                        (f"env.{sensor}.topic", str(sensor_cfg.get("topic") or "")),
+                        (f"env.{sensor}.server_id", normalized_server_id),
+                    )
+                )
+        except (TypeError, ValueError) as e:
+            logger.error("Ошибка валидации env_config: %s", e)
+            return False
+
+        try:
+            with self._connect() as conn:
+                for key, value in updates:
+                    if value is None:
+                        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+                    else:
+                        conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("Ошибка записи env_config: %s", e)
+            return False
 
     # === Password ===
     def get_password_hash(self) -> str | None:
