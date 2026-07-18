@@ -35,11 +35,11 @@ class LogRepository(BaseRepository):
                     query += " AND type = ?"
                     params.append(event_type)
                 if from_date:
-                    query += " AND timestamp >= ?"
+                    query += " AND date(timestamp, 'localtime') >= date(?)"
                     params.append(from_date)
                 if to_date:
-                    query += " AND timestamp <= ?"
-                    params.append(f"{to_date} 23:59:59")
+                    query += " AND date(timestamp, 'localtime') <= date(?)"
+                    params.append(to_date)
 
                 query += " ORDER BY timestamp DESC LIMIT 1000"
                 cursor = conn.execute(query, params)

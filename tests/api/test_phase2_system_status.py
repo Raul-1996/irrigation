@@ -1,6 +1,8 @@
 """Phase-2 regressions for the system-status API package."""
 
+import os
 import sqlite3
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -63,6 +65,38 @@ def test_finding_102_logs_apply_filters_before_repository_limit(admin_client, ap
 
     assert response.status_code == 200
     assert [entry["details"] for entry in response.get_json()] == ["old matching event"]
+
+
+def test_finding_102_log_dates_use_controller_local_calendar(admin_client, app, monkeypatch):
+    """SQL filtering and rendered timestamps use the same local calendar day."""
+    previous_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Etc/GMT-6")
+    time.tzset()
+    try:
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO logs(type, details, timestamp) VALUES (?, ?, ?)",
+                [
+                    ("phase2-local-date", "local July 18", "2026-07-17 20:00:00"),
+                    ("phase2-local-date", "local July 19", "2026-07-18 20:00:00"),
+                ],
+            )
+
+        response = admin_client.get(
+            "/api/logs?type=phase2-local-date&from=2026-07-18&to=2026-07-18"
+        )
+
+        assert response.status_code == 200
+        assert [
+            (entry["details"], entry["timestamp"])
+            for entry in response.get_json()
+        ] == [("local July 18", "2026-07-18 02:00:00")]
+    finally:
+        if previous_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", previous_tz)
+        time.tzset()
 
 
 def test_finding_139_status_deduplicates_program_cancellation_queries(admin_client, app, monkeypatch):
