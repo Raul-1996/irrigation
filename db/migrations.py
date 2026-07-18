@@ -265,7 +265,7 @@ class MigrationRunner:
                 conn.execute("INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)", (group_id, name))
             conn.commit()
             conn.execute(
-                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
                 ("password_hash", generate_password_hash("1234", method="pbkdf2:sha256:120000")),
             )
             conn.commit()
