@@ -85,6 +85,22 @@ def _serialize_group_hardware_mutation(*, always: bool = False):
     return decorate
 
 
+def _serialize_rain_config_mutation(fn):
+    """Serialize one group rain flag update with the global rain runtime."""
+
+    @wraps(fn)
+    def wrapped(group_id, *args, **kwargs):
+        body = request.get_json(silent=True)
+        if isinstance(body, dict) and "use_rain_sensor" in body:
+            from services.monitors import rain_config_transaction_lock
+
+            with rain_config_transaction_lock():
+                return fn(group_id, *args, **kwargs)
+        return fn(group_id, *args, **kwargs)
+
+    return wrapped
+
+
 def _get_group(group_id: int) -> dict | None:
     return next(
         (group for group in (db.get_groups() or []) if int(group.get("id") or 0) == int(group_id)),
@@ -333,6 +349,7 @@ def api_groups():
 
 @groups_api_bp.route("/api/groups/<int:group_id>", methods=["PUT"])
 @audit_log("group_save", target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
+@_serialize_rain_config_mutation
 @_serialize_group_hardware_mutation(always=True)
 def api_update_group(group_id):
     data = request.get_json() or {}

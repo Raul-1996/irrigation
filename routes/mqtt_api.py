@@ -474,65 +474,68 @@ def api_mqtt_server_update(server_id: int):
         except (TypeError, ValueError):
             return jsonify({"success": False, "message": "Некорректные runtime-поля MQTT-сервера"}), 400
         if runtime_fields:
-            guarded = db.update_mqtt_server_reference_guarded(
-                server_id,
-                data,
-                allowed_settings=_RAIN_ONLY_SETTINGS_SCOPE,
-            )
-            guarded_status = guarded.get("status") if isinstance(guarded, dict) else None
-            if guarded_status == "blocked":
-                actual_references = guarded.get("references") or references
-                return jsonify(
-                    {
-                        "success": False,
-                        "message": "Сервер используется оборудованием; сначала перенесите ссылки на другой сервер",
-                        "references": actual_references,
-                        "blocked_fields": sorted(runtime_fields),
-                    }
-                ), 409
-            if guarded_status != "updated":
-                return jsonify({"success": False, "message": "Не удалось обновить"}), 409
+            from services.monitors import rain_config_transaction_lock
 
-            rain_config = guarded.get("rain_config") or {}
-            rain_is_effective = (
-                rain_config.get("enabled") is True
-                and rain_config.get("server_id") is not None
-                and int(rain_config["server_id"]) == int(server_id)
-            )
-            if rain_is_effective and not _reconfigure_rain_monitor(rain_config):
-                before_snapshot = guarded.get("before_snapshot")
-                committed_snapshot = guarded.get("snapshot")
-                rollback = (
-                    db.restore_mqtt_server_snapshot_reference_guarded(
-                        before_snapshot,
-                        committed_snapshot,
-                        allowed_settings=_RAIN_ONLY_SETTINGS_SCOPE,
-                    )
-                    if isinstance(before_snapshot, dict) and isinstance(committed_snapshot, dict)
-                    else {"restored": False, "references": {}}
+            with rain_config_transaction_lock():
+                guarded = db.update_mqtt_server_reference_guarded(
+                    server_id,
+                    data,
+                    allowed_settings=_RAIN_ONLY_SETTINGS_SCOPE,
                 )
-                if not isinstance(rollback, dict) or rollback.get("restored") is not True:
-                    logger.critical(
-                        "RainMonitor rollback CAS/reference guard failed for MQTT server %s: %s",
-                        server_id,
-                        rollback,
-                    )
+                guarded_status = guarded.get("status") if isinstance(guarded, dict) else None
+                if guarded_status == "blocked":
+                    actual_references = guarded.get("references") or references
                     return jsonify(
                         {
                             "success": False,
-                            "message": "Rain runtime не применён, безопасный rollback не выполнен",
-                            "error_code": "RAIN_MONITOR_ROLLBACK_CONFLICT",
-                            "references": rollback.get("references", {}) if isinstance(rollback, dict) else {},
+                            "message": "Сервер используется оборудованием; сначала перенесите ссылки на другой сервер",
+                            "references": actual_references,
+                            "blocked_fields": sorted(runtime_fields),
                         }
-                    ), 500
-                return jsonify(
-                    {
-                        "success": False,
-                        "message": "RainMonitor не принял MQTT-конфигурацию; изменения отменены",
-                        "error_code": "RAIN_MONITOR_RECONFIGURE_FAILED",
-                    }
-                ), 409
-            _refresh_mqtt_runtime(server_id)
+                    ), 409
+                if guarded_status != "updated":
+                    return jsonify({"success": False, "message": "Не удалось обновить"}), 409
+
+                rain_config = guarded.get("rain_config") or {}
+                rain_is_effective = (
+                    rain_config.get("enabled") is True
+                    and rain_config.get("server_id") is not None
+                    and int(rain_config["server_id"]) == int(server_id)
+                )
+                if rain_is_effective and not _reconfigure_rain_monitor(rain_config):
+                    before_snapshot = guarded.get("before_snapshot")
+                    committed_snapshot = guarded.get("snapshot")
+                    rollback = (
+                        db.restore_mqtt_server_snapshot_reference_guarded(
+                            before_snapshot,
+                            committed_snapshot,
+                            allowed_settings=_RAIN_ONLY_SETTINGS_SCOPE,
+                        )
+                        if isinstance(before_snapshot, dict) and isinstance(committed_snapshot, dict)
+                        else {"restored": False, "references": {}}
+                    )
+                    if not isinstance(rollback, dict) or rollback.get("restored") is not True:
+                        logger.critical(
+                            "RainMonitor rollback CAS/reference guard failed for MQTT server %s: %s",
+                            server_id,
+                            rollback,
+                        )
+                        return jsonify(
+                            {
+                                "success": False,
+                                "message": "Rain runtime не применён, безопасный rollback не выполнен",
+                                "error_code": "RAIN_MONITOR_ROLLBACK_CONFLICT",
+                                "references": rollback.get("references", {}) if isinstance(rollback, dict) else {},
+                            }
+                        ), 500
+                    return jsonify(
+                        {
+                            "success": False,
+                            "message": "RainMonitor не принял MQTT-конфигурацию; изменения отменены",
+                            "error_code": "RAIN_MONITOR_RECONFIGURE_FAILED",
+                        }
+                    ), 409
+                _refresh_mqtt_runtime(server_id)
         else:
             # Never write runtime keys merely because a stale preflight saw
             # them as unchanged.  A concurrent runtime rotation may already
