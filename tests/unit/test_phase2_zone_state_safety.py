@@ -290,6 +290,13 @@ def test_finding_36_firing_close_finishes_before_concurrent_master_open(test_db)
         return original_get_server(server_id)
 
     master_values: list[str] = []
+    verifier = MagicMock()
+    verifier.verify_master_command.side_effect = (
+        lambda _sid, _topic, _expected, publish_command, **_kwargs: publish_command()
+    )
+    scheduler = MagicMock()
+    scheduler.schedule_zone_hard_stop.return_value = True
+    scheduler.schedule_zone_cap.return_value = True
 
     def publish(_server, topic, value, **_kwargs):
         if topic == master_topic:
@@ -303,8 +310,9 @@ def test_finding_36_firing_close_finishes_before_concurrent_master_open(test_db)
         patch.object(zone_control, "db", test_db),
         patch.object(test_db, "get_mqtt_server", side_effect=get_server),
         patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
-        patch.object(zone_control, "state_verifier"),
+        patch.object(zone_control, "state_verifier", verifier),
         patch.object(zone_control, "water_monitor"),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
     ):
         zone_control._schedule_master_close(group_dict)
         close_thread = threading.Thread(target=timers[0].callback, name="master-close")

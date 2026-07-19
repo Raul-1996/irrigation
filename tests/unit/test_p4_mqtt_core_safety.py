@@ -87,6 +87,31 @@ def test_publisher_writes_command_channel_only():
     assert [call.args[2] for call in publish_one.call_args_list] == ["/devices/relay/K1/on"]
 
 
+@pytest.mark.parametrize("topic", [None, "", " ", "/", "on", "/on", "/relay/on", "/relay/on/on"])
+def test_invalid_or_command_channel_topics_never_publish(topic):
+    from services import mqtt_pub
+    from utils import normalize_topic
+
+    with (
+        patch.object(mqtt_pub, "_db", None),
+        patch.object(mqtt_pub, "_TOPIC_LAST_SEND", {}),
+        patch.object(mqtt_pub, "_TOPIC_INFLIGHT", {}),
+        patch.object(mqtt_pub, "_publish_one") as publish_one,
+    ):
+        assert normalize_topic(topic) == ""
+        assert mqtt_pub.publish_mqtt_value({"id": 702}, topic, "1", min_interval_sec=0) is False
+
+    publish_one.assert_not_called()
+
+
+def test_topic_normalization_is_idempotent_for_one_canonical_base():
+    from utils import normalize_topic
+
+    canonical = normalize_topic("///devices/relay/K1")
+    assert canonical == "/devices/relay/K1"
+    assert normalize_topic(canonical) == canonical
+
+
 def test_publisher_refuses_deleted_server_instead_of_using_stale_argument():
     from services import mqtt_pub
 
@@ -334,6 +359,60 @@ def test_concurrent_duplicate_publish_waits_for_and_shares_failed_result():
     assert calls == 2
 
 
+def test_server_invalidation_epoch_isolates_aba_inflight_and_debounce():
+    """An old A publish cannot satisfy a new A generation after A -> B -> A."""
+    from services import mqtt_pub
+
+    old_entered = threading.Event()
+    release_old = threading.Event()
+    calls = 0
+
+    def publish_one(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            old_entered.set()
+            assert release_old.wait(timeout=2)
+            return True
+        return calls != 2
+
+    server_a = {"id": 709, "host": "broker-a", "port": 1883}
+    old_result: list[bool] = []
+    with (
+        patch.object(mqtt_pub, "_db", None),
+        patch.object(mqtt_pub, "_TOPIC_LAST_SEND", {}),
+        patch.object(mqtt_pub, "_TOPIC_INFLIGHT", {}),
+        patch.object(mqtt_pub, "_MQTT_SERVER_EPOCH", {}, create=True),
+        patch.object(mqtt_pub, "_invalidate_client"),
+        patch.object(mqtt_pub, "_publish_one", side_effect=publish_one),
+    ):
+        old = threading.Thread(
+            target=lambda: old_result.append(
+                mqtt_pub.publish_mqtt_value(server_a, "/relay", "0", min_interval_sec=60)
+            )
+        )
+        old.start()
+        assert old_entered.wait(timeout=1)
+
+        # Configuration rotates A -> B -> A while the first A generation is
+        # still in flight. Equal config fingerprints must not collapse the
+        # new A command onto the obsolete client generation.
+        mqtt_pub.invalidate_mqtt_server(server_a["id"])
+        mqtt_pub.invalidate_mqtt_server(server_a["id"])
+        assert mqtt_pub.publish_mqtt_value(server_a, "/relay", "0", min_interval_sec=60) is False
+        assert calls == 2
+
+        release_old.set()
+        old.join(timeout=1)
+        assert old_result == [True]
+
+        # The obsolete completion must not repopulate the current generation's
+        # debounce cache after the new generation failed.
+        assert mqtt_pub.publish_mqtt_value(server_a, "/relay", "0", min_interval_sec=60) is True
+
+    assert calls == 3
+
+
 @pytest.mark.parametrize("payload", ["", "UNKNOWN", "2", "null", "offline", "yes"])
 def test_unknown_relay_payload_never_changes_state_or_jobs(payload):
     from services import sse_hub
@@ -392,12 +471,46 @@ def test_new_start_resets_stale_observed_state_before_publish(test_db):
     assert test_db.get_zone(zone["id"])["observed_state"] == "unconfirmed"
 
 
+def test_ordinary_start_subscribes_before_on_publish(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "start-prepared", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    order: list[str] = []
+    verifier = MagicMock()
+    prepared = object()
+    verifier.prepare_verification.side_effect = lambda *_args, **_kwargs: order.append("subscribed") or prepared
+
+    def publish(_server, _topic, value, **_kwargs):
+        assert value == "1"
+        order.append("published")
+        return True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is True
+
+    assert order == ["subscribed", "published"]
+    verifier.verify_async.assert_called_once_with(
+        zone["id"],
+        "on",
+        generation=verifier.register_command.return_value,
+        prepared=prepared,
+    )
+
+
 def test_new_stop_resets_stale_off_and_preserves_activation_until_fresh_echo(test_db):
     from services import zone_control
 
     server = _server(test_db)
     zone = _mqtt_zone(test_db, server, "stop-generation", state="on")
     activation = "2026-07-19 12:00:00"
+    activation_id = "a" * 32
     test_db.update_zone(
         zone["id"],
         {
@@ -406,6 +519,7 @@ def test_new_stop_resets_stale_off_and_preserves_activation_until_fresh_echo(tes
             "watering_start_time": activation,
         },
     )
+    test_db.update_zone_versioned(zone["id"], {"command_id": activation_id})
 
     def publish(_server, _topic, value, **_kwargs):
         during = test_db.get_zone(zone["id"])
@@ -413,6 +527,7 @@ def test_new_stop_resets_stale_off_and_preserves_activation_until_fresh_echo(tes
         assert during["commanded_state"] == "off"
         assert during["observed_state"] == "unconfirmed"
         assert during["watering_start_time"] == activation
+        assert during["command_id"] == activation_id
         return True
 
     with (
@@ -426,6 +541,40 @@ def test_new_stop_resets_stale_off_and_preserves_activation_until_fresh_echo(tes
     after = test_db.get_zone(zone["id"])
     assert after["observed_state"] == "unconfirmed"
     assert after["watering_start_time"] == activation
+    assert after["command_id"] == activation_id
+
+
+def test_ordinary_stop_subscribes_before_off_publish(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "stop-prepared", state="on")
+    test_db.update_zone(zone["id"], {"observed_state": "on", "commanded_state": "on"})
+    order: list[str] = []
+    verifier = MagicMock()
+    prepared = object()
+    verifier.prepare_verification.side_effect = lambda *_args, **_kwargs: order.append("subscribed") or prepared
+
+    def publish(_server, _topic, value, **_kwargs):
+        assert value == "0"
+        order.append("published")
+        return True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+    ):
+        assert zone_control.stop_zone(zone["id"], force=True) is True
+
+    assert order == ["subscribed", "published"]
+    verifier.verify_async.assert_called_once_with(
+        zone["id"],
+        "off",
+        generation=verifier.register_command.return_value,
+        prepared=prepared,
+    )
 
 
 def test_retained_off_cannot_complete_active_command_but_fresh_off_can(test_db):
@@ -465,6 +614,106 @@ def test_retained_off_cannot_complete_active_command_but_fresh_off_can(test_db):
     fresh_result = test_db.get_zone(zone["id"])
     assert fresh_result["observed_state"] == "off"
     assert fresh_result["watering_start_time"] is None
+    scheduler.cancel_zone_jobs.assert_called_once_with(zone["id"], include_cap=True)
+
+
+def test_retained_off_never_disarms_active_confirmed_generation(test_db):
+    from services import sse_hub
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "retained-confirmed-on", state="on")
+    activation = "2026-07-19 12:06:00"
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "on",
+            "observed_state": "on",
+            "watering_start_time": activation,
+        },
+    )
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "0", retained=True)
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "on"
+    assert after["observed_state"] == "on"
+    assert after["watering_start_time"] == activation
+    scheduler.cancel_zone_jobs.assert_not_called()
+
+
+def test_delayed_fresh_off_cannot_disarm_newer_commanded_on_activation(test_db):
+    from services import sse_hub
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "delayed-fresh-off", state="starting")
+    activation = "c" * 32
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "on",
+            "observed_state": "unconfirmed",
+            "watering_start_time": "2026-07-19 12:07:00",
+        },
+    )
+    test_db.update_zone_versioned(zone["id"], {"command_id": activation})
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "0", retained=False)
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "starting"
+    assert after["observed_state"] == "off"
+    assert after["watering_start_time"] == "2026-07-19 12:07:00"
+    assert after["command_id"] == activation
+    scheduler.cancel_zone_jobs.assert_not_called()
+
+
+def test_fresh_off_completes_external_activation_without_commanded_state(test_db):
+    from services import sse_hub
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "external-fresh-off", state="on")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": None,
+            "observed_state": "on",
+            "watering_start_time": "2026-07-19 12:08:00",
+        },
+    )
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "0", retained=False)
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "off"
+    assert after["observed_state"] == "off"
+    assert after["watering_start_time"] is None
     scheduler.cancel_zone_jobs.assert_called_once_with(zone["id"], include_cap=True)
 
 
@@ -649,6 +898,179 @@ def test_new_activation_waits_for_selected_targets_prior_off_generation(test_db)
     assert all(value != "1" for _, value in publishes)
 
 
+def test_central_start_rechecks_emergency_inside_group_admission_before_open(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "emergency-admission", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    publish = MagicMock(return_value=True)
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", publish),
+        patch.object(zone_control, "state_verifier"),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", side_effect=[False, True], create=True) as emergency,
+        patch.object(zone_control, "_rain_group_blocked", return_value=False, create=True),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    assert emergency.call_count >= 2
+    publish.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "off"
+
+
+def test_central_start_fails_closed_when_rain_gate_blocks_group(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "rain-admission", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "_emergency_stop_active", return_value=False, create=True),
+        patch.object(zone_control, "_rain_group_blocked", return_value=True, create=True) as rain_gate,
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    rain_gate.assert_called_with(zone["group_id"])
+    publish.assert_not_called()
+
+
+def test_activation_safety_jobs_and_uuid_are_durable_before_master_or_zone_open(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    group = test_db.create_group("activation-safety")
+    test_db.update_group_fields(
+        group["id"],
+        {
+            "use_master_valve": 1,
+            "master_mqtt_topic": "/master/activation",
+            "master_mqtt_server_id": server["id"],
+            "master_mode": "NC",
+        },
+    )
+    zone = _mqtt_zone(test_db, server, "activation-safety", group_id=group["id"], state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    order: list[str] = []
+    scheduler = MagicMock()
+    scheduler.schedule_zone_hard_stop.side_effect = lambda *_args, **_kwargs: order.append("hard") or True
+    scheduler.schedule_zone_cap.side_effect = lambda *_args, **_kwargs: order.append("cap") or True
+
+    def publish(_server, topic, value, **_kwargs):
+        persisted = test_db.get_zone(zone["id"])
+        assert persisted["command_id"]
+        order.append(f"publish:{topic}:{value}")
+        return True
+
+    verifier = MagicMock()
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "TESTING", False),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False, create=True),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False, create=True),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is True
+
+    token = test_db.get_zone(zone["id"])["command_id"]
+    assert len(token) == 32
+    assert order[:2] == ["hard", "cap"]
+    assert order[2:] == ["publish:/master/activation:1", f"publish:{zone['topic']}:1"]
+    assert scheduler.schedule_zone_hard_stop.call_args.kwargs["activation_token"] == token
+    assert scheduler.schedule_zone_cap.call_args.kwargs["activation_token"] == token
+
+
+def test_uncertain_on_failure_retains_activation_token_and_preplanted_safety(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "uncertain-on", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    scheduler = MagicMock()
+    scheduler.schedule_zone_hard_stop.return_value = True
+    scheduler.schedule_zone_cap.return_value = True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "TESTING", False),
+        patch.object(zone_control, "publish_mqtt_value", return_value=False),
+        patch.object(zone_control, "state_verifier"),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False, create=True),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False, create=True),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    failed = test_db.get_zone(zone["id"])
+    assert failed["state"] == "fault"
+    assert failed["command_id"]
+    assert failed["watering_start_time"]
+    scheduler.schedule_zone_hard_stop.assert_called_once()
+    scheduler.schedule_zone_cap.assert_called_once()
+    scheduler.cancel_zone_jobs.assert_not_called()
+
+
+def test_start_fails_closed_when_activation_uuid_is_not_durably_persisted(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "activation-persist-fail", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_versioned_update", return_value=(False, None)),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "state_verifier"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    publish.assert_not_called()
+
+
+def test_consecutive_activations_never_reuse_durable_command_id(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "activation-uuid-aba", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    tokens: list[str] = []
+
+    def publish(_server, _topic, value, **_kwargs):
+        if value == "1":
+            tokens.append(str((test_db.get_zone(zone["id"]) or {}).get("command_id")))
+        return True
+
+    verifier = MagicMock()
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is True
+        test_db.update_zone(zone["id"], {"state": "off", "observed_state": "off", "watering_start_time": None})
+        test_db.update_zone_versioned(zone["id"], {"command_id": None})
+        assert zone_control.exclusive_start_zone(zone["id"]) is True
+
+    assert len(tokens) == 2
+    assert all(len(token) == 32 for token in tokens)
+    assert tokens[0] != tokens[1]
+
+
 def test_configured_zone_with_missing_server_is_not_virtual(test_db):
     from services import zone_control
 
@@ -780,6 +1202,60 @@ def test_same_topic_on_two_brokers_gets_independent_pending_timers():
         zone_control._PENDING_CLOSE_TIMERS.clear()
 
 
+def test_delayed_master_close_subscribes_before_publish_and_requires_fresh_echo(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    group = test_db.create_group("verified-delayed-close")
+    test_db.update_group_fields(
+        group["id"],
+        {
+            "use_master_valve": 1,
+            "master_mqtt_topic": "/master/verified",
+            "master_mqtt_server_id": server["id"],
+            "master_mode": "NC",
+        },
+    )
+    group = next(item for item in test_db.get_groups() if int(item["id"]) == int(group["id"]))
+    order: list[str] = []
+
+    class ImmediateTimer:
+        def __init__(self, _delay, callback):
+            self.callback = callback
+
+        def cancel(self):
+            return None
+
+        def start(self):
+            self.callback()
+
+    def publish(_server, _topic, _value, **_kwargs):
+        order.append("published")
+        return True
+
+    def verify(_server_id, _topic, _expected, publish_command, **_kwargs):
+        order.append("subscribed")
+        assert publish_command() is True
+        order.append("fresh_echo")
+        return True
+
+    zone_control._PENDING_CLOSE_TIMERS.clear()
+    try:
+        with (
+            patch.object(zone_control, "db", test_db),
+            patch.object(zone_control, "TESTING", False),
+            patch.object(zone_control.threading, "Timer", ImmediateTimer),
+            patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+            patch.object(zone_control.state_verifier, "verify_master_command", side_effect=verify) as verifier,
+        ):
+            zone_control._schedule_master_close(group, immediate=True)
+    finally:
+        zone_control._PENDING_CLOSE_TIMERS.clear()
+
+    assert order == ["subscribed", "published", "fresh_echo"]
+    verifier.assert_called_once()
+
+
 def test_stop_all_reports_unresolved_failed_off(test_db):
     from services import zone_control
 
@@ -791,10 +1267,11 @@ def test_stop_all_reports_unresolved_failed_off(test_db):
         zone_control,
         "stop_zone",
         side_effect=lambda zone_id, **_kwargs: int(zone_id) == int(stopped["id"]),
-    ):
-        result = zone_control.stop_all_in_group(1, force=True)
+    ) as stop:
+        result = zone_control.stop_all_in_group(1, force=True, require_observed_confirmation=True)
 
     assert result == {"success": False, "stopped": [stopped["id"]], "unresolved": [failed["id"]]}
+    assert all(call.kwargs["require_observed_confirmation"] is True for call in stop.call_args_list)
 
 
 def test_emergency_stop_reports_failed_zone_and_never_counts_it_stopped(test_db):
@@ -810,6 +1287,62 @@ def test_emergency_stop_reports_failed_zone_and_never_counts_it_stopped(test_db)
     assert stats["success"] is False
     assert stats["zones_stopped"] == 0
     assert stats["zones_failed"] == [zone["id"]]
+
+
+def test_emergency_broker_ack_without_fresh_zone_off_echo_is_unresolved(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "emergency-ack-only", state="on")
+    test_db.update_zone(zone["id"], {"observed_state": "on", "commanded_state": "on"})
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "stop_zone", return_value=True) as stop,
+    ):
+        stats = zone_control.emergency_stop_all()
+
+    assert stats["success"] is False
+    assert stats["zones_stopped"] == 0
+    assert stats["zones_failed"] == [zone["id"]]
+    assert stop.call_args.kwargs["require_observed_confirmation"] is True
+
+
+def test_emergency_master_ack_without_fresh_close_echo_is_unresolved(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    group = test_db.create_group("emergency-master-echo")
+    test_db.update_group_fields(
+        group["id"],
+        {
+            "use_master_valve": 1,
+            "master_mqtt_topic": "/master/emergency",
+            "master_mqtt_server_id": server["id"],
+            "master_mode": "NC",
+        },
+    )
+
+    def ack_without_echo(_sid, _topic, _expected, publish_command, **_kwargs):
+        assert publish_command() is True
+        return False
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", return_value=True) as publish,
+        patch.object(
+            zone_control.state_verifier,
+            "verify_master_command",
+            side_effect=ack_without_echo,
+        ) as verify,
+    ):
+        stats = zone_control.emergency_stop_all()
+
+    assert publish.call_args.kwargs["retain"] is True
+    verify.assert_called_once()
+    assert stats["success"] is False
+    assert stats["masters_closed"] == 0
+    assert stats["masters_failed_publish"] == 1
 
 
 def test_emergency_deduplicates_master_by_broker_and_topic(test_db):
@@ -833,8 +1366,14 @@ def test_emergency_deduplicates_master_by_broker_and_topic(test_db):
         published_servers.append(int(server["id"]))
         return True
 
-    with patch.object(zone_control, "db", test_db), patch.object(
-        zone_control, "publish_mqtt_value", side_effect=publish
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(
+            zone_control.state_verifier,
+            "verify_master_command",
+            side_effect=lambda _sid, _topic, _expected, callback, **_kwargs: callback(),
+        ),
     ):
         stats = zone_control.emergency_stop_all()
 
@@ -908,6 +1447,7 @@ def test_verifier_cancels_cap_after_fresh_physical_off(test_db):
             "watering_start_time": "2026-07-19 12:30:00",
         },
     )
+    test_db.update_zone_versioned(zone["id"], {"command_id": "b" * 32})
     scheduler = MagicMock()
     verifier = StateVerifier()
     verifier._db = test_db
@@ -922,6 +1462,94 @@ def test_verifier_cancels_cap_after_fresh_physical_off(test_db):
     confirmed = test_db.get_zone(zone["id"])
     assert confirmed["observed_state"] == "off"
     assert confirmed["watering_start_time"] is None
+    assert confirmed["command_id"] is None
+
+
+def test_stale_off_confirmation_cannot_clear_new_activation_after_recheck(test_db):
+    from services import observed_state
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "generation-apply-race", state="on")
+    old_token = "2026-07-19 13:00:00"
+    new_token = "2026-07-19 13:01:00"
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "watering_start_time": old_token,
+        },
+    )
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    generation = verifier.register_command(zone["id"], "off")
+    result = threading.Event()
+    result.set()
+    prepared = observed_state._PreparedVerification(
+        zone_id=zone["id"],
+        expected="off",
+        generation=generation,
+        server=server,
+        topic=zone["topic"],
+        expected_payloads={"0"},
+        client=MagicMock(),
+        result=result,
+    )
+    recheck_entered = threading.Event()
+    allow_apply = threading.Event()
+    new_command_done = threading.Event()
+    checks = 0
+
+    def is_current(*_args, **_kwargs):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            recheck_entered.set()
+            assert allow_apply.wait(timeout=2)
+        return True
+
+    def apply_stale_off(zone_id, _expected):
+        test_db.update_zone(zone_id, {"observed_state": "off", "watering_start_time": None})
+
+    def start_new_generation():
+        verifier.register_command(zone["id"], "on")
+        test_db.update_zone(
+            zone["id"],
+            {
+                "commanded_state": "on",
+                "observed_state": "unconfirmed",
+                "watering_start_time": new_token,
+            },
+        )
+        new_command_done.set()
+
+    with (
+        patch.object(observed_state, "mqtt", object()),
+        patch.object(verifier, "_is_current", side_effect=is_current),
+        patch.object(verifier, "_apply_confirmation", side_effect=apply_stale_off),
+    ):
+        old_verify = threading.Thread(
+            target=lambda: verifier.verify(
+                zone["id"],
+                "off",
+                generation=generation,
+                prepared=prepared,
+                retries=1,
+                timeout=0.01,
+            )
+        )
+        old_verify.start()
+        assert recheck_entered.wait(timeout=1)
+        new_command = threading.Thread(target=start_new_generation)
+        new_command.start()
+        new_command.join(timeout=0.05)
+        assert new_command_done.is_set() is False
+        allow_apply.set()
+        old_verify.join(timeout=1)
+        new_command.join(timeout=1)
+
+    assert new_command_done.is_set()
+    assert test_db.get_zone(zone["id"])["watering_start_time"] == new_token
 
 
 def test_prepared_verifier_catches_immediate_nonretained_echo_after_subscription(test_db):
@@ -1108,11 +1736,16 @@ def test_master_command_verifier_subscribes_before_publish_and_rejects_retained(
         )
 
     assert result is expected
-    assert events == ["subscribed", "published"]
+    expected_events = (
+        ["subscribed", "published"]
+        if expected
+        else ["subscribed", "published", "published", "published"]
+    )
+    assert events == expected_events
     assert fake_mqtt.Client.call_count == 1
 
 
-def test_subscription_topics_are_canonical_base_topics_and_command_echo_is_rejected():
+def test_configured_command_topics_are_rejected_and_never_self_subscribed():
     from services import sse_hub
 
     db = MagicMock()
@@ -1135,8 +1768,8 @@ def test_subscription_topics_are_canonical_base_topics_and_command_echo_is_rejec
     ):
         zone_topics, master_topics = sse_hub._rebuild_subscriptions()
 
-    assert zone_topics == {11: {"/devices/relay/K1": [1]}}
-    assert master_topics == {11: {"/devices/master": [(2, "NC")]}}
+    assert zone_topics == {}
+    assert master_topics == {}
 
     with (
         patch.object(sse_hub, "_db", db),
@@ -1199,6 +1832,50 @@ def test_plaintext_subscriber_is_retired_when_tls_replacement_setup_fails():
     ):
         assert sse_hub._apply_rebuild(1) is True
         assert 12 not in sse_hub._SSE_HUB_MQTT
+
+    old_client.loop_stop.assert_called_once()
+    old_client.disconnect.assert_called_once()
+
+
+def test_old_tls_subscriber_is_retired_when_different_tls_replacement_fails():
+    from services import sse_hub
+
+    old_server = {
+        "id": 14,
+        "host": "old-secure-broker",
+        "port": 8883,
+        "enabled": 1,
+        "tls_enabled": 1,
+        "tls_ca_path": "/old/ca.pem",
+    }
+    new_server = {
+        **old_server,
+        "host": "new-secure-broker",
+        "tls_ca_path": "/new/broken-ca.pem",
+    }
+    old_client = MagicMock(name="old_tls_client")
+    replacement = MagicMock(name="new_tls_replacement")
+    replacement.tls_set.side_effect = OSError("bad replacement CA")
+    fake_mqtt = SimpleNamespace(
+        CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+        Client=MagicMock(return_value=replacement),
+    )
+    db = MagicMock()
+    db.get_zones.return_value = [{"id": 1, "mqtt_server_id": 14, "topic": "/relay"}]
+    db.get_groups.return_value = []
+    db.get_mqtt_server.return_value = new_server
+
+    with (
+        patch.object(sse_hub, "_db", db),
+        patch.object(sse_hub, "_mqtt", fake_mqtt),
+        patch.object(sse_hub, "_SSE_HUB_REQUESTED_GENERATION", 1),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {14: old_client}),
+        patch.object(sse_hub, "_SSE_HUB_SERVER_KEYS", {14: sse_hub._server_key(old_server)}),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {14: {"/relay": [1]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+    ):
+        assert sse_hub._apply_rebuild(1) is True
+        assert 14 not in sse_hub._SSE_HUB_MQTT
 
     old_client.loop_stop.assert_called_once()
     old_client.disconnect.assert_called_once()

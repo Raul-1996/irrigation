@@ -67,6 +67,11 @@ class TestMasterCloseDesyncIssue38:
         with (
             patch.object(zc, "db", test_db),
             patch.object(zc, "publish_mqtt_value", return_value=False) as mock_pub,
+            patch.object(
+                zc.state_verifier,
+                "verify_master_command",
+                side_effect=lambda _sid, _topic, _expected, callback, **_kwargs: callback(),
+            ),
             patch.object(zc, "TESTING", False),
             patch.object(_sse_hub, "broadcast", side_effect=_capture_broadcast),
         ):
@@ -106,6 +111,11 @@ class TestMasterCloseDesyncIssue38:
         with (
             patch.object(zc, "db", test_db),
             patch.object(zc, "publish_mqtt_value", return_value=True),
+            patch.object(
+                zc.state_verifier,
+                "verify_master_command",
+                side_effect=lambda _sid, _topic, _expected, callback, **_kwargs: callback() and False,
+            ),
             patch.object(zc, "TESTING", False),
             patch.object(_sse_hub, "broadcast", side_effect=lambda p: broadcasts.append(p)),
         ):
