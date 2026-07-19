@@ -33,7 +33,7 @@ def test_update_zone_returns_none_for_invalid_integer_field(test_db):
     assert test_db.get_zone(zone["id"])["group_id"] == 1
 
 
-def test_bulk_upsert_counts_invalid_row_without_rolling_back_valid_row(test_db):
+def test_bulk_upsert_invalid_row_rolls_back_entire_batch(test_db):
     first = test_db.create_zone({"name": "First", "duration": 10, "group_id": 1})
     second = test_db.create_zone({"name": "Second", "duration": 10, "group_id": 1})
 
@@ -44,8 +44,15 @@ def test_bulk_upsert_counts_invalid_row_without_rolling_back_valid_row(test_db):
         ]
     )
 
-    assert result == {"created": 0, "updated": 1, "failed": 1}
-    assert test_db.get_zone(first["id"])["name"] == "Committed"
+    assert result == {
+        "success": False,
+        "created": 0,
+        "updated": 0,
+        "failed": 2,
+        "rolled_back": True,
+        "errors": [{"index": 1, "id": second["id"], "code": "invalid_data"}],
+    }
+    assert test_db.get_zone(first["id"])["name"] == "First"
     assert test_db.get_zone(second["id"])["duration"] == 10
 
 
@@ -163,7 +170,13 @@ def test_empty_zone_updates_remain_timestamp_only_noops(test_db):
 
     assert test_db.update_zone(zone["id"], {}) is not None
     assert test_db.bulk_update_zones([{"id": zone["id"]}]) == {"updated": 1, "failed": []}
-    assert test_db.bulk_upsert_zones([{"id": zone["id"]}]) == {"created": 0, "updated": 1, "failed": 0}
+    assert test_db.bulk_upsert_zones([{"id": zone["id"]}]) == {
+        "success": True,
+        "created": 0,
+        "updated": 1,
+        "failed": 0,
+        "errors": [],
+    }
 
     persisted = test_db.get_zone(zone["id"])
     assert persisted["name"] == "No-op"

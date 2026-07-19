@@ -387,63 +387,62 @@ class ZoneRepository(BaseRepository):
 
     @retry_on_busy()
     def bulk_upsert_zones(self, zones: list[dict[str, Any]]) -> dict[str, Any]:
-        """Импорт зон: upsert множества зон в одной транзакции."""
+        """Atomically import a batch of zones.
+
+        Import is all-or-nothing: an invalid row, constraint failure or other
+        database error rolls back every preceding row.  This invariant belongs
+        in the repository because route validation cannot prevent a concurrent
+        schema/constraint change between validation and write time.
+        """
         created = 0
         updated = 0
-        failed = 0
         if not zones:
-            return {"created": 0, "updated": 0, "failed": 0}
+            return {"success": True, "created": 0, "updated": 0, "failed": 0, "errors": []}
+
+        failed_index: int | None = None
+        failed_id: Any = None
         try:
             with self._connect() as conn:
-                for z in zones:
+                conn.execute("BEGIN IMMEDIATE")
+                for index, z in enumerate(zones):
+                    failed_index = index
+                    if not isinstance(z, dict):
+                        failed_id = None
+                        raise TypeError("zone import row must be an object")
+                    candidate_id = z.get("id")
+                    failed_id = candidate_id if isinstance(candidate_id, (str, int, float, bool)) else None
                     try:
                         zid = int(z["id"]) if z.get("id") is not None else None
                     except (TypeError, ValueError) as e:
                         logger.debug("import_zones id parse: %s", e)
                         zid = None
-                    try:
-                        if zid is not None:
-                            cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
-                            row = cur.fetchone()
-                            if row:
-                                # SEC-004 / B1 FIX: импорт строит UPDATE через
-                                # общий builder, суженный до
-                                # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
-                                # константы) — state-machine-поля исключены.
-                                assignments, params = self._build_zone_update_fields(
-                                    z, z, allowed=_ALLOWED_UPDATE_COLUMNS
-                                )
-                                params.append(zid)
-                                if assignments:
-                                    conn.execute(
-                                        f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
-                                        params,
-                                    )
-                                    updated += 1
-                            else:
+
+                    if zid is not None:
+                        cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
+                        row = cur.fetchone()
+                        if row:
+                            # SEC-004 / B1 FIX: импорт строит UPDATE через
+                            # общий builder, суженный до
+                            # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
+                            # константы) — state-machine-поля исключены.
+                            assignments, params = self._build_zone_update_fields(
+                                z, z, allowed=_ALLOWED_UPDATE_COLUMNS
+                            )
+                            params.append(zid)
+                            if assignments:
                                 conn.execute(
-                                    """
-                                    INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                    (
-                                        zid,
-                                        z.get("name") or "Зона",
-                                        z.get("icon") or "🌿",
-                                        int(z.get("duration") or 10),
-                                        int(z.get("group_id", z.get("group", 1))),
-                                        (z.get("topic") or "").strip(),
-                                        z.get("mqtt_server_id"),
-                                    ),
+                                    f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
+                                    params,
                                 )
-                                created += 1
+                                updated += 1
                         else:
                             conn.execute(
                                 """
-                                INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
-                                VALUES (?, ?, ?, ?, ?, ?)
+                                INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                                 (
+                                    zid,
                                     z.get("name") or "Зона",
                                     z.get("icon") or "🌿",
                                     int(z.get("duration") or 10),
@@ -453,14 +452,40 @@ class ZoneRepository(BaseRepository):
                                 ),
                             )
                             created += 1
-                    except (sqlite3.Error, TypeError, ValueError) as e:
-                        logger.warning("Ошибка upsert зоны: %s", e)
-                        failed += 1
+                    else:
+                        conn.execute(
+                            """
+                            INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                z.get("name") or "Зона",
+                                z.get("icon") or "🌿",
+                                int(z.get("duration") or 10),
+                                int(z.get("group_id", z.get("group", 1))),
+                                (z.get("topic") or "").strip(),
+                                z.get("mqtt_server_id"),
+                            ),
+                        )
+                        created += 1
                 conn.commit()
-            return {"created": created, "updated": updated, "failed": failed}
-        except sqlite3.Error as e:
-            logger.error("Ошибка bulk-импорта зон: %s", e)
-            return {"created": created, "updated": updated, "failed": (failed or 0)}
+            return {"success": True, "created": created, "updated": updated, "failed": 0, "errors": []}
+        except (sqlite3.Error, TypeError, ValueError, KeyError) as e:
+            logger.error("Atomic zone import rolled back at row %s: %s", failed_index, e)
+            if isinstance(e, sqlite3.IntegrityError):
+                error_code = "constraint_error"
+            elif isinstance(e, sqlite3.Error):
+                error_code = "database_error"
+            else:
+                error_code = "invalid_data"
+            return {
+                "success": False,
+                "created": 0,
+                "updated": 0,
+                "failed": len(zones),
+                "rolled_back": True,
+                "errors": [{"index": failed_index, "id": failed_id, "code": error_code}],
+            }
 
     @retry_on_busy()
     def delete_zone(self, zone_id: int) -> bool:

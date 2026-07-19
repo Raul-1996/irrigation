@@ -368,6 +368,38 @@ def test_zone_snapshots_use_indexed_latest_run_lookup(test_db):
     assert any("idx_zone_runs_group_start" in str(row) for row in group_plan)
 
 
+def test_bulk_zone_import_rolls_back_mid_batch_constraint_failure(test_db):
+    first = test_db.create_zone({"name": "First before", "duration": 10, "group_id": 1})
+    second = test_db.create_zone({"name": "Second before", "duration": 10, "group_id": 1})
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute("""
+            CREATE TRIGGER reject_injected_zone_import
+            BEFORE UPDATE OF name ON zones
+            WHEN NEW.name = 'reject-me'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected import constraint');
+            END
+        """)
+
+    result = test_db.bulk_upsert_zones(
+        [
+            {"id": first["id"], "name": "First mutated"},
+            {"id": second["id"], "name": "reject-me"},
+        ]
+    )
+
+    assert result == {
+        "success": False,
+        "created": 0,
+        "updated": 0,
+        "failed": 2,
+        "rolled_back": True,
+        "errors": [{"index": 1, "id": second["id"], "code": "constraint_error"}],
+    }
+    assert test_db.get_zone(first["id"])["name"] == "First before"
+    assert test_db.get_zone(second["id"])["name"] == "Second before"
+
+
 def test_backup_uses_wal_consistent_vacuum_fallback(test_db, tmp_path, monkeypatch):
     backup_dir = tmp_path / "backups"
     test_db.logs.backup_dir = str(backup_dir)
