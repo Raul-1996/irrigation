@@ -373,11 +373,20 @@ class TestViewerRole:
         assert viewer_client.get("/api/groups").status_code == 200
         assert viewer_client.get("/api/status").status_code == 200
 
-    def test_viewer_cannot_mutate(self, viewer_client):
-        resp = viewer_client.post(
-            "/api/zones", data=json.dumps({"name": "X", "duration": 1}), content_type="application/json"
-        )
-        assert resp.status_code in (200, 201, 401, 403)  # TESTING mode may allow
+    def test_viewer_cannot_mutate(self, viewer_client, app):
+        zone_ids_before = {zone["id"] for zone in app.db.get_zones()}
+        testing_before = app.config["TESTING"]
+        app.config["TESTING"] = False
+        try:
+            resp = viewer_client.post(
+                "/api/zones", data=json.dumps({"name": "X", "duration": 1}), content_type="application/json"
+            )
+        finally:
+            app.config["TESTING"] = testing_before
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error_code"] == "FORBIDDEN"
+        assert {zone["id"] for zone in app.db.get_zones()} == zone_ids_before
 
 
 class TestGuestRole:
