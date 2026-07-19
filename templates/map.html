@@ -65,12 +65,19 @@
 
 {% block extra_js %}
 <script>
+const MAX_MAP_ITEMS = 20;
+
 async function loadMap() {
   try {
     const res = await api.get('/api/map');
+    if (!res || res.success === false || !Array.isArray(res.items)) {
+      throw new Error((res && (res.message || res.error)) || 'Некорректный ответ карты');
+    }
     const container = document.getElementById('map-container');
     container.innerHTML = '';
-    const items = (res && res.items) || [];
+    // The API applies the same bound; slice defensively so a stale or older
+    // controller response cannot create an unbounded image DOM.
+    const items = ((res && res.items) || []).slice(0, MAX_MAP_ITEMS);
     if (!items.length) {
       container.innerHTML = '<div class="placeholder"><strong>Карта не загружена</strong><span>Загрузите изображение с визуализацией зон.</span></div>';
       return;
@@ -80,7 +87,8 @@ async function loadMap() {
       const wrap = document.createElement('div');
       wrap.className = 'map-item';
       const img = document.createElement('img');
-      img.src = '/static/' + it.path + '?t=' + Date.now();
+      const version = Math.round(Number(it.mtime || 0) * 1000);
+      img.src = '/static/' + it.path + '?v=' + encodeURIComponent(String(version));
       img.alt = it.name;
       img.className = 'map-image';
       wrap.appendChild(img);
@@ -118,11 +126,11 @@ document.getElementById('mapFile').addEventListener('change', async (e) => {
   try {
     const res = await fetch('/api/map', { method: 'POST', body: formData });
     const data = await res.json();
-    if (data && data.success) {
+    if (res.ok && data && data.success) {
       showNotification('Карта загружена', 'success');
       loadMap();
     } else {
-      showNotification(data.message || 'Ошибка загрузки карты', 'error');
+      showNotification((data && (data.message || data.error)) || `Ошибка загрузки карты (HTTP ${res.status})`, 'error');
     }
   } catch (e) {
     showNotification('Ошибка загрузки карты', 'error');
@@ -160,5 +168,3 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 </script>
 {% endblock %}
-
-

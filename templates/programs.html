@@ -81,8 +81,16 @@ let editingId = null;
 let wizardData = {};
 let programs = [];
 let zones = [];
+let executionPollTimer = null;
+let executionRequestGeneration = 0;
 
 const COLORS = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350", "#ab47bc", "#26c6da", "#78909c", "#8d6e63"];
+const DEFAULT_PROGRAM_COLOR = '#42a5f5';
+
+function safeProgramColor(value) {
+  const color = String(value == null ? '' : value).trim();
+  return /^#[0-9A-Fa-f]{6}$/.test(color) ? color.toLowerCase() : DEFAULT_PROGRAM_COLOR;
+}
 
 function apiHeaders(json = true) {
   const h = {};
@@ -104,7 +112,9 @@ async function readResponseJson(resp) {
 async function loadPrograms() {
   try {
     const resp = await fetch('/api/programs');
-    programs = await resp.json();
+    const data = await readResponseJson(resp);
+    if (!resp.ok || !Array.isArray(data)) throw new Error(data.message || 'Некорректный ответ программ');
+    programs = data;
     renderList();
   } catch (err) {
     console.error('Load programs error:', err);
@@ -115,14 +125,73 @@ async function loadPrograms() {
 async function loadZones() {
   try {
     const resp = await fetch('/api/zones');
-    zones = await resp.json();
+    const data = await readResponseJson(resp);
+    if (!resp.ok || !Array.isArray(data)) throw new Error(data.message || 'Некорректный ответ зон');
+    zones = data;
   } catch (err) {
     console.error('Load zones error:', err);
   }
 }
 
+function stopExecutionPolling() {
+  executionRequestGeneration += 1;
+  if (executionPollTimer !== null) {
+    clearTimeout(executionPollTimer);
+    executionPollTimer = null;
+  }
+}
+
+function renderExecutionState(activeGroups, emergencyStop) {
+  const container = document.getElementById('execution-content');
+  if (!container) return;
+  if (emergencyStop) {
+    container.innerHTML = '<div class="empty-state"><h3>⛔ Аварийная остановка активна</h3><p>Новые запуски заблокированы.</p></div>';
+    return;
+  }
+  if (!activeGroups.length) {
+    container.innerHTML = '<div class="empty-state"><h3>Нет активного полива</h3><p>Состояние подтверждено сервером.</p></div>';
+    return;
+  }
+  container.innerHTML = activeGroups.map(group => {
+    const zone = zones.find(item => Number(item.id) === Number(group.current_zone));
+    const zoneName = zone ? `#${zone.id} ${zone.name || ''}` : `#${group.current_zone}`;
+    const source = group.current_zone_source === 'schedule' ? 'Программа' : 'Ручной запуск';
+    const queued = Number(group.queue_remaining || 0);
+    return `<div class="program-card" style="border-left-color:#42a5f5">
+      <div class="program-header">
+        <div class="program-title"><div class="program-name"><span>${escapeHtml(group.name || `Группа ${group.id}`)}</span><span class="badge time-based">Выполняется</span></div></div>
+        <div class="program-time">💧 ${escapeHtml(zoneName)}</div>
+        <div class="program-stats">${escapeHtml(source)}${queued ? ` · в очереди ${queued}` : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadExecutionState() {
+  const requestGeneration = ++executionRequestGeneration;
+  const container = document.getElementById('execution-content');
+  try {
+    const resp = await fetch('/api/status?ts=' + Date.now(), {cache: 'no-store'});
+    const data = await readResponseJson(resp);
+    if (requestGeneration !== executionRequestGeneration || currentTab !== 'execution') return;
+    if (!resp.ok || !data || data.success === false || !Array.isArray(data.groups)) {
+      throw new Error(data.message || data.error || `HTTP ${resp.status}`);
+    }
+    const activeGroups = data.groups.filter(group => group.status === 'watering' && group.current_zone);
+    renderExecutionState(activeGroups, !!data.emergency_stop);
+  } catch (err) {
+    if (requestGeneration !== executionRequestGeneration || currentTab !== 'execution') return;
+    if (container) container.innerHTML = `<div class="empty-state"><h3>Не удалось получить состояние</h3><p>${escapeHtml(err.message || 'Ошибка сети')}</p></div>`;
+  } finally {
+    if (requestGeneration === executionRequestGeneration && currentTab === 'execution') {
+      executionPollTimer = setTimeout(loadExecutionState, 3000);
+    }
+  }
+}
+
 // Tabs
 function switchTab(tab) {
+  stopExecutionPolling();
   currentTab = tab;
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-pill').forEach(p => p.classList.remove('active'));
@@ -130,6 +199,7 @@ function switchTab(tab) {
   document.querySelectorAll('.nav-pill')[['list','execution','log'].indexOf(tab)].classList.add('active');
   
   if (tab === 'list') renderList();
+  if (tab === 'execution') loadExecutionState();
 }
 
 // List rendering
@@ -167,7 +237,7 @@ function renderList() {
     const days = p.days || [];
     
     html += `
-      <div class="program-card" style="border-left-color: ${p.color || '#42a5f5'}">
+      <div class="program-card" style="border-left-color: ${safeProgramColor(p.color)}">
         <div class="program-header" onclick="toggleDetails(${p.id})">
           <div class="program-title">
             <div class="program-name">
@@ -176,7 +246,7 @@ function renderList() {
             </div>
             <div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>
           </div>
-          <div class="program-time">⏰ ${p.time}</div>
+          <div class="program-time">⏰ ${escapeHtml(p.time)}</div>
           <div class="program-days">
             ${p.schedule_type === 'even-odd' ? 
               `<div class="day-pill active">${p.even_odd === 'even' ? 'Чётные дни' : 'Нечётные дни'}</div>` :
@@ -241,7 +311,7 @@ function toggleDetails(id) {
 async function toggleEnabled(id) {
   try {
     const prog = programs.find(p => p.id === id);
-    const newEnabled = prog.enabled ? 0 : 1;
+    const newEnabled = !Boolean(prog.enabled);
     
     const resp = await fetch(`/api/programs/${id}/enabled`, {
       method: 'PATCH',
@@ -325,14 +395,14 @@ function editProgram(id) {
   wizardData = {
     name: p.name || '',
     type: p.type || 'time-based',
-    color: p.color || COLORS[0],
+    color: safeProgramColor(p.color),
     schedule_type: p.schedule_type || 'weekdays',
     days: Array.isArray(p.days) ? [...p.days] : [],
     interval_days: p.interval_days || 3,
     even_odd: p.even_odd || null,
     time: p.time || '06:00',
     zones: Array.isArray(p.zones) ? [...p.zones] : [],
-    enabled: p.enabled !== undefined ? p.enabled : 1,
+    enabled: Boolean(p.enabled),
     extra_times: Array.isArray(p.extra_times) ? [...p.extra_times] : []
   };
   renderWizard();
@@ -353,7 +423,7 @@ function openWizard() {
     even_odd: null,
     time: '06:00',
     zones: [],
-    enabled: 1
+    enabled: true
   };
   renderWizard();
   document.getElementById('wizardModal').classList.add('active');
@@ -479,7 +549,7 @@ function renderWizardStep() {
   html += `<div class="wizard-step ${wizardStep === 3 ? 'active' : ''}">
     <div class="form-group">
       <label class="form-label">Время запуска</label>
-      <input type="time" class="form-input" value="${wizardData.time}" 
+      <input type="time" class="form-input" value="${escapeHtml(wizardData.time)}"
         onchange="wizardData.time = this.value">
     </div>
   </div>`;
@@ -529,7 +599,7 @@ function renderWizardStep() {
             `Каждые ${wizardData.interval_days || 3} дней`
           }
         </div>
-        <div class="summary-value">⏰ ${wizardData.time}</div>
+        <div class="summary-value">⏰ ${escapeHtml(wizardData.time)}</div>
       </div>
       
       <div class="summary-section">

@@ -6,8 +6,84 @@
     let sortColumn = -1;
     let sortDirection = 'asc';
     const zoneStateVersions = new Map();
+    let loadDataGeneration = 0;
+    let zoneStateResyncGeneration = 0;
+    let zoneStateFeedFailed = false;
+
+    const GROUP_HARDWARE_FIELDS = new Set([
+        'use_master_valve', 'master_mqtt_server_id', 'master_mqtt_topic', 'master_mode',
+        'master_close_delay_sec', 'use_pressure_sensor', 'pressure_mqtt_server_id',
+        'pressure_mqtt_topic', 'pressure_unit', 'use_water_meter', 'water_mqtt_server_id',
+        'water_mqtt_topic', 'water_pulse_size', 'water_base_value_m3', 'water_base_pulses'
+    ]);
+    const ZONE_HARDWARE_FIELDS = new Set(['group_id', 'topic', 'mqtt_server_id']);
+
+    function responseSucceeded(response) {
+        if (response === true) return true;
+        if (!response || typeof response !== 'object') return false;
+        return response.success !== false;
+    }
+
+    function responseMessage(response, fallback) {
+        if (response && typeof response === 'object') {
+            return response.message || response.error || fallback;
+        }
+        return fallback;
+    }
+
+    function isZoneHardwareLocked(zoneId) {
+        const zone = zonesData.find(item => Number(item.id) === Number(zoneId));
+        if (!zone) return false;
+        const state = String(zone.state || '').toLowerCase();
+        return state !== '' && state !== 'off';
+    }
+
+    function isGroupHardwareLocked(groupId) {
+        return zonesData.some(zone =>
+            Number(zone.group_id) === Number(groupId) && isZoneHardwareLocked(zone.id)
+        );
+    }
+
+    function parseCanonicalPositiveInt(value) {
+        const raw = String(value == null ? '' : value).trim();
+        if (!/^[1-9]\d*$/.test(raw)) return null;
+        const parsed = Number(raw);
+        return Number.isSafeInteger(parsed) ? parsed : null;
+    }
+
+    function parseZoneDuration(value) {
+        const parsed = parseCanonicalPositiveInt(value);
+        return parsed !== null && parsed <= 240 ? parsed : null;
+    }
+
+    async function checkDurationConflicts(changes) {
+        const response = await fetch('/api/zones/check-duration-conflicts-bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ changes })
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data || data.success === false || !data.results) {
+            throw new Error(responseMessage(data, 'Не удалось проверить конфликты длительности'));
+        }
+        const missing = changes
+            .map(change => String(change.zone_id))
+            .filter(zoneId => !Object.prototype.hasOwnProperty.call(data.results, zoneId));
+        if (missing.length) {
+            throw new Error(`Проверка конфликтов не вернула зоны: ${missing.join(', ')}`);
+        }
+        return data.results;
+    }
 
     async function putGroupSettings(groupId, payload) {
+        if (isGroupHardwareLocked(groupId) && Object.keys(payload || {}).some(key => GROUP_HARDWARE_FIELDS.has(key))) {
+            return {
+                ok: false,
+                data: null,
+                message: 'Остановите полив группы перед изменением аппаратных настроек',
+                status: 409
+            };
+        }
         const response = await fetch(`/api/groups/${groupId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -36,6 +112,8 @@
     
     // Загрузка данных
     async function loadData() {
+        const requestGeneration = ++loadDataGeneration;
+        const versionsAtRequest = new Map(zoneStateVersions);
         try {
             const [zonesRes, groupsRes, mqttRes, rainRes, envRes] = await Promise.all([
                 api.get('/api/zones'),
@@ -44,6 +122,23 @@
                 api.get('/api/rain'),
                 api.get('/api/env')
             ]);
+            if (requestGeneration !== loadDataGeneration) return false;
+            if (!Array.isArray(zonesRes) || !Array.isArray(groupsRes)) {
+                throw new Error('Некорректный ответ зон или групп');
+            }
+            if (!responseSucceeded(mqttRes) || !Array.isArray(mqttRes.servers)
+                || !responseSucceeded(rainRes) || !rainRes.config
+                || !responseSucceeded(envRes) || !envRes.config) {
+                throw new Error('Не удалось загрузить связанные аппаратные настройки');
+            }
+            const currentStates = new Map(zonesData.map(zone => [Number(zone.id), zone.state]));
+            zonesRes.forEach(zone => {
+                const versionBefore = versionsAtRequest.get(zone.id) || 0;
+                const versionNow = zoneStateVersions.get(zone.id) || 0;
+                if (versionNow !== versionBefore && currentStates.has(Number(zone.id))) {
+                    zone.state = currentStates.get(Number(zone.id));
+                }
+            });
             zonesData = zonesRes;
             groupsData = groupsRes;
             window.mqttServers = (mqttRes && mqttRes.servers) ? mqttRes.servers : [];
@@ -58,9 +153,12 @@
             await loadEarlyOff();
             initRainUi();
             initEnvUi();
+            return true;
         } catch (error) {
+            if (requestGeneration !== loadDataGeneration) return false;
             console.error('Ошибка загрузки данных:', error);
-            showNotification('Ошибка загрузки данных', 'error');
+            showNotification(responseMessage(error, error.message || 'Ошибка загрузки данных'), 'error');
+            return false;
         }
     }
     
@@ -73,6 +171,9 @@
             const row = document.createElement('tr');
             row.className = 'zone-row';
             row.dataset.zoneId = zone.id;
+            const hardwareLocked = isZoneHardwareLocked(zone.id);
+            const hardwareDisabled = hardwareLocked ? 'disabled' : '';
+            const hardwareTitle = hardwareLocked ? 'Остановите зону перед изменением аппаратной конфигурации' : '';
             
             row.innerHTML = `
                 <td><input type="checkbox" class="zone-checkbox" value="${zone.id}" onchange="updateSelectedCount()"></td>
@@ -115,7 +216,7 @@
                            min="1" max="240" onchange="(function(inp){ let v=parseInt(inp.value||'0'); if(isNaN(v)||v<1)v=1; if(v>240)v=240; inp.value=v; updateZone(${zone.id}, 'duration', v); })(this)">
                 </td>
                 <td>
-                    <select class="zone-group" onchange="updateZone(${zone.id}, 'group_id', this.value)">
+                    <select class="zone-group" ${hardwareDisabled} title="${hardwareTitle}" onchange="updateZone(${zone.id}, 'group_id', this.value)">
                         ${groupsData.map(group => 
                             (group.id === 999 ? `<option value="999" ${zone.group_id == 999 ? 'selected' : ''}>БЕЗ ПОЛИВА</option>` :
                             `<option value="${group.id}" ${zone.group_id == group.id ? 'selected' : ''}>${escapeHtml(group.name)}</option>`)
@@ -123,11 +224,11 @@
                     </select>
                 </td>
                 <td>
-                    <input type="text" class="zone-topic" value="${escapeHtml(zone.topic || '')}" 
+                    <input type="text" class="zone-topic" value="${escapeHtml(zone.topic || '')}" ${hardwareDisabled} title="${hardwareTitle}"
                            placeholder="zone/1" onchange="updateZone(${zone.id}, 'topic', this.value)">
                 </td>
                 <td>
-                    <select class="zone-mqtt" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
+                    <select class="zone-mqtt" ${hardwareDisabled} title="${hardwareTitle}" onchange="updateZone(${zone.id}, 'mqtt_server_id', this.value)">
                         <option value="" ${zone.mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
                         ${window.mqttServers.map(s => `<option value="${s.id}" ${String(zone.mqtt_server_id||'')===String(s.id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                     </select>
@@ -151,7 +252,7 @@
                 <td>
                     <div class="zone-actions">
                         <button class="start-btn" onclick="toggleZone(${zone.id})">${zone.state === 'on' ? '⏹️' : '▶️'}</button>
-                        <button class="delete-btn" onclick="deleteZone(${zone.id})">🗑️</button>
+                        <button class="delete-btn" ${hardwareDisabled} title="${hardwareTitle || 'Удалить зону'}" onclick="deleteZone(${zone.id})">🗑️</button>
                     </div>
                 </td>
             `;
@@ -188,8 +289,11 @@
             card.className = 'group-card';
             card.dataset.groupId = group.id;
             card.style.position = 'relative';
+            const hardwareLocked = isGroupHardwareLocked(group.id);
+            const hardwareDisabled = hardwareLocked ? 'disabled' : '';
+            const hardwareTitle = hardwareLocked ? 'Остановите полив группы перед изменением аппаратной конфигурации' : '';
             card.innerHTML = `
-                <button class="delete-btn" title="Удалить группу" onclick="deleteGroup(${group.id})">✖</button>
+                <button class="delete-btn" ${hardwareDisabled} title="${hardwareTitle || 'Удалить группу'}" onclick="deleteGroup(${group.id})">✖</button>
                 <div class="group-head-grid">
                     <div>
                         <label style="display:block; color:#555; font-weight:500; margin-bottom:4px;">Имя группы</label>
@@ -204,9 +308,9 @@
                     </div>
                     <div class="toggle-grid">
                         <div class="toggle-row"><input type="checkbox" class="switch group-use-rain ${(!window.rainConfig || !window.rainConfig.enabled)?'blocked-off':''}" ${(window.rainConfig && window.rainConfig.enabled && group.use_rain_sensor)?'checked':''} ${(!window.rainConfig || !window.rainConfig.enabled)?'data-blocked="1"':''} title="${(!window.rainConfig || !window.rainConfig.enabled)?'Глобальный датчик дождя выключен':'Использовать датчик дождя'}" onchange="toggleGroupUseRain(${group.id}, this.checked)" onclick="if(this.getAttribute('data-blocked')==='1'){ event.preventDefault(); showNotification('Нельзя включить датчик дождя для группы: глобальный датчик дождя выключен', 'warning'); }"><label style="margin-left:6px; color:#222;">Использовать датчик дождя</label></div>
-                        <div class="toggle-row"><input type="checkbox" class="switch group-use-mv" ${group.use_master_valve ? 'checked' : ''} onchange="toggleGroupUseMaster(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать мастер клапан</label></div>
-                        <div class="toggle-row"><input type="checkbox" class="switch group-use-pressure" ${group.use_pressure_sensor ? 'checked' : ''} onchange="toggleGroupUsePressure(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать датчик давления</label></div>
-                        <div class="toggle-row"><input type="checkbox" class="switch group-use-water" ${group.use_water_meter ? 'checked' : ''} onchange="toggleGroupUseWater(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать счётчик воды</label></div>
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-mv" ${group.use_master_valve ? 'checked' : ''} ${hardwareDisabled} title="${hardwareTitle}" onchange="toggleGroupUseMaster(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать мастер клапан</label></div>
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-pressure" ${group.use_pressure_sensor ? 'checked' : ''} ${hardwareDisabled} title="${hardwareTitle}" onchange="toggleGroupUsePressure(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать датчик давления</label></div>
+                        <div class="toggle-row"><input type="checkbox" class="switch group-use-water" ${group.use_water_meter ? 'checked' : ''} ${hardwareDisabled} title="${hardwareTitle}" onchange="toggleGroupUseWater(${group.id}, this.checked)"><label style="margin-left:6px; color:#222;">Использовать счётчик воды</label></div>
                     </div>
                 </div>
                 <div style="padding: 0 10px 10px 10px; display:flex; flex-wrap:wrap; gap:8px;">
@@ -226,21 +330,22 @@
                         <div class="modal-form ${group.use_master_valve ? '' : 'dim'}" aria-hidden="false">
                             <div class="form-group">
                                 <label>MQTT сервер</label>
-                                <select id="mv-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.master_mqtt_server_id||'')?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+                                <select id="mv-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
+                                    <option value="" ${group.master_mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.master_mqtt_server_id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>Топик MQTT мастер-клапана</label>
-                                <input type="text" id="mv-topic-${group.id}" value="${(group.master_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-mr6c_101/controls/K1" oninput="scheduleAutoSave(${group.id})" onblur="saveGroupMasterTopic(${group.id})">
+                                <input type="text" id="mv-topic-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" value="${(group.master_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-mr6c_101/controls/K1" oninput="scheduleAutoSave(${group.id})" onblur="saveGroupMasterTopic(${group.id})">
                             </div>
                             <div class="form-group">
                                 <label>Удержание мастера после стопа (сек)</label>
-                                <input type="number" min="1" max="3600" id="mv-delay-${group.id}" value="${(group.master_close_delay_sec ?? 60)}" onblur="saveGroupMasterCloseDelay(${group.id})">
+                                <input type="number" min="1" max="3600" id="mv-delay-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" value="${(group.master_close_delay_sec ?? 60)}" onblur="saveGroupMasterCloseDelay(${group.id})">
                             </div>
                             <div class="form-group">
                                 <label>Режим</label>
-                                <select id="mv-mode-${group.id}" onchange="saveGroupMasterMode(${group.id})">
+                                <select id="mv-mode-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="saveGroupMasterMode(${group.id})">
                                     <option value="NC" ${((group.master_mode||'NC')==='NC')?'selected':''}>NC (нормально закрыт)</option>
                                     <option value="NO" ${((group.master_mode||'NC')==='NO')?'selected':''}>NO (нормально открыт)</option>
                                 </select>
@@ -261,17 +366,18 @@
                         <div class="modal-form ${group.use_pressure_sensor ? '' : 'dim'}">
                             <div class="form-group">
                                 <label>MQTT сервер</label>
-                                <select id="pressure-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.pressure_mqtt_server_id||'')?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+                                <select id="pressure-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
+                                    <option value="" ${group.pressure_mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.pressure_mqtt_server_id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>Топик MQTT датчика давления</label>
-                                <input type="text" id="pressure-topic-${group.id}" value="${(group.pressure_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-ms_10/controls/pressure" oninput="scheduleAutoSave(${group.id})">
+                                <input type="text" id="pressure-topic-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" value="${(group.pressure_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-ms_10/controls/pressure" oninput="scheduleAutoSave(${group.id})">
                             </div>
                             <div class="form-group">
                                 <label>Единицы измерения</label>
-                                <select id="pressure-unit-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                <select id="pressure-unit-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
                                     <option value="bar" ${(group.pressure_unit||'bar')==='bar'?'selected':''}>Бар</option>
                                     <option value="kpa" ${(group.pressure_unit||'bar')==='kpa'?'selected':''}>кПа</option>
                                     <option value="psi" ${(group.pressure_unit||'bar')==='psi'?'selected':''}>PSI</option>
@@ -293,17 +399,18 @@
                         <div class="modal-form ${group.use_water_meter ? '' : 'dim'}">
                             <div class="form-group">
                                 <label>MQTT сервер</label>
-                                <select id="water-server-${group.id}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.water_mqtt_server_id||'')?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+                                <select id="water-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleWaterAutoSave(${group.id})">
+                                    <option value="" ${group.water_mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.water_mqtt_server_id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>Топик MQTT счётчика воды</label>
-                                <input type="text" id="water-topic-${group.id}" value="${(group.water_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-water/controls/meter" oninput="scheduleAutoSave(${group.id})">
+                                <input type="text" id="water-topic-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" value="${(group.water_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-water/controls/meter" oninput="scheduleWaterAutoSave(${group.id})">
                             </div>
                             <div class="form-group">
                                 <label>Величина импульса</label>
-                                <select id="water-pulse-${group.id}" onchange="scheduleAutoSave(${group.id})">
+                                <select id="water-pulse-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleWaterAutoSave(${group.id})">
                                     <option value="1l" ${(group.water_pulse_size||'1l')==='1l'?'selected':''}>1 л</option>
                                     <option value="10l" ${(group.water_pulse_size||'1l')==='10l'?'selected':''}>10 л</option>
                                     <option value="100l" ${(group.water_pulse_size||'1l')==='100l'?'selected':''}>100 л</option>
@@ -318,9 +425,9 @@
                                 <div class="water-digits" id="water-digits-${group.id}" aria-label="Показание счётчика">
                                     ${[0,1,2,3,4,5,6,7].map(i=>`
                                     <div class="digit-col" data-i="${i}">
-                                        <button type="button" class="btn-small" onclick="waterIncDigit(${group.id}, ${i}, 1)">+</button>
+                                        <button type="button" class="btn-small" ${hardwareDisabled} title="${hardwareTitle}" onclick="waterIncDigit(${group.id}, ${i}, 1)">+</button>
                                         <div class="digit" id="water-digit-${group.id}-${i}">0</div>
-                                        <button type="button" class="btn-small" onclick="waterIncDigit(${group.id}, ${i}, -1)">−</button>
+                                        <button type="button" class="btn-small" ${hardwareDisabled} title="${hardwareTitle}" onclick="waterIncDigit(${group.id}, ${i}, -1)">−</button>
                                     </div>`).join('')}
                                 </div>
                                 
@@ -354,6 +461,7 @@
     
     // Загрузка селекторов групп
     function loadGroupSelectors() {
+        const nullOption = '<option value="">Не выбран</option>';
         const selectors = ['bulkGroup', 'zoneGroup'];
         selectors.forEach(selectorId => {
             const selector = document.getElementById(selectorId);
@@ -372,13 +480,13 @@
         // Rain server selector
         const rs = document.getElementById('rain-server');
         if (rs) {
-            rs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+            rs.innerHTML = nullOption + (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         }
         // Env servers
         const ets = document.getElementById('env-temp-server');
-        if (ets) ets.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+        if (ets) ets.innerHTML = nullOption + (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         const ehs = document.getElementById('env-hum-server');
-        if (ehs) ehs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+        if (ehs) ehs.innerHTML = nullOption + (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
     }
     
     // Обновление счетчика зон
@@ -413,7 +521,7 @@
             document.getElementById('rain-type').value = (cfg.type==='NC'?'NC':'NO');
             document.getElementById('rain-topic').value = cfg.topic || '';
             const rs = document.getElementById('rain-server');
-            if (rs && cfg.server_id) rs.value = String(cfg.server_id);
+            if (rs) rs.value = cfg.server_id == null ? '' : String(cfg.server_id);
             try{ updateGlobalToggleTitles(); }catch(e){}
         } catch {}
     }
@@ -438,15 +546,31 @@
             }
             const resp = await fetch('/api/rain', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled, type, topic, server_id})});
             const data = await resp.json();
-            if (data && data.success) {
-                showNotification('Конфигурация датчика дождя сохранена', 'success');
-                // Если глобально выключили — запретим переключатели у групп
-                try{ window.rainConfig = window.rainConfig || {}; window.rainConfig.enabled = enabled; renderGroupsGrid(); }catch(e){}
+            if (resp.ok && data && data.success && data.config && Array.isArray(data.groups)) {
+                // The API applies global policy to every group.  Its returned
+                // snapshot is authoritative; never infer per-group flags from
+                // the requested global toggle.
+                window.rainConfig = data.config;
+                const rainFlags = new Map(
+                    data.groups.map(group => [Number(group.id), group.use_rain_sensor])
+                );
+                groupsData.forEach(group => {
+                    if (!rainFlags.has(Number(group.id))) return;
+                    const rawFlag = rainFlags.get(Number(group.id));
+                    group.use_rain_sensor = rawFlag === true || rawFlag === 1
+                        || String(rawFlag).trim().toLowerCase() === 'true'
+                        || String(rawFlag).trim() === '1';
+                });
+                initRainUi();
+                renderGroupsGrid();
                 try{ updateGlobalToggleTitles(); }catch(e){}
+                showNotification('Конфигурация датчика дождя сохранена', 'success');
             } else {
-                showNotification('Не удалось сохранить конфигурацию', 'error');
+                initRainUi();
+                showNotification((data && (data.message || data.error)) || 'Не удалось сохранить конфигурацию', 'error');
             }
         } catch (e) {
+            try{ initRainUi(); }catch(_e){}
             showNotification('Ошибка сохранения конфигурации', 'error');
         }
     }
@@ -454,12 +578,14 @@
     function initEnvUi() {
         try {
             const cfg = window.envConfig || { temp:{enabled:false}, hum:{enabled:false} };
+            const tempServerId = cfg.temp ? cfg.temp.server_id : null;
+            const humServerId = cfg.hum ? cfg.hum.server_id : null;
             document.getElementById('env-temp-enabled').checked = !!(cfg.temp && cfg.temp.enabled);
             document.getElementById('env-temp-topic').value = (cfg.temp && cfg.temp.topic) || '';
-            if (cfg.temp && cfg.temp.server_id) document.getElementById('env-temp-server').value = String(cfg.temp.server_id);
+            document.getElementById('env-temp-server').value = tempServerId == null ? '' : String(tempServerId);
             document.getElementById('env-hum-enabled').checked = !!(cfg.hum && cfg.hum.enabled);
             document.getElementById('env-hum-topic').value = (cfg.hum && cfg.hum.topic) || '';
-            if (cfg.hum && cfg.hum.server_id) document.getElementById('env-hum-server').value = String(cfg.hum.server_id);
+            document.getElementById('env-hum-server').value = humServerId == null ? '' : String(humServerId);
             try{ updateGlobalToggleTitles(); }catch(e){}
         } catch {}
     }
@@ -489,7 +615,7 @@
             const payload = { use_master_valve: !!enabled };
             if (topic) payload.master_mqtt_topic = topic;
             if (modeEl && modeEl.value) payload.master_mode = modeEl.value;
-            if (serverEl && serverEl.value) payload.master_mqtt_server_id = parseInt(serverEl.value);
+            if (serverEl) payload.master_mqtt_server_id = serverEl.value ? parseInt(serverEl.value) : null;
             const result = await putGroupSettings(groupId, payload);
             if (!result.ok) {
                 showNotification(result.message || 'Не удалось сохранить настройки мастер-клапана', 'error');
@@ -500,7 +626,7 @@
                     groupsData[gi].use_master_valve = !!enabled;
                     if (topic) groupsData[gi].master_mqtt_topic = topic;
                     if (modeEl && modeEl.value) groupsData[gi].master_mode = modeEl.value;
-                    if (serverEl && serverEl.value) groupsData[gi].master_mqtt_server_id = parseInt(serverEl.value);
+                    if (serverEl) groupsData[gi].master_mqtt_server_id = serverEl.value ? parseInt(serverEl.value) : null;
                 }
                 showNotification('Настройки мастер-клапана сохранены', 'success');
             }
@@ -631,14 +757,20 @@
     function closeMasterSettings(groupId){ closeModalById(`modal-master-${groupId}`); }
     function openPressureSettings(groupId){ openModalById(`modal-pressure-${groupId}`); }
     function closePressureSettings(groupId){ closeModalById(`modal-pressure-${groupId}`); }
+    const __waterClosing = {};
     function openWaterSettings(groupId){
         openModalById(`modal-water-${groupId}`);
         try { waterStartLive(groupId); } catch(e){}
     }
-    function closeWaterSettings(groupId){
+    async function closeWaterSettings(groupId){
+        __waterClosing[groupId] = true;
         try { waterStopLive(groupId); } catch(e){}
-        try { waterFlushSave(groupId); } catch(e){}
-        closeModalById(`modal-water-${groupId}`);
+        try {
+            const saved = await waterFlushSave(groupId, {restartLive: false});
+            if (saved === false && __waterState[groupId]?.editing) return;
+        } catch(e){}
+        finally { delete __waterClosing[groupId]; }
+        if (!__waterState[groupId]?.editing) closeModalById(`modal-water-${groupId}`);
     }
 
     // Safety: recenter on resize/orientationchange
@@ -768,6 +900,7 @@
         d = (d + delta + 10) % 10;
         el.textContent = String(d);
         waterMarkDirty(groupId);
+        scheduleWaterAutoSave(groupId);
     }
     function waterCurrentFromPulses(groupId){
         const st = __waterState[groupId] || {};
@@ -778,17 +911,33 @@
         const deltaM3 = (deltaPulses * litersPerPulse) / 1000.0;
         return Math.max(0, baseM3 + deltaM3);
     }
-    async function waterProbeOnce(groupId){
+    const __waterLiveGenerations = {};
+    async function waterProbeOnce(groupId, options = {}){
+        const generation = options.generation;
+        const isCurrent = () => generation == null || __waterLiveGenerations[groupId] === generation;
         try{
             const serverEl = document.getElementById(`water-server-${groupId}`);
             const topicEl = document.getElementById(`water-topic-${groupId}`);
             const sid = serverEl && serverEl.value ? parseInt(serverEl.value) : null;
             const topic = topicEl && topicEl.value ? topicEl.value.trim() : '';
-            if (!sid || !topic){ showNotification('Укажите MQTT сервер и MQTT-топик счётчика воды', 'warning'); return; }
-            const res = await fetch(`/api/mqtt/${sid}/probe`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: topic, duration: 1.5 })});
-            const data = await res.json();
+            if (!sid || !topic){
+                if (!options.silent) showNotification('Укажите MQTT сервер и MQTT-топик счётчика воды', 'warning');
+                return false;
+            }
+            const res = await fetch(`/api/mqtt/${sid}/probe`, {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ filter: topic, duration: 1.5 }),
+                signal: options.signal
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data || data.success === false) throw new Error(responseMessage(data, `HTTP ${res.status}`));
+            if (!isCurrent()) return false;
             const item = (data && data.items || []).find(it=> it.topic===topic);
-            if (!item){ showNotification(`Нет данных по топику: ${topic}`, 'warning'); return; }
+            if (!item){
+                if (!options.silent) showNotification(`Нет данных по топику: ${topic}`, 'warning');
+                return false;
+            }
             const pulses = parseInt((item.payload||'').replace(/[^0-9-]/g,''))||0;
             const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
             if (pulsesEl) pulsesEl.value = String(pulses);
@@ -798,35 +947,62 @@
                 const val = waterCurrentFromPulses(groupId);
                 waterSetDigits(groupId, val);
             }
-        }catch(e){ showNotification('Ошибка запроса MQTT', 'error'); }
+            return true;
+        }catch(e){
+            if (e && e.name === 'AbortError') return false;
+            if (isCurrent() && !options.silent) showNotification('Ошибка запроса MQTT', 'error');
+            return false;
+        }
     }
-    function waterCancel(groupId){
-        const st = __waterState[groupId] || {};
-        __waterState[groupId].editing = false;
+    async function waterCancel(groupId){
+        if (__waterSaveTimers[groupId]) {
+            clearTimeout(__waterSaveTimers[groupId]);
+            delete __waterSaveTimers[groupId];
+        }
+        const state = __waterState[groupId] = __waterState[groupId] || {};
+        const baseValueM3 = Number(state.baseValueM3 || 0);
+        const basePulses = Number(state.basePulses || 0);
+        const hadInFlightSave = Boolean(__waterSaveInFlight[groupId]);
+        const hadPendingRestore = Boolean(__waterCalibrationOverrides[groupId]);
+        const revision = (__waterSaveRevisions[groupId] || 0) + 1;
+        __waterSaveRevisions[groupId] = revision;
+        if (hadInFlightSave || hadPendingRestore) {
+            // The old request may already be on the wire.  Invalidate its UI
+            // result and serialize an explicit compensating write after it.
+            __waterCalibrationOverrides[groupId] = {revision, baseValueM3, basePulses};
+        } else {
+            delete __waterCalibrationOverrides[groupId];
+        }
+        state.editing = false;
+        waterStopLive(groupId);
         const actions = document.getElementById(`water-actions-${groupId}`);
         if (actions) actions.style.display = 'none';
-        waterSetDigits(groupId, Number(st.baseValueM3||0));
-    }
-    async function waterAutoSave(groupId){
-        try{
-            const newVal = waterDigitsToValue(groupId);
-            const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
-            const curP = pulsesEl ? parseInt(pulsesEl.value||'0')||0 : (__waterState[groupId]?.currentPulses||0);
-            const payload = { water_base_value_m3: newVal, water_base_pulses: curP };
-            const result = await putGroupSettings(groupId, payload);
-            if (!result.ok){ return; }
-            __waterState[groupId] = __waterState[groupId] || {};
-            __waterState[groupId].baseValueM3 = newVal;
-            __waterState[groupId].basePulses = curP;
-            __waterState[groupId].editing = false;
-        }catch(e){}
+        waterSetDigits(groupId, baseValueM3);
+        let restored = true;
+        if (hadInFlightSave || hadPendingRestore) {
+            restored = await waterFlushSave(groupId, {restartLive: false});
+            if (!restored) {
+                state.editing = true;
+                if (actions) actions.style.display = 'flex';
+            }
+        }
+        if (waterModalIsOpen(groupId)) waterStartLive(groupId);
+        return restored;
     }
     const __waterSaveTimers = {};
+    const __waterSaveRevisions = {};
+    const __waterSaveInFlight = {};
+    const __waterCalibrationOverrides = {};
     function scheduleWaterAutoSave(groupId){
+        // A response for the previous topic/pulse snapshot must never update
+        // the calibration UI after the user has edited it.
+        waterStopLive(groupId);
+        delete __waterCalibrationOverrides[groupId];
+        __waterSaveRevisions[groupId] = (__waterSaveRevisions[groupId] || 0) + 1;
         if (__waterSaveTimers[groupId]) clearTimeout(__waterSaveTimers[groupId]);
-        __waterSaveTimers[groupId] = setTimeout(()=>{ waterAutoSave(groupId); }, 600);
+        __waterSaveTimers[groupId] = setTimeout(()=>{ waterFlushSave(groupId); }, 600);
     }
-    async function waterFlushSave(groupId){
+    async function performWaterSave(groupId, revision){
         try{
             const wServerSel = document.getElementById(`water-server-${groupId}`);
             const wServer = wServerSel ? parseInt(wServerSel.value) : null;
@@ -838,8 +1014,87 @@
                 water_mqtt_topic: wTopic,
                 water_pulse_size: wPulse
             };
-            await putGroupSettings(groupId, payload);
-        }catch(e){ /* no-op */ }
+            const state = __waterState[groupId] || {};
+            const calibrationOverride = __waterCalibrationOverrides[groupId];
+            const hasCalibrationOverride = Boolean(
+                calibrationOverride && calibrationOverride.revision === revision
+            );
+            let newValue = null;
+            let currentPulses = null;
+            const editing = state.editing === true || hasCalibrationOverride;
+            if (editing) {
+                if (hasCalibrationOverride) {
+                    newValue = Number(calibrationOverride.baseValueM3 || 0);
+                    currentPulses = Number(calibrationOverride.basePulses || 0);
+                } else {
+                    newValue = waterDigitsToValue(groupId);
+                    const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
+                    const rawPulses = pulsesEl ? String(pulsesEl.value || '').trim() : '';
+                    currentPulses = rawPulses
+                        ? (parseInt(rawPulses, 10) || 0)
+                        : Number(state.currentPulses ?? state.basePulses ?? 0);
+                }
+                payload.water_base_value_m3 = newValue;
+                payload.water_base_pulses = currentPulses;
+            }
+            const result = await putGroupSettings(groupId, payload);
+            if (!result || !result.ok) {
+                if ((__waterSaveRevisions[groupId] || 0) === revision) {
+                    showNotification((result && result.message) || 'Не удалось сохранить настройки счётчика воды', 'error');
+                }
+                return false;
+            }
+            if (editing && (__waterSaveRevisions[groupId] || 0) === revision) {
+                state.baseValueM3 = newValue;
+                state.basePulses = currentPulses;
+                state.editing = false;
+                if (hasCalibrationOverride) delete __waterCalibrationOverrides[groupId];
+                const actions = document.getElementById(`water-actions-${groupId}`);
+                if (actions) actions.style.display = 'none';
+            }
+            const group = groupsData.find(item => Number(item.id) === Number(groupId));
+            if (group && (__waterSaveRevisions[groupId] || 0) === revision) Object.assign(group, payload);
+            return true;
+        }catch(e){
+            if ((__waterSaveRevisions[groupId] || 0) === revision) {
+                showNotification('Ошибка сохранения настроек счётчика воды', 'error');
+            }
+            return false;
+        }
+    }
+    async function waterFlushSave(groupId, options = {}){
+        const restartLive = options.restartLive !== false;
+        if (__waterSaveTimers[groupId]) {
+            clearTimeout(__waterSaveTimers[groupId]);
+            delete __waterSaveTimers[groupId];
+        }
+        const revision = __waterSaveRevisions[groupId] || 0;
+        const active = __waterSaveInFlight[groupId];
+        if (active) {
+            const activeResult = await active.promise;
+            if ((__waterSaveRevisions[groupId] || 0) !== active.revision) {
+                return waterFlushSave(groupId, options);
+            }
+            if (activeResult && restartLive && !__waterClosing[groupId] && waterModalIsOpen(groupId)) {
+                waterStartLive(groupId);
+            }
+            return activeResult;
+        }
+        const entry = {revision: revision, promise: performWaterSave(groupId, revision)};
+        __waterSaveInFlight[groupId] = entry;
+        let result;
+        try {
+            result = await entry.promise;
+        } finally {
+            if (__waterSaveInFlight[groupId] === entry) delete __waterSaveInFlight[groupId];
+        }
+        if ((__waterSaveRevisions[groupId] || 0) !== revision) {
+            return waterFlushSave(groupId, options);
+        }
+        if (result && restartLive && !__waterClosing[groupId] && waterModalIsOpen(groupId)) {
+            waterStartLive(groupId);
+        }
+        return result;
     }
     function waterInitForGroup(group){
         __waterState[group.id] = __waterState[group.id] || {};
@@ -852,21 +1107,53 @@
         setTimeout(()=>{ try{ waterSetDigits(group.id, __waterState[group.id].baseValueM3); }catch(e){} }, 0);
     }
     const __waterLiveTimers = {};
+    const __waterLiveControllers = {};
+    const __waterLiveInFlight = {};
+    function waterModalIsOpen(groupId){
+        const modal = document.getElementById(`modal-water-${groupId}`);
+        return !!modal && modal.style.display !== 'none';
+    }
     function waterStartLive(groupId){
         waterStopLive(groupId);
-        const fn = async ()=>{
-            if (__waterState[groupId]?.editing) return; // don't live-update while editing
-            await waterProbeOnce(groupId);
-            if (!__waterState[groupId]?.editing){
-                const val = waterCurrentFromPulses(groupId);
-                waterSetDigits(groupId, val);
+        const generation = (__waterLiveGenerations[groupId] || 0) + 1;
+        __waterLiveGenerations[groupId] = generation;
+        const scheduleNext = () => {
+            if (__waterLiveGenerations[groupId] !== generation) return;
+            __waterLiveTimers[groupId] = setTimeout(run, 3000);
+        };
+        const run = async ()=>{
+            if (__waterLiveGenerations[groupId] !== generation) return;
+            if (__waterLiveInFlight[groupId] || __waterState[groupId]?.editing) {
+                scheduleNext();
+                return;
+            }
+            const controller = new AbortController();
+            __waterLiveControllers[groupId] = controller;
+            __waterLiveInFlight[groupId] = true;
+            try {
+                await waterProbeOnce(groupId, {
+                    generation,
+                    signal: controller.signal,
+                    silent: true
+                });
+            } finally {
+                if (__waterLiveGenerations[groupId] === generation) {
+                    __waterLiveInFlight[groupId] = false;
+                    delete __waterLiveControllers[groupId];
+                    scheduleNext();
+                }
             }
         };
-        __waterLiveTimers[groupId] = setInterval(fn, 3000);
-        fn();
+        run();
     }
     function waterStopLive(groupId){
-        if (__waterLiveTimers[groupId]){ clearInterval(__waterLiveTimers[groupId]); delete __waterLiveTimers[groupId]; }
+        __waterLiveGenerations[groupId] = (__waterLiveGenerations[groupId] || 0) + 1;
+        if (__waterLiveTimers[groupId]){ clearTimeout(__waterLiveTimers[groupId]); delete __waterLiveTimers[groupId]; }
+        if (__waterLiveControllers[groupId]) {
+            __waterLiveControllers[groupId].abort();
+            delete __waterLiveControllers[groupId];
+        }
+        delete __waterLiveInFlight[groupId];
     }
 
     async function saveGroupMasterTopic(groupId) {
@@ -1034,6 +1321,11 @@
     
     // Обновление зоны (отметка как измененной)
     function updateZone(zoneId, field, value) {
+        if (isZoneHardwareLocked(zoneId) && ZONE_HARDWARE_FIELDS.has(field)) {
+            showNotification('Остановите зону перед изменением аппаратной конфигурации', 'warning');
+            renderZonesTable();
+            return;
+        }
         const row = document.querySelector(`tr[data-zone-id="${zoneId}"]`);
         if (row) {
             row.classList.add('modified');
@@ -1059,10 +1351,15 @@
             
             const payload = {
                 name: nameInput.value,
-                duration: parseInt(durationInput.value),
+                duration: parseZoneDuration(durationInput.value),
                 group_id: parseInt(groupSelect.value),
                 icon: zone.icon
             };
+            if (payload.duration === null) {
+                showNotification('Длительность должна быть целым числом от 1 до 240 минут', 'error');
+                durationInput.value = zone.duration;
+                return;
+            }
             if (topicInput) {
                 payload.topic = topicInput.value;
             }
@@ -1071,21 +1368,31 @@
                 payload.mqtt_server_id = val === '' ? null : parseInt(val);
             }
 
-            // Проверка конфликтов (как было)
-            try {
-                const r = await fetch('/api/zones/check-duration-conflicts-bulk', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ changes: [{ zone_id: zoneId, new_duration: payload.duration }] })
-                });
-                const result = await r.json();
-                const zres = result && result.results && result.results[String(zoneId)];
+            const hardwareChanged = Number(zone.group_id) !== Number(payload.group_id)
+                || String(zone.topic || '') !== String(payload.topic || '')
+                || Number(zone.mqtt_server_id || 0) !== Number(payload.mqtt_server_id || 0);
+            if (hardwareChanged && isZoneHardwareLocked(zoneId)) {
+                showNotification('Остановите зону перед изменением аппаратной конфигурации', 'warning');
+                renderZonesTable();
+                return;
+            }
+
+            // Conflict service is required only when duration actually changes.
+            if (Number(zone.duration) !== Number(payload.duration)) {
+                let results;
+                try {
+                    results = await checkDurationConflicts([{ zone_id: zoneId, new_duration: payload.duration }]);
+                } catch (err) {
+                    showNotification(err.message || 'Не удалось проверить конфликты. Изменение не сохранено.', 'error');
+                    return;
+                }
+                const zres = results[String(zoneId)];
                 if (zres && zres.has_conflicts) {
                     showDurationConflictModal(zres.conflicts);
                     showNotification('Обнаружены конфликты программ. Изменение не сохранено.', 'warning');
                     return;
                 }
-            } catch (err) {}
+            }
 
             const result = await api.put(`/api/zones/${zoneId}`, payload);
             if (result && result.success === false) {
@@ -1107,6 +1414,10 @@
     
     // Удаление зоны
     async function deleteZone(zoneId) {
+        if (isZoneHardwareLocked(zoneId)) {
+            showNotification('Остановите зону перед удалением', 'warning');
+            return;
+        }
         if (!confirm(`Удалить зону ${zoneId}?`)) return;
         
         try {
@@ -1121,6 +1432,14 @@
                     || `Ошибка удаления зоны (HTTP ${response.status})`;
                 showNotification(message, 'error');
                 return;
+            }
+
+            if (response.status !== 204) {
+                const result = await response.json().catch(() => null);
+                if (result && result.success === false) {
+                    showNotification(responseMessage(result, 'Ошибка удаления зоны'), 'error');
+                    return;
+                }
             }
 
             // A successful DELETE intentionally returns 204 with an empty body.
@@ -1192,27 +1511,29 @@
                 return;
             }
             
+            // Reserve a version before the request so a later SSE event (or a
+            // second control request) remains authoritative over this reply.
+            const stateVersionAtRequest = (zoneStateVersions.get(zoneId) || 0) + 1;
+            zoneStateVersions.set(zoneId, stateVersionAtRequest);
+
             // MQTT: публикуем '1' и ждём подтверждения через zones-sse
             const response = await api.post(`/api/zones/${zoneId}/mqtt/start`);
             
-            if (response.success) {
+            if (responseSucceeded(response)) {
                 showNotification(`Зона ${zoneId} запущена`, 'success');
-                
-                // Обновляем статус зоны в локальном массиве
-                const zoneIndex = zonesData.findIndex(z => z.id === zoneId);
-                if (zoneIndex !== -1) {
-                    zonesData[zoneIndex].state = 'on';
+
+                if ((zoneStateVersions.get(zoneId) || 0) === stateVersionAtRequest) {
+                    applyZoneState(zoneId, 'on', false);
+                    renderZonesTable();
+                    renderGroupsGrid();
                 }
-                
-                // Обновляем отображение
-                renderZonesTable();
                 
                 // Обновляем статус на странице статуса
                 if (window.location.pathname === '/') {
                     loadStatusData();
                 }
             } else {
-                showNotification(response.message, 'error');
+                showNotification(responseMessage(response, 'Ошибка запуска зоны'), 'error');
             }
         } catch (error) {
             console.error('Ошибка запуска зоны:', error);
@@ -1223,26 +1544,25 @@
     // Остановка зоны
     async function stopZone(zoneId) {
         try {
+            const stateVersionAtRequest = (zoneStateVersions.get(zoneId) || 0) + 1;
+            zoneStateVersions.set(zoneId, stateVersionAtRequest);
             const response = await api.post(`/api/zones/${zoneId}/mqtt/stop`);
             
-            if (response.success) {
+            if (responseSucceeded(response)) {
                 showNotification(`Зона ${zoneId} остановлена`, 'success');
-                
-                // Обновляем статус зоны в локальном массиве
-                const zoneIndex = zonesData.findIndex(z => z.id === zoneId);
-                if (zoneIndex !== -1) {
-                    zonesData[zoneIndex].state = 'off';
+
+                if ((zoneStateVersions.get(zoneId) || 0) === stateVersionAtRequest) {
+                    applyZoneState(zoneId, 'off', false);
+                    renderZonesTable();
+                    renderGroupsGrid();
                 }
-                
-                // Обновляем отображение
-                renderZonesTable();
                 
                 // Обновляем статус на странице статуса
                 if (window.location.pathname === '/') {
                     loadStatusData();
                 }
             } else {
-                showNotification(response.message, 'error');
+                showNotification(responseMessage(response, 'Ошибка остановки зоны'), 'error');
             }
         } catch (error) {
             console.error('Ошибка остановки зоны:', error);
@@ -1299,7 +1619,9 @@
             return;
         }
         
-        const selectedZones = Array.from(document.querySelectorAll('.zone-checkbox:checked')).map(cb => parseInt(cb.value));
+        const selectedZones = Array.from(document.querySelectorAll('.zone-checkbox:checked'))
+            .map(cb => parseCanonicalPositiveInt(cb.value))
+            .filter(zoneId => zoneId !== null);
         if (selectedZones.length === 0) {
             showNotification('Выберите зоны для изменения', 'warning');
             return;
@@ -1307,88 +1629,130 @@
         
         try {
             let value = null;
-            switch (action) {
-                case 'group':
-                    value = parseInt(document.getElementById('bulkGroup').value);
-                    break;
-                case 'icon':
-                    value = document.getElementById('bulkIcon').value;
-                    break;
-                case 'duration':
-                    value = parseInt(document.getElementById('bulkDuration').value);
-                    break;
-                case 'mqtt':
-                    value = parseInt(document.getElementById('bulkMqtt').value);
-                    break;
-            }
-            
-            // Действия, требующие специальных API
-            if (action === 'delete' || action === 'delphoto') {
-                for (const zoneId of selectedZones) {
-                    if (action === 'delete') {
-                        await api.delete(`/api/zones/${zoneId}`);
-                    } else {
-                        await api.delete(`/api/zones/${zoneId}/photo`);
-                    }
+            if (action === 'group') {
+                value = parseCanonicalPositiveInt(document.getElementById('bulkGroup').value);
+                if (value === null) {
+                    showNotification('Выберите корректную группу', 'error');
+                    return;
                 }
-                showNotification(`Изменения применены к ${selectedZones.length} зонам`, 'success');
-                await loadData();
+            } else if (action === 'icon') {
+                value = document.getElementById('bulkIcon').value;
+                if (!value) {
+                    showNotification('Выберите иконку', 'error');
+                    return;
+                }
+            } else if (action === 'duration') {
+                value = parseZoneDuration(document.getElementById('bulkDuration').value);
+                if (value === null) {
+                    showNotification('Длительность должна быть целым числом от 1 до 240 минут', 'error');
+                    return;
+                }
+            } else if (action === 'mqtt') {
+                value = parseCanonicalPositiveInt(document.getElementById('bulkMqtt').value);
+                if (value === null) {
+                    showNotification('Выберите корректный MQTT сервер', 'error');
+                    return;
+                }
+            }
+
+            if ((action === 'group' || action === 'mqtt' || action === 'delete')
+                && selectedZones.some(isZoneHardwareLocked)) {
+                showNotification('Остановите выбранные активные зоны перед изменением аппаратной конфигурации', 'warning');
                 return;
             }
 
-            // Массовое изменение длительности: сначала одна bulk-проверка конфликтов,
-            // затем одна транзакционная запись только для зон без конфликтов
-            if (action === 'duration') {
-                const payload = { changes: selectedZones.map(zid => ({ zone_id: zid, new_duration: parseInt(value) })) };
-                let check = null;
-                try {
-                    const r = await fetch('/api/zones/check-duration-conflicts-bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                    check = await r.json();
-                } catch(e) { check = null; }
-                const results = (check && check.results) || {};
-                const conflicted = [];
-                const okIds = [];
-                for (const zid of selectedZones) {
-                    const zr = results[String(zid)];
-                    if (zr && zr.has_conflicts) conflicted.push(zid); else okIds.push(zid);
+            // Destructive bulk actions require one explicit confirmation and
+            // report the truth of every HTTP response instead of assuming success.
+            if (action === 'delete' || action === 'delphoto') {
+                const noun = action === 'delete' ? 'зоны' : 'фотографии зон';
+                if (!confirm(`Удалить ${noun}: ${selectedZones.length}?`)) return;
+                const failedIds = [];
+                let successCount = 0;
+                for (const zoneId of selectedZones) {
+                    const url = action === 'delete'
+                        ? `/api/zones/${zoneId}`
+                        : `/api/zones/${zoneId}/photo`;
+                    try {
+                        const response = await fetch(url, { method: 'DELETE' });
+                        const result = response.status === 204
+                            ? null
+                            : await response.json().catch(() => null);
+                        if (!response.ok || (result && result.success === false)) {
+                            failedIds.push(zoneId);
+                        } else {
+                            successCount += 1;
+                        }
+                    } catch (_) {
+                        failedIds.push(zoneId);
+                    }
                 }
-                if (conflicted.length > 0) {
+                if (successCount) {
+                    showNotification(`Изменения применены к ${successCount} зонам`, failedIds.length ? 'warning' : 'success');
+                    await loadData();
+                }
+                if (failedIds.length) {
+                    showNotification(`Не удалось обработать зоны: ${failedIds.join(', ')}`, 'error');
+                }
+                return;
+            }
+
+            // A duration write is unsafe unless every selected zone received a
+            // complete, successful conflict-check result.
+            if (action === 'duration') {
+                const changes = selectedZones.map(zoneId => ({ zone_id: zoneId, new_duration: value }));
+                let results;
+                try {
+                    results = await checkDurationConflicts(changes);
+                } catch (error) {
+                    showNotification(error.message || 'Не удалось проверить конфликты. Изменения не применены.', 'error');
+                    return;
+                }
+                const conflicted = selectedZones.filter(zoneId => results[String(zoneId)].has_conflicts);
+                const okIds = selectedZones.filter(zoneId => !results[String(zoneId)].has_conflicts);
+                if (conflicted.length) {
                     showNotification(`Конфликты у зон: ${conflicted.join(', ')} — они пропущены`, 'warning');
                 }
-                if (okIds.length > 0) {
-                    const zonesPayload = okIds.map(id => ({ id, duration: parseInt(value) }));
-                    const resp = await fetch('/api/zones/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zones: zonesPayload }) });
-                    const j = await resp.json();
-                    if (!j || !j.success) {
-                        showNotification('Ошибка применения изменений', 'error');
-                    } else {
-                        showNotification(`Обновлено ${j.updated}, создано ${j.created}, ошибок ${j.failed}`, 'success');
-                    }
+                if (!okIds.length) return;
+                const zonesPayload = okIds.map(id => ({ id, duration: value }));
+                const response = await fetch('/api/zones/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ zones: zonesPayload })
+                });
+                const result = await response.json().catch(() => null);
+                if (!response.ok || !responseSucceeded(result)) {
+                    showNotification(responseMessage(result, 'Ошибка применения изменений'), 'error');
+                    return;
                 }
+                showNotification(
+                    `Обновлено ${result.updated || 0}, создано ${result.created || 0}, ошибок ${result.failed || 0}`,
+                    result.failed ? 'warning' : 'success'
+                );
                 await loadData();
                 return;
             }
 
-            // Остальные массовые операции оформляем одним импортом
             let zonesPayload = [];
-            if (action === 'group') {
-                zonesPayload = selectedZones.map(id => ({ id, group_id: parseInt(value) }));
-            } else if (action === 'icon') {
-                zonesPayload = selectedZones.map(id => ({ id, icon: value }));
-            } else if (action === 'mqtt') {
-                zonesPayload = selectedZones.map(id => ({ id, mqtt_server_id: parseInt(value) }));
-            }
-            if (zonesPayload.length > 0) {
-                const resp = await fetch('/api/zones/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zones: zonesPayload }) });
-                const j = await resp.json();
-                if (!j || !j.success) {
-                    showNotification('Ошибка применения изменений', 'error');
-                } else {
-                    showNotification(`Обновлено ${j.updated}, создано ${j.created}, ошибок ${j.failed}`, 'success');
+            if (action === 'group') zonesPayload = selectedZones.map(id => ({ id, group_id: value }));
+            else if (action === 'icon') zonesPayload = selectedZones.map(id => ({ id, icon: value }));
+            else if (action === 'mqtt') zonesPayload = selectedZones.map(id => ({ id, mqtt_server_id: value }));
+            if (zonesPayload.length) {
+                const response = await fetch('/api/zones/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ zones: zonesPayload })
+                });
+                const result = await response.json().catch(() => null);
+                if (!response.ok || !responseSucceeded(result)) {
+                    showNotification(responseMessage(result, 'Ошибка применения изменений'), 'error');
+                    return;
                 }
+                showNotification(
+                    `Обновлено ${result.updated || 0}, создано ${result.created || 0}, ошибок ${result.failed || 0}`,
+                    result.failed ? 'warning' : 'success'
+                );
                 await loadData();
             }
-            
         } catch (error) {
             console.error('Ошибка массового действия:', error);
             showNotification('Ошибка применения изменений', 'error');
@@ -1474,30 +1838,38 @@
     function closeAddGroupModal() { closeModalById('addGroupModal'); const f = document.getElementById('addGroupForm'); if (f){ f.reset(); } }
     
     // Обработчики форм
-    document.getElementById('zoneForm').addEventListener('submit', async (e) => {
+    async function createZone(e) {
         e.preventDefault();
-        
+        const duration = parseZoneDuration(document.getElementById('zoneDuration').value);
+        const groupId = parseCanonicalPositiveInt(document.getElementById('zoneGroup').value);
+        if (duration === null || groupId === null) {
+            showNotification('Проверьте длительность и группу зоны', 'error');
+            return;
+        }
         const zoneData = {
             name: document.getElementById('zoneName').value,
             icon: document.getElementById('zoneIcon').value,
-            duration: parseInt(document.getElementById('zoneDuration').value),
-            group_id: parseInt(document.getElementById('zoneGroup').value),
+            duration,
+            group_id: groupId,
             topic: document.getElementById('zoneTopic').value,
             mqtt_server_id: (window.mqttServers||[]).length === 1 ? ((window.mqttServers[0] && window.mqttServers[0].id) || null) : undefined
         };
         
         try {
-            const success = await api.post('/api/zones', zoneData);
-            if (success) {
+            const result = await api.post('/api/zones', zoneData);
+            if (responseSucceeded(result)) {
                 showNotification('Зона создана', 'success');
                 closeZoneModal();
                 await loadData();
+            } else {
+                showNotification(responseMessage(result, 'Ошибка создания зоны'), 'error');
             }
         } catch (error) {
             console.error('Ошибка создания зоны:', error);
             showNotification('Ошибка создания зоны', 'error');
         }
-    });
+    }
+    document.getElementById('zoneForm').addEventListener('submit', createZone);
     
     document.getElementById('groupForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -1506,14 +1878,20 @@
         
         try {
             if (editingGroupId) {
-                const success = await api.put(`/api/groups/${editingGroupId}`, { name: groupName });
-                if (success) {
+                const result = await api.put(`/api/groups/${editingGroupId}`, { name: groupName });
+                if (responseSucceeded(result)) {
                     showNotification('Группа обновлена', 'success');
+                } else {
+                    showNotification(responseMessage(result, 'Ошибка обновления группы'), 'error');
+                    return;
                 }
             } else {
-                const success = await api.post('/api/groups', { name: groupName });
-                if (success) {
+                const result = await api.post('/api/groups', { name: groupName });
+                if (responseSucceeded(result)) {
                     showNotification('Группа создана', 'success');
+                } else {
+                    showNotification(responseMessage(result, 'Ошибка создания группы'), 'error');
+                    return;
                 }
             }
             
@@ -1530,10 +1908,12 @@
         const name = document.getElementById('newGroupName').value || 'Новая группа';
         try {
             const res = await api.post('/api/groups', { name });
-            if (res && (res.id || res.success)) {
+            if (responseSucceeded(res) && res && (res.id || res.success)) {
                 showNotification('Группа создана', 'success');
                 closeAddGroupModal();
                 await loadData();
+            } else {
+                showNotification(responseMessage(res, 'Ошибка создания группы'), 'error');
             }
         } catch (err) {
             showNotification('Ошибка создания группы', 'error');
@@ -1579,9 +1959,11 @@
     }
 
     async function resyncZoneStates() {
+        const requestGeneration = ++zoneStateResyncGeneration;
         const versionsAtRequest = new Map(zoneStateVersions);
         const snapshot = await api.get('/api/zones');
-        if (!Array.isArray(snapshot)) return;
+        if (requestGeneration !== zoneStateResyncGeneration) return;
+        if (!Array.isArray(snapshot)) throw new Error('Некорректный ответ состояний зон');
         snapshot.forEach(zone => {
             const versionBefore = versionsAtRequest.get(zone.id) || 0;
             const versionNow = zoneStateVersions.get(zone.id) || 0;
@@ -1598,8 +1980,10 @@
         try {
             const es = new EventSource('/api/mqtt/zones-sse');
             es.onopen = () => {
+                zoneStateFeedFailed = false;
                 resyncZoneStates().catch(error => {
                     console.warn('Не удалось синхронизировать состояния зон после подключения SSE:', error);
+                    showNotification('Не удалось синхронизировать состояния зон', 'error');
                 });
             };
             es.onmessage = (ev)=>{
@@ -1607,6 +1991,12 @@
                     const data = JSON.parse(ev.data);
                     applyZoneState(data.zone_id, data.state, true);
                 }catch(e){}
+            };
+            es.onerror = () => {
+                if (!zoneStateFeedFailed) {
+                    zoneStateFeedFailed = true;
+                    showNotification('Поток состояний зон недоступен; показанные состояния могут устареть', 'warning');
+                }
             };
         } catch (e) {}
     });
@@ -1816,8 +2206,8 @@
                 name: nameInput.value
             };
             
-            const success = await api.put(`/api/groups/${groupId}`, updatedGroup);
-            if (success) {
+            const result = await api.put(`/api/groups/${groupId}`, updatedGroup);
+            if (responseSucceeded(result)) {
                 // Обновляем данные в локальном массиве
                 const groupIndex = groupsData.findIndex(g => g.id === groupId);
                 if (groupIndex !== -1) {
@@ -1832,6 +2222,8 @@
                 
                 // Обновляем только сетку групп
                 renderGroupsGrid();
+            } else {
+                showNotification(responseMessage(result, 'Ошибка сохранения группы'), 'error');
             }
         } catch (error) {
             console.error('Ошибка сохранения группы:', error);
@@ -1865,7 +2257,7 @@
             });
             
             const results = await Promise.all(savePromises);
-            const successCount = results.filter(result => result).length;
+            const successCount = results.filter(responseSucceeded).length;
             
             if (successCount === modifiedGroups.size) {
                 // Обновляем все данные в локальном массиве
@@ -1901,21 +2293,25 @@
     }
 
     async function deleteGroup(groupId) {
+        if (isGroupHardwareLocked(groupId)) {
+            showNotification('Остановите полив группы перед удалением', 'warning');
+            return;
+        }
         if (!confirm(`Удалить группу ${groupsData.find(g => g.id === groupId)?.name || groupId}?`)) {
             return;
         }
 
         try {
             const resp = await fetch(`/api/groups/${groupId}`, { method: 'DELETE' });
-            if (resp.status === 204) {
+            const result = resp.status === 204 ? null : await resp.json().catch(() => null);
+            if (resp.ok && responseSucceeded(result === null ? true : result)) {
                 showNotification('Группа удалена', 'success');
                 groupsData = groupsData.filter(g => g.id !== groupId);
                 modifiedGroups.delete(groupId);
                 renderGroupsGrid();
                 await loadData(); // Перезагружаем все данные, чтобы обновить счетчик зон
             } else {
-                const error = await resp.json().catch(() => ({}));
-                showNotification(error.message || 'Ошибка удаления группы', 'error');
+                showNotification(responseMessage(result, 'Ошибка удаления группы'), 'error');
             }
         } catch (error) {
             console.error('Ошибка удаления группы:', error);
@@ -1924,8 +2320,12 @@
     }
     
     function encodeCSVCell(value) {
-        const text = value == null ? '' : String(value);
-        return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+        let text = value == null ? '' : String(value);
+        // Spreadsheet programs execute cells beginning with formula sigils.
+        // Prefix the original value before normal RFC 4180 quoting.
+        if (/^[\u0000-\u0020]*[=+\-@]/.test(text)) text = "'" + text;
+        const needsQuotes = text.includes('"') || text.includes(',') || text.includes('\r') || text.includes('\n');
+        return needsQuotes ? `"${text.replace(/"/g, '""')}"` : text;
     }
 
     function parseCSV(text) {
@@ -2011,10 +2411,10 @@
     
     // Обработка импорта CSV файла
     async function handleCSVImport(event) {
-        const file = event.target.files[0];
-        if (!file) return;
-        
+        const input = event.currentTarget || event.target;
         try {
+            const file = input && input.files ? input.files[0] : null;
+            if (!file) return;
             const text = await file.text();
             const rows = parseCSV(text).filter(row => row.some(cell => cell.trim()));
             if (rows.length === 0) {
@@ -2032,8 +2432,13 @@
                 showNotification('Неверный формат файла. Должен быть столбец id', 'error');
                 return;
             }
+            if (new Set(headers).size !== headers.length) {
+                showNotification('Заголовки CSV не должны повторяться', 'error');
+                return;
+            }
             
             const zonesToImport = [];
+            const seenIds = new Set();
             for (let i = 1; i < rows.length; i++) {
                 const values = rows[i];
                 const get = (key) => {
@@ -2042,20 +2447,76 @@
                 };
                 const idStr = get('id');
                 if (!idStr) continue;
-                const zone = { id: parseInt(idStr,10) };
+                const zoneId = parseCanonicalPositiveInt(idStr);
+                if (zoneId === null) throw new Error(`Строка ${i + 1}: id должен быть каноническим положительным целым числом`);
+                if (seenIds.has(zoneId)) throw new Error(`Строка ${i + 1}: повторяющийся id ${zoneId}`);
+                seenIds.add(zoneId);
+                const zone = { id: zoneId };
                 const name = get('name'); if (name) zone.name = name;
                 const icon = get('icon'); if (icon) zone.icon = icon;
-                const dur = get('duration'); if (dur) zone.duration = parseInt(dur,10);
-                const gid = get('group_id'); if (gid) zone.group_id = parseInt(gid,10);
-                const state = get('state'); if (state) zone.state = state;
+                const dur = get('duration');
+                if (dur) {
+                    zone.duration = parseZoneDuration(dur);
+                    if (zone.duration === null) throw new Error(`Строка ${i + 1}: duration должна быть целым числом от 1 до 240`);
+                }
+                const gid = get('group_id');
+                if (gid) {
+                    zone.group_id = parseCanonicalPositiveInt(gid);
+                    if (zone.group_id === null) throw new Error(`Строка ${i + 1}: некорректный group_id`);
+                }
+                // state is exported for diagnostics, but is never imported:
+                // DB state is authoritative and follows confirmed hardware events.
                 const topic = get('topic'); if (topic) zone.topic = topic;
-                const mqtt = get('mqtt_server_id'); if (mqtt) zone.mqtt_server_id = parseInt(mqtt,10);
+                const mqtt = get('mqtt_server_id');
+                if (mqtt) {
+                    zone.mqtt_server_id = parseCanonicalPositiveInt(mqtt);
+                    if (zone.mqtt_server_id === null) throw new Error(`Строка ${i + 1}: некорректный mqtt_server_id`);
+                }
                 zonesToImport.push(zone);
             }
             
             if (zonesToImport.length === 0) {
                 showNotification('Файл не содержит данных для импорта', 'warning');
                 return;
+            }
+
+            const activeHardwareChanges = zonesToImport.filter(zone => {
+                const current = zonesData.find(item => Number(item.id) === Number(zone.id));
+                if (!current || !isZoneHardwareLocked(zone.id)) return false;
+                return (zone.group_id !== undefined && Number(zone.group_id) !== Number(current.group_id))
+                    || (zone.topic !== undefined && String(zone.topic) !== String(current.topic || ''))
+                    || (zone.mqtt_server_id !== undefined
+                        && Number(zone.mqtt_server_id) !== Number(current.mqtt_server_id || 0));
+            });
+            if (activeHardwareChanges.length) {
+                showNotification(
+                    `Остановите активные зоны перед изменением аппаратной конфигурации: ${activeHardwareChanges.map(zone => zone.id).join(', ')}`,
+                    'warning'
+                );
+                return;
+            }
+
+            const durationChanges = zonesToImport
+                .filter(zone => {
+                    const current = zonesData.find(item => Number(item.id) === Number(zone.id));
+                    return current && zone.duration !== undefined && Number(current.duration) !== Number(zone.duration);
+                })
+                .map(zone => ({ zone_id: zone.id, new_duration: zone.duration }));
+            if (durationChanges.length) {
+                let results;
+                try {
+                    results = await checkDurationConflicts(durationChanges);
+                } catch (error) {
+                    showNotification(error.message || 'Не удалось проверить конфликты. Импорт отменён.', 'error');
+                    return;
+                }
+                const conflicted = durationChanges.filter(change => results[String(change.zone_id)].has_conflicts);
+                if (conflicted.length) {
+                    const first = results[String(conflicted[0].zone_id)];
+                    showDurationConflictModal(first.conflicts || []);
+                    showNotification(`Импорт отменён: конфликты длительности у зон ${conflicted.map(item => item.zone_id).join(', ')}`, 'warning');
+                    return;
+                }
             }
             
             if (confirm(`Импортировать ${zonesToImport.length} зон?`)) {
@@ -2064,11 +2525,12 @@
             
         } catch (error) {
             console.error('Ошибка импорта CSV:', error);
-            showNotification('Ошибка чтения CSV файла', 'error');
+            showNotification(error.message || 'Ошибка чтения CSV файла', 'error');
+        } finally {
+            // Selecting the same corrected file must always fire `change`
+            // after any validation, conflict, cancellation, or network exit.
+            if (input) input.value = '';
         }
-        
-        // Очищаем input
-        event.target.value = '';
     }
     
     // Импорт зон в базу данных
@@ -2087,14 +2549,15 @@
                 showNotification(msg, 'error');
                 return;
             }
-            const j = await resp.json();
-            
-            // Перезагружаем данные
-            await loadData();
-            if (j && j.success) {
-                showNotification(`Импорт: создано ${j.created}, обновлено ${j.updated}, ошибок ${j.failed}`, 'success');
+            const j = await resp.json().catch(() => null);
+            if (resp.ok && responseSucceeded(j)) {
+                await loadData();
+                showNotification(
+                    `Импорт: создано ${j.created || 0}, обновлено ${j.updated || 0}, ошибок ${j.failed || 0}`,
+                    j.failed ? 'warning' : 'success'
+                );
             } else {
-                showNotification(j.message || 'Импорт завершился с ошибкой', 'error');
+                showNotification(responseMessage(j, `Импорт завершился с ошибкой (HTTP ${resp.status})`), 'error');
             }
             
         } catch (error) {
