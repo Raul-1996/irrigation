@@ -296,6 +296,25 @@ class TestCalculateActual:
         assert minutes[date(2026, 11, 1)] == 60
         assert counts[date(2026, 11, 1)] == 1
 
+    def test_elapsed_duration_uses_utc_timeline_across_berlin_spring_forward(self):
+        controller_tz = ZoneInfo("Europe/Berlin")
+        runs = [
+            {
+                "start_utc": "2026-03-29T01:30:00+01:00",
+                "end_utc": "2026-03-29T04:30:00+02:00",
+                "status": "ok",
+            }
+        ]
+
+        minutes, counts = calculate_actual_for_zone(
+            runs,
+            [date(2026, 3, 29)],
+            controller_tz=controller_tz,
+        )
+
+        assert minutes[date(2026, 3, 29)] == 120
+        assert counts[date(2026, 3, 29)] == 1
+
     def test_naive_fold_duration_uses_monotonic_timeline(self):
         controller_tz = ZoneInfo("America/New_York")
         runs = [

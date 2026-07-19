@@ -345,8 +345,12 @@ def _load_interval_occurrences(
                 for raw_occurrence in by_slot.get(slot, []):
                     occurrence = parse_controller_datetime(raw_occurrence, controller_tz)
                     if occurrence is not None:
-                        occurrences.append(occurrence)
-            result[program_id] = sorted(set(occurrences), key=lambda value: value.astimezone(UTC))
+                        # Python compares two datetimes that share one ZoneInfo
+                        # by wall time, so fold=0 and fold=1 can compare equal.
+                        # Normalize before both deduplication and ordering to
+                        # preserve the two real instants in a repeated hour.
+                        occurrences.append(occurrence.astimezone(UTC))
+            result[program_id] = sorted(set(occurrences))
         except Exception:
             # APScheduler job stores may surface sqlite3, SQLAlchemy, or
             # backend-specific errors. Absence of trustworthy metadata is an

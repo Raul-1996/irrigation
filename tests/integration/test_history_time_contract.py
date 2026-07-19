@@ -209,6 +209,42 @@ def test_interval_occurrences_use_live_scheduler_slot_contract(monkeypatch):
     assert result == {17: [morning, evening]}
 
 
+def test_interval_occurrences_preserve_both_berlin_repeated_hour_instants(monkeypatch):
+    from routes.zones_history_api import _load_interval_occurrences
+
+    controller_tz = ZoneInfo("Europe/Berlin")
+    range_start = datetime(2026, 10, 25, 0, 0, tzinfo=controller_tz)
+    range_end = datetime(2026, 10, 26, 0, 0, tzinfo=controller_tz)
+    summer_fold = datetime(2026, 10, 25, 2, 30, tzinfo=controller_tz, fold=0)
+    winter_fold = datetime(2026, 10, 25, 2, 30, tzinfo=controller_tz, fold=1)
+
+    class FakeScheduler:
+        def get_program_interval_anchors(self, _program_id):
+            return {"main": summer_fold}
+
+        def get_program_occurrences(self, _program_id, _start, _end, *, limit):
+            assert limit == 512
+            return {"main": [winter_fold, summer_fold]}
+
+    monkeypatch.setattr("irrigation_scheduler.get_scheduler", lambda: FakeScheduler())
+    programs = [
+        {
+            "id": 19,
+            "enabled": True,
+            "schedule_type": "interval",
+            "time": "02:30",
+            "extra_times": [],
+        }
+    ]
+
+    result = _load_interval_occurrences(programs, range_start, range_end, controller_tz)
+
+    assert [value.astimezone(UTC) for value in result[19]] == [
+        datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
+        datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
+    ]
+
+
 def test_interval_occurrences_fail_closed_without_a_valid_slot(monkeypatch):
     from routes.zones_history_api import _load_interval_occurrences
 
@@ -318,6 +354,34 @@ def test_dst_fold_runs_sort_and_measure_on_utc_timeline(app, client, monkeypatch
         "2026-11-01T01:45:00-04:00",
     ]
     assert payload["summary"]["total_minutes"] == 20
+
+
+def test_berlin_repeated_hour_runs_sort_by_utc_instant(app, client, monkeypatch):
+    controller_tz = ZoneInfo("Europe/Berlin")
+    controller_now = datetime(2026, 10, 25, 12, 0, tzinfo=controller_tz)
+    monkeypatch.setenv("WB_TZ", "Europe/Berlin")
+
+    with patch("routes.zones_history_api._controller_now", return_value=controller_now):
+        zone = _create_zone(app, "history-berlin-fold-sort")
+        _insert_local_run(
+            app,
+            zone["id"],
+            "2026-10-25T02:45:00+02:00",
+            "2026-10-25T02:55:00+02:00",
+        )
+        _insert_local_run(
+            app,
+            zone["id"],
+            "2026-10-25T02:15:00+01:00",
+            "2026-10-25T02:25:00+01:00",
+        )
+
+        payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
+
+    assert [run["start_utc"] for run in payload["runs"]] == [
+        "2026-10-25T02:15:00+01:00",
+        "2026-10-25T02:45:00+02:00",
+    ]
 
 
 def test_naive_dst_fold_rows_sort_by_utc_creation_timeline(app, client, monkeypatch):
