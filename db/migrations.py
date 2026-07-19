@@ -360,6 +360,12 @@ class MigrationRunner:
 
         Reads existing schema, removes specified columns, recreates the table
         and copies data back. Works on all SQLite versions.
+
+        Rebuilding a table implicitly drops its indexes and triggers.  It can
+        also make SQLite reject the rebuild while a trigger on another table
+        still references the temporarily missing table.  Preserve every
+        compatible schema object and temporarily remove cross-table triggers
+        so a downgrade cannot silently disable current integrity guards.
         """
         cur = conn.execute(f"PRAGMA table_info({table})")
         columns_info = cur.fetchall()
@@ -397,11 +403,40 @@ class MigrationRunner:
         cols_csv = ", ".join(keep_names)
         defs_csv = ", ".join(col_defs)
         tmp = table + "__down_tmp"
+
+        table_pattern = re.compile(rf"\b{re.escape(table)}\b", re.IGNORECASE)
+        dropped_patterns = [re.compile(rf"\b{re.escape(column)}\b", re.IGNORECASE) for column in drop_columns]
+        schema_objects = []
+        dependent_triggers = []
+        for object_type, name, owner_table, sql in conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE type IN ('index', 'trigger') AND sql IS NOT NULL "
+            "ORDER BY type, name"
+        ).fetchall():
+            is_local = owner_table == table
+            references_table = object_type == "trigger" and table_pattern.search(str(sql)) is not None
+            if not is_local and not references_table:
+                continue
+            schema_objects.append((name, str(sql)))
+            if references_table and not is_local:
+                dependent_triggers.append(name)
+
         conn.execute(f"DROP TABLE IF EXISTS {tmp}")
         conn.execute(f"CREATE TABLE {tmp} ({defs_csv})")
         conn.execute(f"INSERT INTO {tmp} ({cols_csv}) SELECT {cols_csv} FROM {table}")
+        for trigger_name in dependent_triggers:
+            escaped_name = str(trigger_name).replace('"', '""')
+            conn.execute(f'DROP TRIGGER "{escaped_name}"')
         conn.execute(f"DROP TABLE {table}")
         conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+        for object_name, object_sql in schema_objects:
+            if any(pattern.search(object_sql) is not None for pattern in dropped_patterns):
+                logger.info(
+                    "Not restoring schema object %s because it references a removed column",
+                    object_name,
+                )
+                continue
+            conn.execute(object_sql)
         conn.commit()
 
     @staticmethod
