@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -878,6 +879,57 @@ def test_sse_fresh_off_snapshot_apply_aba_is_noop_for_new_activation(test_db):
     scheduler.cancel_zone_jobs.assert_not_called()
 
 
+def test_queued_old_off_received_before_new_activation_cannot_complete_new_stop(test_db):
+    from services import observed_state, sse_hub
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "queued-off-before-new-activation", state="on")
+    new_token = "f" * 32
+    scheduler = MagicMock()
+
+    # OFF(A) entered the queue at t=0. Activation B starts and is commanded
+    # OFF before the worker reaches that old physical report.
+    observed_state.state_verifier.register_command(zone["id"], "on")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "state": "starting",
+            "commanded_state": "on",
+            "observed_state": "unconfirmed",
+            "watering_start_time": "2026-07-19 12:11:00",
+        },
+    )
+    test_db.update_zone_versioned(zone["id"], {"command_id": new_token})
+    observed_state.state_verifier.register_command(zone["id"], "off")
+    test_db.update_zone(zone["id"], {"state": "stopping", "commanded_state": "off"})
+
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast") as broadcast,
+    ):
+        sse_hub._process_mqtt_message(
+            server["id"],
+            None,
+            zone["topic"],
+            "0",
+            retained=False,
+            received_at=0.0,
+        )
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "stopping"
+    assert after["observed_state"] == "unconfirmed"
+    assert after["watering_start_time"] == "2026-07-19 12:11:00"
+    assert after["command_id"] == new_token
+    scheduler.cancel_zone_jobs.assert_not_called()
+    broadcast.assert_not_called()
+
+
 def test_fresh_off_completes_external_activation_without_commanded_state(test_db):
     from services import sse_hub
 
@@ -1267,18 +1319,13 @@ def test_consecutive_activations_never_reuse_durable_command_id(test_db):
 def test_configured_zone_with_missing_server_is_not_virtual(test_db):
     from services import zone_control
 
-    zone = test_db.create_zone(
-        {
-            "name": "broken-physical-zone",
-            "duration": 10,
-            "group_id": 1,
-            "topic": "/zones/broken",
-            "mqtt_server_id": 987654,
-        }
-    )
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "broken-physical-zone", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
 
     with (
         patch.object(zone_control, "db", test_db),
+        patch.object(test_db, "get_mqtt_server", return_value=None),
         patch.object(zone_control, "publish_mqtt_value") as publish,
         patch.object(zone_control, "state_verifier"),
         patch.object(zone_control, "water_monitor"),
@@ -1708,6 +1755,60 @@ def test_stop_all_reports_unresolved_failed_off(test_db):
     assert all(call.kwargs["require_observed_confirmation"] is True for call in stop.call_args_list)
 
 
+def test_stop_all_fails_closed_when_repository_collapses_sqlite_error_to_empty(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "strict-group-read", state="on")
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(test_db.zones, "_connect", side_effect=sqlite3.OperationalError("partition unreadable")),
+        patch.object(zone_control, "stop_zone") as stop,
+    ):
+        # This is the repository behavior that previously became a false
+        # successful empty partition in the central primitive.
+        assert test_db.get_zones_by_group(zone["group_id"]) == []
+        result = zone_control.stop_all_in_group(zone["group_id"], force=True)
+
+    assert result == {
+        "success": False,
+        "group_id": zone["group_id"],
+        "stopped": [],
+        "unresolved": [],
+        "retry_scheduled": False,
+    }
+    stop.assert_not_called()
+
+
+def test_direct_stop_all_uses_strict_complete_group_partition(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zones = [
+        _mqtt_zone(test_db, server, "strict-direct-a", state="on"),
+        _mqtt_zone(test_db, server, "strict-direct-b", state="on"),
+    ]
+    expected_ids = [zone["id"] for zone in zones]
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        # Prove the safety primitive is independent of the ambiguous helper.
+        patch.object(test_db, "get_zones_by_group", return_value=[]),
+        patch.object(zone_control, "stop_zone", return_value=True) as stop,
+    ):
+        result = zone_control.stop_all_in_group(1, force=True)
+
+    assert result == {
+        "success": True,
+        "group_id": 1,
+        "stopped": expected_ids,
+        "unresolved": [],
+        "retry_scheduled": False,
+    }
+    assert [call.args[0] for call in stop.call_args_list] == expected_ids
+
+
 def test_emergency_stop_reports_failed_zone_and_never_counts_it_stopped(test_db):
     from services import zone_control
 
@@ -1721,6 +1822,38 @@ def test_emergency_stop_reports_failed_zone_and_never_counts_it_stopped(test_db)
     assert stats["success"] is False
     assert stats["zones_stopped"] == 0
     assert stats["zones_failed"] == [zone["id"]]
+
+
+def test_emergency_missing_group_snapshot_still_stops_complete_zone_partition(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "emergency-no-groups", state="on")
+    test_db.update_zone(zone["id"], {"observed_state": "on", "commanded_state": "on"})
+
+    def stop_zone(zone_id, **_kwargs):
+        test_db.update_zone(zone_id, {"state": "off", "observed_state": "off", "commanded_state": "off"})
+        return True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(test_db, "get_groups", return_value=[]),
+        patch.object(zone_control, "stop_zone", side_effect=stop_zone) as stop,
+    ):
+        stats = zone_control.emergency_stop_all()
+
+    stop.assert_called_once_with(
+        zone["id"],
+        reason="emergency_stop",
+        force=True,
+        master_close_immediately=False,
+        skip_master_close=True,
+        require_observed_confirmation=True,
+    )
+    assert stats["success"] is False
+    assert stats["zones_stopped"] == 1
+    assert stats["zones_failed"] == []
+    assert "groups:snapshot_empty_or_unavailable" in stats["errors"]
 
 
 def test_emergency_broker_ack_without_fresh_zone_off_echo_is_unresolved(test_db):
