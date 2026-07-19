@@ -97,7 +97,12 @@ def test_merged_weather_prefers_fresh_local_sensors(
     assert result["rain"] == {"value": True, "source": "local"}
     assert result["wind_speed"]["source"] == "api"
     assert result["forecast_24h"] == [{"time": "16:00", "temp": 18}]
-    assert result["sensors"]["rain"] == {"enabled": True, "online": True, "value": True}
+    assert result["sensors"]["rain"] == {
+        "enabled": True,
+        "online": True,
+        "value": True,
+        "state": "rain",
+    }
     assert result["timestamp"] == 1300.0
 
 
@@ -105,7 +110,7 @@ def test_merged_weather_prefers_fresh_local_sensors(
 @patch("services.weather_merged._get_rain_state", return_value={"enabled": True, "is_rain": None})
 @patch("services.weather_merged._get_env_state", return_value=_env_state(online=False))
 @patch("services.weather_merged.get_weather_service")
-def test_merged_weather_marks_enabled_offline_sensors_as_api_fallback(
+def test_merged_weather_keeps_enabled_offline_rain_unknown(
     get_service,
     _get_env,
     _get_rain,
@@ -117,9 +122,10 @@ def test_merged_weather_marks_enabled_offline_sensors_as_api_fallback(
 
     assert result["temperature"] == {"value": 18.0, "source": "api_fallback", "unit": "°C"}
     assert result["humidity"] == {"value": 55.0, "source": "api_fallback", "unit": "%"}
-    assert result["rain"] == {"value": False, "source": "api_fallback"}
+    assert result["rain"] == {"value": None, "source": "local", "state": "offline"}
     assert result["sensors"]["temperature"]["online"] is False
     assert result["sensors"]["rain"]["online"] is False
+    assert result["sensors"]["rain"]["state"] == "offline"
 
 
 @patch("services.weather_merged.get_weather_service")

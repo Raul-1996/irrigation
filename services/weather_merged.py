@@ -6,6 +6,7 @@ The canonical weather package now builds forecasts and astronomy through
 that is not part of that service payload.
 """
 
+import copy
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -45,13 +46,16 @@ def _get_rain_state() -> dict[str, Any]:
         from services.monitors import rain_monitor
 
         config = rain_monitor._cfg or {}
+        state = rain_monitor.get_sensor_state()
         return {
-            "enabled": bool(config.get("enabled", False)),
+            "enabled": bool(config.get("enabled", False)) or state != "disabled",
             "is_rain": rain_monitor.is_rain,
+            "online": bool(rain_monitor.sensor_online),
+            "state": state,
         }
     except Exception as exc:
         logger.debug("RainMonitor state unavailable: %s", exc)
-        return {"enabled": False, "is_rain": None}
+        return {"enabled": True, "is_rain": None, "online": False, "state": "offline"}
 
 
 def _api_field(current: dict[str, Any], name: str, *, unit: str | None = None) -> dict[str, Any]:
@@ -88,6 +92,67 @@ def _api_rain(precipitation: Any) -> bool:
         return precipitation is not None and float(precipitation) > 0
     except (TypeError, ValueError):
         return False
+
+
+def merge_weather_response(extended: dict[str, Any]) -> dict[str, Any]:
+    """Add rain health without replacing the canonical effective snapshot.
+
+    ``WeatherService.get_weather_extended`` has already selected one local/API
+    temperature and humidity snapshot and used it for values, factors, and the
+    skip decision. Reading those sensors again here could pair a new 30°C value
+    with an older freeze decision. Their canonical fields are therefore
+    immutable here; only the independent rain-monitor status is appended.
+    """
+    if not extended.get("available"):
+        return extended
+
+    result = copy.deepcopy(extended)
+    current = result.setdefault("current", {})
+    temperature = dict(current.get("temperature") or {})
+    humidity = dict(current.get("humidity") or {})
+    result["temperature"] = temperature.get("value")
+    result["humidity"] = humidity.get("value")
+
+    rain_state = _get_rain_state()
+    rain_enabled = bool(rain_state.get("enabled"))
+    rain_value = rain_state.get("is_rain")
+    rain_online = rain_enabled and bool(rain_state.get("online", rain_value is not None))
+    rain_state_name = str(
+        rain_state.get("state") or ("rain" if rain_online and rain_value else "dry" if rain_online else "offline")
+    )
+    if rain_enabled and rain_online and rain_value is not None:
+        current["rain"] = {"value": bool(rain_value), "source": "local"}
+    elif rain_enabled:
+        current["rain"] = {
+            "value": None,
+            "source": "local",
+            "state": rain_state_name,
+        }
+    else:
+        precipitation = (current.get("precipitation_mm") or {}).get("value")
+        current["rain"] = {
+            "value": _api_rain(precipitation),
+            "source": "api",
+        }
+
+    sensors = result.setdefault("sensors", {})
+    for name, field in (("temperature", temperature), ("humidity", humidity)):
+        source = str(field.get("source") or "api")
+        sensors.setdefault(
+            name,
+            {
+                "enabled": source in {"local", "api_fallback"},
+                "online": source == "local",
+                "last_rx": None,
+            },
+        )
+    sensors["rain"] = {
+        "enabled": rain_enabled,
+        "online": rain_online,
+        "value": rain_value,
+        "state": rain_state_name if rain_enabled else "disabled",
+    }
+    return result
 
 
 def get_merged_weather(db_path: str) -> dict[str, Any]:
@@ -130,14 +195,23 @@ def get_merged_weather(db_path: str) -> dict[str, Any]:
 
     rain_enabled = bool(rain_state.get("enabled"))
     rain_value = rain_state.get("is_rain")
-    rain_online = rain_enabled and rain_value is not None
-    if rain_online:
+    rain_online = rain_enabled and bool(rain_state.get("online", rain_value is not None))
+    rain_state_name = str(
+        rain_state.get("state") or ("rain" if rain_online and rain_value else "dry" if rain_online else "offline")
+    )
+    if rain_enabled and rain_online and rain_value is not None:
         rain = {"value": bool(rain_value), "source": "local"}
+    elif rain_enabled:
+        rain = {
+            "value": None,
+            "source": "local",
+            "state": rain_state_name,
+        }
     else:
         precipitation = (current.get("precipitation_mm") or {}).get("value")
         rain = {
             "value": _api_rain(precipitation),
-            "source": "api_fallback" if rain_enabled else "api",
+            "source": "api",
         }
 
     sensors = {
@@ -155,6 +229,7 @@ def get_merged_weather(db_path: str) -> dict[str, Any]:
             "enabled": rain_enabled,
             "online": rain_online,
             "value": rain_value,
+            "state": rain_state_name if rain_enabled else "disabled",
         },
     }
 
@@ -178,4 +253,4 @@ def get_merged_weather(db_path: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["SENSOR_STALE_TIMEOUT", "get_merged_weather"]
+__all__ = ["SENSOR_STALE_TIMEOUT", "get_merged_weather", "merge_weather_response"]

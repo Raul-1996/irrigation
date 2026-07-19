@@ -9,8 +9,9 @@ parser and every other submodule consume the same values, and splitting a
 ten-line constants module would add import churn without clarity.
 """
 
-import contextlib
 import logging
+import math
+import re
 import time
 from datetime import datetime
 
@@ -32,6 +33,27 @@ _DAY_NAMES_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 # Sensor data older than this is considered stale (for merged weather)
 SENSOR_STALE_TIMEOUT = 600  # 10 minutes
 
+_HH_MM_RE = re.compile(r"^\d{2}:\d{2}$")
+_LOCAL_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$")
+
+
+def _canonical_hh_mm(value: object) -> str | None:
+    """Validate an API/relay time and return the only UI-safe representation."""
+    if not isinstance(value, str):
+        return None
+    if _HH_MM_RE.fullmatch(value):
+        formats = ("%H:%M",)
+    elif _LOCAL_DATETIME_RE.fullmatch(value):
+        formats = ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S")
+    else:
+        return None
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    return None
+
 
 # ===================================================================
 # WeatherData — parsed API response
@@ -44,7 +66,10 @@ class WeatherData:
     def __init__(self, raw):
         # type: (Dict[str, Any]) -> None
         self.raw = raw
-        self.timestamp = raw.get("_fetched_at", time.time())
+        now = time.time()
+        self.timestamp = float(raw.get("_fetched_at", now))
+        if not math.isfinite(self.timestamp) or self.timestamp > now:
+            raise ValueError("weather fetched_at must not be in the future")
         self._parse()
 
     def _parse(self):
@@ -70,16 +95,21 @@ class WeatherData:
                 idx = i
                 break
         if idx is None and times:
-            # Fallback: closest hour
-            idx = 0
+            # Never reinterpret an arbitrary sample as "now".  This happens
+            # with an expired relay/cache payload whose time range no longer
+            # covers the controller's current hour.  Leaving idx=None makes the
+            # payload unavailable to safety decisions instead of presenting
+            # (usually midnight of an old day) as a live reading.
+            logger.warning("WeatherData: current hour absent from payload")
 
         def _safe_get(data, key, index):
             try:
                 arr = data.get(key, [])
                 if arr and index is not None and index < len(arr):
                     val = arr[index]
-                    return float(val) if val is not None else None
-            except (ValueError, TypeError, IndexError):
+                    number = float(val) if val is not None else None
+                    return number if number is not None and math.isfinite(number) else None
+            except (OverflowError, ValueError, TypeError, IndexError):
                 pass
             return None
 
@@ -89,7 +119,7 @@ class WeatherData:
                 if arr and index is not None and index < len(arr):
                     val = arr[index]
                     return int(val) if val is not None else None
-            except (ValueError, TypeError, IndexError):
+            except (OverflowError, ValueError, TypeError, IndexError):
                 pass
             return None
 
@@ -98,59 +128,100 @@ class WeatherData:
         self.precipitation = _safe_get(hourly, "precipitation", idx)
         self.wind_speed = _safe_get(hourly, "wind_speed_10m", idx)
         self.et0_hourly = _safe_get(hourly, "et0_fao_evapotranspiration", idx)
+        if self.humidity is not None and not 0.0 <= self.humidity <= 100.0:
+            self.humidity = None
+        for attribute in ("precipitation", "wind_speed", "et0_hourly"):
+            value = getattr(self, attribute)
+            if value is not None and value < 0:
+                setattr(self, attribute, None)
 
         # Current weather code (WMO)
         self.weather_code = _safe_get_int(hourly, "weather_code", idx)
 
-        # Daily values (today = index 0)
-        self.daily_precipitation = _safe_get(daily, "precipitation_sum", 0)
-        self.daily_et0 = _safe_get(daily, "et0_fao_evapotranspiration", 0)
+        # Daily values must be selected by the location-local date.  ``past_days``
+        # deliberately puts yesterday at index 0, and a fresh cache may also be
+        # parsed on the next side of midnight.
+        today = now.strftime("%Y-%m-%d")
+        daily_times = daily.get("time", [])
+        daily_idx = next((i for i, value in enumerate(daily_times) if str(value) == today), None)
+
+        self.daily_precipitation = _safe_get(daily, "precipitation_sum", daily_idx)
+        self.daily_et0 = _safe_get(daily, "et0_fao_evapotranspiration", daily_idx)
+        if self.daily_precipitation is not None and self.daily_precipitation < 0:
+            self.daily_precipitation = None
+        if self.daily_et0 is not None and self.daily_et0 < 0:
+            self.daily_et0 = None
 
         # Daily temperature min/max (today)
-        self.temperature_min = _safe_get(daily, "temperature_2m_min", 0)
-        self.temperature_max = _safe_get(daily, "temperature_2m_max", 0)
+        self.temperature_min = _safe_get(daily, "temperature_2m_min", daily_idx)
+        self.temperature_max = _safe_get(daily, "temperature_2m_max", daily_idx)
 
         # Sunrise/sunset (today, as strings like "06:28")
         daily_sunrise = daily.get("sunrise", [])
         daily_sunset = daily.get("sunset", [])
         self.sunrise = None
         self.sunset = None
-        if daily_sunrise and len(daily_sunrise) > 0 and daily_sunrise[0]:
-            with contextlib.suppress(IndexError, ValueError):
-                self.sunrise = (
-                    str(daily_sunrise[0]).split("T")[1][:5] if "T" in str(daily_sunrise[0]) else str(daily_sunrise[0])
-                )
-        if daily_sunset and len(daily_sunset) > 0 and daily_sunset[0]:
-            with contextlib.suppress(IndexError, ValueError):
-                self.sunset = (
-                    str(daily_sunset[0]).split("T")[1][:5] if "T" in str(daily_sunset[0]) else str(daily_sunset[0])
-                )
+        if daily_idx is not None and daily_idx < len(daily_sunrise) and daily_sunrise[daily_idx]:
+            self.sunrise = _canonical_hh_mm(daily_sunrise[daily_idx])
+        if daily_idx is not None and daily_idx < len(daily_sunset) and daily_sunset[daily_idx]:
+            self.sunset = _canonical_hh_mm(daily_sunset[daily_idx])
 
-        # Calculate precipitation sum for past 24h from hourly data
-        self.precipitation_24h = 0.0
-        if idx is not None:
+        # Calculate precipitation only when the payload covers every one of the
+        # previous 24 contiguous hourly slots.  A partial relay/cache payload is
+        # unavailable, never a misleading small "24h" value.
+        self.precipitation_24h = None
+        if idx is not None and idx >= 23:
             precip_arr = hourly.get("precipitation", [])
-            start_idx = max(0, idx - 23)
-            for i in range(start_idx, idx + 1):
-                try:
-                    val = precip_arr[i]
-                    if val is not None:
-                        self.precipitation_24h += float(val)
-                except (IndexError, ValueError, TypeError):
-                    pass
+            start_idx = idx - 23
+            window_times = times[start_idx : idx + 1]
+            contiguous = len(window_times) == 24
+            parsed_times = []
+            if contiguous:
+                for value in window_times:
+                    try:
+                        parsed_times.append(datetime.strptime(str(value), "%Y-%m-%dT%H:%M"))
+                    except ValueError:
+                        contiguous = False
+                        break
+            if contiguous:
+                contiguous = all(
+                    (parsed_times[i] - parsed_times[i - 1]).total_seconds() == 3600 for i in range(1, len(parsed_times))
+                )
+            values = []
+            if contiguous and idx < len(precip_arr):
+                for i in range(start_idx, idx + 1):
+                    try:
+                        value = float(precip_arr[i])
+                        if not math.isfinite(value) or value < 0:
+                            raise ValueError("invalid precipitation")
+                        values.append(value)
+                    except (IndexError, OverflowError, ValueError, TypeError):
+                        values = []
+                        break
+            if len(values) == 24:
+                total = sum(values)
+                if math.isfinite(total):
+                    self.precipitation_24h = total
 
         # Calculate precipitation forecast for next 6h
-        self.precipitation_forecast_6h = 0.0
+        self.precipitation_forecast_6h = None
         if idx is not None:
             precip_arr = hourly.get("precipitation", [])
-            end_idx = min(len(precip_arr), idx + 7)
-            for i in range(idx + 1, end_idx):
+            forecast_values = []
+            for i in range(idx + 1, idx + 7):
                 try:
                     val = precip_arr[i]
-                    if val is not None:
-                        self.precipitation_forecast_6h += float(val)
-                except (IndexError, ValueError, TypeError):
-                    pass
+                    number = float(val)
+                    if val is None or not math.isfinite(number) or number < 0:
+                        raise ValueError("invalid precipitation forecast")
+                    forecast_values.append(number)
+                except (IndexError, OverflowError, ValueError, TypeError):
+                    forecast_values = []
+                    break
+            if len(forecast_values) == 6:
+                total = sum(forecast_values)
+                if math.isfinite(total):
+                    self.precipitation_forecast_6h = total
 
         # Hourly forecast for next 24h (every 4 hours, 6 points)
         self.hourly_forecast_24h = []  # type: List[Dict[str, Any]]
@@ -167,17 +238,18 @@ class WeatherData:
                 target_idx = idx + (target_h - current_h)
                 if target_idx < 0 or target_idx >= len(hour_times):
                     continue
-                try:
-                    t_str = hour_times[target_idx]
-                    hh_mm = t_str.split("T")[1][:5] if "T" in t_str else t_str
-                except (IndexError, ValueError):
-                    hh_mm = ""
+                hh_mm = _canonical_hh_mm(hour_times[target_idx])
+                if hh_mm is None:
+                    continue
 
-                def _arr_val(arr, i):
+                def _arr_val(arr, i, *, nonnegative=False):
                     try:
                         v = arr[i]
-                        return float(v) if v is not None else None
-                    except (IndexError, ValueError, TypeError):
+                        number = float(v) if v is not None else None
+                        if number is None or not math.isfinite(number) or (nonnegative and number < 0):
+                            return None
+                        return number
+                    except (IndexError, OverflowError, ValueError, TypeError):
                         return None
 
                 def _arr_int(arr, i):
@@ -191,8 +263,8 @@ class WeatherData:
                     {
                         "time": hh_mm,
                         "temp": _arr_val(temp_arr, target_idx),
-                        "precip": _arr_val(precip_arr, target_idx),
-                        "wind": _arr_val(wind_arr, target_idx),
+                        "precip": _arr_val(precip_arr, target_idx, nonnegative=True),
+                        "wind": _arr_val(wind_arr, target_idx, nonnegative=True),
                         "weather_code": _arr_int(wcode_arr, target_idx),
                     }
                 )
@@ -200,7 +272,6 @@ class WeatherData:
 
         # Daily forecast (3 days)
         self.daily_forecast = []  # type: List[Dict[str, Any]]
-        daily_times = daily.get("time", [])
         daily_tmin = daily.get("temperature_2m_min", [])
         daily_tmax = daily.get("temperature_2m_max", [])
         daily_psum = daily.get("precipitation_sum", [])
@@ -208,7 +279,8 @@ class WeatherData:
         daily_sr = daily.get("sunrise", [])
         daily_ss = daily.get("sunset", [])
 
-        for di in range(min(3, len(daily_times))):
+        daily_start = daily_idx if daily_idx is not None else len(daily_times)
+        for di in range(daily_start, min(daily_start + 3, len(daily_times))):
             date_str = str(daily_times[di]) if di < len(daily_times) else ""
             day_name = ""
             try:
@@ -217,28 +289,29 @@ class WeatherData:
             except (ValueError, IndexError):
                 pass
 
-            def _dval(arr, i):
+            def _dval(arr, i, *, nonnegative=False):
                 try:
                     v = arr[i]
-                    return float(v) if v is not None else None
-                except (IndexError, ValueError, TypeError):
+                    number = float(v) if v is not None else None
+                    if number is None or not math.isfinite(number) or (nonnegative and number < 0):
+                        return None
+                    return number
+                except (IndexError, OverflowError, ValueError, TypeError):
                     return None
 
             def _dint(arr, i):
                 try:
                     v = arr[i]
                     return int(v) if v is not None else None
-                except (IndexError, ValueError, TypeError):
+                except (IndexError, OverflowError, ValueError, TypeError):
                     return None
 
             sr_val = None
             ss_val = None
             if di < len(daily_sr) and daily_sr[di]:
-                with contextlib.suppress(IndexError, ValueError):
-                    sr_val = str(daily_sr[di]).split("T")[1][:5] if "T" in str(daily_sr[di]) else str(daily_sr[di])
+                sr_val = _canonical_hh_mm(daily_sr[di])
             if di < len(daily_ss) and daily_ss[di]:
-                with contextlib.suppress(IndexError, ValueError):
-                    ss_val = str(daily_ss[di]).split("T")[1][:5] if "T" in str(daily_ss[di]) else str(daily_ss[di])
+                ss_val = _canonical_hh_mm(daily_ss[di])
 
             self.daily_forecast.append(
                 {
@@ -246,7 +319,7 @@ class WeatherData:
                     "day_name": day_name,
                     "temp_min": _dval(daily_tmin, di),
                     "temp_max": _dval(daily_tmax, di),
-                    "precip_sum": _dval(daily_psum, di),
+                    "precip_sum": _dval(daily_psum, di, nonnegative=True),
                     "weather_code": _dint(daily_wcode, di),
                     "sunrise": sr_val,
                     "sunset": ss_val,
@@ -257,18 +330,19 @@ class WeatherData:
         self.min_temp_forecast_6h = None  # type: Optional[float]
         if idx is not None:
             temp_arr = hourly.get("temperature_2m", [])
-            end_idx_6h = min(len(temp_arr), idx + 7)
-            min_t = None
-            for i in range(idx, end_idx_6h):
+            forecast_temperatures = []
+            for i in range(idx, idx + 7):
                 try:
                     v = temp_arr[i]
-                    if v is not None:
-                        fv = float(v)
-                        if min_t is None or fv < min_t:
-                            min_t = fv
-                except (IndexError, ValueError, TypeError):
-                    pass
-            self.min_temp_forecast_6h = min_t
+                    number = float(v)
+                    if v is None or not math.isfinite(number):
+                        raise ValueError("invalid temperature forecast")
+                    forecast_temperatures.append(number)
+                except (IndexError, OverflowError, ValueError, TypeError):
+                    forecast_temperatures = []
+                    break
+            if len(forecast_temperatures) == 7:
+                self.min_temp_forecast_6h = min(forecast_temperatures)
 
     def to_dict(self):
         # type: () -> Dict[str, Any]
