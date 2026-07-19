@@ -170,7 +170,16 @@ def test_146_stop_during_group_initialization_prevents_late_sequence_job(safety_
         patch.object(scheduler_module, "TESTING", False),
         patch.object(test_db, "get_zones", side_effect=blocking_get_zones),
         patch("services.zone_control.db", test_db),
-        patch("services.zone_control.stop_all_in_group"),
+        patch(
+            "services.zone_control.stop_all_in_group",
+            return_value={
+                "success": True,
+                "group_id": group["id"],
+                "stopped": [zone["id"]],
+                "unresolved": [],
+                "retry_scheduled": False,
+            },
+        ),
     ):
         starter = threading.Thread(
             target=lambda: result.append(safety_scheduler.start_group_sequence(group["id"])), daemon=True
@@ -269,6 +278,7 @@ def test_30_recovery_considers_previous_local_date_when_window_crosses_midnight(
     zones = [test_db.create_zone({"name": f"z{i}", "duration": 20, "group_id": group["id"]}) for i in range(3)]
     program = _program(test_db, [z["id"] for z in zones], time="23:30", days=[0])
     safety_scheduler._boot_interrupted_zone_ids = {zones[1]["id"]}
+    safety_scheduler._boot_interrupted_program_zones = {program["id"]: {zones[1]["id"]}}
     safety_scheduler.start(paused=True)
 
     with patch.object(scheduler_module, "datetime", _FixedDateTime):
@@ -300,7 +310,7 @@ def test_128_overlapping_extra_window_does_not_recover_from_later_skipped_fire(s
     _FixedDateTime.value = datetime(2026, 7, 21, 6, 40)
     group = test_db.create_group("overlap")
     zones = [test_db.create_zone({"name": f"z{i}", "duration": 20, "group_id": group["id"]}) for i in range(3)]
-    _program(
+    program = _program(
         test_db,
         [z["id"] for z in zones],
         time="06:00",
@@ -310,6 +320,7 @@ def test_128_overlapping_extra_window_does_not_recover_from_later_skipped_fire(s
         days=[0, 1],
     )
     safety_scheduler._boot_interrupted_zone_ids = {zones[2]["id"]}
+    safety_scheduler._boot_interrupted_program_zones = {program["id"]: {zones[2]["id"]}}
     safety_scheduler.start(paused=True)
 
     with patch.object(scheduler_module, "datetime", _FixedDateTime):

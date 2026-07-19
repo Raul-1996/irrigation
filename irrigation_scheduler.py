@@ -10,6 +10,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 import json
 
 _BOOT_RECOVERY_INTENTS_KEY = "scheduler.boot_recovery_intents.v1"
+_PROGRAM_ACTIVATION_EVIDENCE_KEY = "scheduler.program_activation_evidence.v1"
 
 from apscheduler.schedulers import SchedulerNotRunningError
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -284,6 +286,28 @@ def job_stop_zone(zone_id: int):
         logger.exception("job_stop_zone failed (zone_id=%s)", zone_id)
 
 
+def _replant_activation_bound_stop(scheduler_instance: Any, zone_id: int, activation_token: str) -> bool:
+    """Replace a consumed safety DateTrigger after a nonterminal failure."""
+    token = str(activation_token or "").strip()
+    if scheduler_instance is None or not token:
+        logger.critical("Cannot replant unbound activation stop for zone %s", zone_id)
+        return False
+    try:
+        retry_at = scheduler_instance._controller_now() + timedelta(seconds=30)
+        replanted = scheduler_instance.schedule_zone_hard_stop(
+            int(zone_id),
+            retry_at,
+            activation_token=token,
+        )
+        if replanted is not True:
+            logger.critical("Activation stop retry is unverified for zone %s", zone_id)
+            return False
+        return True
+    except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
+        logger.exception("Could not replant activation stop retry for zone %s", zone_id)
+        return False
+
+
 def job_stop_zone_if_activation(
     zone_id: int,
     activation_token: str | None,
@@ -304,38 +328,62 @@ def job_stop_zone_if_activation(
             "force": bool(force),
         },
     )
+    s = None
+    expected_token = str(activation_token or "").strip()
     try:
         from irrigation_scheduler import get_scheduler
+        from services.locks import group_lock
 
         s = get_scheduler()
         if s is None:
             return
-        zone = s.db.get_zone(int(zone_id))
+        zone = s._read_zone_strict(int(zone_id))
         if not zone:
             return
-        current_token = zone.get("command_id")
-        if current_token in (None, ""):
-            # Upgrade compatibility for an activation that predates durable
-            # command ids.  Never compare a legacy timestamp when the current
-            # activation already has a UUID: seconds-resolution timestamps can
-            # collide across rapid OFF/ON transitions.
-            current_token = zone.get("watering_start_time")
-        if activation_token is not None and str(current_token or "") != str(activation_token):
-            logger.info(
-                "Stale stop callback ignored for zone %s (expected activation=%s, current=%s)",
-                zone_id,
-                activation_token,
-                current_token,
-            )
+        group_id = int(zone.get("group_id") or 0)
+        if not expected_token:
+            logger.error("Unbound stop callback ignored for zone %s", zone_id)
             return
-        s._stop_zone(
-            int(zone_id),
-            reason="activation_bound_stop",
-            activation_token=None if activation_token is None else str(activation_token),
-            force=bool(force),
-        )
-    except (sqlite3.Error, OSError, ValueError, TypeError):
+
+        # Core start/stop transitions use this canonical per-group RLock. Hold
+        # it across the strict token recheck and the physical OFF. Core's
+        # stop_zone() reacquires the same RLock, so the call remains safe while
+        # a newer activation is unable to overtake the check (TOCTOU fence).
+        with group_lock(group_id):
+            current = s._read_zone_strict(int(zone_id))
+            if not current or int(current.get("group_id") or 0) != group_id:
+                logger.error("Activation-bound stop lost zone identity for zone %s", zone_id)
+                _replant_activation_bound_stop(s, int(zone_id), expected_token)
+                return
+            current_token = current.get("command_id")
+            if current_token in (None, ""):
+                # Upgrade compatibility for an activation that predates
+                # durable command ids. Never compare a legacy timestamp when
+                # the current activation already has a UUID.
+                current_token = current.get("watering_start_time")
+            if str(current_token or "") != expected_token:
+                logger.info(
+                    "Stale stop callback ignored for zone %s (expected activation=%s, current=%s)",
+                    zone_id,
+                    expected_token,
+                    current_token,
+                )
+                return
+            stopped = s._stop_zone(
+                int(zone_id),
+                reason="activation_bound_stop",
+                activation_token=expected_token,
+                force=bool(force),
+            )
+            if stopped is not True and not s._has_zone_safety_job(
+                int(zone_id),
+                activation_token=expected_token,
+                roles={"hard"},
+            ):
+                _replant_activation_bound_stop(s, int(zone_id), expected_token)
+    except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, KeyError, ImportError):
         logger.exception("job_stop_zone_if_activation failed (zone_id=%s)", zone_id)
+        _replant_activation_bound_stop(s, int(zone_id), expected_token)
 
 
 def job_close_master_valve(group_id: int):
@@ -621,11 +669,13 @@ class IrrigationScheduler:
         # and records which zones were interrupted; app startup calls
         # complete_boot_recovery only after its physical OFF reconciliation.
         self._boot_interrupted_zone_ids: set[int] = set()
+        self._boot_interrupted_program_zones: dict[int, set[int]] = {}
         self._boot_recovery_completed = False
         self._started_paused = False
         self._boot_reconcile_ok: bool | None = None
         self._boot_reconcile_failures: set[str] = set()
         self._boot_recovery_intent_lock = threading.RLock()
+        self._program_activation_evidence_lock = threading.RLock()
         self._boot_recovery_handoff_durable = False
 
     def _controller_timezone(self) -> tzinfo | None:
@@ -1071,14 +1121,19 @@ class IrrigationScheduler:
         cannot stop a later activation of the same zone.
         """
         zid = int(zone_id)
-        token = activation_token if activation_token is not None else self._current_activation_token(zid)
+        token = str(activation_token or "").strip() or None
         try:
             initial_zone = self._read_zone_strict(zid) or {}
+            if token is None:
+                strict_token = initial_zone.get("command_id") or initial_zone.get("watering_start_time")
+                token = str(strict_token or "").strip() or None
             physical = bool(initial_zone.get("mqtt_server_id") and str(initial_zone.get("topic") or "").strip())
         except (sqlite3.Error, OSError, ValueError, TypeError):
             # Unknown topology is physical until proven otherwise.
             logger.exception("Strict topology read failed before OFF for zone %s", zid)
             physical = True
+            if token is None:
+                token = self._current_activation_token(zid)
         try:
             from services.zone_control import stop_zone as _stop_zone_central
 
@@ -1121,6 +1176,7 @@ class IrrigationScheduler:
         # Virtual zones complete synchronously; physical zones reach this point
         # only after a fresh observed OFF. Both may now release every timer.
         self.cancel_zone_jobs(zid, include_cap=True)
+        self._clear_program_activation_evidence(zid, token)
         try:
             zone = self.db.get_zone(zid)
             if zone:
@@ -1241,16 +1297,19 @@ class IrrigationScheduler:
         # concurrent sequence owns.  Mirrors the lifecycle in the
         # `finally` block of `_run_group_sequence`.
         registered_gids: list[tuple[int, threading.Event]] = []
+        claimed_events: dict[int, threading.Event] = {}
         # Compute program_gids ONCE up front: needed by both the manual-vs-
         # scheduled guard (must run BEFORE pre-register so it doesn't see
         # our own planted events) and by the pre-register block.
-        program_gids: set = set()
+        program_gids: set[int] = set()
+        discovery_valid = True
         try:
             for z in zones:
                 try:
-                    zd = self.db.get_zone(z)
+                    zd = self._read_zone_strict(int(z))
                     if not zd:
-                        continue
+                        discovery_valid = False
+                        break
                     g = int(zd.get("group_id") or 0)
                     # Skip the "no group" sentinels (gid==0 unset, gid==999
                     # is the legacy "ungrouped" bucket per project convention).
@@ -1258,8 +1317,14 @@ class IrrigationScheduler:
                         program_gids.add(g)
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("_run_program_threaded: gid lookup failed for zone=%s: %s", z, e)
+                    discovery_valid = False
+                    break
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
             logger.debug("_run_program_threaded: program_gids collection failed: %s", e)
+            discovery_valid = False
+        if not discovery_valid:
+            logger.error("Program %s group ownership discovery failed closed", program_id)
+            return False
         blocked_gids = sorted(gid for gid in program_gids if self._is_group_rain_blocked(gid))
         if blocked_gids:
             logger.warning("Программа %s заблокирована дождём для групп %s", program_id, blocked_gids)
@@ -1286,14 +1351,18 @@ class IrrigationScheduler:
                 # Check-and-claim is one critical section.  A separate
                 # is-active check followed by setdefault allowed two program
                 # fires (or a manual group start) to both proceed.
-                with self._group_session_lock:
-                    blocking_gids = [g for g in program_gids if g in self.group_cancel_events]
-                    if not blocking_gids:
-                        for gid in program_gids:
-                            new_event = threading.Event()
-                            self.group_cancel_events[gid] = new_event
-                            self._running_group_sessions.add(gid)
-                            registered_gids.append((gid, new_event))
+                with ExitStack() as admission:
+                    for gid in sorted(program_gids):
+                        admission.enter_context(self._group_start_lock_for(gid))
+                    with self._group_session_lock:
+                        blocking_gids = [g for g in program_gids if g in self.group_cancel_events]
+                        if not blocking_gids:
+                            for gid in program_gids:
+                                new_event = threading.Event()
+                                self.group_cancel_events[gid] = new_event
+                                self._running_group_sessions.add(gid)
+                                registered_gids.append((gid, new_event))
+                                claimed_events[gid] = new_event
                 if blocking_gids:
                     try:
                         self.db.add_log(
@@ -1403,6 +1472,10 @@ class IrrigationScheduler:
                 except (sqlite3.Error, OSError, ValueError, TypeError) as e:
                     logger.debug("Handled exception in _run_program_threaded: %s", e)
                 cancel_event = self.group_cancel_events.get(group_id)
+                if group_id not in {0, 999} and claimed_events.get(group_id) is not cancel_event:
+                    logger.warning("Program %s has no exact group ownership for group %s", program_id, group_id)
+                    run_ok = False
+                    break
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Программа {program_id}: группа {group_id} отменена, зона {zone_id} пропущена")
                     continue
@@ -1474,6 +1547,8 @@ class IrrigationScheduler:
 
                     def cancel_guard() -> bool:
                         with self._group_session_lock:
+                            if group_id not in {0, 999} and claimed_events.get(group_id) is not cancel_event:
+                                return True
                             return bool(
                                 cancel_event is not None
                                 and (
@@ -1482,7 +1557,7 @@ class IrrigationScheduler:
                                 )
                             )
 
-                    start_kwargs: dict[str, Any] = {"source": "program"}
+                    start_kwargs: dict[str, Any] = {"source": "manual" if manual else "program"}
                     if self._callable_accepts_keyword(_start_central, "cancel_guard"):
                         start_kwargs["cancel_guard"] = cancel_guard
                     if cancel_guard():
@@ -1497,7 +1572,8 @@ class IrrigationScheduler:
                     run_ok = False
                     break
                 try:
-                    latest_state = str((self.db.get_zone(int(zone_id)) or {}).get("state") or "").lower()
+                    activation = self._read_zone_strict(int(zone_id)) or {}
+                    latest_state = str(activation.get("state") or "").lower()
                     if latest_state == "fault":
                         logger.error("Программа %s: зона %s перешла в fault при старте", program_id, zone_id)
                         run_ok = False
@@ -1509,7 +1585,7 @@ class IrrigationScheduler:
                         planned_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
                         metadata = {
                             "planned_end_time": planned_str,
-                            "watering_start_source": "schedule",
+                            "watering_start_source": "manual" if manual else "schedule",
                         }
                         # Compatibility for legacy DB-only virtual zones on
                         # older controllers and TESTING synthetic transports.
@@ -1521,9 +1597,28 @@ class IrrigationScheduler:
                         self.db.update_zone(zone_id, metadata)
                     except (sqlite3.Error, OSError) as e:
                         logger.debug("Handled exception in line_413: %s", e)
+                    activation_token = str(
+                        activation.get("command_id") or activation.get("watering_start_time") or ""
+                    ).strip()
+                    if manual:
+                        self._clear_program_activation_evidence(int(zone_id))
+                    elif not activation_token or not self._persist_program_activation_evidence(
+                        int(program_id),
+                        int(zone_id),
+                        activation_token,
+                    ):
+                        logger.error(
+                            "Program %s zone %s has no durable boot-recovery ownership evidence",
+                            program_id,
+                            zone_id,
+                        )
                     # Watchdog job
                     try:
-                        self.schedule_zone_hard_stop(zone_id, end_time)
+                        self.schedule_zone_hard_stop(
+                            zone_id,
+                            end_time,
+                            activation_token=activation_token or None,
+                        )
                     except (ValueError, KeyError, RuntimeError) as e:
                         logger.debug("Handled exception in line_418: %s", e)
                     self.db.add_log(
@@ -2277,6 +2372,10 @@ class IrrigationScheduler:
                 run_at = now + timedelta(seconds=1)
             if activation_token is None:
                 activation_token = self._current_activation_token(int(zone_id))
+            activation_token = str(activation_token or "").strip()
+            if not activation_token:
+                logger.error("Watchdog hard-stop requires an exact activation token for zone %s", zone_id)
+                return False
             _kwargs = dict(
                 args=[zone_id, activation_token, True],
                 id=f"zone_hard_stop:{int(zone_id)}",
@@ -2322,6 +2421,10 @@ class IrrigationScheduler:
             run_at = self._controller_now() + timedelta(minutes=int(cap_minutes))
             if activation_token is None:
                 activation_token = self._current_activation_token(int(zone_id))
+            activation_token = str(activation_token or "").strip()
+            if not activation_token:
+                logger.error("Zone cap requires an exact activation token for zone %s", zone_id)
+                return False
             # Уникальный job id для капа
             job_id = f"zone_cap_stop:{int(zone_id)}"
             _kwargs = dict(
@@ -2642,7 +2745,7 @@ class IrrigationScheduler:
         # Claim the group before any DB/MQTT initialisation.  This makes both
         # repeated starts and Stop-during-init observable immediately.
         cancel_event = threading.Event()
-        with self._group_session_lock:
+        with self._group_start_lock_for(group_id), self._group_session_lock:
             if group_id in self.group_cancel_events:
                 logger.info("Группа %s уже имеет активную сессию", group_id)
                 return False
@@ -2744,6 +2847,9 @@ class IrrigationScheduler:
             zone_ids = [z["id"] for z in group_zones]
             # In TESTING mode, run synchronously to avoid APScheduler thread timing issues
             if TESTING:
+                with self._group_start_lock_for(group_id), self._group_session_lock:
+                    if self.group_cancel_events.get(group_id) is not cancel_event or cancel_event.is_set():
+                        return False
                 self._run_group_sequence(
                     group_id,
                     zone_ids,
@@ -2771,14 +2877,17 @@ class IrrigationScheduler:
                 )
                 if getattr(self, "has_volatile_jobstore", False):
                     _kwargs["jobstore"] = "volatile"
-                self.scheduler.add_job(
-                    job_run_group_sequence,
-                    DateTrigger(
-                        run_date=self._controller_now(naive=True),
-                        timezone=self._controller_timezone(),
-                    ),
-                    **_kwargs,
-                )
+                with self._group_start_lock_for(group_id), self._group_session_lock:
+                    if self.group_cancel_events.get(group_id) is not cancel_event or cancel_event.is_set():
+                        return False
+                    self.scheduler.add_job(
+                        job_run_group_sequence,
+                        DateTrigger(
+                            run_date=self._controller_now(naive=True),
+                            timezone=self._controller_timezone(),
+                        ),
+                        **_kwargs,
+                    )
             sequence_handed_off = True
             try:
                 pass  # dlog replaced by logger
@@ -2972,7 +3081,7 @@ class IrrigationScheduler:
                                 or self.group_cancel_events.get(int(group_id)) is not cancel_event
                             )
 
-                    start_kwargs: dict[str, Any] = {"source": "program"}
+                    start_kwargs: dict[str, Any] = {"source": "manual" if manual else "program"}
                     if self._callable_accepts_keyword(_start_central, "cancel_guard"):
                         start_kwargs["cancel_guard"] = cancel_guard
                     if cancel_guard():
@@ -2986,7 +3095,8 @@ class IrrigationScheduler:
                     logger.warning("Группа %s: зона %s не стартовала, success-учёт пропущен", group_id, zone_id)
                     continue
 
-                latest_state = str((self.db.get_zone(int(zone_id)) or {}).get("state") or "").lower()
+                activation = self._read_zone_strict(int(zone_id)) or {}
+                latest_state = str(activation.get("state") or "").lower()
                 if latest_state == "fault":
                     logger.error("Группа %s: зона %s перешла в fault при старте", group_id, zone_id)
                     continue
@@ -2995,7 +3105,7 @@ class IrrigationScheduler:
                 try:
                     metadata = {
                         "planned_end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "watering_start_source": "schedule",
+                        "watering_start_source": "manual" if manual else "schedule",
                     }
                     legacy_virtual_state = latest_state in {"off", "starting"}
                     if legacy_virtual_state and (not zone.get("mqtt_server_id") or not zone.get("topic")):
@@ -3006,8 +3116,16 @@ class IrrigationScheduler:
                     )
                 except (sqlite3.Error, OSError) as e:
                     logger.debug("group sequence planned end update failed: %s", e)
+                activation_token = str(
+                    activation.get("command_id") or activation.get("watering_start_time") or ""
+                ).strip()
+                self._clear_program_activation_evidence(int(zone_id))
                 try:
-                    self.schedule_zone_hard_stop(int(zone_id), end_time)
+                    self.schedule_zone_hard_stop(
+                        int(zone_id),
+                        end_time,
+                        activation_token=activation_token or None,
+                    )
                 except (ValueError, TypeError, KeyError) as e:
                     logger.debug("Handled exception in _run_group_sequence: %s", e)
                 try:
@@ -3197,6 +3315,56 @@ class IrrigationScheduler:
                 anchors[str(slot)] = min(values)
         return anchors
 
+    def _program_interval_anchor_contract(
+        self,
+        program_data: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, Any]] | None:
+        """Return exact live interval cadence identity, or ``None`` if unknown."""
+        program = self._normalise_program_payload(int(program_data["id"]), program_data)
+        if program.get("schedule_type") != "interval":
+            return {}
+        metadata = metadata or self.get_program_trigger_metadata(int(program["id"]))
+        slots = metadata.get("slots") if isinstance(metadata, dict) else None
+        expected = {"main"} | {f"extra:{index}" for index, _value in enumerate(program["extra_times"])}
+        if not isinstance(slots, dict) or set(slots) != expected:
+            return None
+        timezone = self._controller_timezone()
+        slot_times = {"main": program["time"]} | {
+            f"extra:{index}": value for index, value in enumerate(program["extra_times"])
+        }
+        contract: dict[str, dict[str, Any]] = {}
+        for slot in sorted(expected):
+            entries = slots.get(slot)
+            if not isinstance(entries, list) or len(entries) != 1:
+                return None
+            entry = entries[0]
+            anchor = entry.get("anchor") if isinstance(entry, dict) else None
+            if (
+                entry.get("trigger_type") != "IntervalTrigger"
+                or type(entry.get("interval_days")) is not int
+                or int(entry["interval_days"]) != int(program["interval_days"])
+                or not isinstance(anchor, datetime)
+                or anchor.tzinfo is None
+                or anchor.utcoffset() is None
+            ):
+                return None
+            local_anchor = anchor.astimezone(timezone) if timezone is not None else anchor.astimezone()
+            hours, minutes, _canonical_time = self._parse_program_time(slot_times[slot])
+            if (
+                local_anchor.hour,
+                local_anchor.minute,
+                local_anchor.second,
+                local_anchor.microsecond,
+            ) != (hours, minutes, 0, 0):
+                return None
+            contract[str(slot)] = {
+                "anchor": local_anchor.isoformat(),
+                "timezone": str(getattr(local_anchor.tzinfo, "key", local_anchor.tzinfo)),
+                "interval_days": int(entry["interval_days"]),
+            }
+        return contract
+
     def get_program_occurrences(
         self,
         program_id: int,
@@ -3338,14 +3506,17 @@ class IrrigationScheduler:
         group_id: int,
         *,
         master_close_immediately: bool,
-    ) -> tuple[threading.Event | None, list[dict[str, Any]], object, bool]:
+    ) -> tuple[threading.Event, list[dict[str, Any]], object, bool]:
         """Set the cancel fence and complete bulk OFF under one start barrier."""
         gid = int(group_id)
         with self._group_start_lock_for(gid):
             with self._group_session_lock:
-                owned_event = self.group_cancel_events.get(gid)
-                if owned_event is not None:
-                    owned_event.set()
+                predecessor = self.group_cancel_events.get(gid)
+                if predecessor is not None:
+                    predecessor.set()
+                owned_event = threading.Event()
+                owned_event.set()
+                self.group_cancel_events[gid] = owned_event
             group_zones = self._read_group_zones_strict(gid)
             try:
                 from services.zone_control import stop_all_in_group as _stop_all
@@ -3411,6 +3582,46 @@ class IrrigationScheduler:
                 return False
             time.sleep(0.02)
 
+    def _remove_group_sequence_jobs_verified(self, group_id: int) -> tuple[bool, bool]:
+        """Remove every pending sequence job and verify the jobstore is clear.
+
+        Returns ``(verified_clear, had_pending_job)``. A raised removal is not
+        by itself decisive because a durable jobstore can commit and then
+        report an error; the authoritative post-scan decides whether the
+        cancellation fence may be released.
+        """
+        gid = int(group_id)
+        prefix = f"group_seq:{gid}:"
+        try:
+            pending_ids = sorted(
+                {str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(prefix)}
+            )
+        except (AttributeError, RuntimeError, ValueError, TypeError, KeyError):
+            logger.exception("Could not enumerate pending sequence jobs for group %s", gid)
+            return False, False
+
+        for job_id in pending_ids:
+            try:
+                self.scheduler.remove_job(job_id)
+            except LookupError:
+                # Submission/removal may have won concurrently. The strict
+                # post-scan below remains the source of truth.
+                continue
+            except (RuntimeError, ValueError, TypeError):
+                logger.exception("Could not remove pending group job %s", job_id)
+
+        try:
+            remaining = sorted(
+                str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(prefix)
+            )
+        except (AttributeError, RuntimeError, ValueError, TypeError, KeyError):
+            logger.exception("Could not verify pending sequence removal for group %s", gid)
+            return False, bool(pending_ids)
+        if remaining:
+            logger.error("Group %s still has pending sequence jobs: %s", gid, remaining)
+            return False, bool(pending_ids)
+        return True, bool(pending_ids)
+
     def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False) -> dict[str, Any]:
         """Отменяет все активные задачи планировщика для указанной группы.
 
@@ -3460,6 +3671,11 @@ class IrrigationScheduler:
                 logger.error("Group %s runner did not acknowledge cancellation before timeout", gid)
                 contract_valid = False
 
+            sequence_jobs_clear, _had_pending_sequence = self._remove_group_sequence_jobs_verified(gid)
+            if not sequence_jobs_clear:
+                logger.error("Group %s pending sequence cancellation is unverified", gid)
+                contract_valid = False
+
             stop_call_failed = stop_call_failed or not contract_valid
             unresolved = set() if stop_call_failed else set(explicit_unresolved)
             stopped = set() if stop_call_failed else set(explicit_stopped)
@@ -3482,26 +3698,11 @@ class IrrigationScheduler:
                 else:
                     self.cancel_zone_jobs(zone_id, include_cap=True)
 
-            # Отменяем задачи последовательного полива группы
-            job_ids_to_remove = []
-            for job in self.scheduler.get_jobs():
-                jid = str(job.id)
-                if jid.startswith(f"group_seq:{gid}:"):
-                    job_ids_to_remove.append(job.id)
-
-            removed_sequence_jobs = 0
-            for job_id in job_ids_to_remove:
-                try:
-                    self.scheduler.remove_job(job_id)
-                    removed_sequence_jobs += 1
-                except (ValueError, KeyError, RuntimeError) as e:
-                    logger.debug("Handled exception in line_980: %s", e)
-
             # A removed pending DateTrigger has no runner/finally to release
             # the claim.  Active executor sessions retain ownership until their
             # identity-safe cleanup completes.
             with self._group_session_lock:
-                can_release_pending = removed_sequence_jobs > 0 or TESTING
+                can_release_pending = sequence_jobs_clear and contract_valid and not unresolved
                 if (
                     can_release_pending
                     and gid not in self._running_group_sessions
@@ -3760,6 +3961,119 @@ class IrrigationScheduler:
         programs = [self._decode_recovery_program_row(row) for row in program_rows]
         return programs, [dict(row) for row in zone_rows]
 
+    @staticmethod
+    def _read_program_activation_evidence_from_connection(
+        conn: sqlite3.Connection,
+    ) -> dict[int, dict[str, Any]]:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (_PROGRAM_ACTIVATION_EVIDENCE_KEY,),
+        ).fetchone()
+        if row is None:
+            return {}
+        payload = json.loads(str(row[0]))
+        if not isinstance(payload, dict) or set(payload) != {"version", "activations"}:
+            raise ValueError("invalid program activation evidence payload")
+        if payload.get("version") != 1 or not isinstance(payload.get("activations"), dict):
+            raise ValueError("invalid program activation evidence version")
+        result: dict[int, dict[str, Any]] = {}
+        for raw_zone_id, marker in payload["activations"].items():
+            if (
+                not isinstance(raw_zone_id, str)
+                or not raw_zone_id.isdigit()
+                or str(int(raw_zone_id)) != raw_zone_id
+                or int(raw_zone_id) <= 0
+                or not isinstance(marker, dict)
+                or set(marker) != {"program_id", "zone_id", "activation_token"}
+                or type(marker.get("program_id")) is not int
+                or int(marker["program_id"]) <= 0
+                or type(marker.get("zone_id")) is not int
+                or int(marker["zone_id"]) != int(raw_zone_id)
+                or not isinstance(marker.get("activation_token"), str)
+                or not str(marker["activation_token"]).strip()
+            ):
+                raise ValueError("invalid program activation evidence marker")
+            zone_id = int(raw_zone_id)
+            result[zone_id] = {
+                "program_id": int(marker["program_id"]),
+                "zone_id": zone_id,
+                "activation_token": str(marker["activation_token"]),
+            }
+        return result
+
+    @staticmethod
+    def _write_program_activation_evidence(
+        conn: sqlite3.Connection,
+        activations: dict[int, dict[str, Any]],
+    ) -> None:
+        if not activations:
+            conn.execute("DELETE FROM settings WHERE key = ?", (_PROGRAM_ACTIVATION_EVIDENCE_KEY,))
+            return
+        payload = json.dumps(
+            {
+                "version": 1,
+                "activations": {str(zone_id): marker for zone_id, marker in sorted(activations.items())},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+            (_PROGRAM_ACTIVATION_EVIDENCE_KEY, payload),
+        )
+
+    def _read_program_activation_evidence_strict(self) -> dict[int, dict[str, Any]]:
+        with self._program_activation_evidence_lock, sqlite3.connect(self.db.db_path, timeout=5) as conn:
+            return self._read_program_activation_evidence_from_connection(conn)
+
+    def _persist_program_activation_evidence(
+        self,
+        program_id: int,
+        zone_id: int,
+        activation_token: str,
+    ) -> bool:
+        marker = {
+            "program_id": int(program_id),
+            "zone_id": int(zone_id),
+            "activation_token": str(activation_token or "").strip(),
+        }
+        if marker["program_id"] <= 0 or marker["zone_id"] <= 0 or not marker["activation_token"]:
+            return False
+        try:
+            with self._program_activation_evidence_lock, sqlite3.connect(self.db.db_path, timeout=5) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                activations = self._read_program_activation_evidence_from_connection(conn)
+                activations[int(zone_id)] = marker
+                self._write_program_activation_evidence(conn, activations)
+                conn.commit()
+            return self._read_program_activation_evidence_strict().get(int(zone_id)) == marker
+        except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+            logger.exception("Could not persist program activation evidence program=%s zone=%s", program_id, zone_id)
+            return False
+
+    def _clear_program_activation_evidence(self, zone_id: int, activation_token: str | None = None) -> bool:
+        zid = int(zone_id)
+        token = str(activation_token or "").strip()
+        try:
+            with self._program_activation_evidence_lock, sqlite3.connect(self.db.db_path, timeout=5) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                activations = self._read_program_activation_evidence_from_connection(conn)
+                current = activations.get(zid)
+                if current is None:
+                    conn.rollback()
+                    return True
+                if token and current["activation_token"] != token:
+                    conn.rollback()
+                    return False
+                activations.pop(zid, None)
+                self._write_program_activation_evidence(conn, activations)
+                conn.commit()
+            return zid not in self._read_program_activation_evidence_strict()
+        except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+            logger.exception("Could not clear program activation evidence zone=%s", zid)
+            return False
+
     def _normalise_boot_recovery_intent(self, intent_id: str, raw: object) -> dict[str, Any]:
         if not isinstance(raw, dict) or str(raw.get("id") or "") != str(intent_id):
             raise ValueError("invalid boot recovery intent identity")
@@ -3786,6 +4100,80 @@ class IrrigationScheduler:
         program_name = raw.get("program_name")
         if not isinstance(program_name, str) or not program_name:
             raise ValueError("invalid boot recovery program name")
+
+        schedule_fingerprint = raw.get("schedule_fingerprint")
+        if schedule_fingerprint is not None and (
+            not isinstance(schedule_fingerprint, str)
+            or len(schedule_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in schedule_fingerprint)
+        ):
+            raise ValueError("invalid boot recovery schedule fingerprint")
+
+        raw_anchor_contract = raw.get("interval_anchor_contract")
+        interval_anchor_contract: dict[str, dict[str, Any]] | None
+        if raw_anchor_contract is None:
+            # Upgrade compatibility: legacy intents are retained in a readable
+            # form but execution will terminalize them without watering because
+            # their recurring cadence identity cannot be proven.
+            interval_anchor_contract = None
+        elif not isinstance(raw_anchor_contract, dict):
+            raise ValueError("invalid boot recovery interval anchor contract")
+        else:
+            interval_anchor_contract = {}
+            for slot, entry in sorted(raw_anchor_contract.items()):
+                if not isinstance(slot, str) or (
+                    slot != "main" and not (slot.startswith("extra:") and slot[6:].isdigit())
+                ):
+                    raise ValueError("invalid boot recovery interval slot")
+                if not isinstance(entry, dict) or set(entry) != {"anchor", "timezone", "interval_days"}:
+                    raise ValueError("invalid boot recovery interval anchor entry")
+                anchor_text = entry.get("anchor")
+                timezone_name = entry.get("timezone")
+                interval_days = entry.get("interval_days")
+                if (
+                    not isinstance(anchor_text, str)
+                    or not isinstance(timezone_name, str)
+                    or not timezone_name
+                    or type(interval_days) is not int
+                    or not 1 <= interval_days <= 30
+                ):
+                    raise ValueError("invalid boot recovery interval anchor value")
+                try:
+                    anchor = datetime.fromisoformat(anchor_text)
+                except ValueError as exc:
+                    raise ValueError("invalid boot recovery interval anchor datetime") from exc
+                if anchor.tzinfo is None or anchor.utcoffset() is None:
+                    raise ValueError("boot recovery interval anchor must be timezone-aware")
+                interval_anchor_contract[slot] = {
+                    "anchor": anchor.isoformat(),
+                    "timezone": timezone_name,
+                    "interval_days": interval_days,
+                }
+
+        raw_duration_contract = raw.get("zone_duration_contract")
+        zone_duration_contract: dict[str, int] | None
+        if raw_duration_contract is None:
+            zone_duration_contract = None
+        elif not isinstance(raw_duration_contract, dict):
+            raise ValueError("invalid boot recovery zone duration contract")
+        else:
+            zone_duration_contract = {}
+            for raw_zone_id, raw_duration in sorted(raw_duration_contract.items(), key=lambda item: str(item[0])):
+                if (
+                    not isinstance(raw_zone_id, str)
+                    or not raw_zone_id.isdigit()
+                    or str(int(raw_zone_id)) != raw_zone_id
+                    or int(raw_zone_id) <= 0
+                    or type(raw_duration) is not int
+                    or raw_duration < 0
+                ):
+                    raise ValueError("invalid boot recovery zone duration entry")
+                zone_duration_contract[raw_zone_id] = raw_duration
+        controller_timezone = raw.get("controller_timezone")
+        if controller_timezone is not None and (
+            not isinstance(controller_timezone, str) or not controller_timezone.strip()
+        ):
+            raise ValueError("invalid boot recovery controller timezone")
         return {
             "id": str(intent_id),
             "program_id": int(program_id),
@@ -3794,6 +4182,10 @@ class IrrigationScheduler:
             "zones": [int(zone_id) for zone_id in zones],
             "scheduled_start": scheduled_start,
             "window_end": window_end,
+            "schedule_fingerprint": schedule_fingerprint,
+            "interval_anchor_contract": interval_anchor_contract,
+            "zone_duration_contract": zone_duration_contract,
+            "controller_timezone": controller_timezone,
             "completed": bool(raw.get("completed", False)),
         }
 
@@ -3924,7 +4316,7 @@ class IrrigationScheduler:
 
     def _ensure_boot_recovery_job(
         self,
-        intent: dict[str, Any],
+        intent: dict[str, Any] | str,
         *,
         run_at: datetime | None = None,
         retry_generation: bool = False,
@@ -3937,7 +4329,7 @@ class IrrigationScheduler:
         ):
             logger.critical("Durable boot recovery requires the running SQLAlchemy jobstore")
             return False
-        intent_id = str(intent["id"])
+        intent_id = str(intent if isinstance(intent, str) else intent["id"])
         job_id = (
             self._boot_recovery_retry_job_id(intent_id)
             if retry_generation
@@ -3989,14 +4381,45 @@ class IrrigationScheduler:
                 logger.info("Boot recovery intent %s expired safely", intent_id)
                 return self._finalize_boot_recovery_intent(intent)
 
-            programs, _zones = self._read_recovery_inputs_strict()
+            programs, zones = self._read_recovery_inputs_strict()
             program = next((item for item in programs if int(item["id"]) == int(intent["program_id"])), None)
             if program is None or not program.get("enabled", True):
                 logger.info("Boot recovery intent %s is no longer applicable", intent_id)
                 return self._finalize_boot_recovery_intent(intent)
+            if (
+                intent.get("schedule_fingerprint") is None
+                or intent.get("interval_anchor_contract") is None
+                or intent.get("zone_duration_contract") is None
+                or intent.get("controller_timezone") is None
+            ):
+                logger.info("Boot recovery intent %s has legacy unverified inputs", intent_id)
+                return self._finalize_boot_recovery_intent(intent)
+            if str(self._controller_timezone()) != intent["controller_timezone"]:
+                logger.info("Boot recovery intent %s superseded by controller timezone change", intent_id)
+                return self._finalize_boot_recovery_intent(intent)
             current_program_zones = sorted({int(zone_id) for zone_id in (program.get("zones") or [])})
             if current_program_zones != intent["program_zones"]:
                 logger.info("Boot recovery intent %s superseded by program edit", intent_id)
+                return self._finalize_boot_recovery_intent(intent)
+            try:
+                current_fingerprint = self.program_schedule_fingerprint(int(program["id"]), program)
+                current_anchor_contract = self._program_interval_anchor_contract(program)
+                zones_by_id = {int(zone["id"]): zone for zone in zones}
+                current_duration_contract = {
+                    str(zone_id): int((zones_by_id[zone_id]).get("duration") or 0)
+                    for zone_id in current_program_zones
+                    if zone_id in zones_by_id
+                }
+            except (KeyError, TypeError, ValueError):
+                logger.info("Boot recovery intent %s has malformed current inputs", intent_id)
+                return self._finalize_boot_recovery_intent(intent)
+            if (
+                current_fingerprint != intent["schedule_fingerprint"]
+                or current_anchor_contract is None
+                or current_anchor_contract != intent["interval_anchor_contract"]
+                or current_duration_contract != intent["zone_duration_contract"]
+            ):
+                logger.info("Boot recovery intent %s superseded by schedule/anchor/duration edit", intent_id)
                 return self._finalize_boot_recovery_intent(intent)
 
             completed = self._run_program_threaded(
@@ -4012,10 +4435,17 @@ class IrrigationScheduler:
             # terminal expiry callback so it cannot linger forever in a live
             # process; a crash before then is recovered from the intent itself.
             expiry = window_end.replace(tzinfo=self._controller_timezone())
-            self._ensure_boot_recovery_job(intent, run_at=expiry, retry_generation=True)
+            if not self._ensure_boot_recovery_job(intent, run_at=expiry, retry_generation=True):
+                logger.critical("Boot recovery intent %s failed without a verified expiry retry", intent_id)
             return False
         except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             logger.exception("Boot recovery intent execution failed (intent_id=%s)", intent_id)
+            try:
+                retry_at = self._controller_now() + timedelta(seconds=30)
+                if not self._ensure_boot_recovery_job(str(intent_id), run_at=retry_at, retry_generation=True):
+                    logger.critical("Boot recovery intent %s failed without a persistent generation retry", intent_id)
+            except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, KeyError):
+                logger.exception("Could not replant failed boot recovery intent %s", intent_id)
             return False
 
     def boot_recovery_handoff_is_durable(self) -> bool:
@@ -4097,8 +4527,9 @@ class IrrigationScheduler:
                     zones = sorted([int(z) for z in (p.get("zones") or [])])
                     if not zones:
                         continue
+                    program_evidence = self._boot_interrupted_program_zones.get(int(p["id"]), set())
                     interrupted_indices = [
-                        idx for idx, zone_id in enumerate(zones) if zone_id in self._boot_interrupted_zone_ids
+                        idx for idx, zone_id in enumerate(zones) if zone_id in program_evidence
                     ]
                     if require_interrupted_evidence and not interrupted_indices:
                         continue
@@ -4108,37 +4539,28 @@ class IrrigationScheduler:
                     durations = [int((zones_by_id.get(zid) or {}).get("duration") or 0) for zid in zones]
                     total_min = sum(durations)
                     candidates: list[datetime] = []
+                    interval_anchor_contract: dict[str, dict[str, Any]] = {}
                     if (p.get("schedule_type") or "weekdays") == "interval":
                         # Interval phase is defined by the preserved live
                         # IntervalTrigger anchor, never by service-start time.
                         # Missing metadata fails closed rather than inventing a
                         # new occurrence and watering on the wrong phase.
-                        metadata = self.get_program_trigger_metadata(int(p["id"]))
-                        expected_slots = {"main"} | {
-                            f"extra:{index}" for index, _value in enumerate(p.get("extra_times") or [])
-                        }
-                        slot_metadata = metadata.get("slots") or {}
-                        anchors_valid = set(slot_metadata) == expected_slots
-                        for slot in expected_slots:
-                            entries = slot_metadata.get(slot)
-                            if (
-                                not isinstance(entries, list)
-                                or len(entries) != 1
-                                or entries[0].get("trigger_type") != "IntervalTrigger"
-                                or entries[0].get("anchor") is None
-                                or int(entries[0].get("interval_days") or 0) != int(p.get("interval_days") or 0)
-                            ):
-                                anchors_valid = False
+                        with self._program_jobs_lock:
+                            metadata = self.get_program_trigger_metadata(int(p["id"]))
+                            anchor_snapshot = self._program_interval_anchor_contract(p, metadata)
+                            anchors_valid = anchor_snapshot is not None
+                            if anchor_snapshot is not None:
+                                interval_anchor_contract = anchor_snapshot
+                            occurrence_start = now - timedelta(minutes=max(1, total_min))
+                            occurrences = self.get_program_occurrences(
+                                int(p["id"]),
+                                occurrence_start,
+                                now,
+                            )
                         if require_interrupted_evidence and not anchors_valid:
                             logger.error("Interrupted interval program %s has no authoritative live anchor", p["id"])
                             all_ok = False
                             continue
-                        occurrence_start = now - timedelta(minutes=max(1, total_min))
-                        occurrences = self.get_program_occurrences(
-                            int(p["id"]),
-                            occurrence_start,
-                            now,
-                        )
                         timezone = self._controller_timezone()
                         for fires in occurrences.values():
                             for fire in fires:
@@ -4207,6 +4629,12 @@ class IrrigationScheduler:
                             "zones": recovery_zones,
                             "scheduled_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                             "window_end": (start_dt + timedelta(minutes=total_min)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "schedule_fingerprint": self.program_schedule_fingerprint(int(p["id"]), p),
+                            "interval_anchor_contract": interval_anchor_contract,
+                            "zone_duration_contract": {
+                                str(zone_id): duration for zone_id, duration in zip(zones, durations, strict=True)
+                            },
+                            "controller_timezone": str(self._controller_timezone()),
                         }
                         if not self._persist_boot_recovery_intent(intent):
                             all_ok = False
@@ -4290,12 +4718,42 @@ class IrrigationScheduler:
             with sqlite3.connect(self.db.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 zones = [dict(row) for row in conn.execute("SELECT * FROM zones ORDER BY id").fetchall()]
+                open_runs = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT zone_id, source FROM zone_runs WHERE end_utc IS NULL ORDER BY id"
+                    ).fetchall()
+                ]
             interrupted = {
                 int(z["id"])
                 for z in zones
                 if str(z.get("state") or "").lower() in ("starting", "on", "stopping", "paused")
             }
             self._boot_interrupted_zone_ids = interrupted
+            try:
+                activation_evidence = self._read_program_activation_evidence_strict()
+            except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+                activation_evidence = {}
+                all_ok = False
+                logger.exception("Boot remediation: program activation evidence read failed")
+            open_run_source = {int(row["zone_id"]): str(row.get("source") or "") for row in open_runs}
+            interrupted_programs: dict[int, set[int]] = {}
+            for zone in zones:
+                zone_id = int(zone["id"])
+                if zone_id not in interrupted:
+                    continue
+                marker = activation_evidence.get(zone_id)
+                current_token = str(zone.get("command_id") or zone.get("watering_start_time") or "").strip()
+                if (
+                    marker is None
+                    or not current_token
+                    or marker["activation_token"] != current_token
+                    or str(zone.get("watering_start_source") or "").lower() != "schedule"
+                    or open_run_source.get(zone_id) != "program"
+                ):
+                    continue
+                interrupted_programs.setdefault(int(marker["program_id"]), set()).add(zone_id)
+            self._boot_interrupted_program_zones = interrupted_programs
             # init_scheduler runs before services.app_init._boot_sync.  Closing
             # crash-open rows here is therefore mandatory: otherwise the first
             # normal stop_zone call below finalizes yesterday's interrupted run

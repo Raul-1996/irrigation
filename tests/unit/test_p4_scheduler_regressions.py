@@ -56,6 +56,39 @@ def _core_stop_result(group_id: int, *, stopped: list[int], unresolved: list[int
     }
 
 
+def _boot_recovery_intent(
+    sched: IrrigationScheduler,
+    program: dict,
+    zone_id: int,
+    *,
+    anchor_contract: dict | None = None,
+    duration_minutes: int = 30,
+) -> dict:
+    return {
+        "id": f"{program['id']}:20260720T060000",
+        "program_id": program["id"],
+        "program_name": f"{program['name']} (recovered)",
+        "program_zones": [zone_id],
+        "zones": [zone_id],
+        "scheduled_start": "2026-07-20 06:00:00",
+        "window_end": "2026-07-20 06:30:00",
+        "schedule_fingerprint": sched.program_schedule_fingerprint(program["id"], program),
+        "interval_anchor_contract": {} if anchor_contract is None else anchor_contract,
+        "zone_duration_contract": {str(zone_id): int(duration_minutes)},
+        "controller_timezone": str(sched._controller_timezone()),
+    }
+
+
+def _interval_anchor_contract(anchor: datetime, interval_days: int) -> dict:
+    return {
+        "main": {
+            "anchor": anchor.isoformat(),
+            "timezone": str(anchor.tzinfo),
+            "interval_days": int(interval_days),
+        }
+    }
+
+
 def test_load_programs_preserves_persistent_misfire_and_interval_anchor(test_db):
     _, program = _create_interval_program(test_db)
 
@@ -480,8 +513,10 @@ def test_cancelling_pending_group_sequence_releases_session_claim(sched, test_db
     owned = threading.Event()
     sched.group_cancel_events[group["id"]] = owned
     pending = MagicMock(id=f"group_seq:{group['id']}:123")
+    jobs = [pending]
     sched.scheduler = MagicMock()
-    sched.scheduler.get_jobs.return_value = [pending]
+    sched.scheduler.get_jobs.side_effect = lambda: list(jobs)
+    sched.scheduler.remove_job.side_effect = lambda _job_id: jobs.clear()
 
     with patch(
         "services.zone_control.stop_all_in_group",
@@ -492,6 +527,135 @@ def test_cancelling_pending_group_sequence_releases_session_claim(sched, test_db
     assert result["success"] is True
     assert owned.is_set()
     assert group["id"] not in sched.group_cancel_events
+
+
+def test_group_cancel_fails_closed_when_pending_sequence_job_cannot_be_removed(sched, test_db):
+    group = test_db.create_group("pending-sequence-remove-failure")
+    zone = test_db.create_zone({"name": "zone", "duration": 5, "group_id": group["id"]})
+    owned = threading.Event()
+    sched.group_cancel_events[group["id"]] = owned
+    pending = MagicMock(id=f"group_seq:{group['id']}:123")
+    sched.scheduler = MagicMock()
+    sched.scheduler.get_jobs.return_value = [pending]
+    sched.scheduler.remove_job.side_effect = RuntimeError("jobstore unavailable")
+
+    with (
+        patch.object(sched, "schedule_zone_hard_stop", return_value=True) as replant,
+        patch(
+            "services.zone_control.stop_all_in_group",
+            return_value=_core_stop_result(group["id"], stopped=[zone["id"]], unresolved=[]),
+        ),
+    ):
+        result = sched.cancel_group_jobs(group["id"])
+
+    assert result == {
+        "success": False,
+        "group_id": group["id"],
+        "aggregate_valid": False,
+        "stopped": [],
+        "unresolved": [],
+        "unverified_zone_ids": [zone["id"]],
+        "retry_scheduled": False,
+    }
+    assert owned.is_set()
+    assert sched.group_cancel_events[group["id"]] is not owned
+    assert sched.group_cancel_events[group["id"]].is_set()
+    replant.assert_called_once()
+
+
+def test_group_cancel_plants_generation_fence_before_off_and_blocks_fresh_program_start(sched, test_db):
+    group = test_db.create_group("cancel-fresh-start-fence")
+    zone = test_db.create_zone({"name": "zone", "duration": 1, "group_id": group["id"]})
+    core_entered = threading.Event()
+    release_core = threading.Event()
+    start_attempted = threading.Event()
+    cancel_result: dict[str, object] = {}
+
+    def blocking_core_stop(_group_id, **_kwargs):
+        core_entered.set()
+        assert release_core.wait(timeout=2)
+        return _core_stop_result(group["id"], stopped=[zone["id"]], unresolved=[])
+
+    def run_cancel():
+        cancel_result.update(sched.cancel_group_jobs(group["id"]))
+
+    with (
+        patch.object(scheduler_module, "TESTING", False),
+        patch("services.zone_control.stop_all_in_group", side_effect=blocking_core_stop),
+        patch("services.zone_control.exclusive_start_zone", side_effect=lambda *_a, **_k: start_attempted.set()),
+        patch.object(sched, "_stop_zone", return_value=True),
+    ):
+        cancel_thread = threading.Thread(target=run_cancel)
+        cancel_thread.start()
+        assert core_entered.wait(timeout=1)
+
+        start_thread = threading.Thread(
+            target=sched._run_program_threaded,
+            args=(77_001, [zone["id"]], "racing program"),
+            kwargs={"manual": True},
+        )
+        start_thread.start()
+        start_thread.join(timeout=0.2)
+        attempted_while_off_blocked = start_attempted.is_set()
+
+        release_core.set()
+        cancel_thread.join(timeout=2)
+        start_thread.join(timeout=2)
+
+    assert not cancel_thread.is_alive()
+    assert not start_thread.is_alive()
+    assert cancel_result["success"] is True
+    assert attempted_while_off_blocked is False
+    assert start_attempted.is_set() is False
+    assert group["id"] not in sched.group_cancel_events
+
+
+def test_program_runner_fails_closed_when_group_ownership_discovery_is_transient(sched, test_db):
+    group = test_db.create_group("transient-group-discovery")
+    zone = test_db.create_zone({"name": "zone", "duration": 1, "group_id": group["id"]})
+
+    with (
+        patch.object(sched, "_read_zone_strict", return_value=None),
+        patch("services.zone_control.exclusive_start_zone", return_value=True) as start_zone,
+    ):
+        assert sched._run_program_threaded(77_002, [zone["id"]], "transient discovery", manual=True) is False
+
+    start_zone.assert_not_called()
+    assert group["id"] not in sched.group_cancel_events
+
+
+def test_group_sequence_cannot_enqueue_after_cancel_verified_empty_postscan(sched, test_db):
+    group = test_db.create_group("cancel-before-sequence-enqueue")
+    zone = test_db.create_zone({"name": "zone", "duration": 1, "group_id": group["id"]})
+    schedule_map_entered = threading.Event()
+    release_starter = threading.Event()
+    start_result: list[bool] = []
+    real_set_schedule = test_db.set_group_scheduled_starts
+
+    def pause_schedule_map(group_id, schedule_map):
+        real_set_schedule(group_id, schedule_map)
+        schedule_map_entered.set()
+        assert release_starter.wait(timeout=2)
+
+    aggregate = _core_stop_result(group["id"], stopped=[zone["id"]], unresolved=[])
+    with (
+        patch.object(scheduler_module, "TESTING", False),
+        patch.object(test_db, "set_group_scheduled_starts", side_effect=pause_schedule_map),
+        patch("services.zone_control.stop_all_in_group", return_value=aggregate),
+    ):
+        starter = threading.Thread(
+            target=lambda: start_result.append(sched.start_group_sequence(group["id"], manual=True))
+        )
+        starter.start()
+        assert schedule_map_entered.wait(timeout=1)
+        cancelled = sched.cancel_group_jobs(group["id"])
+        release_starter.set()
+        starter.join(timeout=2)
+
+    assert not starter.is_alive()
+    assert cancelled["success"] is True
+    assert start_result == [False]
+    assert not any(str(job.id).startswith(f"group_seq:{group['id']}:") for job in sched.scheduler.get_jobs())
 
 
 def test_group_session_quiesce_truthfully_tracks_running_ownership(sched):
@@ -520,7 +684,7 @@ def test_cancel_fence_blocks_runner_paused_after_precheck(sched, test_db, monkey
     published_on: list[int] = []
 
     def paused_start(zone_id, *, source, cancel_guard):
-        assert source == "program"
+        assert source == "manual"
         entered.set()
         assert release.wait(timeout=3)
         if cancel_guard():
@@ -567,7 +731,7 @@ def test_program_cancel_generation_blocks_on_after_precheck(sched, test_db):
     published_on: list[int] = []
 
     def paused_start(zone_id, *, source, cancel_guard):
-        assert source == "program"
+        assert source == "manual"
         entered.set()
         assert release.wait(timeout=3)
         if cancel_guard():
@@ -827,6 +991,72 @@ def test_activation_callback_prefers_unique_command_id_over_legacy_timestamp(sch
     assert sched._current_activation_token(zone["id"]) == command_id
 
 
+def test_activation_callback_serializes_token_check_and_off_against_new_start(sched, test_db):
+    from services.locks import group_lock
+
+    group = test_db.create_group("activation-token-cas")
+    zone = test_db.create_zone({"name": "zone", "duration": 5, "group_id": group["id"]})
+    old_token = "old-activation"
+    new_token = "new-activation"
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute(
+            "UPDATE zones SET state = 'on', command_id = ? WHERE id = ?",
+            (old_token, zone["id"]),
+        )
+        conn.commit()
+
+    interleaving: dict[str, object] = {}
+
+    def stop_after_competing_start(zone_id, **_kwargs):
+        def try_new_start():
+            lock = group_lock(group["id"])
+            acquired = lock.acquire(blocking=False)
+            interleaving["new_start_acquired"] = acquired
+            if not acquired:
+                return
+            try:
+                with sqlite3.connect(test_db.db_path) as conn:
+                    conn.execute(
+                        "UPDATE zones SET state = 'on', command_id = ? WHERE id = ?",
+                        (new_token, zone_id),
+                    )
+                    conn.commit()
+            finally:
+                lock.release()
+
+        contender = threading.Thread(target=try_new_start)
+        contender.start()
+        contender.join(timeout=1)
+        assert not contender.is_alive()
+        interleaving["token_at_off"] = sched._current_activation_token(zone_id)
+        return True
+
+    with (
+        patch.object(scheduler_module, "get_scheduler", return_value=sched),
+        patch.object(sched, "_stop_zone", side_effect=stop_after_competing_start),
+    ):
+        scheduler_module.job_stop_zone_if_activation(zone["id"], old_token, True)
+
+    assert interleaving == {
+        "new_start_acquired": False,
+        "token_at_off": old_token,
+    }
+
+
+def test_activation_callback_replants_exact_retry_after_strict_precheck_failure(sched):
+    token = "activation-owned"
+    with (
+        patch.object(scheduler_module, "get_scheduler", return_value=sched),
+        patch.object(sched, "_read_zone_strict", side_effect=sqlite3.OperationalError("busy")),
+        patch.object(sched, "schedule_zone_hard_stop", return_value=True) as replant,
+    ):
+        scheduler_module.job_stop_zone_if_activation(93_001, token, True)
+
+    replant.assert_called_once()
+    assert replant.call_args.args[0] == 93_001
+    assert replant.call_args.kwargs["activation_token"] == token
+
+
 def test_failed_auto_stop_rearms_activation_bound_hard_retry(sched, test_db):
     group = test_db.create_group("retry")
     zone = test_db.create_zone({"name": "zone", "duration": 5, "group_id": group["id"]})
@@ -842,6 +1072,24 @@ def test_failed_auto_stop_rearms_activation_bound_hard_retry(sched, test_db):
     assert test_db.get_zone(zone["id"])["state"] == "on"
     hard_stop.assert_called_once()
     assert hard_stop.call_args.kwargs["activation_token"] == token
+
+
+def test_hard_and_cap_refuse_to_replace_token_bound_safety_after_token_read_failure(sched):
+    zone_id = 91_001
+    token = "activation-owned"
+    run_at = sched._controller_now() + timedelta(minutes=10)
+    sched.start(paused=True)
+    assert sched.schedule_zone_hard_stop(zone_id, run_at, activation_token=token) is True
+    assert sched.schedule_zone_cap(zone_id, cap_minutes=20, activation_token=token) is True
+
+    with patch.object(sched, "_current_activation_token", return_value=None):
+        assert sched.schedule_zone_hard_stop(zone_id, run_at) is False
+        assert sched.schedule_zone_cap(zone_id, cap_minutes=20) is False
+
+    hard = sched.scheduler.get_job(f"zone_hard_stop:{zone_id}")
+    cap = sched.scheduler.get_job(f"zone_cap_stop:{zone_id}")
+    assert list(hard.args) == [zone_id, token, True]
+    assert list(cap.args) == [zone_id, token, True]
 
 
 def test_scheduler_off_requires_fresh_physical_confirmation(sched, test_db):
@@ -902,13 +1150,21 @@ def test_safety_stop_forces_mqtt_off_and_rearms_after_publish_failure(sched, tes
             "commanded_state": "off",
             "observed_state": "on",
             "watering_start_time": None,
+            "command_id": "activation-owned",
         },
     )
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute("UPDATE zones SET command_id = ? WHERE id = ?", ("activation-owned", zone["id"]))
+        conn.commit()
     if safety_kind == "hard":
-        sched.schedule_zone_hard_stop(zone["id"], datetime.now() + timedelta(minutes=1))
+        sched.schedule_zone_hard_stop(
+            zone["id"],
+            datetime.now() + timedelta(minutes=1),
+            activation_token="activation-owned",
+        )
         job_id = f"zone_hard_stop:{zone['id']}"
     else:
-        sched.schedule_zone_cap(zone["id"], cap_minutes=1)
+        sched.schedule_zone_cap(zone["id"], cap_minutes=1, activation_token="activation-owned")
         job_id = f"zone_cap_stop:{zone['id']}"
     planted = sched.scheduler.get_job(job_id)
     assert planted is not None
@@ -926,9 +1182,9 @@ def test_safety_stop_forces_mqtt_off_and_rearms_after_publish_failure(sched, tes
     publish.assert_called_once()
     assert publish.call_args.args[2] == "0"
     assert test_db.get_zone(zone["id"])["state"] == "fault"
-    assert planted.args == (zone["id"], None, True)
+    assert planted.args == (zone["id"], "activation-owned", True)
     rearm.assert_called_once()
-    assert rearm.call_args.kwargs["activation_token"] is None
+    assert rearm.call_args.kwargs["activation_token"] == "activation-owned"
 
 
 def test_scheduler_boot_aborts_crash_open_run_before_forced_stop(sched, test_db):
@@ -957,6 +1213,89 @@ def test_scheduler_boot_aborts_crash_open_run_before_forced_stop(sched, test_db)
         status, end_utc = conn.execute("SELECT status, end_utc FROM zone_runs WHERE id = ?", (run_id,)).fetchone()
     assert status == "aborted"
     assert end_utc is not None
+
+
+def test_manual_crash_inside_program_window_is_not_scheduler_recovery_evidence(sched, test_db):
+    group = test_db.create_group("manual-not-program-evidence")
+    zones = [
+        test_db.create_zone({"name": f"z{index}", "duration": 20, "group_id": group["id"]})
+        for index in range(2)
+    ]
+    test_db.create_program(
+        {
+            "name": "coincident schedule",
+            "time": "06:00",
+            "schedule_type": "weekdays",
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "zones": [zone["id"] for zone in zones],
+            "enabled": True,
+        }
+    )
+    token = "manual-activation"
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute(
+            "UPDATE zones SET state = 'on', watering_start_source = 'manual', command_id = ? WHERE id = ?",
+            (token, zones[0]["id"]),
+        )
+        conn.commit()
+    test_db.create_zone_run(
+        zones[0]["id"],
+        group["id"],
+        "2026-07-20 06:03:00",
+        1.0,
+        None,
+        0,
+        source="manual",
+    )
+
+    def forced_stop(zone_id, **_kwargs):
+        test_db.update_zone(zone_id, {"state": "off"})
+        return True
+
+    with patch("services.zone_control.stop_zone", side_effect=forced_stop):
+        assert sched.stop_on_boot_active_zones() is True
+
+    with (
+        patch.object(sched, "_controller_now", return_value=datetime(2026, 7, 20, 6, 5, 0)),
+        patch.object(sched, "_persist_boot_recovery_intent", return_value=True) as persist_intent,
+        patch.object(sched, "_ensure_boot_recovery_job", return_value=True),
+    ):
+        assert sched.recover_missed_runs(require_interrupted_evidence=True) is True
+
+    persist_intent.assert_not_called()
+
+
+def test_boot_capture_binds_program_source_zone_and_activation_token(sched, test_db):
+    group = test_db.create_group("program-activation-evidence")
+    zone = test_db.create_zone({"name": "zone", "duration": 20, "group_id": group["id"]})
+    program = test_db.create_program(
+        {
+            "name": "owned schedule",
+            "time": "06:00",
+            "schedule_type": "weekdays",
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "zones": [zone["id"]],
+            "enabled": True,
+        }
+    )
+    token = "program-activation"
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute(
+            "UPDATE zones SET state = 'on', watering_start_source = 'schedule', command_id = ? WHERE id = ?",
+            (token, zone["id"]),
+        )
+        conn.commit()
+    test_db.create_zone_run(zone["id"], group["id"], "2026-07-20 06:03:00", 1.0, None, 0, source="program")
+    assert sched._persist_program_activation_evidence(program["id"], zone["id"], token) is True
+
+    def forced_stop(zone_id, **_kwargs):
+        test_db.update_zone(zone_id, {"state": "off"})
+        return True
+
+    with patch("services.zone_control.stop_zone", side_effect=forced_stop):
+        assert sched.stop_on_boot_active_zones() is True
+
+    assert sched._boot_interrupted_program_zones == {program["id"]: {zone["id"]}}
 
 
 def test_boot_active_zone_scan_does_not_trust_fail_soft_repository_empty_list(sched, test_db):
@@ -1068,7 +1407,7 @@ def test_program_runner_aborts_before_next_zone_when_off_is_unresolved(sched, te
 
     assert start.call_count == 1
     assert start.call_args.args == (zones[0]["id"],)
-    assert start.call_args.kwargs["source"] == "program"
+    assert start.call_args.kwargs["source"] == "manual"
     assert callable(start.call_args.kwargs["cancel_guard"])
     stop.assert_called_once_with(zones[0]["id"], reason="auto")
 
@@ -1088,7 +1427,7 @@ def test_group_runner_aborts_before_next_zone_when_off_is_unresolved(sched, test
 
     assert start.call_count == 1
     assert start.call_args.args == (zones[0]["id"],)
-    assert start.call_args.kwargs["source"] == "program"
+    assert start.call_args.kwargs["source"] == "manual"
     assert callable(start.call_args.kwargs["cancel_guard"])
     stop.assert_called_once_with(zones[0]["id"], reason="group_sequence")
 
@@ -1178,6 +1517,7 @@ def test_interval_crash_recovery_uses_live_preserved_occurrence(sched, test_db):
         replace_existing=True,
     )
     sched._boot_interrupted_zone_ids = {zones[0]["id"]}
+    sched._boot_interrupted_program_zones = {program["id"]: {zones[0]["id"]}}
 
     with patch.object(sched, "_controller_now", return_value=now):
         assert sched.recover_missed_runs(require_interrupted_evidence=True) is True
@@ -1187,6 +1527,146 @@ def test_interval_crash_recovery_uses_live_preserved_occurrence(sched, test_db):
     recovery = [job for job in sched.scheduler.get_jobs() if str(job.id).startswith("boot_recovery:")]
     assert len(recovery) == 1
     assert list(recovery[0].args) == [next(iter(intents))]
+
+
+@pytest.mark.parametrize(
+    ("initial_schedule", "edit"),
+    [
+        ({"schedule_type": "weekdays", "days": [0, 1, 2, 3, 4, 5, 6]}, {"time": "06:10"}),
+        ({"schedule_type": "weekdays", "days": [0, 1, 2, 3, 4, 5, 6]}, {"days": [1, 2]}),
+        (
+            {"schedule_type": "weekdays", "days": [0, 1, 2, 3, 4, 5, 6]},
+            {"schedule_type": "even-odd", "even_odd": "even"},
+        ),
+        ({"schedule_type": "even-odd", "days": [], "even_odd": "even"}, {"even_odd": "odd"}),
+        (
+            {"schedule_type": "weekdays", "days": [0, 1, 2, 3, 4, 5, 6]},
+            {"extra_times": ["06:15"]},
+        ),
+    ],
+    ids=["time", "days", "schedule-type", "even-odd", "extra-times"],
+)
+def test_boot_recovery_intent_is_superseded_by_same_zone_schedule_edit(
+    sched,
+    test_db,
+    initial_schedule,
+    edit,
+):
+    group = test_db.create_group("same-zone-schedule-edit")
+    zone = test_db.create_zone({"name": "zone", "duration": 30, "group_id": group["id"]})
+    program = test_db.create_program(
+        {
+            "name": "schedule revision",
+            "time": "06:00",
+            "zones": [zone["id"]],
+            "enabled": True,
+            **initial_schedule,
+        }
+    )
+    intent = _boot_recovery_intent(sched, program, zone["id"])
+    assert sched._persist_boot_recovery_intent(intent) is True
+    assert test_db.update_program(program["id"], edit) is not None
+
+    now = datetime(2026, 7, 20, 6, 5, 0)
+    with (
+        patch.object(sched, "_controller_now", return_value=now),
+        patch.object(sched, "_run_program_threaded", return_value=True) as run_program,
+    ):
+        assert sched._execute_boot_recovery_intent(intent["id"]) is True
+
+    run_program.assert_not_called()
+    assert sched._read_boot_recovery_intents_strict() == {}
+
+
+def test_boot_recovery_intent_is_superseded_by_same_zone_duration_edit(sched, test_db):
+    group = test_db.create_group("same-zone-duration-edit")
+    zone = test_db.create_zone({"name": "zone", "duration": 30, "group_id": group["id"]})
+    program = test_db.create_program(
+        {
+            "name": "duration revision",
+            "time": "06:00",
+            "schedule_type": "weekdays",
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "zones": [zone["id"]],
+            "enabled": True,
+        }
+    )
+    intent = _boot_recovery_intent(sched, program, zone["id"], duration_minutes=30)
+    assert sched._persist_boot_recovery_intent(intent) is True
+    assert test_db.update_zone(zone["id"], {"duration": 45}) is not None
+
+    with (
+        patch.object(sched, "_controller_now", return_value=datetime(2026, 7, 20, 6, 5, 0)),
+        patch.object(sched, "_run_program_threaded", return_value=True) as run_program,
+    ):
+        assert sched._execute_boot_recovery_intent(intent["id"]) is True
+
+    run_program.assert_not_called()
+
+
+def test_boot_recovery_intent_is_superseded_by_interval_revision_or_anchor_shift(sched, test_db):
+    group = test_db.create_group("same-zone-interval-edit")
+    zone = test_db.create_zone({"name": "zone", "duration": 30, "group_id": group["id"]})
+    program = test_db.create_program(
+        {
+            "name": "interval revision",
+            "time": "06:00",
+            "schedule_type": "interval",
+            "interval_days": 2,
+            "days": [],
+            "zones": [zone["id"]],
+            "enabled": True,
+        }
+    )
+    now = datetime(2026, 7, 20, 6, 5, 0)
+    timezone = sched._controller_timezone()
+    anchor = datetime(2026, 7, 18, 6, 0, tzinfo=timezone)
+    sched.start(paused=True)
+    sched.scheduler.add_job(
+        scheduler_module.job_run_program,
+        scheduler_module.IntervalTrigger(days=2, start_date=anchor, timezone=timezone),
+        args=[program["id"], [zone["id"]], program["name"]],
+        id=f"program:{program['id']}:main",
+        replace_existing=True,
+    )
+
+    first = _boot_recovery_intent(
+        sched,
+        program,
+        zone["id"],
+        anchor_contract=_interval_anchor_contract(anchor, 2),
+    )
+    assert sched._persist_boot_recovery_intent(first) is True
+    assert test_db.update_program(program["id"], {"interval_days": 3}) is not None
+    with (
+        patch.object(sched, "_controller_now", return_value=now),
+        patch.object(sched, "_run_program_threaded", return_value=True) as run_after_interval_edit,
+    ):
+        assert sched._execute_boot_recovery_intent(first["id"]) is True
+    run_after_interval_edit.assert_not_called()
+
+    revised = test_db.update_program(program["id"], {"interval_days": 2})
+    shifted_anchor = anchor + timedelta(days=1)
+    sched.scheduler.add_job(
+        scheduler_module.job_run_program,
+        scheduler_module.IntervalTrigger(days=2, start_date=shifted_anchor, timezone=timezone),
+        args=[program["id"], [zone["id"]], program["name"]],
+        id=f"program:{program['id']}:main",
+        replace_existing=True,
+    )
+    second = _boot_recovery_intent(
+        sched,
+        revised,
+        zone["id"],
+        anchor_contract=_interval_anchor_contract(anchor, 2),
+    )
+    assert sched._persist_boot_recovery_intent(second) is True
+    with (
+        patch.object(sched, "_controller_now", return_value=now),
+        patch.object(sched, "_run_program_threaded", return_value=True) as run_after_anchor_shift,
+    ):
+        assert sched._execute_boot_recovery_intent(second["id"]) is True
+    run_after_anchor_shift.assert_not_called()
 
 
 def test_durable_intent_restores_job_after_submit_before_callback_crash(test_db):
@@ -1208,6 +1688,7 @@ def test_durable_intent_restores_job_after_submit_before_callback_crash(test_db)
     first.start(paused=True)
     try:
         first._boot_interrupted_zone_ids = {zone["id"]}
+        first._boot_interrupted_program_zones = {program["id"]: {zone["id"]}}
         with patch.object(first, "_controller_now", return_value=now):
             assert first.recover_missed_runs(require_interrupted_evidence=True) is True
         intents = first._read_boot_recovery_intents_strict()
@@ -1239,7 +1720,7 @@ def test_durable_intent_restores_job_after_submit_before_callback_crash(test_db)
 def test_failed_boot_recovery_attempt_keeps_durable_intent(sched, test_db):
     group = test_db.create_group("failed-durable-recovery")
     zone = test_db.create_zone({"name": "interrupted", "duration": 30, "group_id": group["id"]})
-    test_db.create_program(
+    program = test_db.create_program(
         {
             "name": "retry later",
             "time": "06:00",
@@ -1252,6 +1733,7 @@ def test_failed_boot_recovery_attempt_keeps_durable_intent(sched, test_db):
     now = datetime(2026, 7, 20, 6, 5, 0)
     sched.start(paused=True)
     sched._boot_interrupted_zone_ids = {zone["id"]}
+    sched._boot_interrupted_program_zones = {program["id"]: {zone["id"]}}
     with patch.object(sched, "_controller_now", return_value=now):
         assert sched.recover_missed_runs(require_interrupted_evidence=True) is True
     intent_id = next(iter(sched._read_boot_recovery_intents_strict()))
@@ -1268,7 +1750,7 @@ def test_failed_boot_recovery_attempt_keeps_durable_intent(sched, test_db):
 def test_completed_boot_recovery_clear_failure_replants_terminal_processor(sched, test_db):
     group = test_db.create_group("terminal-durable-recovery")
     zone = test_db.create_zone({"name": "interrupted", "duration": 30, "group_id": group["id"]})
-    test_db.create_program(
+    program = test_db.create_program(
         {
             "name": "terminal retry",
             "time": "06:00",
@@ -1281,6 +1763,7 @@ def test_completed_boot_recovery_clear_failure_replants_terminal_processor(sched
     now = datetime(2026, 7, 20, 6, 5, 0)
     sched.start(paused=True)
     sched._boot_interrupted_zone_ids = {zone["id"]}
+    sched._boot_interrupted_program_zones = {program["id"]: {zone["id"]}}
     with patch.object(sched, "_controller_now", return_value=now):
         assert sched.recover_missed_runs(require_interrupted_evidence=True) is True
     intent_id = next(iter(sched._read_boot_recovery_intents_strict()))
@@ -1317,7 +1800,7 @@ def test_boot_recovery_retry_survives_one_shot_coordinator_removal(sched, test_d
     """The terminal clear retry must not reuse the submitted DateTrigger id."""
     group = test_db.create_group("terminal-one-shot-recovery")
     zone = test_db.create_zone({"name": "interrupted", "duration": 30, "group_id": group["id"]})
-    test_db.create_program(
+    program = test_db.create_program(
         {
             "name": "terminal one-shot retry",
             "time": "06:00",
@@ -1330,6 +1813,7 @@ def test_boot_recovery_retry_survives_one_shot_coordinator_removal(sched, test_d
     now = datetime(2026, 7, 20, 6, 5, 0)
     sched.start(paused=True)
     sched._boot_interrupted_zone_ids = {zone["id"]}
+    sched._boot_interrupted_program_zones = {program["id"]: {zone["id"]}}
     with patch.object(sched, "_controller_now", return_value=now):
         assert sched.recover_missed_runs(require_interrupted_evidence=True) is True
     intent_id = next(iter(sched._read_boot_recovery_intents_strict()))
@@ -1354,10 +1838,45 @@ def test_boot_recovery_retry_survives_one_shot_coordinator_removal(sched, test_d
     assert sched._read_boot_recovery_intents_strict()[intent_id]["completed"] is True
 
 
+def test_boot_recovery_callback_exception_replants_persistent_generation_retry(sched, test_db):
+    group = test_db.create_group("boot-recovery-read-retry")
+    zone = test_db.create_zone({"name": "zone", "duration": 30, "group_id": group["id"]})
+    program = test_db.create_program(
+        {
+            "name": "boot recovery retry",
+            "time": "06:00",
+            "schedule_type": "weekdays",
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "zones": [zone["id"]],
+            "enabled": True,
+        }
+    )
+    intent = _boot_recovery_intent(sched, program, zone["id"])
+    sched.start(paused=True)
+    assert sched._persist_boot_recovery_intent(intent) is True
+    assert sched._ensure_boot_recovery_job(intent) is True
+    sched.scheduler.remove_job(sched._boot_recovery_job_id(intent["id"]), jobstore="default")
+
+    with (
+        patch.object(sched, "_controller_now", return_value=datetime(2026, 7, 20, 6, 5, 0)),
+        patch.object(sched, "_read_recovery_inputs_strict", side_effect=sqlite3.OperationalError("busy")),
+    ):
+        assert sched._execute_boot_recovery_intent(intent["id"]) is False
+
+    assert intent["id"] in sched._read_boot_recovery_intents_strict()
+    retries = [
+        job
+        for job in sched.scheduler.get_jobs(jobstore="default")
+        if str(job.id).startswith(f"boot_recovery:{intent['id']}:retry:")
+    ]
+    assert len(retries) == 1
+    assert list(retries[0].args) == [intent["id"]]
+
+
 def test_boot_recovery_candidate_rejects_memory_jobstore_handoff(sched, test_db):
     group = test_db.create_group("non-durable-recovery")
     zone = test_db.create_zone({"name": "interrupted", "duration": 30, "group_id": group["id"]})
-    test_db.create_program(
+    program = test_db.create_program(
         {
             "name": "must persist",
             "time": "06:00",
@@ -1369,6 +1888,7 @@ def test_boot_recovery_candidate_rejects_memory_jobstore_handoff(sched, test_db)
     )
     sched.start(paused=True)
     sched._boot_interrupted_zone_ids = {zone["id"]}
+    sched._boot_interrupted_program_zones = {program["id"]: {zone["id"]}}
     sched.jobstore_backend = "memory-fallback"
 
     with patch.object(sched, "_controller_now", return_value=datetime(2026, 7, 20, 6, 5, 0)):
@@ -1742,6 +2262,7 @@ def test_interrupted_interval_requires_live_preserved_anchor(sched, test_db, anc
         )
 
     sched._boot_interrupted_zone_ids = {zone["id"]}
+    sched._boot_interrupted_program_zones = {program["id"]: {zone["id"]}}
     with patch.object(sched, "_controller_now", return_value=now):
         assert sched.recover_missed_runs(require_interrupted_evidence=True) is False
 
