@@ -158,8 +158,11 @@ class TestGuestEndpointAccess:
                 patch("routes.system_emergency_api.get_scheduler", return_value=None),
             ):
                 resp = guest_client.post("/api/emergency-stop", content_type="application/json")
-            assert resp.status_code == 200
-            assert resp.get_json()["success"] is True
+            assert resp.status_code == 503
+            assert resp.get_json()["success"] is False
+            assert resp.get_json()["physical_stop_confirmed"] is True
+            assert resp.get_json()["sessions_quiesced"] is False
+            assert app.config["EMERGENCY_STOP"] is True
         finally:
             app.config["EMERGENCY_STOP"] = False
             app.config["TESTING"] = True

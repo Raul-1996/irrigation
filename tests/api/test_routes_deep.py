@@ -153,7 +153,9 @@ class TestSystemStatusExtended:
 class TestEmergencyFlow:
     def test_emergency_stop_resume(self, admin_client):
         resp = admin_client.post("/api/emergency-stop", content_type="application/json")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        assert resp.get_json()["success"] is False
+        assert resp.get_json()["sessions_quiesced"] is False
 
         resp = admin_client.post("/api/emergency-resume", content_type="application/json")
         assert resp.status_code == 200

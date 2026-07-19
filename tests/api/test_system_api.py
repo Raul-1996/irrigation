@@ -33,9 +33,10 @@ class TestHealthAPI:
 class TestEmergencyAPI:
     def test_emergency_stop(self, admin_client):
         resp = admin_client.post("/api/emergency-stop", content_type="application/json")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = resp.get_json()
-        assert data["success"] is True
+        assert data["success"] is False
+        assert data["sessions_quiesced"] is False
 
     def test_emergency_resume(self, admin_client):
         # First stop
