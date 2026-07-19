@@ -132,6 +132,38 @@ class TestPerZoneJson:
         assert data["summary"]["has_liters"] is True
         assert data["summary"]["liters_partial"] is True
 
+    def test_unconfirmed_aborted_attempt_does_not_inflate_actual_summary(self, app, client, seeded_zone):
+        now = datetime.now(UTC)
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, total_liters, status, source, confirmed) "
+                "VALUES (?, 1, ?, ?, 0.0, 20.0, 'aborted', 'manual', 0)",
+                (
+                    seeded_zone["id"],
+                    _utc_iso_now_minus(30, now),
+                    _utc_iso_now_minus(20, now),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, total_liters, status, source, confirmed) "
+                "VALUES (?, 1, ?, ?, 0.0, 5.0, 'aborted', 'manual', 1)",
+                (
+                    seeded_zone["id"],
+                    _utc_iso_now_minus(15, now),
+                    _utc_iso_now_minus(10, now),
+                ),
+            )
+            conn.commit()
+
+        data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
+
+        assert len(data["runs"]) == 2
+        assert data["summary"]["total_runs"] == 1
+        assert data["summary"]["total_minutes"] == 5
+        assert data["summary"]["total_liters"] == 5.0
+
     def test_has_plan_false_when_no_active_program(self, app, client, seeded_zone):
         data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
         assert data["summary"]["has_plan"] is False
@@ -180,6 +212,42 @@ class TestGlobalJson:
 
     def test_400_for_bad_days(self, client):
         assert client.get("/api/zones/history?days=15").status_code == 400
+
+    def test_group_filter_uses_group_stored_on_run(self, app, client):
+        zone = app.db.create_zone({"name": "Moved", "duration": 10, "group_id": 1, "topic": "/x/moved"})
+        _create_run(app, zone["id"], 1, 60, 50, status="ok")
+        assert app.db.update_zone(zone["id"], {"group_id": 2}) is not None
+
+        old_group = client.get("/api/zones/history?days=7&group_id=1").get_json()
+        new_group = client.get("/api/zones/history?days=7&group_id=2").get_json()
+
+        assert old_group["summary"]["total_runs"] == 1
+        assert [run["zone_id"] for run in old_group["runs"]] == [zone["id"]]
+        assert new_group["summary"]["total_runs"] == 0
+        assert new_group["runs"] == []
+
+    def test_deleted_zone_run_is_not_named_after_replacement(self, app, client):
+        original = app.db.create_zone({"name": "Original", "duration": 10, "group_id": 1, "topic": "/x/original"})
+        _create_run(app, original["id"], 1, 60, 50, status="ok")
+        assert app.db.delete_zone(original["id"]) is True
+        replacement = app.db.create_zone(
+            {
+                "id": original["id"],
+                "name": "Replacement",
+                "duration": 10,
+                "group_id": 2,
+                "topic": "/x/replacement",
+            }
+        )
+        assert replacement["id"] == original["id"]
+
+        payload = client.get(f"/api/zones/history?days=7&zone_id={original['id']}").get_json()
+
+        assert len(payload["runs"]) == 1
+        run = payload["runs"][0]
+        assert run["zone_id"] == original["id"]
+        assert run["zone_name"] == "Удалённая зона"
+        assert run["zone_deleted"] is True
 
 
 class TestCsv:

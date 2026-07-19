@@ -1,6 +1,7 @@
 """Issue #35: unit tests for services.history_calc — pure functions."""
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from services.history_calc import (
     _program_runs_on,
@@ -56,6 +57,11 @@ class TestProgramRunsOn:
         assert _program_runs_on(_prog(schedule_type="even-odd", even_odd="odd"), TUE) is True
         assert _program_runs_on(_prog(schedule_type="even-odd", even_odd="odd"), MON) is False
 
+    def test_even_odd_null_matches_scheduler_odd_semantics(self):
+        """A persisted NULL is distinct from an absent key in the scheduler."""
+        assert _program_runs_on(_prog(schedule_type="even-odd", even_odd=None), TUE) is True
+        assert _program_runs_on(_prog(schedule_type="even-odd", even_odd=None), MON) is False
+
     def test_interval_anchor_at_created_at(self):
         """interval_days=3 with anchor 2026-05-04 ⇒ fires every 3 days from anchor."""
         p = _prog(
@@ -95,6 +101,19 @@ class TestCalculatePlan:
         plan = calculate_plan_for_zone(1, 10, [MON], progs)
         # main 07:00 + extra 19:00 = 2 firings ⇒ 20 min
         assert plan[MON] == 20
+
+    def test_future_slot_today_does_not_count_as_saved_water(self):
+        progs = [_prog(days=[0], zones=[1], time="07:00", extra_times=["19:00"])]
+
+        plan = calculate_plan_for_zone(
+            1,
+            10,
+            [MON],
+            progs,
+            as_of_local=datetime(2026, 5, 4, 12, 0),
+        )
+
+        assert plan[MON] == 10
 
     def test_zone_not_in_any_program(self):
         progs = [_prog(zones=[2])]  # zone 1 not in program
@@ -157,6 +176,42 @@ class TestCalculateActual:
         assert minutes[local_d] == 0
         # Still counts as a "run started today" — UI lists it.
         assert counts[local_d] == 1
+
+    def test_unconfirmed_aborted_attempt_is_not_actual_watering(self):
+        runs = [
+            {
+                "start_utc": "2026-05-04 07:00:00",
+                "end_utc": "2026-05-04 07:10:00",
+                "status": "aborted",
+                "confirmed": 0,
+            },
+            {
+                "start_utc": "2026-05-04 08:00:00",
+                "end_utc": "2026-05-04 08:05:00",
+                "status": "aborted",
+                "confirmed": 1,
+            },
+        ]
+
+        minutes, counts = calculate_actual_for_zone(runs, [MON], controller_tz=ZoneInfo("UTC"))
+
+        assert minutes[MON] == 5
+        assert counts[MON] == 1
+
+    def test_naive_run_uses_explicit_controller_timezone(self):
+        controller_tz = ZoneInfo("Asia/Bishkek")
+        runs = [
+            {
+                "start_utc": "2026-05-04 00:05:00",
+                "end_utc": "2026-05-04 00:20:00",
+                "status": "ok",
+            }
+        ]
+
+        minutes, counts = calculate_actual_for_zone(runs, [MON], controller_tz=controller_tz)
+
+        assert minutes[MON] == 15
+        assert counts[MON] == 1
 
 
 class TestSummary:

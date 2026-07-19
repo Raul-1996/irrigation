@@ -18,8 +18,56 @@ Domain rules (decisions Q1, Q2):
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
-from typing import Iterable
+import os
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+def get_controller_timezone() -> tzinfo:
+    """Return the timezone that owns controller-local persisted timestamps.
+
+    Runtime scheduling gives ``WB_TZ`` precedence over ``TZ``.  History must
+    use that same domain even when the process-local timezone differs (for
+    example in tests, maintenance shells, or after a service-manager change).
+    """
+    candidates = [os.getenv("WB_TZ"), os.getenv("TZ")]
+    try:
+        with open("/etc/timezone", encoding="utf-8") as timezone_file:
+            candidates.append(timezone_file.read().strip())
+    except OSError:
+        pass
+
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name.removeprefix(":"))
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+
+    return datetime.now().astimezone().tzinfo or UTC
+
+
+def parse_controller_datetime(raw: Any, controller_tz: tzinfo | None = None) -> datetime | None:
+    """Parse a run timestamp into the explicit controller timezone.
+
+    Production writers persist naive controller-local wall time despite the
+    legacy ``*_utc`` column names.  Aware legacy/test values are accepted and
+    converted to the same controller domain rather than interpreted through
+    the caller process's implicit timezone.
+    """
+    if raw is None or raw == "":
+        return None
+    tz = controller_tz or get_controller_timezone()
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=tz)
+    return parsed.astimezone(tz)
+
 
 # ---- Plan: which dates does a single program fire on? ----
 
@@ -100,8 +148,10 @@ def _program_runs_on(prog: dict, d: date) -> bool:
 
     if sched == "even-odd":
         is_even = d.day % 2 == 0
-        eo = (prog.get("even_odd") or "even").lower()
-        return is_even if eo == "even" else not is_even
+        # Keep exact scheduler semantics: an absent key defaults to even,
+        # while a persisted SQL NULL compares unequal to "even" and means odd.
+        want_even = prog.get("even_odd", "even") == "even"
+        return is_even if want_even else not is_even
 
     if sched == "interval":
         # Decision Q1=a: anchor = created_at. Dates before anchor contribute 0.
@@ -117,11 +167,26 @@ def _program_runs_on(prog: dict, d: date) -> bool:
     return False
 
 
-def _program_firings_count(prog: dict, d: date) -> int:
+def _parse_program_time(raw: str) -> time | None:
+    try:
+        return time.fromisoformat(str(raw)).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _program_firings_count(prog: dict, d: date, as_of_local: datetime | None = None) -> int:
     """How many times does ``prog`` fire on ``d`` (main time + extra_times)?"""
     if not _program_runs_on(prog, d):
         return 0
-    return len(_coerce_times(prog))
+    firing_times = [parsed for raw in _coerce_times(prog) if (parsed := _parse_program_time(raw)) is not None]
+    if as_of_local is None:
+        return len(firing_times)
+    if d > as_of_local.date():
+        return 0
+    if d < as_of_local.date():
+        return len(firing_times)
+    cutoff = as_of_local.timetz().replace(tzinfo=None)
+    return sum(firing_time <= cutoff for firing_time in firing_times)
 
 
 # ---- Plan per zone / date ----
@@ -132,6 +197,8 @@ def calculate_plan_for_zone(
     zone_duration: int,
     dates: Iterable[date],
     programs: Iterable[dict],
+    *,
+    as_of_local: datetime | None = None,
 ) -> dict[date, int]:
     """Return ``{date: planned_minutes}`` over ``dates``.
 
@@ -147,7 +214,7 @@ def calculate_plan_for_zone(
     for d in dates:
         total = 0
         for prog in rel_progs:
-            firings = _program_firings_count(prog, d)
+            firings = _program_firings_count(prog, d, as_of_local)
             if firings:
                 total += firings * int(zone_duration)
         out[d] = total
@@ -167,20 +234,15 @@ def zone_has_active_program(zone_id: int, programs: Iterable[dict]) -> bool:
 # ---- Actual per zone / date ----
 
 
-def _run_duration_min(run: dict) -> int:
+def _run_duration_min(run: dict, controller_tz: tzinfo | None = None) -> int:
     """Best-effort duration in whole minutes from a zone_runs row.
 
     Uses ``end_utc - start_utc`` when both present, else 0 for an open row.
     Rounds to nearest minute (UI shows whole-minute granularity).
     """
-    s = run.get("start_utc")
-    e = run.get("end_utc")
-    if not s or not e:
-        return 0
-    try:
-        sdt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-        edt = datetime.fromisoformat(str(e).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    sdt = parse_controller_datetime(run.get("start_utc"), controller_tz)
+    edt = parse_controller_datetime(run.get("end_utc"), controller_tz)
+    if sdt is None or edt is None:
         return 0
     delta = (edt - sdt).total_seconds()
     if delta <= 0:
@@ -188,20 +250,33 @@ def _run_duration_min(run: dict) -> int:
     return round(delta / 60.0)
 
 
-def _run_local_date(run: dict) -> date | None:
-    s = run.get("start_utc")
-    if not s:
-        return None
-    try:
-        sdt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return sdt.astimezone().date()
+def _run_local_date(run: dict, controller_tz: tzinfo | None = None) -> date | None:
+    sdt = parse_controller_datetime(run.get("start_utc"), controller_tz)
+    return sdt.date() if sdt is not None else None
+
+
+def run_counts_as_actual(run: dict) -> bool:
+    """Whether a history row proves that water physically flowed.
+
+    Legacy successful rows predate the ``confirmed`` column and remain valid
+    by their persisted ``ok`` status.  A boot-aborted/unconfirmed attempt is
+    still returned in the detailed list for diagnostics, but it must not
+    inflate actual minutes, run count, liters, or claimed savings.
+    """
+    status = str(run.get("status") or "").lower()
+    if status == "failed":
+        return False
+    if status != "aborted":
+        return True
+    confirmed = run.get("confirmed")
+    return confirmed is True or confirmed == 1 or str(confirmed).lower() in {"1", "true", "yes"}
 
 
 def calculate_actual_for_zone(
     runs: Iterable[dict],
     dates: Iterable[date],
+    *,
+    controller_tz: tzinfo | None = None,
 ) -> tuple[dict[date, int], dict[date, int]]:
     """Return ``({date: actual_minutes}, {date: runs_count})``.
 
@@ -212,15 +287,12 @@ def calculate_actual_for_zone(
     minutes: dict[date, int] = {d: 0 for d in date_set}
     counts: dict[date, int] = {d: 0 for d in date_set}
     for run in runs:
-        # A 'failed' run is a phantom watering (relay never confirmed) — it
-        # stays visible as a row in the history list, but must not inflate the
-        # actual-minutes / run-count totals shown in the summary.
-        if run.get("status") == "failed":
+        if not run_counts_as_actual(run):
             continue
-        d = _run_local_date(run)
+        d = _run_local_date(run, controller_tz)
         if d is None or d not in date_set:
             continue
-        minutes[d] += _run_duration_min(run)
+        minutes[d] += _run_duration_min(run, controller_tz)
         counts[d] += 1
     return minutes, counts
 

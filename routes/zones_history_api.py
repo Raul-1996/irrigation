@@ -17,7 +17,7 @@ import contextlib
 import csv
 import io
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Any
 
 from flask import Blueprint, Response, jsonify, request
@@ -28,9 +28,11 @@ from services.history_calc import (
     calculate_plan_for_zone,
     calculate_summary,
     date_range,
+    get_controller_timezone,
+    parse_controller_datetime,
+    run_counts_as_actual,
     zone_has_active_program,
 )
-from utils import to_iso_with_tz
 
 zones_history_api_bp = Blueprint("zones_history_api", __name__)
 
@@ -51,42 +53,77 @@ def _parse_days() -> int | None:
     return d
 
 
-def _today_local() -> date:
-    return datetime.now().astimezone().date()
+def _controller_now(controller_tz: tzinfo) -> datetime:
+    return datetime.now(controller_tz)
+
+
+def _history_clock() -> tuple[tzinfo, datetime]:
+    controller_tz = get_controller_timezone()
+    now_local = _controller_now(controller_tz)
+    if now_local.tzinfo is None:
+        now_local = now_local.replace(tzinfo=controller_tz)
+    else:
+        now_local = now_local.astimezone(controller_tz)
+    return controller_tz, now_local
 
 
 def _iso_local(d: date) -> str:
     return d.isoformat()
 
 
-def _fetch_runs_for_zones(zone_ids: list[int], from_local: date, to_local: date) -> list[dict[str, Any]]:
-    """Return zone_runs rows for ``zone_ids`` whose start_utc falls in the
-    [from_local, to_local] local-date range (inclusive on both ends).
+def _fetch_runs(
+    from_local: date,
+    to_local: date,
+    controller_tz: tzinfo,
+    *,
+    zone_ids: list[int] | None = None,
+    group_id: int | None = None,
+    exclude_group_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return runs in one explicit controller-local calendar window.
 
     ``zone_runs`` uses the controller-local naive timestamp convention of its
-    production writers.  Keep SQL bounds in that same sortable representation;
-    UTC RFC 3339 bounds would compare incorrectly against SQLite TEXT values.
+    production writers, but legacy/test rows can be RFC 3339. SQL therefore
+    narrows to a two-day-padded candidate window; Python performs the exact
+    timezone-aware local-date check before any bucket, list, or CSV consumes it.
     """
-    if not zone_ids:
+    if zone_ids is not None and not zone_ids:
         return []
-    start_text = datetime.combine(from_local, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
-    end_text = datetime.combine(to_local + timedelta(days=1), datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
+    # Two days covers the maximum calendar-date shift between valid UTC
+    # offsets (+14:00 to -12:00) while retaining a bounded candidate query.
+    padded_from = from_local - timedelta(days=2)
+    padded_to_exclusive = to_local + timedelta(days=3)
+    start_text = datetime.combine(padded_from, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
+    end_text = datetime.combine(padded_to_exclusive, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
 
-    placeholders = ",".join("?" * len(zone_ids))
+    clauses = ["start_utc IS NOT NULL", "start_utc >= ?", "start_utc < ?"]
+    params: list[Any] = [start_text, end_text]
+    if zone_ids is not None:
+        placeholders = ",".join("?" * len(zone_ids))
+        clauses.append(f"zone_id IN ({placeholders})")
+        params.extend(int(zone_id) for zone_id in zone_ids)
+    if group_id is not None:
+        clauses.append("group_id = ?")
+        params.append(int(group_id))
+    if exclude_group_id is not None:
+        clauses.append("group_id != ?")
+        params.append(int(exclude_group_id))
     sql = (
-        f"SELECT id, zone_id, group_id, start_utc, end_utc, total_liters, status, source "
-        f"FROM zone_runs "
-        f"WHERE zone_id IN ({placeholders}) "
-        f"  AND start_utc IS NOT NULL "
-        f"  AND start_utc >= ? AND start_utc < ? "
-        f"ORDER BY start_utc DESC"
+        "SELECT id, zone_id, group_id, start_utc, end_utc, total_liters, "
+        "status, source, confirmed, created_at FROM zone_runs WHERE " + " AND ".join(clauses)
     )
-    params = [*list(zone_ids), start_text, end_text]
     try:
         with sqlite3.connect(db.db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
-            return [dict(r) for r in rows]
+        dated_rows = []
+        for row in rows:
+            run = dict(row)
+            start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
+            if start_local is not None and from_local <= start_local.date() <= to_local:
+                dated_rows.append((start_local, run))
+        dated_rows.sort(key=lambda item: item[0], reverse=True)
+        return [run for _, run in dated_rows]
     except sqlite3.Error:
         return []
 
@@ -110,30 +147,61 @@ def _build_daily(
     return out
 
 
-def _serialize_run(run: dict[str, Any], zone_lookup: dict[int, dict[str, Any]]) -> dict[str, Any]:
-    z = zone_lookup.get(int(run.get("zone_id") or 0)) or {}
-    duration_min = 0
-    # Despite their legacy column names, production writers store naive
-    # controller-local wall time.  Add the controller offset at the API
-    # boundary so RFC 3339 parsing is reliable and remote browsers can render
-    # the same instant in their own timezone.
-    s = to_iso_with_tz(run.get("start_utc"))
-    e = to_iso_with_tz(run.get("end_utc"))
-    if s and e:
+def _zone_identity_for_run(
+    run: dict[str, Any],
+    zone_lookup: dict[int, dict[str, Any]],
+    controller_tz: tzinfo,
+) -> tuple[dict[str, Any], bool]:
+    """Resolve a run without assigning a deleted predecessor to a reused ID."""
+    zone = zone_lookup.get(int(run.get("zone_id") or 0))
+    if not zone:
+        return {}, True
+
+    def sqlite_utc(raw: Any) -> datetime | None:
         try:
-            sdt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-            edt = datetime.fromisoformat(str(e).replace("Z", "+00:00"))
-            dsec = (edt - sdt).total_seconds()
-            duration_min = round(dsec / 60.0) if dsec > 0 else 0
+            value = datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if raw else None
         except (TypeError, ValueError):
-            duration_min = 0
+            return None
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC) if value is not None else None
+
+    zone_created = sqlite_utc(zone.get("created_at"))
+    run_created = sqlite_utc(run.get("created_at"))
+    if zone_created is not None and run_created is not None:
+        if run_created < zone_created:
+            return {}, True
+        if run_created > zone_created:
+            return zone, False
+
+    # SQLite timestamps have one-second precision. Resolve equal timestamps
+    # with the physical start invariant: a run cannot predate its own zone.
+    start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
+    if start_local is not None and zone_created is not None and start_local.astimezone(UTC) < zone_created:
+        return {}, True
+    return zone, False
+
+
+def _serialize_run(
+    run: dict[str, Any],
+    zone_lookup: dict[int, dict[str, Any]],
+    controller_tz: tzinfo,
+) -> dict[str, Any]:
+    zone, zone_deleted = _zone_identity_for_run(run, zone_lookup, controller_tz)
+    duration_min = 0
+    start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
+    end_local = parse_controller_datetime(run.get("end_utc"), controller_tz)
+    if start_local is not None and end_local is not None:
+        dsec = (end_local - start_local).total_seconds()
+        duration_min = round(dsec / 60.0) if dsec > 0 else 0
     return {
         "id": int(run.get("id")) if run.get("id") is not None else None,
         "zone_id": int(run.get("zone_id") or 0),
-        "zone_name": z.get("name"),
+        "zone_name": "Удалённая зона" if zone_deleted else zone.get("name"),
+        "zone_deleted": zone_deleted,
         "group_id": int(run.get("group_id") or 0),
-        "start_utc": s,
-        "end_utc": e,
+        "start_utc": start_local.isoformat(timespec="seconds") if start_local is not None else None,
+        "end_utc": end_local.isoformat(timespec="seconds") if end_local is not None else None,
         "duration_min": duration_min,
         "liters": run.get("total_liters"),
         "status": run.get("status"),
@@ -176,26 +244,33 @@ def get_zone_history(zone_id: int):
     if not zone:
         return jsonify({"success": False, "message": "zone not found"}), 404
 
-    today = _today_local()
+    controller_tz, now_local = _history_clock()
+    today = now_local.date()
     dates = date_range(today, days)
     from_d, to_d = dates[0], dates[-1]
 
     programs = db.get_programs() or []
-    plan_by_date = calculate_plan_for_zone(zone_id, int(zone.get("duration") or 0), dates, programs)
+    plan_by_date = calculate_plan_for_zone(
+        zone_id,
+        int(zone.get("duration") or 0),
+        dates,
+        programs,
+        as_of_local=now_local,
+    )
     has_plan = zone_has_active_program(zone_id, programs)
 
-    raw_runs = _fetch_runs_for_zones([zone_id], from_d, to_d)
-    actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates)
+    raw_runs = _fetch_runs(from_d, to_d, controller_tz, zone_ids=[zone_id])
+    actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates, controller_tz=controller_tz)
 
     daily = _build_daily(dates, actual_min, runs_count, plan_by_date, has_plan)
 
     zone_lookup = {int(zone["id"]): zone}
-    runs_out = [_serialize_run(r, zone_lookup) for r in raw_runs]
+    runs_out = [_serialize_run(r, zone_lookup, controller_tz) for r in raw_runs]
 
     total_actual = sum(actual_min.values())
     total_plan = sum(plan_by_date.values()) if has_plan else 0
     summary = calculate_summary(total_actual, total_plan, has_plan)
-    total_liters, liters_partial, has_liters = _aggregate_liters(raw_runs)
+    total_liters, liters_partial, has_liters = _aggregate_liters([r for r in raw_runs if run_counts_as_actual(r)])
     summary.update(
         {
             "total_minutes": int(total_actual),
@@ -243,20 +318,23 @@ def get_global_history():
     # Drop the special "no irrigation" group from defaults.
     zones = [z for z in all_zones if int(z.get("group_id") or 0) != 999]
 
-    if zone_id_raw:
+    zone_filter_id: int | None = None
+    group_filter_id: int | None = None
+    if zone_id_raw is not None:
         try:
-            zid = int(zone_id_raw)
+            zone_filter_id = int(zone_id_raw)
         except (TypeError, ValueError):
             return jsonify({"success": False, "message": "invalid zone_id"}), 400
-        zones = [z for z in zones if int(z["id"]) == zid]
-    elif group_id_raw:
+        zones = [z for z in zones if int(z["id"]) == zone_filter_id]
+    elif group_id_raw is not None:
         try:
-            gid = int(group_id_raw)
+            group_filter_id = int(group_id_raw)
         except (TypeError, ValueError):
             return jsonify({"success": False, "message": "invalid group_id"}), 400
-        zones = [z for z in zones if int(z.get("group_id") or 0) == gid]
+        zones = [z for z in zones if int(z.get("group_id") or 0) == group_filter_id]
 
-    today = _today_local()
+    controller_tz, now_local = _history_clock()
+    today = now_local.date()
     dates = date_range(today, days)
     from_d, to_d = dates[0], dates[-1]
 
@@ -272,23 +350,33 @@ def get_global_history():
             has_plan_any = True
         # Decision Q2: zones without programs contribute 0 (not NULL).
         # We use the calc helper either way — it returns {date: 0} when no match.
-        zplan = calculate_plan_for_zone(zid, int(z.get("duration") or 0), dates, programs)
+        zplan = calculate_plan_for_zone(
+            zid,
+            int(z.get("duration") or 0),
+            dates,
+            programs,
+            as_of_local=now_local,
+        )
         for d in dates:
             plan_agg[d] += int(zplan.get(d, 0))
 
-    zone_ids = [int(z["id"]) for z in zones]
-    raw_runs = _fetch_runs_for_zones(zone_ids, from_d, to_d)
-    actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates)
+    if zone_filter_id is not None:
+        raw_runs = _fetch_runs(from_d, to_d, controller_tz, zone_ids=[zone_filter_id])
+    elif group_filter_id is not None:
+        raw_runs = [] if group_filter_id == 999 else _fetch_runs(from_d, to_d, controller_tz, group_id=group_filter_id)
+    else:
+        raw_runs = _fetch_runs(from_d, to_d, controller_tz, exclude_group_id=999)
+    actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates, controller_tz=controller_tz)
 
     daily = _build_daily(dates, actual_min, runs_count, plan_agg, has_plan_any)
 
     zone_lookup = {int(z["id"]): z for z in all_zones}
-    runs_out = [_serialize_run(r, zone_lookup) for r in raw_runs]
+    runs_out = [_serialize_run(r, zone_lookup, controller_tz) for r in raw_runs]
 
     total_actual = sum(actual_min.values())
     total_plan = sum(plan_agg.values()) if has_plan_any else 0
     summary = calculate_summary(total_actual, total_plan, has_plan_any)
-    total_liters, liters_partial, has_liters = _aggregate_liters(raw_runs)
+    total_liters, liters_partial, has_liters = _aggregate_liters([r for r in raw_runs if run_counts_as_actual(r)])
     summary.update(
         {
             "total_minutes": int(total_actual),
@@ -308,8 +396,8 @@ def get_global_history():
                 "days": days,
             },
             "filters": {
-                "group_id": int(group_id_raw) if group_id_raw else None,
-                "zone_id": int(zone_id_raw) if zone_id_raw else None,
+                "group_id": group_filter_id,
+                "zone_id": zone_filter_id,
             },
             "zone_count": len(zones),
             "summary": summary,
@@ -331,10 +419,11 @@ def get_zone_history_csv(zone_id: int):
     if not zone:
         return jsonify({"success": False, "message": "zone not found"}), 404
 
-    today = _today_local()
+    controller_tz, now_local = _history_clock()
+    today = now_local.date()
     dates = date_range(today, days)
     from_d, to_d = dates[0], dates[-1]
-    raw_runs = _fetch_runs_for_zones([zone_id], from_d, to_d)
+    raw_runs = _fetch_runs(from_d, to_d, controller_tz, zone_ids=[zone_id])
 
     buf = io.StringIO()
     # BOM so Excel opens UTF-8 cleanly.
@@ -353,33 +442,22 @@ def get_zone_history_csv(zone_id: int):
             "status",
         ]
     )
+    zone_lookup = {int(zone["id"]): zone}
     for r in raw_runs:
-        s = r.get("start_utc")
-        e = r.get("end_utc")
-        try:
-            sdt = datetime.fromisoformat(str(s).replace("Z", "+00:00")) if s else None
-        except (TypeError, ValueError):
-            sdt = None
-        try:
-            edt = datetime.fromisoformat(str(e).replace("Z", "+00:00")) if e else None
-        except (TypeError, ValueError):
-            edt = None
-        date_str = sdt.astimezone().date().isoformat() if sdt else ""
-        start_str = sdt.astimezone().strftime("%H:%M:%S") if sdt else ""
-        end_str = edt.astimezone().strftime("%H:%M:%S") if edt else ""
-        if sdt and edt:
-            dsec = (edt - sdt).total_seconds()
-            dur_min = round(dsec / 60.0) if dsec > 0 else 0
-        else:
-            dur_min = 0
+        serialized = _serialize_run(r, zone_lookup, controller_tz)
+        sdt = parse_controller_datetime(r.get("start_utc"), controller_tz)
+        edt = parse_controller_datetime(r.get("end_utc"), controller_tz)
+        date_str = sdt.date().isoformat() if sdt else ""
+        start_str = sdt.strftime("%H:%M:%S") if sdt else ""
+        end_str = edt.strftime("%H:%M:%S") if edt else ""
         writer.writerow(
             [
                 date_str,
                 start_str,
                 end_str,
                 r.get("zone_id"),
-                zone.get("name") or "",
-                dur_min,
+                serialized["zone_name"] or "",
+                serialized["duration_min"],
                 "" if r.get("total_liters") is None else r.get("total_liters"),
                 r.get("source") or "",
                 r.get("status") or "",

@@ -7,6 +7,8 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 
 @contextmanager
@@ -84,3 +86,62 @@ def test_api_adds_controller_offset_for_remote_browser_rendering(app, client):
         # JavaScript Date applies the browser timezone to this same instant.
         remote_time = datetime.fromisoformat(run["start_utc"]).astimezone(timezone(timedelta(hours=3)))
         assert remote_time.strftime("%Y-%m-%d %H:%M") == f"{today.isoformat()} 03:00"
+
+
+def test_buckets_list_and_csv_share_explicit_controller_timezone(app, client, monkeypatch):
+    """WB_TZ, not the test runner's process timezone, owns history dates."""
+    controller_tz = ZoneInfo("Pacific/Kiritimati")
+    controller_now = datetime(2026, 1, 2, 0, 30, tzinfo=controller_tz)
+    monkeypatch.setenv("WB_TZ", "Pacific/Kiritimati")
+
+    with (
+        _system_timezone("UTC"),
+        patch(
+            "routes.zones_history_api._controller_now",
+            return_value=controller_now,
+        ),
+    ):
+        zone = _create_zone(app, "history-one-timezone")
+        _insert_local_run(
+            app,
+            zone["id"],
+            "2026-01-02 00:05:00",
+            "2026-01-02 00:20:00",
+        )
+
+        payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
+        csv_body = client.get(f"/api/zones/{zone['id']}/history.csv?days=7").get_data(as_text=True)
+
+    assert payload["period"]["to"] == "2026-01-02"
+    bucket = next(item for item in payload["daily"] if item["date"] == "2026-01-02")
+    assert bucket["runs"] == 1
+    assert bucket["actual_minutes"] == 15
+    assert payload["runs"][0]["start_utc"] == "2026-01-02T00:05:00+14:00"
+    assert "2026-01-02,00:05:00,00:20:00" in csv_body
+
+
+def test_summary_does_not_claim_savings_for_future_slot_today(app, client, monkeypatch):
+    controller_tz = ZoneInfo("UTC")
+    controller_now = datetime(2026, 5, 4, 12, 0, tzinfo=controller_tz)
+    monkeypatch.setenv("WB_TZ", "UTC")
+
+    with patch("routes.zones_history_api._controller_now", return_value=controller_now):
+        zone = _create_zone(app, "history-future-plan")
+        app.db.create_program(
+            {
+                "name": "Morning and evening",
+                "time": "07:00",
+                "extra_times": ["19:00"],
+                "days": [0],
+                "zones": [zone["id"]],
+                "schedule_type": "weekdays",
+                "enabled": True,
+            }
+        )
+
+        payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
+
+    today = next(item for item in payload["daily"] if item["date"] == "2026-05-04")
+    assert today["plan_minutes"] == 15
+    assert payload["summary"]["plan_minutes"] == 15
+    assert payload["summary"]["saved_minutes"] == 15
