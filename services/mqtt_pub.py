@@ -35,8 +35,9 @@ _MQTT_CLIENT_USERS: dict[int, int] = {}
 _RETIRED_MQTT_CLIENTS: dict[int, tuple[int, object]] = {}
 _MQTT_CONFIG_FINGERPRINT_KEY = secrets.token_bytes(32)
 _MQTT_CLIENT_GENERATION = 0
-_TOPIC_LAST_SEND: dict[tuple[int, str], tuple[str, float]] = {}
-_TOPIC_INFLIGHT: dict[tuple[int, str, str], "_InflightPublish"] = {}
+_TOPIC_LAST_SEND: dict[tuple[int, int, str, str], tuple[str, float]] = {}
+_TOPIC_INFLIGHT: dict[tuple[int, int, str, str, str], "_InflightPublish"] = {}
+_MQTT_SERVER_EPOCH: dict[int, int] = {}
 _TOPIC_LOCK = threading.Lock()
 _SERVER_CACHE: dict[int, tuple[dict, float]] = {}
 _SERVER_CACHE_LOCK = threading.Lock()
@@ -441,6 +442,10 @@ def invalidate_mqtt_server(server_id: Any) -> None:
     with _SERVER_CACHE_LOCK:
         _SERVER_CACHE.pop(sid, None)
     with _TOPIC_LOCK:
+        # Epoch, not only config fingerprint, separates A -> B -> A rotations
+        # from an obsolete in-flight publish that still belongs to the first A
+        # client generation.
+        _MQTT_SERVER_EPOCH[sid] = _MQTT_SERVER_EPOCH.get(sid, 0) + 1
         stale_topics = [key for key in _TOPIC_LAST_SEND if key[0] == sid]
         for key in stale_topics:
             _TOPIC_LAST_SEND.pop(key, None)
@@ -497,6 +502,9 @@ def publish_mqtt_value(
 ) -> bool:
     try:
         t = normalize_topic(topic)
+        if not t:
+            logger.error("MQTT publish refused invalid/base-command topic=%r", topic)
+            return False
         sid = int(server.get("id")) if server.get("id") else None
         # normalize server via TTL cache
         if sid is not None and _db is not None:
@@ -527,13 +535,16 @@ def publish_mqtt_value(
         # command channel; publishing to the base topic makes our own value
         # indistinguishable from a physical relay echo to long-lived
         # subscribers and can falsely complete runs/cancel safety jobs.
-        t_command = t if t.endswith("/on") else t + "/on"
-        key = (sid or 0, t_command)
-        inflight_key = (sid or 0, t_command, value)
+        t_command = t + "/on"
+        server_key = sid or 0
+        config_fingerprint = mqtt_server_config_fingerprint(server)
         now = time.time()
         wait_for: _InflightPublish | None = None
         pending: _InflightPublish | None = None
         with _TOPIC_LOCK:
+            epoch = _MQTT_SERVER_EPOCH.get(server_key, 0)
+            key = (server_key, epoch, config_fingerprint, t_command)
+            inflight_key = (server_key, epoch, config_fingerprint, t_command, value)
             wait_for = _TOPIC_INFLIGHT.get(inflight_key)
             if wait_for is None:
                 last = _TOPIC_LAST_SEND.get(key)
@@ -556,7 +567,11 @@ def publish_mqtt_value(
             delivered = bool(_publish_one(server, sid, t_command, value, effective_qos, retain))
         finally:
             with _TOPIC_LOCK:
-                if delivered:
+                # An invalidation may complete while the broker call is in
+                # flight.  The old caller still receives its delivery result,
+                # but it must not repopulate debounce state after the server
+                # authority moved to a newer epoch (including A -> B -> A).
+                if delivered and _MQTT_SERVER_EPOCH.get(server_key, 0) == epoch:
                     _TOPIC_LAST_SEND[key] = (value, time.time())
                 if _TOPIC_INFLIGHT.get(inflight_key) is pending:
                     _TOPIC_INFLIGHT.pop(inflight_key, None)
@@ -602,7 +617,7 @@ def publish_mqtt_value(
             pass
 
         return True
-    except (ConnectionError, SecretDecryptionError, TimeoutError, OSError):
+    except (ConnectionError, SecretDecryptionError, TimeoutError, OSError, TypeError, ValueError):
         logger.exception("publish_mqtt_value failed")
         return False
 
