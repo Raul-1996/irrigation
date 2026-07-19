@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -581,7 +582,12 @@ def test_finding_139_status_deduplicates_program_cancellation_queries(admin_clie
 
 def test_finding_148_health_cancel_does_not_create_ownerless_group_session(admin_client, monkeypatch):
     """Cancelling an idle group delegates cleanup without planting a session event."""
-    scheduler = SimpleNamespace(group_cancel_events={}, cancel_group_jobs=Mock())
+    scheduler = SimpleNamespace(
+        group_cancel_events={},
+        cancel_group_jobs=Mock(
+            return_value={"success": True, "stopped": [], "unresolved": [], "group_id": 37}
+        ),
+    )
     monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
 
     response = admin_client.post("/api/health/group/37/cancel")
@@ -589,3 +595,140 @@ def test_finding_148_health_cancel_does_not_create_ownerless_group_session(admin
     assert response.status_code == 200
     scheduler.cancel_group_jobs.assert_called_once_with(37)
     assert scheduler.group_cancel_events == {}
+
+
+def test_health_cancel_group_fails_closed_on_unresolved_relays(admin_client, monkeypatch):
+    scheduler = SimpleNamespace(
+        group_cancel_events={},
+        cancel_group_jobs=Mock(
+            return_value={
+                "success": False,
+                "stopped": [11],
+                "unresolved": [12, 13],
+                "group_id": 37,
+            }
+        ),
+    )
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = admin_client.post("/api/health/group/37/cancel")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "success": False,
+        "error_code": "GROUP_CANCEL_INCOMPLETE",
+        "group_id": 37,
+        "stopped": [11],
+        "unresolved": [12, 13],
+    }
+
+
+def test_health_cancel_group_never_trusts_success_when_unresolved_is_nonempty(admin_client, monkeypatch):
+    scheduler = SimpleNamespace(
+        group_cancel_events={},
+        cancel_group_jobs=Mock(
+            return_value={
+                "success": True,
+                "stopped": [],
+                "unresolved": [21],
+                "group_id": 37,
+            }
+        ),
+    )
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = admin_client.post("/api/health/group/37/cancel")
+
+    assert response.status_code == 503
+    assert response.get_json()["unresolved"] == [21]
+    assert response.get_json()["success"] is False
+
+
+def test_health_cancel_group_fails_closed_when_scheduler_returns_no_outcome(admin_client, monkeypatch):
+    scheduler = SimpleNamespace(group_cancel_events={}, cancel_group_jobs=Mock(return_value=None))
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = admin_client.post("/api/health/group/37/cancel")
+
+    assert response.status_code == 503
+    assert response.get_json()["success"] is False
+    assert response.get_json()["error_code"] == "group_cancel_result_invalid"
+
+
+def test_status_water_today_uses_local_zone_run_history_not_last_snapshots(admin_client, app, monkeypatch):
+    from services import reports
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 7, 19, 12, 0, 0)
+            return value if tz is None else value.astimezone(tz)
+
+    zone = app.db.create_zone({"name": "Daily meter", "duration": 10, "group_id": 1})
+    app.db.update_zone(zone["id"], {"last_total_liters": 999.0})
+    with sqlite3.connect(app.db.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, total_liters, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (zone["id"], 1, "2026-07-18 23:59:59", "2026-07-19 00:01:00", 100.0, "ok"),
+                (zone["id"], 1, "2026-07-19 00:00:00", "2026-07-19 00:10:00", 3.0, "ok"),
+                (zone["id"], 1, "2026-07-19 20:00:00", "2026-07-19 20:10:00", 4.0, "failed"),
+                (zone["id"], 1, "2026-07-20 00:00:00", "2026-07-20 00:10:00", 200.0, "ok"),
+            ],
+        )
+        # The legacy table may contain overlapping rows. Once measured
+        # zone_runs exist it must not be added a second time.
+        conn.execute(
+            "INSERT INTO water_usage(zone_id, liters, timestamp) VALUES (?, ?, ?)",
+            (zone["id"], 500.0, "2026-07-19 08:00:00"),
+        )
+    monkeypatch.setattr(reports, "datetime", FrozenDateTime)
+
+    response = admin_client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.get_json()["water_today"] == {
+        "date": "2026-07-19",
+        "liters": 7.0,
+        "has_data": True,
+        "partial": False,
+        "source": "zone_runs",
+        "per_zone": [
+            {
+                "zone_id": zone["id"],
+                "name": "Daily meter",
+                "liters": 7.0,
+            }
+        ],
+    }
+
+
+def test_status_water_today_reports_unavailable_instead_of_confirmed_zero(admin_client, monkeypatch):
+    monkeypatch.setattr(
+        "routes.system_status_api.get_calendar_water_report",
+        lambda _period: {
+            "date": "2026-07-19",
+            "total_liters": 0,
+            "zone_usage": [],
+            "source": "unavailable",
+            "partial": False,
+            "has_data": False,
+            "error_code": "WATER_REPORT_UNAVAILABLE",
+        },
+    )
+
+    response = admin_client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.get_json()["water_today"] == {
+        "date": "2026-07-19",
+        "liters": 0.0,
+        "has_data": False,
+        "partial": False,
+        "source": "unavailable",
+        "per_zone": [],
+        "error_code": "WATER_REPORT_UNAVAILABLE",
+    }

@@ -23,6 +23,7 @@ from services.helpers import api_error, parse_dt
 from services.locks import snapshot_all_locks as _locks_snapshot
 from services.monitors import env_monitor, rain_monitor, water_monitor
 from services.next_watering import compute_next_watering, weather_skip_today
+from services.reports import get_calendar_water_report
 from services.security import admin_required
 from utils import SecretDecryptionError
 
@@ -431,12 +432,49 @@ def api_health_cancel_group(group_id):
         if not sched:
             return api_error("scheduler_unavailable", "scheduler unavailable", 503)
         try:
-            if hasattr(sched, "cancel_group_jobs"):
-                sched.cancel_group_jobs(int(group_id))
+            cancel_group_jobs = getattr(sched, "cancel_group_jobs", None)
+            if not callable(cancel_group_jobs):
+                return api_error(
+                    "group_cancel_unavailable",
+                    "group cancellation is unavailable",
+                    503,
+                    {"group_id": int(group_id)},
+                )
+            outcome = cancel_group_jobs(int(group_id))
         except (ValueError, TypeError, RuntimeError):
             logger.exception("group cancel failed")
             return api_error("group_cancel_failed", "failed to cancel group jobs", 400)
-        return jsonify({"success": True, "message": f"group {group_id} cancelled"})
+        if not isinstance(outcome, dict):
+            return api_error(
+                "group_cancel_result_invalid",
+                "group cancellation result is unavailable",
+                503,
+                {"group_id": int(group_id)},
+            )
+        stopped = list(outcome.get("stopped") or [])
+        unresolved = list(outcome.get("unresolved") or [])
+        if not bool(outcome.get("success")) or unresolved:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error_code": "GROUP_CANCEL_INCOMPLETE",
+                        "group_id": int(group_id),
+                        "stopped": stopped,
+                        "unresolved": unresolved,
+                    }
+                ),
+                503,
+            )
+        return jsonify(
+            {
+                "success": True,
+                "message": f"group {group_id} cancelled",
+                "group_id": int(group_id),
+                "stopped": stopped,
+                "unresolved": [],
+            }
+        )
     except (ValueError, TypeError, KeyError) as e:
         logger.exception("cancel group failed")
         return api_error("cancel_group_failed", f"error: {e}", 500)
@@ -617,6 +655,24 @@ def api_status():
     groups = db.get_groups()
     programs = db.get_programs()
     weather_skip = weather_skip_today()
+    water_report = get_calendar_water_report("today")
+    water_today = {
+        "date": water_report.get("date") or datetime.now().strftime("%Y-%m-%d"),
+        "liters": round(float(water_report.get("total_liters") or 0), 2),
+        "has_data": bool(water_report.get("has_data")),
+        "partial": bool(water_report.get("partial")),
+        "source": str(water_report.get("source") or "unavailable"),
+        "per_zone": [
+            {
+                "zone_id": int(row.get("zone_id") or 0),
+                "name": row.get("name"),
+                "liters": round(float(row.get("liters") or 0), 2),
+            }
+            for row in (water_report.get("zone_usage") or [])
+        ],
+    }
+    if water_report.get("error_code"):
+        water_today["error_code"] = str(water_report["error_code"])
 
     # Compute the request-wide snapshot once and slice it per group below.
     # Besides avoiding repeated schedule work, this lets next_watering's
@@ -960,6 +1016,7 @@ def api_status():
             "mqtt_enabled_count": mqtt_enabled_count,
             "mqtt_connected": mqtt_connected,
             "mqtt_health": mqtt_health,
+            "water_today": water_today,
             "system_health": {
                 "ok": not any(f.get("severity", "critical") == "critical" for f in faults),
                 "faults": faults,
