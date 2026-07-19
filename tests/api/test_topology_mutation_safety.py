@@ -996,38 +996,91 @@ class TestManualMasterSafety:
 
 
 class TestGroupStopConfirmationSafety:
-    def test_malformed_stop_aggregate_is_never_reported_as_success(self, admin_client, app):
+    @staticmethod
+    def _result(group_id, *, stopped=None, unresolved=None, **overrides):
+        result = {
+            "success": not unresolved,
+            "group_id": group_id,
+            "aggregate_valid": True,
+            "stopped": list(stopped or []),
+            "unresolved": list(unresolved or []),
+            "unverified_zone_ids": [],
+            "retry_scheduled": bool(unresolved),
+        }
+        result.update(overrides)
+        return result
+
+    def test_malformed_scheduler_aggregate_is_never_reported_as_success(self, admin_client, app):
         group = _group(app)
         zone = _zone(app, group["id"], topic="")
-        valid = {
-            "success": True,
-            "group_id": group["id"],
-            "stopped": [zone["id"]],
-            "unresolved": [],
-            "retry_scheduled": False,
-        }
+        valid = self._result(group["id"], stopped=[zone["id"]])
         malformed_results = [
             None,
             {},
             {key: value for key, value in valid.items() if key != "group_id"},
+            {**valid, "extra": False},
             {**valid, "group_id": group["id"] + 1},
+            {**valid, "group_id": True},
             {**valid, "stopped": []},
             {**valid, "unresolved": [zone["id"]]},
             {**valid, "success": False},
             {**valid, "stopped": [True]},
             {**valid, "stopped": [zone["id"], zone["id"]]},
+            {**valid, "unverified_zone_ids": [zone["id"]]},
+            {**valid, "retry_scheduled": True},
+            {
+                **valid,
+                "success": False,
+                "aggregate_valid": False,
+                "stopped": [],
+                "unverified_zone_ids": [],
+            },
         ]
 
         for malformed in malformed_results:
+            scheduler = Mock()
+            scheduler.cancel_group_jobs.return_value = malformed
             with (
-                patch("services.zone_control.stop_all_in_group", return_value=malformed),
-                patch("routes.groups_api.get_scheduler") as get_scheduler,
+                patch("services.zone_control.stop_all_in_group") as core_stop,
+                patch("routes.groups_api.get_scheduler", return_value=scheduler),
             ):
                 response = admin_client.post(f"/api/groups/{group['id']}/stop")
 
             assert response.status_code == 503
             assert response.get_json()["unresolved"] == [zone["id"]]
-            get_scheduler.assert_not_called()
+            scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
+            core_stop.assert_not_called()
+
+    @pytest.mark.parametrize("scheduler_value", [None, object()])
+    def test_missing_scheduler_barrier_fails_closed_without_core_fallback(self, admin_client, app, scheduler_value):
+        group = _group(app)
+        zone = _zone(app, group["id"], topic="")
+
+        with (
+            patch("routes.groups_api.get_scheduler", return_value=scheduler_value),
+            patch("services.zone_control.stop_all_in_group") as core_stop,
+        ):
+            response = admin_client.post(f"/api/groups/{group['id']}/stop")
+
+        assert response.status_code == 503
+        assert response.get_json()["unverified_zone_ids"] == [zone["id"]]
+        core_stop.assert_not_called()
+
+    def test_scheduler_exception_fails_closed_without_core_fallback(self, admin_client, app):
+        group = _group(app)
+        zone = _zone(app, group["id"], topic="")
+        scheduler = Mock()
+        scheduler.cancel_group_jobs.side_effect = RuntimeError("pending-job scan unavailable")
+
+        with (
+            patch("routes.groups_api.get_scheduler", return_value=scheduler),
+            patch("services.zone_control.stop_all_in_group") as core_stop,
+        ):
+            response = admin_client.post(f"/api/groups/{group['id']}/stop")
+
+        assert response.status_code == 503
+        assert response.get_json()["unverified_zone_ids"] == [zone["id"]]
+        core_stop.assert_not_called()
 
     @pytest.mark.parametrize("observed_state", ["on", "unconfirmed"])
     def test_unresolved_off_keeps_recovery_jobs_and_returns_503(self, admin_client, app, observed_state):
@@ -1042,17 +1095,12 @@ class TestGroupStopConfirmationSafety:
             },
         )
         scheduler = Mock()
-        result = {
-            "success": False,
-            "group_id": group["id"],
-            "stopped": [],
-            "unresolved": [zone["id"]],
-            "retry_scheduled": False,
-        }
+        result = self._result(group["id"], unresolved=[zone["id"]])
+        scheduler.cancel_group_jobs.return_value = result
 
         with (
-            patch("services.zone_control.stop_all_in_group", return_value=result) as stop_all,
             patch("routes.groups_api.get_scheduler", return_value=scheduler) as get_scheduler,
+            patch("services.zone_control.stop_all_in_group") as core_stop,
             patch.object(app.db, "clear_group_scheduled_starts") as clear_starts,
             patch.object(app.db, "reschedule_group_to_next_program") as reschedule,
         ):
@@ -1061,21 +1109,44 @@ class TestGroupStopConfirmationSafety:
         assert response.status_code == 503
         assert response.get_json() == {
             "success": False,
-            "message": "Не все зоны подтвердили состояние OFF",
+            "message": "Не все зоны и задания группы подтверждены безопасными",
             "stopped": [],
             "unresolved": [zone["id"]],
+            "unverified_zone_ids": [],
+            "retry_scheduled": True,
         }
-        stop_all.assert_called_once_with(
-            group["id"],
-            reason="group_stop",
-            force=True,
-            require_observed_confirmation=True,
-        )
-        get_scheduler.assert_not_called()
-        scheduler.cancel_group_jobs.assert_not_called()
+        get_scheduler.assert_called_once_with()
+        scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
+        core_stop.assert_not_called()
         clear_starts.assert_not_called()
         reschedule.assert_not_called()
         app.db.update_zone(zone["id"], {"observed_state": "off"})
+
+    def test_scheduler_invalid_partition_is_never_reported_as_success(self, admin_client, app):
+        group = _group(app)
+        zone = _zone(app, group["id"], topic="")
+        scheduler = Mock()
+        scheduler.cancel_group_jobs.return_value = self._result(
+            group["id"],
+            success=False,
+            aggregate_valid=False,
+            stopped=[],
+            unresolved=[],
+            unverified_zone_ids=[zone["id"]],
+            retry_scheduled=False,
+        )
+
+        with (
+            patch("routes.groups_api.get_scheduler", return_value=scheduler),
+            patch.object(app.db, "clear_group_scheduled_starts") as clear_starts,
+            patch.object(app.db, "reschedule_group_to_next_program") as reschedule,
+        ):
+            response = admin_client.post(f"/api/groups/{group['id']}/stop")
+
+        assert response.status_code == 503
+        assert response.get_json()["unverified_zone_ids"] == [zone["id"]]
+        clear_starts.assert_not_called()
+        reschedule.assert_not_called()
 
     def test_group_stop_does_not_cancel_future_program_slots_for_the_day(self, admin_client, app):
         group = _group(app)
@@ -1090,23 +1161,18 @@ class TestGroupStopConfirmationSafety:
             }
         )
         today = datetime.now().strftime("%Y-%m-%d")
+        scheduler = Mock()
+        scheduler.cancel_group_jobs.return_value = self._result(group["id"], stopped=[zone["id"]])
 
         with (
-            patch(
-                "services.zone_control.stop_all_in_group",
-                return_value={
-                    "success": True,
-                    "group_id": group["id"],
-                    "stopped": [zone["id"]],
-                    "unresolved": [],
-                    "retry_scheduled": False,
-                },
-            ),
-            patch("routes.groups_api.get_scheduler", return_value=None),
+            patch("routes.groups_api.get_scheduler", return_value=scheduler),
+            patch("services.zone_control.stop_all_in_group") as core_stop,
         ):
             response = admin_client.post(f"/api/groups/{group['id']}/stop")
 
         assert response.status_code == 200
+        scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
+        core_stop.assert_not_called()
         assert app.db.is_program_run_cancelled_for_group(program["id"], today, group["id"]) is False
 
 

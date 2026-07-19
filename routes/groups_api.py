@@ -214,35 +214,56 @@ def _zone_is_physically_safe(zone: dict) -> bool:
 
 
 def _validated_group_stop_result(result, group_id: int, expected_ids: list[int]) -> dict | None:
-    """Accept only the core's complete, internally consistent OFF partition."""
-    if not isinstance(result, dict):
+    """Accept only the scheduler's exact physical-and-job stop contract."""
+    required_keys = {
+        "success",
+        "group_id",
+        "aggregate_valid",
+        "stopped",
+        "unresolved",
+        "unverified_zone_ids",
+        "retry_scheduled",
+    }
+    if not isinstance(result, dict) or set(result) != required_keys:
         return None
-    if type(result.get("group_id")) is not int or result["group_id"] != int(group_id):
+    if type(result["group_id"]) is not int or result["group_id"] != int(group_id):
         return None
-    if type(result.get("success")) is not bool:
+    if any(type(result[key]) is not bool for key in ("success", "aggregate_valid", "retry_scheduled")):
         return None
 
     normalized: dict[str, list[int]] = {}
-    for key in ("stopped", "unresolved"):
-        values = result.get(key)
+    for key in ("stopped", "unresolved", "unverified_zone_ids"):
+        values = result[key]
         if not isinstance(values, list):
             return None
         if any(type(zone_id) is not int or zone_id <= 0 for zone_id in values):
             return None
-        if len(values) != len(set(values)):
+        if values != sorted(set(values)):
             return None
         normalized[key] = list(values)
 
     stopped = set(normalized["stopped"])
     unresolved = set(normalized["unresolved"])
-    if stopped & unresolved or stopped | unresolved != set(expected_ids):
-        return None
-    if result["success"] is not (not unresolved):
-        return None
+    unverified = set(normalized["unverified_zone_ids"])
+    expected = set(expected_ids)
+    if result["aggregate_valid"]:
+        if unverified or stopped & unresolved or stopped | unresolved != expected:
+            return None
+        if result["success"] is not (not unresolved):
+            return None
+        if result["retry_scheduled"] and not unresolved:
+            return None
+    else:
+        if result["success"] or stopped or unresolved or unverified != expected or result["retry_scheduled"]:
+            return None
+
     return {
         "success": result["success"],
+        "aggregate_valid": result["aggregate_valid"],
         "stopped": normalized["stopped"],
         "unresolved": normalized["unresolved"],
+        "unverified_zone_ids": normalized["unverified_zone_ids"],
+        "retry_scheduled": result["retry_scheduled"],
     }
 
 
@@ -736,22 +757,20 @@ def api_stop_group(group_id):
                 }
             ), 503
         try:
-            from services.zone_control import stop_all_in_group as _stop_all
-
-            stop_result = _stop_all(
-                int(group_id),
-                reason="group_stop",
-                force=True,
-                require_observed_confirmation=True,
-            )
+            scheduler = get_scheduler()
+            cancel_group_jobs = getattr(scheduler, "cancel_group_jobs", None)
+            if not callable(cancel_group_jobs):
+                raise RuntimeError("scheduler group cancellation is unavailable")
+            stop_result = cancel_group_jobs(int(group_id))
         except Exception:
-            logger.exception("group stop: stop_all_in_group failed")
+            logger.exception("group stop: scheduler cancellation failed")
             return jsonify(
                 {
                     "success": False,
-                    "message": "Не удалось подтвердить остановку всех зон группы",
+                    "message": "Не удалось безопасно остановить группу и снять задания",
                     "stopped": [],
-                    "unresolved": [],
+                    "unresolved": expected_zone_ids,
+                    "unverified_zone_ids": expected_zone_ids,
                 }
             ), 503
 
@@ -764,47 +783,47 @@ def api_stop_group(group_id):
                     "message": "Не удалось подтвердить остановку всех зон группы",
                     "stopped": [],
                     "unresolved": expected_zone_ids,
+                    "unverified_zone_ids": expected_zone_ids,
                 }
             ), 503
-        if validated_stop["success"] is not True:
+        if validated_stop["aggregate_valid"] is not True or validated_stop["success"] is not True:
             logger.error(
-                "group stop remains unresolved: group_id=%s unresolved=%s",
+                "group stop remains unresolved: group_id=%s unresolved=%s unverified=%s",
                 group_id,
                 validated_stop["unresolved"],
+                validated_stop["unverified_zone_ids"],
             )
             return jsonify(
                 {
                     "success": False,
-                    "message": "Не все зоны подтвердили состояние OFF",
+                    "message": "Не все зоны и задания группы подтверждены безопасными",
                     "stopped": validated_stop["stopped"],
                     "unresolved": validated_stop["unresolved"],
+                    "unverified_zone_ids": validated_stop["unverified_zone_ids"],
+                    "retry_scheduled": validated_stop["retry_scheduled"],
                 }
             ), 503
 
-        scheduler = get_scheduler()
-        if scheduler:
-            scheduler.cancel_group_jobs(int(group_id))
-            # Issue #16 §3.5: emit a session_aborted_by_user audit row so
-            # a single query on action_type='session_aborted_by_user'
-            # lists all user-driven aborts regardless of which button
-            # was pressed (zone-card stop, group-card stop). Behaviour
-            # unchanged — only the audit signal is added.
-            try:
-                from services.audit import record_audit
+        # Issue #16 §3.5: emit a session_aborted_by_user audit row so
+        # a single query on action_type='session_aborted_by_user'
+        # lists all user-driven aborts regardless of which button
+        # was pressed (zone-card stop, group-card stop).
+        try:
+            from services.audit import record_audit
 
-                record_audit(
-                    action_type="session_aborted_by_user",
-                    source="group_stop",
-                    target=f"group:{int(group_id)}",
-                    payload={"endpoint": "api_stop_group"},
-                    actor="user",
-                )
-            except Exception:
-                logger.exception("session_aborted_by_user audit failed")
-            try:
-                db.clear_group_scheduled_starts(group_id)
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("Handled exception in api_stop_group: %s", e)
+            record_audit(
+                action_type="session_aborted_by_user",
+                source="group_stop",
+                target=f"group:{int(group_id)}",
+                payload={"endpoint": "api_stop_group"},
+                actor="user",
+            )
+        except Exception:
+            logger.exception("session_aborted_by_user audit failed")
+        try:
+            db.clear_group_scheduled_starts(group_id)
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("Handled exception in api_stop_group: %s", e)
 
         # The scheduler cancellation above terminates only the active group
         # session. Do not write a day-wide program cancellation here: it would
