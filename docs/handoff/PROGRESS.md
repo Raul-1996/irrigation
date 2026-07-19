@@ -8,13 +8,13 @@ main checkpoint `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
 
 - Полный read-only review всего текущего проекта завершён; P0 не найдено.
 - Исторический префикс `#1–#152` не переупорядочен и не переименован.
-- Добавлены стабильные post-review ID `PR-001…PR-060`: `PR-001…PR-059` —
-  подтверждённые новые либо переоткрытые root causes, `PR-060` — намеренный
-  H2 shadow-mode, не дефект.
-- Финальный реестр сейчас содержит **216 записей**: `VERIFIED_REAL` — 207,
+- Добавлены стабильные post-review ID `PR-001…PR-068`: `PR-001…PR-059` и
+  `PR-061…PR-068` — подтверждённые новые либо переоткрытые root causes,
+  `PR-060` — намеренный H2 shadow-mode, не дефект.
+- Финальный реестр сейчас содержит **224 записи**: `VERIFIED_REAL` — 215,
   `VERIFIED_FALSE` — 7, `INTENTIONAL_LIMITATION` — 2, `UNVERIFIED` — 0.
-- Remediation disposition: **141 fixed · 7 deferred · 59 pending ·
-  9 not_applicable**. Все 59 post-review дефектов пока намеренно `pending`:
+- Remediation disposition: **141 fixed · 7 deferred · 67 pending ·
+  9 not_applicable**. Все 67 post-review дефектов пока намеренно `pending`:
   интеграция частичного owner-пакета сохраняет root открытым, пока не закрыты
   остальные владельцы и общий regression contract; неслитый owner commit тем
   более не считается fix.
@@ -60,6 +60,28 @@ main checkpoint `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
      и `git diff --check` чисты;
    - `PR-043` не закрыт: ещё нужны удаление default `1234` из DB bootstrap,
      интеграция auth cookie/trim policy и deploy cleanup/runtime permissions.
+
+### Reconciliation post-package reviewer residuals
+
+- Финальный read-only residual map не меняет disposition уже интегрированных
+  пакетов и не считает owner-branch commits fixes до merge и общего gate.
+- Восемь независимых root causes добавлены append-only как `#217–#224`:
+  - `PR-061` — monotonic и serialized postpone across HTTP/Telegram/rain;
+  - `PR-062` — unbounded квадратичный `extra_times` conflict-check;
+  - `PR-063` — network weather fetch под program mutation lock;
+  - `PR-064` — orphan default `group_id=1` при POST/bulk;
+  - `PR-065` — start-zone membership TOCTOU;
+  - `PR-066` — intent-before-result throttle/MQTT debounce false success;
+  - `PR-067` — photo/rotate prevalidation и atomic media mutation;
+  - `PR-068` — weather factor diagnostics/source provenance.
+- Остальные reviewer residuals сопоставлены существующим инвариантам без новых
+  ID: `PR-002…PR-009`, `PR-011…PR-022`, `PR-024…PR-025`, `PR-029`, `PR-033`,
+  `PR-035…PR-041`, `PR-043`, `PR-045`, `PR-047…PR-052`, `PR-054…PR-056` и
+  `PR-059` по точным строкам final residual map. Где post-package evidence
+  уточнило сам контракт, расширены notes `PR-003` и `PR-009`; historical
+  `reopens` не менялись, потому что новых связей с `#1–#152` map не установил.
+- Запрос активировать H2 в scheduler отклонён frozen objective: `PR-060`
+  остаётся `INTENTIONAL_LIMITATION`, H2 — только shadow-mode.
 
 ### Решение оркестратора по `db/migrations.py`
 
@@ -527,10 +549,12 @@ Docker как production target, e2e и `mqtt_real` без физическог�
   пользовательский untracked `AGENTS.md` сохранён и не индексировался.
 
 Этот блок фиксирует доказательства прежнего HEAD, но больше не является текущим
-completion claim: полный post-review добавил 59 pending root causes. Новая локальная
+completion claim: полный post-review и residual reconciliation оставили 67 pending
+root causes. Новая локальная
 точка передачи будет готова только после индивидуального fixed/deferred disposition
-для каждого `PR-001…PR-059`, интеграции owner packages и повторного полного serial
-pytest, Ruff, inventory renderer `--check` и `git diff --check`.
+для каждого `VERIFIED_REAL` PR-ID (`PR-001…PR-059`, `PR-061…PR-068`), интеграции
+owner packages и повторного полного serial pytest, Ruff, inventory renderer
+`--check` и `git diff --check`.
 
 `git push` не выполнялся и по-прежнему запрещён без отдельного подтверждения:
 inventory и raw reports содержат подробные данные внутреннего аудита.
