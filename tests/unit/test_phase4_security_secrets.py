@@ -7,6 +7,8 @@ import logging
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -50,6 +52,114 @@ def test_database_file_and_new_parent_are_private_independent_of_umask(tmp_path)
         sidecar = Path(f"{db_path}{suffix}")
         if sidecar.exists():
             assert _mode(sidecar) == 0o600
+
+
+def test_private_directories_do_not_require_linux_unsupported_path_chmod(tmp_path, monkeypatch):
+    """Linux rejects chmod(path, ..., follow_symlinks=False); fd chmod must work."""
+
+    import utils
+
+    real_chmod = os.chmod
+
+    def linux_like_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+        if follow_symlinks is False:
+            raise NotImplementedError("follow_symlinks=False unavailable on Linux chmod")
+        return real_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(utils.os, "chmod", linux_like_chmod)
+    private_directory = tmp_path / "runtime" / "backups"
+
+    with _umask(0):
+        utils.ensure_private_directory(private_directory)
+
+    assert _mode(private_directory.parent) == 0o700
+    assert _mode(private_directory) == 0o700
+
+    restrictive_directory = tmp_path / "umask-locked" / "backups"
+    with _umask(0o777):
+        utils.ensure_private_directory(restrictive_directory)
+    assert _mode(restrictive_directory.parent) == 0o700
+    assert _mode(restrictive_directory) == 0o700
+
+
+def test_linux_like_chmod_limitation_does_not_break_secret_or_logging_startup(tmp_path, monkeypatch):
+    import utils
+    from config import _load_or_generate_secret
+    from services.logging_setup import setup_logging
+
+    real_chmod = os.chmod
+
+    def linux_like_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+        if follow_symlinks is False:
+            raise NotImplementedError("follow_symlinks=False unavailable on Linux chmod")
+        return real_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(utils.os, "chmod", linux_like_chmod)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PHASE4_LINUX_FLASK_SECRET", raising=False)
+    secret_path = tmp_path / "runtime" / ".secret_key"
+    assert _load_or_generate_secret("PHASE4_LINUX_FLASK_SECRET", str(secret_path))
+
+    root = logging.getLogger()
+    import_logger = logging.getLogger("import_export")
+    saved_root_handlers = root.handlers[:]
+    saved_import_handlers = import_logger.handlers[:]
+    saved_root_level = root.level
+    root.handlers = [logging.NullHandler()]
+    import_logger.handlers = []
+    try:
+        setup_logging(logging.getLogger("phase4.linux.startup"))
+        assert (tmp_path / "backups" / "app.log").is_file()
+    finally:
+        for handler in [*root.handlers, *import_logger.handlers]:
+            if handler not in saved_root_handlers and handler not in saved_import_handlers:
+                with contextlib.suppress(Exception):
+                    handler.close()
+        root.handlers = saved_root_handlers
+        root.setLevel(saved_root_level)
+        import_logger.handlers = saved_import_handlers
+
+
+def test_linux_like_chmod_limitation_does_not_break_app_import(tmp_path):
+    project_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(project_root),
+            "SECRET_KEY": "phase4-subprocess-test-secret-key",
+            "TESTING": "1",
+        }
+    )
+    script = """
+import logging
+import os
+
+real_chmod = os.chmod
+
+def linux_like_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+    if follow_symlinks is False:
+        raise NotImplementedError("follow_symlinks=False unavailable on Linux chmod")
+    return real_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+os.chmod = linux_like_chmod
+import app
+from services.logging_setup import setup_logging
+setup_logging(logging.getLogger("app"))
+assert os.path.isfile("backups/app.log")
+logging.shutdown()
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_missing_admin_hash_uses_private_recovery_file_not_logs(tmp_path, caplog):
@@ -174,6 +284,71 @@ def test_concurrent_flask_secret_initialization_converges_on_one_complete_key(tm
     assert len(results) == 2
     assert results[0] == results[1] == key_path.read_text(encoding="utf-8")
     assert _mode(key_path) == 0o600
+
+
+def test_private_file_fsyncs_parent_after_publish_before_removing_temp(tmp_path, monkeypatch):
+    import utils
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_link = os.link
+    real_unlink = os.unlink
+
+    def tracked_fsync(descriptor):
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(f"fsync:{kind}")
+        return real_fsync(descriptor)
+
+    def tracked_link(source, destination, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
+        events.append("link:final")
+        return real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def tracked_unlink(path, *, dir_fd=None):
+        if str(path).endswith(".tmp"):
+            events.append("unlink:temp")
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(utils.os, "fsync", tracked_fsync)
+    monkeypatch.setattr(utils.os, "link", tracked_link)
+    monkeypatch.setattr(utils.os, "unlink", tracked_unlink)
+    target = tmp_path / ".secret_key"
+
+    utils.create_private_file(target, b"durable-secret")
+
+    assert target.read_bytes() == b"durable-secret"
+    assert events.index("fsync:file") < events.index("link:final")
+    assert events.index("link:final") < events.index("fsync:directory")
+    assert events.index("fsync:directory") < events.index("unlink:temp")
+
+
+def test_parent_fsync_failure_keeps_private_recovery_link(tmp_path, monkeypatch):
+    import utils
+
+    real_fsync = os.fsync
+
+    def fail_directory_fsync(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("simulated directory fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(utils.os, "fsync", fail_directory_fsync)
+    target = tmp_path / ".secret_key"
+
+    with pytest.raises(OSError, match="directory fsync"):
+        utils.create_private_file(target, b"recoverable-secret")
+
+    temporary_links = list(tmp_path.glob("..secret_key.*.tmp"))
+    assert target.read_bytes() == b"recoverable-secret"
+    assert len(temporary_links) == 1
+    assert temporary_links[0].read_bytes() == b"recoverable-secret"
+    assert target.stat().st_ino == temporary_links[0].stat().st_ino
+    assert _mode(target) == _mode(temporary_links[0]) == 0o600
 
 
 def test_irrigation_secret_existing_file_is_hardened(tmp_path, monkeypatch):

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 _PRIVATE_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
 _PRIVATE_DIR_MODE = stat.S_IRWXU
 _SAFE_OPEN_FLAGS = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _SAFE_OPEN_FLAGS
 
 
 class SecretKeyConfigurationError(RuntimeError):
@@ -20,6 +21,28 @@ class SecretKeyConfigurationError(RuntimeError):
     encrypted MQTT/Telegram credentials unrecoverable.  Messages raised by
     this class deliberately identify only the key source, never its material.
     """
+
+
+def _open_private_directory(directory: str | os.PathLike[str]) -> int:
+    """Open a real directory without following its final path component."""
+
+    path = os.fspath(directory)
+    descriptor = os.open(path, _DIRECTORY_OPEN_FLAGS)
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise NotADirectoryError(f"Private storage path is not a directory: {path}")
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _harden_private_directory(directory: str | os.PathLike[str]) -> None:
+    descriptor = _open_private_directory(directory)
+    try:
+        os.fchmod(descriptor, _PRIVATE_DIR_MODE)
+    finally:
+        os.close(descriptor)
 
 
 def ensure_private_directory(directory: str | os.PathLike[str]) -> None:
@@ -42,25 +65,34 @@ def ensure_private_directory(directory: str | os.PathLike[str]) -> None:
         cursor = parent
 
     for path in reversed(missing):
+        created = False
         try:
             os.mkdir(path, _PRIVATE_DIR_MODE)
+            created = True
         except FileExistsError:
             pass
-        info = os.lstat(path)
-        if not stat.S_ISDIR(info.st_mode):
-            raise NotADirectoryError(f"Private storage path is not a directory: {path}")
-        os.chmod(path, _PRIVATE_DIR_MODE, follow_symlinks=False)
+        try:
+            _harden_private_directory(path)
+        except PermissionError:
+            if not created:
+                raise
+            # A maximally restrictive umask can remove owner permissions from
+            # the directory we just created, preventing O_DIRECTORY open.  It
+            # is safe to grant mode on this just-created path, then immediately
+            # verify it through O_NOFOLLOW and constrain it via fchmod.
+            os.chmod(path, _PRIVATE_DIR_MODE)
+            _harden_private_directory(path)
 
-    info = os.lstat(directory_path)
-    if not stat.S_ISDIR(info.st_mode):
-        raise NotADirectoryError(f"Private storage path is not a directory: {directory_path}")
-    os.chmod(directory_path, _PRIVATE_DIR_MODE, follow_symlinks=False)
+    _harden_private_directory(directory_path)
 
 
 def _ensure_private_parent(file_path: str | os.PathLike[str]) -> None:
     parent = os.path.dirname(os.path.abspath(os.fspath(file_path)))
     if not os.path.lexists(parent):
         ensure_private_directory(parent)
+        return
+    descriptor = _open_private_directory(parent)
+    os.close(descriptor)
 
 
 def ensure_private_file(file_path: str | os.PathLike[str], *, create: bool = False) -> None:
@@ -107,36 +139,58 @@ def create_private_file(file_path: str | os.PathLike[str], data: bytes) -> None:
 
     path = os.path.abspath(os.fspath(file_path))
     _ensure_private_parent(path)
-    temporary_path = os.path.join(
-        os.path.dirname(path),
-        f".{os.path.basename(path)}.{secrets.token_hex(8)}.tmp",
-    )
-    descriptor = os.open(
-        temporary_path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _SAFE_OPEN_FLAGS,
-        _PRIVATE_FILE_MODE,
-    )
+    parent = os.path.dirname(path)
+    target_name = os.path.basename(path)
+    temporary_name = f".{target_name}.{secrets.token_hex(8)}.tmp"
+    directory_descriptor = _open_private_directory(parent)
+    cleanup_temporary = True
     try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _SAFE_OPEN_FLAGS,
+            _PRIVATE_FILE_MODE,
+            dir_fd=directory_descriptor,
+        )
         try:
-            os.fchmod(descriptor, _PRIVATE_FILE_MODE)
-            view = memoryview(data)
-            while view:
-                written = os.write(descriptor, view)
-                if written <= 0:
-                    raise OSError(f"Unable to persist private file: {path}")
-                view = view[written:]
-            os.fsync(descriptor)
+            try:
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError(f"Unable to persist private file: {path}")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            # A hard link publishes the fully-written inode only if the target
+            # is still absent.  Both names are resolved against the verified
+            # directory fd, so a parent-path swap cannot redirect publication.
+            os.link(
+                temporary_name,
+                target_name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            try:
+                # Persist the final directory entry before dropping the only
+                # fallback name.  If this fsync fails, retain the 0600 temp hard
+                # link so an operator can recover the generated material.
+                os.fsync(directory_descriptor)
+            except OSError:
+                cleanup_temporary = False
+                raise
+            os.unlink(temporary_name, dir_fd=directory_descriptor)
+            cleanup_temporary = False
         finally:
-            os.close(descriptor)
-        # A hard link publishes the fully-written inode only if the target is
-        # still absent.  Concurrent workers therefore either create the key or
-        # receive FileExistsError and load the winner's complete key.
-        os.link(temporary_path, path, follow_symlinks=False)
+            if cleanup_temporary:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_descriptor)
+                except FileNotFoundError:
+                    pass
     finally:
-        try:
-            os.unlink(temporary_path)
-        except FileNotFoundError:
-            pass
+        os.close(directory_descriptor)
 
 
 def to_iso_with_tz(s: str | None) -> str | None:
