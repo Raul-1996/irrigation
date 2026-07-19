@@ -34,6 +34,23 @@ class TestZoneCRUD:
         assert updated["name"] == "New"
         assert updated["duration"] == 20
 
+    def test_update_zone_persists_command_and_sequence_ids(self, test_db):
+        zone = test_db.create_zone({"name": "Fallback", "duration": 5, "group_id": 1})
+
+        updated = test_db.update_zone(
+            zone["id"],
+            {
+                "command_id": "f66bfe6f-b626-45ac-8846-c914ce65ea69",
+                "sequence_id": "e65d90d4-61ad-4e11-99b0-4af5efbeb15b",
+            },
+        )
+
+        assert updated["command_id"] == "f66bfe6f-b626-45ac-8846-c914ce65ea69"
+        assert updated["sequence_id"] == "e65d90d4-61ad-4e11-99b0-4af5efbeb15b"
+
+        assert test_db.update_zone(zone["id"], {"command_id": 123}) is None
+        assert test_db.get_zone(zone["id"])["command_id"] == "f66bfe6f-b626-45ac-8846-c914ce65ea69"
+
     def test_update_zone_not_found(self, test_db):
         result = test_db.update_zone(9999, {"name": "X"})
         assert result is None

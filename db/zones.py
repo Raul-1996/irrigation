@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
+from db.identity import parse_explicit_entity_id
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,13 @@ class ZoneRepository(BaseRepository):
         ):
             if column in payload:
                 add(column, payload[column])
+        for column in ("command_id", "sequence_id"):
+            if column not in payload:
+                continue
+            value = payload[column]
+            if value is not None and (not isinstance(value, str) or not value or len(value) > 128):
+                raise ValueError(f"{column} must be a non-empty string of at most 128 characters or null")
+            add(column, value)
 
         # updated_at is always set but uses SQL CURRENT_TIMESTAMP — not a
         # parameter, and not user-controllable.
@@ -111,39 +119,37 @@ class ZoneRepository(BaseRepository):
         ``zones_drop_last_watering_time`` migration.
         """
         try:
-            with self._connect() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
-                    SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
-                    FROM zones z
-                    LEFT JOIN groups g ON z.group_id = g.id
-                    ORDER BY z.id
-                """)
-                zones = []
-                for row in cursor.fetchall():
-                    zone = dict(row)
-                    zone["group"] = zone["group_id"]
-                    zones.append(zone)
-                # Single batched query — derive last_watering_time from
-                # zone_runs (idx_zone_runs_active covers it). Done after
-                # row.fetchall() so the cursor isn't held while we issue
-                # a second statement on the same connection.
-                try:
-                    cur2 = conn.execute(
-                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
-                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
-                        "GROUP BY zone_id"
-                    )
-                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
-                except sqlite3.Error as e:
-                    logger.debug("get_zones: zone_runs aggregation failed: %s", e)
-                    last_map = {}
-                for z in zones:
-                    z["last_watering_time"] = last_map.get(int(z["id"]))
-                return zones
+            return self.get_zones_strict()
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон: %s", e)
             return []
+
+    def get_zones_strict(self) -> list[dict[str, Any]]:
+        """Return all zones and propagate database failures to safety callers."""
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter,
+                       (
+                           SELECT zr.end_utc
+                           FROM zone_runs zr
+                           WHERE zr.zone_id = z.id
+                             AND zr.status = 'ok'
+                             AND zr.end_utc IS NOT NULL
+                           ORDER BY zr.end_utc DESC
+                           LIMIT 1
+                       ) AS last_watering_time
+                FROM zones z
+                LEFT JOIN groups g ON z.group_id = g.id
+                ORDER BY z.id
+            """)
+            zones = []
+            for row in cursor.fetchall():
+                zone = dict(row)
+                zone["group"] = zone["group_id"]
+                zones.append(zone)
+            return zones
 
     def get_zone(self, zone_id: int) -> dict[str, Any] | None:
         """Получить зону по ID.
@@ -157,7 +163,16 @@ class ZoneRepository(BaseRepository):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     """
-                    SELECT z.*, g.name as group_name
+                    SELECT z.*, g.name as group_name,
+                           (
+                               SELECT zr.end_utc
+                               FROM zone_runs zr
+                               WHERE zr.zone_id = z.id
+                                 AND zr.status = 'ok'
+                                 AND zr.end_utc IS NOT NULL
+                               ORDER BY zr.end_utc DESC
+                               LIMIT 1
+                           ) AS last_watering_time
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.id = ?
@@ -168,7 +183,6 @@ class ZoneRepository(BaseRepository):
                 if row:
                     zone = dict(row)
                     zone["group"] = zone["group_id"]
-                    zone["last_watering_time"] = self.get_last_watering_time(int(zone_id))
                     return zone
                 return None
         except sqlite3.Error as e:
@@ -194,11 +208,12 @@ class ZoneRepository(BaseRepository):
                     except (ConnectionError, TimeoutError, OSError):
                         pass
                 zid_explicit = None
-                try:
-                    zid_explicit = int(zone_data.get("id")) if zone_data.get("id") is not None else None
-                except (TypeError, ValueError) as e:
-                    logger.debug("create_zone explicit id parse: %s", e)
-                    zid_explicit = None
+                if "id" in zone_data:
+                    try:
+                        zid_explicit = parse_explicit_entity_id(zone_data["id"])
+                    except ValueError:
+                        logger.warning("Не удалось создать зону: некорректный явный id")
+                        return None
 
                 if zid_explicit is not None:
                     try:
@@ -386,63 +401,57 @@ class ZoneRepository(BaseRepository):
 
     @retry_on_busy()
     def bulk_upsert_zones(self, zones: list[dict[str, Any]]) -> dict[str, Any]:
-        """Импорт зон: upsert множества зон в одной транзакции."""
+        """Atomically import a batch of zones.
+
+        Import is all-or-nothing: an invalid row, constraint failure or other
+        database error rolls back every preceding row.  This invariant belongs
+        in the repository because route validation cannot prevent a concurrent
+        schema/constraint change between validation and write time.
+        """
         created = 0
         updated = 0
-        failed = 0
         if not zones:
-            return {"created": 0, "updated": 0, "failed": 0}
+            return {"success": True, "created": 0, "updated": 0, "failed": 0, "errors": []}
+
+        failed_index: int | None = None
+        failed_id: Any = None
         try:
             with self._connect() as conn:
-                for z in zones:
-                    try:
-                        zid = int(z["id"]) if z.get("id") is not None else None
-                    except (TypeError, ValueError) as e:
-                        logger.debug("import_zones id parse: %s", e)
-                        zid = None
-                    try:
-                        if zid is not None:
-                            cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
-                            row = cur.fetchone()
-                            if row:
-                                # SEC-004 / B1 FIX: импорт строит UPDATE через
-                                # общий builder, суженный до
-                                # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
-                                # константы) — state-machine-поля исключены.
-                                assignments, params = self._build_zone_update_fields(
-                                    z, z, allowed=_ALLOWED_UPDATE_COLUMNS
-                                )
-                                params.append(zid)
-                                if assignments:
-                                    conn.execute(
-                                        f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
-                                        params,
-                                    )
-                                    updated += 1
-                            else:
+                conn.execute("BEGIN IMMEDIATE")
+                for index, z in enumerate(zones):
+                    failed_index = index
+                    if not isinstance(z, dict):
+                        failed_id = None
+                        raise TypeError("zone import row must be an object")
+                    id_is_explicit = "id" in z
+                    candidate_id = z.get("id")
+                    failed_id = candidate_id if isinstance(candidate_id, (str, int, float, bool)) else None
+                    zid = parse_explicit_entity_id(candidate_id) if id_is_explicit else None
+
+                    if zid is not None:
+                        cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
+                        row = cur.fetchone()
+                        if row:
+                            # SEC-004 / B1 FIX: импорт строит UPDATE через
+                            # общий builder, суженный до
+                            # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
+                            # константы) — state-machine-поля исключены.
+                            assignments, params = self._build_zone_update_fields(z, z, allowed=_ALLOWED_UPDATE_COLUMNS)
+                            params.append(zid)
+                            if assignments:
                                 conn.execute(
-                                    """
-                                    INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                    (
-                                        zid,
-                                        z.get("name") or "Зона",
-                                        z.get("icon") or "🌿",
-                                        int(z.get("duration") or 10),
-                                        int(z.get("group_id", z.get("group", 1))),
-                                        (z.get("topic") or "").strip(),
-                                        z.get("mqtt_server_id"),
-                                    ),
+                                    f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
+                                    params,
                                 )
-                                created += 1
+                                updated += 1
                         else:
                             conn.execute(
                                 """
-                                INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
-                                VALUES (?, ?, ?, ?, ?, ?)
+                                INSERT INTO zones (id, name, icon, duration, group_id, topic, mqtt_server_id)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                                 (
+                                    zid,
                                     z.get("name") or "Зона",
                                     z.get("icon") or "🌿",
                                     int(z.get("duration") or 10),
@@ -452,23 +461,100 @@ class ZoneRepository(BaseRepository):
                                 ),
                             )
                             created += 1
-                    except (sqlite3.Error, TypeError, ValueError) as e:
-                        logger.warning("Ошибка upsert зоны: %s", e)
-                        failed += 1
+                    else:
+                        conn.execute(
+                            """
+                            INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                z.get("name") or "Зона",
+                                z.get("icon") or "🌿",
+                                int(z.get("duration") or 10),
+                                int(z.get("group_id", z.get("group", 1))),
+                                (z.get("topic") or "").strip(),
+                                z.get("mqtt_server_id"),
+                            ),
+                        )
+                        created += 1
                 conn.commit()
-            return {"created": created, "updated": updated, "failed": failed}
-        except sqlite3.Error as e:
-            logger.error("Ошибка bulk-импорта зон: %s", e)
-            return {"created": created, "updated": updated, "failed": (failed or 0)}
+            return {"success": True, "created": created, "updated": updated, "failed": 0, "errors": []}
+        except (sqlite3.Error, TypeError, ValueError, KeyError) as e:
+            logger.error("Atomic zone import rolled back at row %s: %s", failed_index, e)
+            if isinstance(e, sqlite3.IntegrityError):
+                error_code = "constraint_error"
+            elif isinstance(e, sqlite3.Error):
+                error_code = "database_error"
+            else:
+                error_code = "invalid_data"
+            return {
+                "success": False,
+                "created": 0,
+                "updated": 0,
+                "failed": len(zones),
+                "rolled_back": True,
+                "errors": [{"index": failed_index, "id": failed_id, "code": error_code}],
+            }
 
     @retry_on_busy()
     def delete_zone(self, zone_id: int) -> bool:
-        """Удалить зону."""
+        """Delete a zone while retiring its identity and schedule links.
+
+        ``zone_runs`` and water history intentionally remain untouched.  The
+        durable-ID migration prevents those retained rows from ever attaching
+        to a replacement zone.
+        """
         try:
             with self._connect() as conn:
-                conn.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM zones WHERE id = ?", (int(zone_id),)).fetchone() is None:
+                    conn.rollback()
+                    return False
+
+                program_updates: list[tuple[str, int]] = []
+                for program_id, zones_json in conn.execute("SELECT id, zones FROM programs").fetchall():
+                    try:
+                        identifiers = json.loads(zones_json or "[]")
+                    except (json.JSONDecodeError, TypeError) as error:
+                        logger.error(
+                            "Cannot safely delete zone %s: program %s has malformed zones JSON: %s",
+                            zone_id,
+                            program_id,
+                            error,
+                        )
+                        conn.rollback()
+                        return False
+                    if not isinstance(identifiers, list):
+                        logger.error(
+                            "Cannot safely delete zone %s: program %s zones is not a list",
+                            zone_id,
+                            program_id,
+                        )
+                        conn.rollback()
+                        return False
+
+                    filtered: list[Any] = []
+                    removed = False
+                    for identifier in identifiers:
+                        try:
+                            is_deleted = int(identifier) == int(zone_id)
+                        except (TypeError, ValueError):
+                            is_deleted = False
+                        if is_deleted:
+                            removed = True
+                        else:
+                            filtered.append(identifier)
+                    if removed:
+                        program_updates.append((json.dumps(filtered, ensure_ascii=False), int(program_id)))
+
+                for zones_json, program_id in program_updates:
+                    conn.execute(
+                        "UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (zones_json, program_id),
+                    )
+                cursor = conn.execute("DELETE FROM zones WHERE id = ?", (int(zone_id),))
                 conn.commit()
-                return True
+                return cursor.rowcount == 1
         except sqlite3.Error as e:
             logger.error("Ошибка удаления зоны %s: %s", zone_id, e)
             return False
@@ -484,7 +570,16 @@ class ZoneRepository(BaseRepository):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     """
-                    SELECT z.*, g.name as group_name
+                    SELECT z.*, g.name as group_name,
+                           (
+                               SELECT zr.end_utc
+                               FROM zone_runs zr
+                               WHERE zr.zone_id = z.id
+                                 AND zr.status = 'ok'
+                                 AND zr.end_utc IS NOT NULL
+                               ORDER BY zr.end_utc DESC
+                               LIMIT 1
+                           ) AS last_watering_time
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.group_id = ?
@@ -497,18 +592,6 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone["group"] = zone["group_id"]
                     zones.append(zone)
-                try:
-                    cur2 = conn.execute(
-                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
-                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
-                        "GROUP BY zone_id"
-                    )
-                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
-                except sqlite3.Error as e:
-                    logger.debug("get_zones_by_group: zone_runs aggregation failed: %s", e)
-                    last_map = {}
-                for z in zones:
-                    z["last_watering_time"] = last_map.get(int(z["id"]))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон группы %s: %s", group_id, e)
@@ -765,9 +848,10 @@ class ZoneRepository(BaseRepository):
         on-demand from ``MAX(end_utc)`` over rows with ``status='ok'`` and
         a non-NULL ``end_utc`` (i.e. the run actually finished cleanly).
 
-        The covering index ``idx_zone_runs_active(zone_id, end_utc)`` keeps
-        this O(log n) per zone. Returns ``None`` for a zone that has never
-        been watered (or whose only runs are aborted / still open).
+        The partial covering index
+        ``idx_zone_runs_last_ok(zone_id, end_utc DESC)`` keeps this O(log n)
+        per zone. Returns ``None`` for a zone that has never been watered (or
+        whose only runs are aborted / still open).
         """
         try:
             with self._connect() as conn:
@@ -811,7 +895,9 @@ class ZoneRepository(BaseRepository):
         return times
 
     @staticmethod
-    def _first_program_start_after(prog: dict[str, Any], hour: int, minute: int, lower_bound: datetime) -> datetime | None:
+    def _first_program_start_after(
+        prog: dict[str, Any], hour: int, minute: int, lower_bound: datetime
+    ) -> datetime | None:
         """Первый старт программы строго позже ``lower_bound``.
 
         Семантика повторяет планировщик (irrigation_scheduler._schedule_single_time):

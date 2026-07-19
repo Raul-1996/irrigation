@@ -247,10 +247,16 @@ class TestMQTTOperations:
         assert resp.status_code in (200, 201)
 
     def test_zone_mqtt_start_stop(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         app.db.create_zone(
-            {"name": "MQTTZ", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {
+                "name": "MQTTZ",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/devices/test/K1",
+                "mqtt_server_id": server["id"],
+            }
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
 
@@ -407,10 +413,10 @@ class TestZoneStartStopWorkflow:
     """Zone start/stop through API."""
 
     def test_zone_start_stop_via_api(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         app.db.create_zone(
-            {"name": "SSZ", "duration": 5, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "SSZ", "duration": 5, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server["id"]}
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
 

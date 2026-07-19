@@ -81,20 +81,33 @@ class TestZoneCRUD:
         zone = data.get("zone") or data
         assert zone["icon"] == "💧"
 
-    def test_update_zone_group(self, admin_client):
+    def test_update_zone_group(self, admin_client, app):
+        target_group = app.db.create_group("Functional target group")
         zid = self._create_zone(admin_client, group_id=1)
-        resp = admin_client.put(f"/api/zones/{zid}", data=json.dumps({"group_id": 2}), content_type="application/json")
+        resp = admin_client.put(
+            f"/api/zones/{zid}",
+            data=json.dumps({"group_id": target_group["id"]}),
+            content_type="application/json",
+        )
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
-        assert zone["group_id"] == 2
+        assert zone["group_id"] == target_group["id"]
 
-    def test_update_multiple_fields(self, admin_client):
+    def test_update_multiple_fields(self, admin_client, app):
         """Bottom sheet saves name + duration + icon + group at once."""
+        target_group = app.db.create_group("Functional multi-field group")
         zid = self._create_zone(admin_client, name="Old", duration=10, icon="🌿", group_id=1)
         resp = admin_client.put(
             f"/api/zones/{zid}",
-            data=json.dumps({"name": "New", "duration": 20, "icon": "🌳", "group_id": 2}),
+            data=json.dumps(
+                {
+                    "name": "New",
+                    "duration": 20,
+                    "icon": "🌳",
+                    "group_id": target_group["id"],
+                }
+            ),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -103,7 +116,7 @@ class TestZoneCRUD:
         assert zone["name"] == "New"
         assert zone["duration"] == 20
         assert zone["icon"] == "🌳"
-        assert zone["group_id"] == 2
+        assert zone["group_id"] == target_group["id"]
 
     def test_duration_increment_decrement(self, admin_client):
         """Simulate +/- buttons: 10 → 11 → 10 → 1 (min)."""

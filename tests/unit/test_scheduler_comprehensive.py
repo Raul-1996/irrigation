@@ -259,9 +259,10 @@ class TestStartGroupSequence:
         own durations (helper's third branch). Result must match what the
         method returned before #12 — True, with the first zone marked ON.
         """
-        z1 = test_db.create_zone({"name": "BC1", "duration": 4, "group_id": 7, "topic": "/t/bc1"})
-        test_db.create_zone({"name": "BC2", "duration": 6, "group_id": 7, "topic": "/t/bc2"})
-        result = started_scheduler.start_group_sequence(7)
+        group = test_db.create_group("Back-compat sequence group")
+        z1 = test_db.create_zone({"name": "BC1", "duration": 4, "group_id": group["id"], "topic": "/t/bc1"})
+        test_db.create_zone({"name": "BC2", "duration": 6, "group_id": group["id"], "topic": "/t/bc2"})
+        result = started_scheduler.start_group_sequence(group["id"])
         assert result is True
         # First zone goes ON in TESTING mode (legacy assertion still holds).
         assert test_db.get_zone(z1["id"])["state"] == "on"

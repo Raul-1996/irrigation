@@ -103,21 +103,21 @@ def test_boot_aborts_crash_open_run_before_forced_zone_stop(test_db):
 
 def test_shutdown_quiesces_scheduler_before_final_retained_off(test_db):
     """No final OFF may be published before scheduler workers are drained."""
+    server = test_db.create_mqtt_server(
+        {
+            "name": "Shutdown broker",
+            "host": "127.0.0.1",
+            "port": 1883,
+            "enabled": 1,
+        }
+    )
     test_db.create_zone(
         {
             "name": "Shutdown zone",
             "duration": 10,
             "group_id": 1,
             "topic": "/devices/test/controls/K1",
-            "mqtt_server_id": 1,
-        }
-    )
-    test_db.create_mqtt_server(
-        {
-            "name": "Shutdown broker",
-            "host": "127.0.0.1",
-            "port": 1883,
-            "enabled": 1,
+            "mqtt_server_id": server["id"],
         }
     )
 

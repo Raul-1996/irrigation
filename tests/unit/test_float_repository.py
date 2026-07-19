@@ -89,12 +89,13 @@ class TestFloatRepositoryOps:
     def test_pause_active_zones_transitions_state(self, test_db, test_db_path):
         """pause_active_zones() flips state='on' zones to 'paused'
         with reason='float' and records pause_remaining_seconds=duration."""
+        group = test_db.create_group("Float pause group")
         # create zone in state='on'
         z = test_db.create_zone(
             {
                 "name": "FZ",
                 "duration": 120,
-                "group_id": 7,
+                "group_id": group["id"],
             }
         )
         # Set state='on' directly (create_zone default state is 'off')
@@ -105,7 +106,7 @@ class TestFloatRepositoryOps:
         from db.float import FloatRepository
 
         repo = FloatRepository(test_db_path)
-        paused = repo.pause_active_zones(group_id=7)
+        paused = repo.pause_active_zones(group_id=group["id"])
         assert z["id"] in paused
 
         after = test_db.get_zone(z["id"])
@@ -115,20 +116,24 @@ class TestFloatRepositoryOps:
 
     def test_pause_active_zones_ignores_off_zones(self, test_db, test_db_path):
         """Zones not in state='on' must not be paused."""
+        group = test_db.create_group("Float off group")
+        assert group is not None
         z = test_db.create_zone(
             {
                 "name": "OFF",
                 "duration": 60,
-                "group_id": 8,
+                "group_id": group["id"],
             }
         )
+        assert z is not None
         # state is default 'off' — no pausing expected
 
         from db.float import FloatRepository
 
         repo = FloatRepository(test_db_path)
-        paused = repo.pause_active_zones(group_id=8)
+        paused = repo.pause_active_zones(group_id=group["id"])
         assert paused == []
+        assert test_db.get_zone(z["id"])["state"] == "off"
 
     def test_get_float_enabled_groups_filters(self, test_db, test_db_path):
         """get_float_enabled_groups returns only groups with float_enabled=1."""

@@ -27,6 +27,30 @@ class GroupRepository(BaseRepository):
             logger.error("Ошибка получения групп: %s", e)
             return []
 
+    def get_group_storage_snapshot(self, group_id: int) -> dict[str, Any] | None:
+        """Return the exact stored row used only for compensating rollback."""
+
+        return self._get_storage_snapshot("groups", group_id)
+
+    def restore_group_snapshot(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any] | None = None,
+    ) -> bool:
+        return self._restore_storage_snapshot("groups", "group", before, expected_current)
+
+    def delete_group_if_unchanged(self, expected: dict[str, Any]) -> bool:
+        try:
+            if int(expected.get("id")) in {1, 999}:
+                return False
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return self._delete_storage_snapshot_if_unchanged(
+            "groups",
+            expected,
+            restrict_query="SELECT 1 FROM zones WHERE group_id = ? LIMIT 1",
+        )
+
     @retry_on_busy()
     def create_group(self, name: str) -> dict[str, Any] | None:
         """Создать новую группу."""
@@ -42,9 +66,9 @@ class GroupRepository(BaseRepository):
 
     @retry_on_busy()
     def delete_group(self, group_id: int) -> bool:
-        """Удалить группу. Запрещено для группы 999 и непустых групп."""
+        """Удалить группу. Запрещено для системных и непустых групп."""
         try:
-            if group_id == 999:
+            if group_id in {1, 999}:
                 return False
             with self._connect() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM zones WHERE group_id = ?", (group_id,))
