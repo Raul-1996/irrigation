@@ -1,6 +1,7 @@
 """Deep tests for settings routes (telegram settings, etc.)."""
 
 import json
+from unittest.mock import patch
 
 
 class TestTelegramSettings:
@@ -17,17 +18,54 @@ class TestTelegramSettings:
 
     def test_put_telegram_token(self, admin_client):
         """PUT /api/settings/telegram with a bot token."""
-        resp = admin_client.put(
-            "/api/settings/telegram",
-            data=json.dumps(
-                {
-                    "telegram_bot_token": "123456:ABCdef",
-                }
-            ),
-            content_type="application/json",
-        )
+        with (
+            patch("routes.settings.encrypt_secret", return_value="encrypted-token"),
+            patch("services.telegram_bot.reconfigure_bot_token", return_value=True) as reconfigure,
+        ):
+            resp = admin_client.put(
+                "/api/settings/telegram",
+                data=json.dumps(
+                    {
+                        "telegram_bot_token": "123456:ABCdef",
+                    }
+                ),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
         assert resp.get_json()["success"] is True
+        reconfigure.assert_called_once_with("encrypted-token")
+
+    def test_delete_telegram_token_reconfigures_runtime(self, admin_client):
+        with patch("services.telegram_bot.reconfigure_bot_token", return_value=True) as reconfigure:
+            resp = admin_client.put(
+                "/api/settings/telegram",
+                data=json.dumps({"telegram_bot_token": ""}),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 200
+        assert resp.get_json()["success"] is True
+        reconfigure.assert_called_once_with(None)
+
+    def test_set_webhook_is_rejected_before_token_mutation(self, admin_client):
+        with patch("services.telegram_bot.reconfigure_bot_token") as reconfigure:
+            resp = admin_client.put(
+                "/api/settings/telegram",
+                data=json.dumps(
+                    {
+                        "telegram_bot_token": "123456:ABCdef",
+                        "set_webhook": True,
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 400
+        assert resp.get_json() == {
+            "success": False,
+            "error": "Telegram webhook mode is not supported; use long polling",
+        }
+        reconfigure.assert_not_called()
 
     def test_put_telegram_admin_chat_id(self, admin_client):
         """PUT /api/settings/telegram sets admin chat ID."""

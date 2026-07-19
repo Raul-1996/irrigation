@@ -10,6 +10,7 @@
 import json
 import logging
 import sqlite3
+from datetime import datetime, timedelta
 
 from database import db
 
@@ -175,8 +176,34 @@ def _do_group_stop(group_id: int) -> str:
             from services.zone_control import stop_all_in_group
 
             stop_all_in_group(int(group_id), reason="telegram", force=True)
-        return "⏹ Полив группы остановлен"
-    except ImportError as e:
+
+        # Both stop primitives are best-effort and historically returned no
+        # aggregate result.  Re-read the authoritative state before telling an
+        # operator that physical OFF succeeded.
+        zones = db.get_zones_by_group(int(group_id)) or []
+        unresolved = [
+            int(zone["id"])
+            for zone in zones
+            if str(zone.get("state") or "").strip().lower() != "off"
+        ]
+        if not unresolved:
+            return "⏹ Полив группы остановлен"
+
+        retry_at = datetime.now() + timedelta(seconds=15)
+        if scheduler is not None and hasattr(scheduler, "schedule_zone_hard_stop"):
+            for zone_id in unresolved:
+                scheduler.schedule_zone_hard_stop(zone_id, retry_at)
+        else:
+            # Without APScheduler, retain observed-state retry publishes rather
+            # than converting an unresolved command into a false success.
+            from services.observed_state import state_verifier
+
+            for zone_id in unresolved:
+                state_verifier.verify_async(zone_id, "off")
+
+        ids = ", ".join(str(zone_id) for zone_id in unresolved)
+        return f"⚠️ Команда остановки отправлена, но OFF не подтверждён для зон: {ids}. Повторная проверка запущена."
+    except (ImportError, sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         logger.debug("Exception in _do_group_stop: %s", e)
         return "Ошибка остановки группы"
 
