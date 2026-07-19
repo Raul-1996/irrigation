@@ -255,6 +255,12 @@ def _run_local_date(run: dict, controller_tz: tzinfo | None = None) -> date | No
     return sdt.date() if sdt is not None else None
 
 
+def run_was_confirmed(run: dict) -> bool:
+    """Normalize SQLite/JSON confirmation representations to one boolean."""
+    confirmed = run.get("confirmed")
+    return confirmed is True or confirmed == 1 or str(confirmed).lower() in {"1", "true", "yes"}
+
+
 def run_counts_as_actual(run: dict) -> bool:
     """Whether a history row proves that water physically flowed.
 
@@ -268,8 +274,7 @@ def run_counts_as_actual(run: dict) -> bool:
         return False
     if status != "aborted":
         return True
-    confirmed = run.get("confirmed")
-    return confirmed is True or confirmed == 1 or str(confirmed).lower() in {"1", "true", "yes"}
+    return run_was_confirmed(run)
 
 
 def calculate_actual_for_zone(

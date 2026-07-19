@@ -163,6 +163,11 @@ class TestPerZoneJson:
         assert data["summary"]["total_runs"] == 1
         assert data["summary"]["total_minutes"] == 5
         assert data["summary"]["total_liters"] == 5.0
+        runs_by_liters = {run["liters"]: run for run in data["runs"]}
+        assert runs_by_liters[20.0]["confirmed"] is False
+        assert runs_by_liters[20.0]["counts_as_actual"] is False
+        assert runs_by_liters[5.0]["confirmed"] is True
+        assert runs_by_liters[5.0]["counts_as_actual"] is True
 
     def test_has_plan_false_when_no_active_program(self, app, client, seeded_zone):
         data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
@@ -226,28 +231,39 @@ class TestGlobalJson:
         assert new_group["summary"]["total_runs"] == 0
         assert new_group["runs"] == []
 
-    def test_deleted_zone_run_is_not_named_after_replacement(self, app, client):
-        original = app.db.create_zone({"name": "Original", "duration": 10, "group_id": 1, "topic": "/x/original"})
-        _create_run(app, original["id"], 1, 60, 50, status="ok")
-        assert app.db.delete_zone(original["id"]) is True
-        replacement = app.db.create_zone(
-            {
-                "id": original["id"],
-                "name": "Replacement",
-                "duration": 10,
-                "group_id": 2,
-                "topic": "/x/replacement",
-            }
+    def test_legacy_reused_id_runs_are_not_named_after_current_zone(self, app, client):
+        """Seed a pre-durable-ID collision without exercising supported CRUD reuse."""
+        current = app.db.create_zone(
+            {"name": "Current replacement", "duration": 10, "group_id": 2, "topic": "/x/current"}
         )
-        assert replacement["id"] == original["id"]
+        now = datetime.now(UTC)
+        old_created = (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+        with sqlite3.connect(app.db.db_path) as conn:
+            for start_min, end_min, run_created in (
+                (120, 110, old_created),
+                # SQLite CURRENT_TIMESTAMP has one-second precision. This row
+                # pins the equal-created_at fallback to its earlier start.
+                (60, 50, current["created_at"]),
+            ):
+                conn.execute(
+                    "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                    "start_monotonic, status, source, confirmed, created_at) "
+                    "VALUES (?, 1, ?, ?, 0.0, 'ok', 'manual', 0, ?)",
+                    (
+                        current["id"],
+                        _utc_iso_now_minus(start_min, now),
+                        _utc_iso_now_minus(end_min, now),
+                        run_created,
+                    ),
+                )
+            conn.commit()
 
-        payload = client.get(f"/api/zones/history?days=7&zone_id={original['id']}").get_json()
+        payload = client.get(f"/api/zones/history?days=7&zone_id={current['id']}").get_json()
 
-        assert len(payload["runs"]) == 1
-        run = payload["runs"][0]
-        assert run["zone_id"] == original["id"]
-        assert run["zone_name"] == "Удалённая зона"
-        assert run["zone_deleted"] is True
+        assert len(payload["runs"]) == 2
+        assert all(run["zone_id"] == current["id"] for run in payload["runs"])
+        assert all(run["zone_name"] == "Удалённая зона" for run in payload["runs"])
+        assert all(run["zone_deleted"] is True for run in payload["runs"])
 
 
 class TestCsv:

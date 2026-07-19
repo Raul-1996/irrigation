@@ -31,6 +31,7 @@ from services.history_calc import (
     get_controller_timezone,
     parse_controller_datetime,
     run_counts_as_actual,
+    run_was_confirmed,
     zone_has_active_program,
 )
 
@@ -206,6 +207,8 @@ def _serialize_run(
         "liters": run.get("total_liters"),
         "status": run.get("status"),
         "source": run.get("source"),
+        "confirmed": run_was_confirmed(run),
+        "counts_as_actual": run_counts_as_actual(run),
     }
 
 
