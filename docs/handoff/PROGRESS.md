@@ -1,7 +1,8 @@
 # Прогресс аудита и исправлений wb-irrigation
 
-Текущий checkpoint: 2026-07-19. Ветка: `refactor/audit-2026-07`, review HEAD
-`84f0b3df9712234a504ecbaff2e10b909c6e5975`.
+Текущий checkpoint: 2026-07-19. Ветка: `refactor/audit-2026-07`, post-review
+baseline `84f0b3df9712234a504ecbaff2e10b909c6e5975`, последний интегрированный
+main checkpoint `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
 
 ## Текущее состояние после полного post-review
 
@@ -14,8 +15,9 @@
   `VERIFIED_FALSE` — 7, `INTENTIONAL_LIMITATION` — 2, `UNVERIFIED` — 0.
 - Remediation disposition: **141 fixed · 7 deferred · 59 pending ·
   9 not_applicable**. Все 59 post-review дефектов пока намеренно `pending`:
-  commit из изолированного owner worktree не считается интегрированным fix до
-  merge, regression evidence и полного serial gate.
+  интеграция частичного owner-пакета сохраняет root открытым, пока не закрыты
+  остальные владельцы и общий regression contract; неслитый owner commit тем
+  более не считается fix.
 - Reopened evidence связано с историческими `#38`, `#45`, `#50`, `#53`, `#81`,
   `#89`, `#93`, `#94`, `#100`, `#127`, `#129`, `#132`, `#149` и `#152` через
   поле `reopens`; старые записи остаются историей прежнего решения, а новые PR-ID
@@ -41,6 +43,23 @@
 - Cross-owner очереди явно записаны как `p4-monitors`, `p4-status-api`,
   `p4-history`, `p4-performance` и `p4-test-quality`; они не считаются закрытыми
   через соседний пакет.
+
+### Интегрированные post-review пакеты
+
+1. `p4-security-secrets` — частичная remediation `PR-043`, root остаётся
+   `pending`
+   - fixes `d0fb6f1b1e481581ea05da0ba79fd94fde2cab95` и
+     `85ec3c60d977b3de49c244e4696f9733850843b6`;
+   - merge `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`;
+   - secret keys, SQLite files и runtime logs переведены на fail-closed
+     owner-only storage; bootstrap credential больше не пишется в лог и
+     сохраняется в приватный recovery-файл, bootstrap-сообщения редактируются;
+   - regression: `tests/unit/test_phase4_security_secrets.py`;
+   - serial evidence: 2090 passed, 2 skipped, 17 deselected; единственный
+     sandbox-only AF_UNIX bind failure прошёл точным повтором вне sandbox; Ruff
+     и `git diff --check` чисты;
+   - `PR-043` не закрыт: ещё нужны удаление default `1234` из DB bootstrap,
+     интеграция auth cookie/trim policy и deploy cleanup/runtime permissions.
 
 ### Решение оркестратора по `db/migrations.py`
 

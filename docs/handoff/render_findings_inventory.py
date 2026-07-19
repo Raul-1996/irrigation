@@ -169,6 +169,45 @@ def validate(inventory: list[dict], package_doc: dict) -> Counter:
         disposition = implementation["disposition"]
         if disposition not in DISPOSITIONS:
             raise ValueError(f"finding #{finding_id}: invalid disposition {disposition}")
+
+        partial_remediations = finding.get("partial_remediations", [])
+        if not isinstance(partial_remediations, list):
+            raise ValueError(f"finding #{finding_id}: partial_remediations must be a list")
+        if partial_remediations and disposition != "pending":
+            raise ValueError(f"finding #{finding_id}: partial remediation requires pending disposition")
+        partial_packages: set[str] = set()
+        for partial in partial_remediations:
+            if not isinstance(partial, dict):
+                raise ValueError(f"finding #{finding_id}: partial remediation must be an object")
+            package = partial.get("package")
+            if not isinstance(package, str) or not package.strip() or package in partial_packages:
+                raise ValueError(f"finding #{finding_id}: invalid/duplicate partial package")
+            partial_packages.add(package)
+            fix_commits = partial.get("fix_commits")
+            if (
+                not isinstance(fix_commits, list)
+                or not fix_commits
+                or any(not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit) for commit in fix_commits)
+            ):
+                raise ValueError(f"finding #{finding_id}: partial remediation needs unique full fix commits")
+            if len(fix_commits) != len(set(fix_commits)):
+                raise ValueError(f"finding #{finding_id}: partial remediation needs unique full fix commits")
+            merge_commit = partial.get("merge_commit")
+            if not isinstance(merge_commit, str) or not COMMIT_RE.fullmatch(merge_commit):
+                raise ValueError(f"finding #{finding_id}: partial remediation needs a full merge commit")
+            tests = partial.get("tests")
+            if (
+                not isinstance(tests, list)
+                or not tests
+                or any(not isinstance(test, str) or not test.strip() for test in tests)
+            ):
+                raise ValueError(f"finding #{finding_id}: partial remediation needs unique tests")
+            if len(tests) != len(set(tests)):
+                raise ValueError(f"finding #{finding_id}: partial remediation needs unique tests")
+            for key in ("summary", "verification", "remaining"):
+                if not isinstance(partial.get(key), str) or not partial[key].strip():
+                    raise ValueError(f"finding #{finding_id}: partial remediation missing {key}")
+
         if status in {"VERIFIED_FALSE", "INTENTIONAL_LIMITATION"}:
             if disposition != "not_applicable":
                 raise ValueError(f"finding #{finding_id}: non-defect decision must be not_applicable")
@@ -237,6 +276,18 @@ def _render_finding(finding_id: int, finding: dict) -> list[str]:
         lines.append(f"- **Owner packages:** {rendered_owners}.")
     if finding.get("decision_notes"):
         lines.append(f"- **Решение оркестратора:** {finding['decision_notes']}")
+    for partial in finding.get("partial_remediations", []):
+        fix_commits = ", ".join(f"`{commit}`" for commit in partial["fix_commits"])
+        tests = ", ".join(f"`{test}`" for test in partial["tests"])
+        lines.extend(
+            [
+                f"- **Partial remediation `{partial['package']}`:** {partial['summary']}",
+                f"  - Fix commits: {fix_commits}; merge: `{partial['merge_commit']}`.",
+                f"  - Regression tests: {tests}.",
+                f"  - Verification: {partial['verification']}",
+                f"  - Осталось: {partial['remaining']}",
+            ]
+        )
     lines.append(f"- **Disposition Фаз 2–3:** `{implementation['disposition']}`.")
     if implementation["reason"]:
         lines.append(f"- **Причина disposition:** {implementation['reason']}")

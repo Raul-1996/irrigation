@@ -6030,6 +6030,22 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "reopens": [],
+    "partial_remediations": [
+      {
+        "package": "p4-security-secrets",
+        "fix_commits": [
+          "d0fb6f1b1e481581ea05da0ba79fd94fde2cab95",
+          "85ec3c60d977b3de49c244e4696f9733850843b6"
+        ],
+        "merge_commit": "6905ee35554ad6216e33b3bfec4a86a4a120e6c9",
+        "summary": "Secret keys, SQLite files and runtime logs now use fail-closed owner-only storage; bootstrap credentials are written to a private recovery file instead of logs, and bootstrap log messages are redacted.",
+        "tests": [
+          "tests/unit/test_phase4_security_secrets.py"
+        ],
+        "verification": "Full serial evidence: 2090 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX bind failure passed as an exact rerun outside the sandbox. Ruff and git diff --check were clean.",
+        "remaining": "PR-043 remains open until the default 1234 database seed is removed, auth cookie/trim policy is integrated, and deploy cleanup plus runtime file permissions are integrated."
+      }
+    ],
     "implementation": {
       "disposition": "pending",
       "reason": null,
