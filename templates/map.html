@@ -65,6 +65,8 @@
 
 {% block extra_js %}
 <script>
+const MAX_MAP_ITEMS = 20;
+
 async function loadMap() {
   try {
     const res = await api.get('/api/map');
@@ -73,7 +75,9 @@ async function loadMap() {
     }
     const container = document.getElementById('map-container');
     container.innerHTML = '';
-    const items = (res && res.items) || [];
+    // The API applies the same bound; slice defensively so a stale or older
+    // controller response cannot create an unbounded image DOM.
+    const items = ((res && res.items) || []).slice(0, MAX_MAP_ITEMS);
     if (!items.length) {
       container.innerHTML = '<div class="placeholder"><strong>Карта не загружена</strong><span>Загрузите изображение с визуализацией зон.</span></div>';
       return;

@@ -85,6 +85,12 @@ let executionPollTimer = null;
 let executionRequestGeneration = 0;
 
 const COLORS = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350", "#ab47bc", "#26c6da", "#78909c", "#8d6e63"];
+const DEFAULT_PROGRAM_COLOR = '#42a5f5';
+
+function safeProgramColor(value) {
+  const color = String(value == null ? '' : value).trim();
+  return /^#[0-9A-Fa-f]{6}$/.test(color) ? color.toLowerCase() : DEFAULT_PROGRAM_COLOR;
+}
 
 function apiHeaders(json = true) {
   const h = {};
@@ -231,7 +237,7 @@ function renderList() {
     const days = p.days || [];
     
     html += `
-      <div class="program-card" style="border-left-color: ${p.color || '#42a5f5'}">
+      <div class="program-card" style="border-left-color: ${safeProgramColor(p.color)}">
         <div class="program-header" onclick="toggleDetails(${p.id})">
           <div class="program-title">
             <div class="program-name">
@@ -389,7 +395,7 @@ function editProgram(id) {
   wizardData = {
     name: p.name || '',
     type: p.type || 'time-based',
-    color: p.color || COLORS[0],
+    color: safeProgramColor(p.color),
     schedule_type: p.schedule_type || 'weekdays',
     days: Array.isArray(p.days) ? [...p.days] : [],
     interval_days: p.interval_days || 3,

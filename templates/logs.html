@@ -118,6 +118,17 @@
     let filteredLogs = [];
     let eventRequestGeneration = 0;
     let auditRequestGeneration = 0;
+
+    function clearEventLogsError() {
+        logsData = [];
+        filteredLogs = [];
+        updateEventTypeOptions();
+        document.getElementById('log-body').innerHTML = `
+            <tr>
+                <td colspan="3" class="no-data">Ошибка загрузки данных</td>
+            </tr>
+        `;
+    }
     
     // Загрузка логов
     async function loadLogs() {
@@ -138,11 +149,7 @@
             if (requestGeneration !== eventRequestGeneration) return;
             console.error('Ошибка загрузки логов:', error);
             showNotification('Ошибка загрузки логов', 'error');
-            document.getElementById('log-body').innerHTML = `
-                <tr>
-                    <td colspan="3" class="no-data">Ошибка загрузки данных</td>
-                </tr>
-            `;
+            clearEventLogsError();
         }
     }
     
@@ -263,6 +270,7 @@
             if (requestGeneration !== eventRequestGeneration) return;
             console.error('Ошибка фильтрации логов:', error);
             showNotification('Ошибка фильтрации логов', 'error');
+            clearEventLogsError();
         }
     }
     
@@ -383,6 +391,12 @@
     // ===== Audit-tab helpers =====
     let auditRows = [];
 
+    function clearAuditError() {
+        auditRows = [];
+        document.getElementById('auditStats').textContent = 'Данные недоступны';
+        document.getElementById('audit-body').innerHTML = '<tr><td colspan="8" class="no-data">Ошибка загрузки аудита</td></tr>';
+    }
+
     function switchLogsTab(name) {
         document.querySelectorAll('.logs-tab').forEach(b => {
             const active = b.dataset.tab === name;
@@ -439,7 +453,7 @@
             renderAudit();
         } catch (e) {
             if (requestGeneration !== auditRequestGeneration) return;
-            tbody.innerHTML = '<tr><td colspan="8" class="no-data">Ошибка загрузки аудита</td></tr>';
+            clearAuditError();
         }
     }
 

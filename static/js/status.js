@@ -161,6 +161,8 @@
             }
             statusData = nextStatus;
             updateStatusDisplay();
+            updateWaterMeter();
+            try { updateZoneStats(zonesData); } catch (e) {}
             hideConnectionError('status');
             updateMqttWarnings();
             return true;
@@ -231,7 +233,7 @@
 
             // Update sidebar indicators
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
-            try { updateWaterMeter(zonesData); } catch(e) {}
+            try { updateWaterMeter(); } catch(e) {}
 
             hideConnectionError('zones');
             return true;
@@ -276,12 +278,20 @@
         const health = data.mqtt_health && typeof data.mqtt_health === 'object'
             ? String(data.mqtt_health.status || '').trim().toLowerCase()
             : '';
-        const noServers = !Number.isFinite(serverCount) || serverCount <= 0;
-        const hasEnabledServers = Number.isFinite(enabledCount) && enabledCount > 0;
         const problemStates = new Set(['degraded', 'down', 'unhealthy', 'error', 'failed', 'critical', 'disconnected']);
+        const authoritativeProblem = problemStates.has(health);
+        // A degraded/error health result can accompany zero counts when the
+        // server list itself could not be decrypted/read. Do not mislabel that
+        // as "no servers configured".
+        const noServers = authoritativeProblem
+            ? false
+            : (!Number.isFinite(serverCount) || serverCount <= 0);
+        const hasEnabledServers = Number.isFinite(enabledCount) && enabledCount > 0;
         let connectionProblem = false;
 
-        if (!noServers && hasEnabledServers) {
+        if (authoritativeProblem) {
+            connectionProblem = true;
+        } else if (!noServers && hasEnabledServers) {
             if (health) {
                 // "disabled" and "unknown" are explicitly not proof of a
                 // broker disconnect.  Only an authoritative unhealthy state
@@ -344,6 +354,36 @@
             }
             default: return mob ? '✅ Ожидание' : 'Ожидание - готов к поливу';
         }
+    }
+
+    function renderGroupExtraHtml(group, zones) {
+        group = group && typeof group === 'object' ? group : {};
+        zones = Array.isArray(zones) ? zones : [];
+        if (group.status === 'watering' && group.current_zone) {
+            const zone = zones.find(function(candidate) { return candidate.id === group.current_zone; });
+            const zoneId = escapeHtml(group.current_zone);
+            const zoneLabel = zone && zone.name
+                ? `#${escapeHtml(zone.id)} ${escapeHtml(zone.name)}`
+                : `#${zoneId}`;
+            const groupId = escapeHtml(group.id);
+            return `Зона ${zoneLabel}: осталось <span class="group-timer" id="group-timer-${groupId}" data-group-id="${groupId}" data-zone-id="${zoneId}" data-remaining-seconds="">--:--</span>`;
+        }
+        if (group.status === 'postponed' && group.postpone_until) {
+            const postponeUntil = String(group.postpone_until);
+            const safePostponeUntil = escapeHtml(postponeUntil);
+            // postpone_reason is used only as an exact enum and is never
+            // interpolated into HTML. Unknown/malicious values get the
+            // generic, safely escaped presentation.
+            const reason = String(group.postpone_reason || '').toLowerCase();
+            if (reason === 'emergency' || postponeUntil.trim().toLowerCase().startsWith('до ')) {
+                return safePostponeUntil;
+            }
+            return `До ${safePostponeUntil}`;
+        }
+        if (group.status === 'error' && group.error_message) {
+            return escapeHtml(group.error_message);
+        }
+        return '—';
     }
 
     async function initGroupTimer(group) {
@@ -470,22 +510,7 @@
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
-            let extraText = '—';
-            if (group.status === 'watering' && group.current_zone) {
-                const _zw = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
-                const _zLbl = (_zw && _zw.name) ? `#${_zw.id} ${escapeHtml(_zw.name)}` : `#${group.current_zone}`;
-                extraText = `Зона ${_zLbl}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
-            } else if (group.status === 'postponed' && group.postpone_until) {
-                const pu = String(group.postpone_until);
-                const reason = String(group.postpone_reason || '').toLowerCase();
-                if (reason === 'emergency' || pu.trim().toLowerCase().startsWith('до ')) {
-                    extraText = pu;
-                } else {
-                    extraText = `До ${pu}`;
-                }
-            } else if (group.status === 'error' && group.error_message) {
-                extraText = String(group.error_message);
-            }
+            const extraText = renderGroupExtraHtml(group, zonesData);
             const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
             const _m = window.innerWidth < 1024;
             const skipBtnHtml = (anyZoneOnThisGroup && Number(group.queue_remaining || 0) > 0)
@@ -519,19 +544,19 @@
                 gridCells.push(`<div class="grid-item grid-item-span2">${mvBtn}</div>`);
             }
             if (pressureOn && !flowOn) {
-                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
             } else if (!pressureOn && flowOn) {
                 const meter = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
                 const flow = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${meter}</span> м³ (<span id="flow-${group.id}">${flow}</span> л/мин)</div></div>`);
+                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${escapeHtml(meter)}</span> м³ (<span id="flow-${group.id}">${escapeHtml(flow)}</span> л/мин)</div></div>`);
             } else {
                 if (pressureOn) {
-                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
                 }
                 if (flowOn) {
                     const meter = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
                     const flow = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${meter}</span> м³ (<span id="flow-${group.id}">${flow}</span> л/мин)</div></div>`);
+                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${escapeHtml(meter)}</span> м³ (<span id="flow-${group.id}">${escapeHtml(flow)}</span> л/мин)</div></div>`);
                 }
             }
             // pad to keep even number of cells for 2x2 symmetry on desktop
@@ -611,36 +636,26 @@
     }
 
     async function refreshSingleGroup(groupId) {
+        const requestGeneration = ++statusRequestGeneration;
         try {
             const resp = await fetch(`/api/status?ts=${Date.now()}`, {cache: 'no-store'});
-            const data = await resp.json();
-            if (!data || !data.groups) return;
+            const data = await assertJsonResponse(resp);
+            if (requestGeneration !== statusRequestGeneration) return false;
+            if (!data || !Array.isArray(data.groups)) throw new Error('Invalid status response');
             // Обновим глобальные данные статуса, чтобы кнопки/условия отображались корректно
             statusData = data;
+            hideConnectionError('status');
+            updateMqttWarnings();
+            updateWaterMeter();
             const group = (data.groups || []).find(g => String(g.id) === String(groupId));
-            if (!group) return;
+            if (!group) return false;
             const card = document.getElementById(`group-card-${group.id}`);
-            if (!card) return;
+            if (!card) return false;
             // Полностью пересоберем содержимое карточки по актуальным данным
             const flowActive = group.status === 'watering' && Math.random() > 0.3;
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
-            let extraText2 = '—';
-            if (group.status === 'watering' && group.current_zone) {
-                const _zw2 = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
-                const _zLbl2 = (_zw2 && _zw2.name) ? `#${_zw2.id} ${escapeHtml(_zw2.name)}` : `#${group.current_zone}`;
-                extraText2 = `Зона ${_zLbl2}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
-            } else if (group.status === 'postponed' && group.postpone_until) {
-                const pu2 = String(group.postpone_until);
-                const reason2 = String(group.postpone_reason || '').toLowerCase();
-                if (reason2 === 'emergency' || pu2.trim().toLowerCase().startsWith('до ')) {
-                    extraText2 = pu2;
-                } else {
-                    extraText2 = `До ${pu2}`;
-                }
-            } else if (group.status === 'error' && group.error_message) {
-                extraText2 = String(group.error_message);
-            }
+            const extraText2 = renderGroupExtraHtml(group, zonesData);
             const mvEnabled2 = (group.use_master_valve === true) || (group.use_master_valve === 1); // показываем только если включено для группы
             const mvState2 = String(group.master_valve_state || 'unknown');
             const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
@@ -685,19 +700,19 @@
                     cells.push(`<div class=\"grid-item grid-item-span2\">${mvBtn2}</div>`);
                 }
                 if (pressureOn2 && !flowOn2) {
-                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
                 } else if (!pressureOn2 && flowOn2) {
                     const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
                     const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${meter2}</span> м³ (<span id=\"flow-${group.id}\">${flow2}</span> л/мин)</div></div>`);
+                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${escapeHtml(meter2)}</span> м³ (<span id=\"flow-${group.id}\">${escapeHtml(flow2)}</span> л/мин)</div></div>`);
                 } else {
                     if (pressureOn2) {
-                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
                     }
                     if (flowOn2) {
                         const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
                         const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${meter2}</span> м³ (<span id=\"flow-${group.id}\">${flow2}</span> л/мин)</div></div>`);
+                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${escapeHtml(meter2)}</span> м³ (<span id=\"flow-${group.id}\">${escapeHtml(flow2)}</span> л/мин)</div></div>`);
                     }
                 }
                 if (cells.length) {
@@ -708,7 +723,12 @@
             if (group.status === 'watering' && group.current_zone) {
                 initGroupTimer(group);
             }
-        } catch (e) {}
+            return true;
+        } catch (e) {
+            if (requestGeneration !== statusRequestGeneration) return false;
+            showConnectionError('status');
+            return false;
+        }
     }
 
     // Реакция на события MQTT через SSE для моментального обновления (используется ниже в DOMContentLoaded)
@@ -1177,7 +1197,7 @@
             renderGroupTabs();
             renderZoneCards();
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
-            try { updateWaterMeter(zonesData); } catch(e) {}
+            try { updateWaterMeter(); } catch(e) {}
             // Then refresh in background for live data
             setTimeout(function() {
                 Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
@@ -1258,8 +1278,21 @@
     }
     function formatTemp(v) {
         if (v === null || v === undefined) return '—';
-        var sign = v > 0 ? '+' : '';
-        return sign + Math.round(v);
+        var numeric = Number(v);
+        if (!Number.isFinite(numeric)) return '—';
+        var sign = numeric > 0 ? '+' : '';
+        return sign + Math.round(numeric);
+    }
+    function formatWeatherNumber(v, digits, fallback) {
+        var fallbackValue = fallback === undefined ? '—' : fallback;
+        if (v === null || v === undefined || v === '') return fallbackValue;
+        var numeric = Number(v);
+        if (!Number.isFinite(numeric)) return fallbackValue;
+        return digits == null ? String(numeric) : numeric.toFixed(digits);
+    }
+    function formatWeatherMetric(v, digits, unit, fallback) {
+        var number = formatWeatherNumber(v, digits, '');
+        return number === '' ? (fallback === undefined ? '—' : fallback) : number + unit;
     }
     function coeffColor(c) {
         if (c === 0) return 'var(--danger-color, #f44336)';
@@ -1285,7 +1318,10 @@
         }
         var html = '<span class="coeff-mode-badge">' + badge + '</span>';
         if (second !== null) {
-            html += ' <span class="coeff-second">второе мнение: ' + second + '%</span>';
+            var numericSecond = Number(second);
+            if (Number.isFinite(numericSecond)) {
+                html += ' <span class="coeff-second">второе мнение: ' + numericSecond + '%</span>';
+            }
         }
         return html;
     }
@@ -1364,7 +1400,7 @@
                 var skipReason = adj.skip_reason || j.skip_reason;
                 var phrase = weatherReasonPhrase(skipReason);
                 coeffEl.innerHTML = '<span class="skip-main">Полив отложен</span>'
-                    + (phrase ? '<span class="skip-reason">(' + phrase + ')</span>' : '');
+                    + (phrase ? '<span class="skip-reason">(' + escapeHtml(phrase) + ')</span>' : '');
                 coeffEl.style.color = 'var(--danger-color, #f44336)';
                 coeffEl.classList.add('skip');
                 if (coeffModeEl) coeffModeEl.textContent = '';
@@ -1381,9 +1417,9 @@
         var precipVal = (j.stats && j.stats.precipitation_24h !== undefined) ? j.stats.precipitation_24h : j.precipitation_24h;
         var metricsEl = document.getElementById('w-metrics');
         if (metricsEl) {
-            metricsEl.innerHTML = '<span>💧 ' + (humVal !== null && humVal !== undefined ? Math.round(humVal) + '%' : '—') + '</span>'
-                + '<span>💨 ' + (windVal !== null && windVal !== undefined ? (typeof windVal === 'number' ? windVal.toFixed(1) : windVal) + ' м/с' : '—') + '</span>'
-                + '<span>🌧 ' + (precipVal !== null && precipVal !== undefined ? (typeof precipVal === 'number' ? precipVal.toFixed(1) : precipVal) + ' мм' : '—') + '</span>';
+            metricsEl.innerHTML = '<span>💧 ' + escapeHtml(formatWeatherMetric(humVal, 0, '%')) + '</span>'
+                + '<span>💨 ' + escapeHtml(formatWeatherMetric(windVal, 1, ' м/с')) + '</span>'
+                + '<span>🌧 ' + escapeHtml(formatWeatherMetric(precipVal, 1, ' мм')) + '</span>';
         }
         // Source
         var srcEl = document.getElementById('w-source');
@@ -1409,12 +1445,12 @@
             var it = filtered[i];
             var icon = it.icon || getWeatherIcon(it.weather_code);
             html += '<div class="hour-cell">'
-                + '<div class="hour-time">' + (it.time || '') + '</div>'
-                + '<div class="hour-icon">' + icon + '</div>'
-                + '<div class="hour-temp">' + formatTemp(it.temp) + '°</div>'
+                + '<div class="hour-time">' + escapeHtml(it.time || '') + '</div>'
+                + '<div class="hour-icon">' + escapeHtml(icon) + '</div>'
+                + '<div class="hour-temp">' + escapeHtml(formatTemp(it.temp)) + '°</div>'
                 + '<div class="hour-detail">'
-                + (it.precip != null ? (typeof it.precip === 'number' ? it.precip.toFixed(1) : it.precip) : '0') + 'мм · '
-                + (it.wind != null ? (typeof it.wind === 'number' ? it.wind.toFixed(1) : it.wind) : '—') + 'м/с'
+                + escapeHtml(formatWeatherNumber(it.precip, 1, '0')) + 'мм · '
+                + escapeHtml(formatWeatherMetric(it.wind, 1, 'м/с'))
                 + '</div></div>';
         }
         el.innerHTML = html;
@@ -1429,10 +1465,10 @@
             var it = items[i];
             var icon = it.icon || getWeatherIcon(it.weather_code);
             html += '<div class="weather-day">'
-                + '<span class="weather-day-dow">' + (it.day_name || '') + '</span>'
-                + '<span class="weather-day-icon">' + icon + '</span>'
-                + '<span class="weather-day-temps">' + formatTemp(it.temp_min) + '° / ' + formatTemp(it.temp_max) + '°</span>'
-                + '<span class="weather-day-rain">🌧 ' + (it.precip_sum !== null && it.precip_sum !== undefined ? (typeof it.precip_sum === 'number' ? it.precip_sum.toFixed(1) : it.precip_sum) : '0') + ' мм</span>'
+                + '<span class="weather-day-dow">' + escapeHtml(it.day_name || '') + '</span>'
+                + '<span class="weather-day-icon">' + escapeHtml(icon) + '</span>'
+                + '<span class="weather-day-temps">' + escapeHtml(formatTemp(it.temp_min)) + '° / ' + escapeHtml(formatTemp(it.temp_max)) + '°</span>'
+                + '<span class="weather-day-rain">🌧 ' + escapeHtml(formatWeatherNumber(it.precip_sum, 1, '0')) + ' мм</span>'
                 + '</div>';
         }
         el.innerHTML = html;
@@ -1447,11 +1483,11 @@
         var precip24 = (stats.precipitation_24h !== undefined) ? stats.precipitation_24h : j.precipitation_24h;
         var et0 = (stats.daily_et0 !== undefined) ? stats.daily_et0 : j.daily_et0;
         var html = '<div class="weather-params">';
-        if (astro.sunrise) html += '<span class="weather-params-label">🌅 Восход</span><span class="weather-params-val">' + astro.sunrise + '</span>';
-        if (astro.sunset) html += '<span class="weather-params-label">🌇 Закат</span><span class="weather-params-val">' + astro.sunset + '</span>';
-        html += '<span class="weather-params-label">🌧 Осадки 24ч</span><span class="weather-params-val">' + (precip24 !== null && precip24 !== undefined ? (typeof precip24 === 'number' ? precip24.toFixed(1) : precip24) + ' мм' : '—') + '</span>';
-        html += '<span class="weather-params-label">🔮 Прогноз 6ч</span><span class="weather-params-val">' + (precipFc !== null && precipFc !== undefined ? (typeof precipFc === 'number' ? precipFc.toFixed(1) : precipFc) + ' мм' : '—') + '</span>';
-        html += '<span class="weather-params-label">🔬 ET₀</span><span class="weather-params-val">' + (et0 !== null && et0 !== undefined ? (typeof et0 === 'number' ? et0.toFixed(2) : et0) + ' мм/день' : '—') + '</span>';
+        if (astro.sunrise) html += '<span class="weather-params-label">🌅 Восход</span><span class="weather-params-val">' + escapeHtml(astro.sunrise) + '</span>';
+        if (astro.sunset) html += '<span class="weather-params-label">🌇 Закат</span><span class="weather-params-val">' + escapeHtml(astro.sunset) + '</span>';
+        html += '<span class="weather-params-label">🌧 Осадки 24ч</span><span class="weather-params-val">' + escapeHtml(formatWeatherMetric(precip24, 1, ' мм')) + '</span>';
+        html += '<span class="weather-params-label">🔮 Прогноз 6ч</span><span class="weather-params-val">' + escapeHtml(formatWeatherMetric(precipFc, 1, ' мм')) + '</span>';
+        html += '<span class="weather-params-label">🔬 ET₀</span><span class="weather-params-val">' + escapeHtml(formatWeatherMetric(et0, 2, ' мм/день')) + '</span>';
         html += '</div>';
         el.innerHTML = html;
     }
@@ -1479,8 +1515,8 @@
             var statusMark = f.status === 'ok' ? '✓' : (f.status === 'danger' ? '✕' : '⚠');
             html += '<div class="weather-factor">'
                 + '<div class="weather-factor-row">'
-                + '<span class="weather-factor-name">' + (factorNames[key] || key) + '</span>'
-                + '<span class="weather-factor-status ' + statusCls + '">' + statusMark + ' ' + (f.detail || '') + '</span>'
+                + '<span class="weather-factor-name">' + escapeHtml(factorNames[key] || key) + '</span>'
+                + '<span class="weather-factor-status ' + statusCls + '">' + statusMark + ' ' + escapeHtml(f.detail || '') + '</span>'
                 + '</div></div>';
         }
         // Summary line
@@ -1489,9 +1525,11 @@
         if (coeff !== undefined || skip) {
             var summaryColor = skip ? 'var(--danger-color, #f44336)' : 'var(--success-color, #4caf50)';
             var skipPhrase = weatherReasonPhrase(adj.skip_reason || '');
-            var summaryText = skip ? ('Полив отложен' + (skipPhrase ? ' ' + skipPhrase : '')) : ('Коэффициент: ' + coeff + '%');
+            var summaryText = skip
+                ? ('Полив отложен' + (skipPhrase ? ' ' + skipPhrase : ''))
+                : ('Коэффициент: ' + formatWeatherNumber(coeff, 0, '—') + '%');
             html += '<div style="margin-top:0.5rem;padding:0.4rem;background:rgba(33,150,243,0.08);border-radius:6px;text-align:center;font-size:0.8rem;">'
-                + '<strong style="color:' + summaryColor + ';">' + summaryText + '</strong></div>';
+                + '<strong style="color:' + summaryColor + ';">' + escapeHtml(summaryText) + '</strong></div>';
         }
         el.innerHTML = html;
     }
@@ -1524,9 +1562,9 @@
                     badgeText = 'ОТЛОЖЕН';
                 }
                 html += '<div class="weather-hist-item">'
-                    + '<span class="weather-hist-date">' + date + '</span>'
-                    + '<span class="weather-badge ' + badgeCls + '">' + badgeText + '</span>'
-                    + '<span>' + localizeWeatherReason(it.reason || '') + '</span>'
+                    + '<span class="weather-hist-date">' + escapeHtml(date) + '</span>'
+                    + '<span class="weather-badge ' + badgeCls + '">' + escapeHtml(badgeText) + '</span>'
+                    + '<span>' + escapeHtml(localizeWeatherReason(it.reason || '')) + '</span>'
                     + '</div>';
             }
             el.innerHTML = html;
@@ -1608,30 +1646,53 @@
     }
 
     // --- Water Meter ---
-    function updateWaterMeter(zones) {
+    function getAuthoritativeWaterToday(data) {
+        const water = data && data.water_today;
+        if (!water || typeof water !== 'object') {
+            return { available: false, liters: null, date: null, source: null };
+        }
+        const source = typeof water.source === 'string' ? water.source : null;
+        if (source === 'unavailable' || water.error_code) {
+            return { available: false, liters: null, date: null, source: source };
+        }
+        const noRecordedUsage = water.has_data === false || source === 'none';
+        const liters = noRecordedUsage ? 0 : Number(water.liters);
+        if (!Number.isFinite(liters) || liters < 0) {
+            return { available: false, liters: null, date: null, source: source };
+        }
+        return {
+            available: true,
+            liters: liters,
+            date: typeof water.date === 'string' ? water.date : null,
+            source: source,
+        };
+    }
+
+    function updateWaterMeter() {
         var el = document.getElementById('sidebar-water-meter');
         if (!el) return;
-        var total = 0;
-        var perZone = [];
-        zones.forEach(function(z) {
-            if (z.last_total_liters > 0) {
-                total += z.last_total_liters;
-                perZone.push({name: z.name, liters: z.last_total_liters});
-            }
+        var usage = getAuthoritativeWaterToday(statusData);
+        var groups = statusData && Array.isArray(statusData.groups) ? statusData.groups : [];
+        var hasFlowMeter = groups.some(function(group) {
+            return group.use_water_meter === true || group.use_water_meter === 1;
         });
-        if (total === 0) {
+        if (!hasFlowMeter) {
             el.style.display = 'none';
             return;
         }
         el.style.display = '';
         var valEl = document.getElementById('water-meter-value');
         var detEl = document.getElementById('water-meter-detail');
-        if (valEl) valEl.innerHTML = Math.round(total).toLocaleString() + ' <span class="unit">л</span>';
+        if (!usage.available) {
+            if (valEl) valEl.innerHTML = '— <span class="unit">л</span>';
+            if (detEl) detEl.textContent = 'Данные за сутки недоступны';
+            return;
+        }
+        if (valEl) valEl.innerHTML = Math.round(usage.liters).toLocaleString() + ' <span class="unit">л</span>';
         if (detEl) {
-            perZone.sort(function(a,b) { return b.liters - a.liters; });
-            detEl.innerHTML = perZone.slice(0, 3).map(function(z) {
-                return '<span>' + escapeHtml(z.name) + ': ' + Math.round(z.liters) + 'л</span>';
-            }).join('');
+            detEl.textContent = usage.date
+                ? ('За ' + usage.date + (usage.source === 'none' ? ': расход не зафиксирован' : ''))
+                : 'За текущие сутки контроллера';
         }
     }
 
@@ -1862,8 +1923,7 @@
         var all = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
         var running = all.filter(function(z) { return z.state === 'on'; }).length;
         var groups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
-        var totalWater = 0;
-        all.forEach(function(z) { if (z.last_total_liters > 0) totalWater += z.last_total_liters; });
+        var waterToday = getAuthoritativeWaterToday(statusData);
         var _flag = function(v){ try { if (v===true||v===1) return true; var s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
         var hasFlowMeter = groups.some(function(g){ return _flag(g.use_water_meter); });
 
@@ -1873,7 +1933,7 @@
         el = document.getElementById('statZonesGroups'); if (el) el.textContent = groups.length;
         el = document.getElementById('statZonesWater');
         if (el) {
-            el.textContent = totalWater > 0 ? Math.round(totalWater) : '—';
+            el.textContent = waterToday.available ? Math.round(waterToday.liters) : '—';
             // Hide the whole tile (.zstat-item) when no flow meter is configured (issue #3).
             // flex:1 on remaining tiles makes them fill the bar automatically.
             var tile = el.closest('.zstat-item');

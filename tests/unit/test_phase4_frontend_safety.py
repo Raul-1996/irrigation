@@ -28,7 +28,9 @@ def _source(path: Path) -> str:
 def _function(source: str, name: str) -> str:
     match = re.search(rf"(?:async\s+)?function\s+{re.escape(name)}\s*\([^)]*\)\s*\{{", source)
     assert match, f"{name}() not found"
-    body_start = source.index("{", match.start())
+    # The regex ends on the function body's opening brace.  Using index()
+    # from the signature start breaks on default object parameters (`= {}`).
+    body_start = match.end() - 1
     depth = 0
     quote: str | None = None
     escaped = False
@@ -129,7 +131,13 @@ const cases = [
     mqtt_servers_count: 1,
     mqtt_enabled_count: 1,
     mqtt_connected: true,
-    mqtt_health: {{status: 'ok'}},
+    mqtt_health: {{status: 'healthy'}},
+  }}),
+  deriveMqttWarningState({{
+    mqtt_servers_count: 0,
+    mqtt_enabled_count: 0,
+    mqtt_connected: false,
+    mqtt_health: {{status: 'degraded', error_code: 'MQTT_SECRET_UNAVAILABLE'}},
   }}),
   deriveMqttWarningState({{
     mqtt_servers_count: 1,
@@ -140,12 +148,142 @@ const cases = [
 console.log(JSON.stringify(cases));
 """
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
-    disabled, unknown, degraded, healthy, legacy_disconnected = json.loads(result.stdout)
+    disabled, unknown, degraded, healthy, credentials_error, legacy_disconnected = json.loads(result.stdout)
     assert disabled == {"noServers": False, "connectionProblem": False, "degraded": False}
     assert unknown == {"noServers": False, "connectionProblem": False, "degraded": False}
     assert degraded == {"noServers": False, "connectionProblem": True, "degraded": True}
     assert healthy == {"noServers": False, "connectionProblem": False, "degraded": False}
+    assert credentials_error == {"noServers": False, "connectionProblem": True, "degraded": True}
     assert legacy_disconnected == {"noServers": False, "connectionProblem": True, "degraded": False}
+
+
+def test_single_group_refresh_shares_global_status_request_generation() -> None:
+    body = _function(_source(STATUS), "refreshSingleGroup")
+    assert "++statusRequestGeneration" in body
+    assert "requestGeneration !== statusRequestGeneration" in body
+    assert "statusData = data" in body
+
+
+def test_water_widgets_use_authoritative_controller_day_total_only() -> None:
+    source = _source(STATUS)
+    helper = _function(source, "getAuthoritativeWaterToday")
+    meter = _function(source, "updateWaterMeter")
+    stats = _function(source, "updateZoneStats")
+    script = f"""
+{helper}
+process.stdout.write(JSON.stringify([
+  getAuthoritativeWaterToday({{water_today: {{liters: 12.5, date: '2026-07-19', source: 'zone_runs', has_data: true}}}}),
+  getAuthoritativeWaterToday({{water_today: {{liters: 99, date: '2026-07-19', source: 'none', has_data: false}}}}),
+  getAuthoritativeWaterToday({{water_today: {{liters: 0, source: 'unavailable', error_code: 'WATER_REPORT_UNAVAILABLE'}}}}),
+  getAuthoritativeWaterToday({{water_today: null}}),
+]));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert json.loads(completed.stdout) == [
+        {"available": True, "liters": 12.5, "date": "2026-07-19", "source": "zone_runs"},
+        {"available": True, "liters": 0, "date": "2026-07-19", "source": "none"},
+        {"available": False, "liters": None, "date": None, "source": "unavailable"},
+        {"available": False, "liters": None, "date": None, "source": None},
+    ]
+    assert "water_today" in helper
+    assert "last_total_liters" not in meter
+    assert "last_total_liters" not in stats
+
+
+def test_status_inner_html_escapes_dynamic_group_and_weather_strings() -> None:
+    source = _source(STATUS)
+    extra = _function(source, "renderGroupExtraHtml")
+    display = _function(source, "updateStatusDisplay")
+    single = _function(source, "refreshSingleGroup")
+    script = f"""
+function escapeHtml(value) {{
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}}
+{extra}
+const postponed = renderGroupExtraHtml({{
+  id: 7,
+  status: 'postponed',
+  postpone_until: '<img src=x onerror=alert(1)>',
+  postpone_reason: '<svg onload=alert(2)>',
+}}, []);
+const failed = renderGroupExtraHtml({{
+  id: 8,
+  status: 'error',
+  error_message: '<script>alert(3)</script>',
+}}, []);
+process.stdout.write(JSON.stringify({{postponed, failed}}));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    rendered = json.loads(completed.stdout)
+    assert "<img" not in rendered["postponed"]
+    assert "<svg" not in rendered["postponed"]
+    assert "&lt;img" in rendered["postponed"]
+    assert "<script" not in rendered["failed"]
+    assert "&lt;script" in rendered["failed"]
+    assert "renderGroupExtraHtml" in display
+    assert "renderGroupExtraHtml" in single
+    assert "escapeHtml(group.error_message)" in extra
+    for name in (
+        "renderForecast24h",
+        "renderForecast3d",
+        "renderWeatherDetails",
+        "renderWeatherFactors",
+        "renderWeatherHistory",
+    ):
+        assert "escapeHtml" in _function(source, name)
+
+
+def test_weather_renderers_neutralize_html_payloads_at_runtime() -> None:
+    source = _source(STATUS)
+    helpers = "\n".join(
+        _function(source, name)
+        for name in (
+            "formatTemp",
+            "formatWeatherNumber",
+            "formatWeatherMetric",
+            "renderForecast24h",
+            "renderWeatherDetails",
+            "renderWeatherFactors",
+        )
+    )
+    script = f"""
+function escapeHtml(value) {{
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}}
+function getWeatherIcon() {{ return 'safe'; }}
+function weatherReasonPhrase() {{ return ''; }}
+const elements = {{
+  'w-hours': {{innerHTML: ''}},
+  'w-details': {{innerHTML: ''}},
+  'w-factors': {{innerHTML: ''}},
+}};
+const document = {{getElementById(id) {{ return elements[id] || null; }}}};
+{helpers}
+renderForecast24h([{{
+  time: '<img src=x onerror=alert(1)>',
+  icon: '<svg onload=alert(2)>',
+  temp: '<script>alert(3)</script>',
+  precip: '<iframe>',
+  wind: '<object>',
+}}]);
+renderWeatherDetails({{
+  astronomy: {{sunrise: '<img src=x>', sunset: '<svg onload=x>'}},
+  stats: {{precipitation_24h: '<script>', precipitation_forecast_6h: '<iframe>', daily_et0: '<object>'}},
+}});
+renderWeatherFactors({{factors: {{rain: {{status: 'warn', detail: '<img src=x onerror=x>'}}}}}});
+process.stdout.write(JSON.stringify(elements));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    rendered = " ".join(item["innerHTML"] for item in json.loads(completed.stdout).values())
+    for dangerous in ("<img", "<svg", "<script", "<iframe", "<object"):
+        assert dangerous not in rendered
+    assert "&lt;img" in rendered
 
 
 def test_zones_sse_resync_cannot_overwrite_a_newer_event() -> None:
@@ -183,6 +321,92 @@ def test_duration_mutations_validate_and_conflict_check_fail_closed() -> None:
     assert "checkDurationConflicts" in imported
 
 
+def test_csv_input_is_reset_in_finally_on_every_validation_exit() -> None:
+    body = _function(_source(ZONES), "handleCSVImport")
+    assert "finally" in body
+    assert "input.value = ''" in body
+
+
+def test_water_calibration_uses_one_combined_autosave_and_live_probe_is_serialized() -> None:
+    source = _source(ZONES)
+    increment = _function(source, "waterIncDigit")
+    flush = _function(source, "waterFlushSave")
+    perform = _function(source, "performWaterSave")
+    close = _function(source, "closeWaterSettings")
+    live = _function(source, "waterStartLive")
+    stop = _function(source, "waterStopLive")
+    assert "scheduleWaterAutoSave" in increment
+    assert "water_base_value_m3" in perform
+    assert "water_base_pulses" in perform
+    assert perform.count("putGroupSettings(") == 1
+    assert "clearTimeout(__waterSaveTimers[groupId])" in flush
+    assert "__waterSaveInFlight" in flush
+    assert "active.promise" in flush
+    assert "await waterFlushSave" in close
+    assert "restartLive: false" in close
+    assert "waterStopLive" in _function(source, "scheduleWaterAutoSave")
+    assert "waterStartLive" in flush
+    assert "__waterLiveInFlight" in live
+    assert "setTimeout" in live
+    assert "setInterval" not in live
+    assert "generation" in live
+    assert ".abort()" in stop
+
+
+def test_water_close_reuses_the_current_autosave_request() -> None:
+    source = _source(ZONES)
+    perform = _function(source, "performWaterSave")
+    flush = _function(source, "waterFlushSave")
+    script = f"""
+const __waterSaveTimers = {{}};
+const __waterSaveRevisions = {{1: 4}};
+const __waterSaveInFlight = {{}};
+const __waterClosing = {{1: true}};
+const __waterState = {{1: {{editing: false}}}};
+const groupsData = [];
+const elements = {{
+  'water-server-1': {{value: '3'}},
+  'water-topic-1': {{value: '/meter'}},
+  'water-pulse-1': {{value: '1l'}},
+}};
+const document = {{getElementById(id) {{ return elements[id] || null; }}}};
+function waterDigitsToValue() {{ return 0; }}
+function waterModalIsOpen() {{ return false; }}
+function waterStartLive() {{ throw new Error('must not restart while closing'); }}
+function showNotification() {{}}
+let requestCount = 0;
+let resolveRequest;
+function putGroupSettings() {{
+  requestCount += 1;
+  return new Promise(resolve => {{ resolveRequest = resolve; }});
+}}
+{perform}
+{flush}
+const autosave = waterFlushSave(1);
+const closeFlush = waterFlushSave(1, {{restartLive: false}});
+resolveRequest({{ok: true}});
+Promise.all([autosave, closeFlush]).then(results => {{
+  process.stdout.write(JSON.stringify({{requestCount, results}}));
+}});
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert json.loads(completed.stdout) == {"requestCount": 1, "results": [True, True]}
+
+
+def test_all_sensor_mqtt_selectors_can_preserve_explicit_null() -> None:
+    source = _source(ZONES)
+    groups = _function(source, "renderGroupsGrid")
+    selectors = _function(source, "loadGroupSelectors")
+    rain = _function(source, "initRainUi")
+    env = _function(source, "initEnvUi")
+    assert groups.count('<option value=""') >= 3
+    assert "Не выбран" in groups
+    assert "nullOption" in selectors
+    assert "cfg.server_id == null ? ''" in rain
+    assert "tempServerId == null ? ''" in env
+    assert "humServerId == null ? ''" in env
+
+
 def test_active_hardware_mapping_is_locked_in_zone_and_mqtt_ui() -> None:
     zones = _source(ZONES)
     mqtt = _source(MQTT)
@@ -190,8 +414,56 @@ def test_active_hardware_mapping_is_locked_in_zone_and_mqtt_ui() -> None:
     assert "hardwareLocked ? 'disabled'" in _function(zones, "renderZonesTable")
     assert "isGroupHardwareLocked" in _function(zones, "putGroupSettings")
     assert "isZoneHardwareLocked" in _function(zones, "deleteZone")
-    assert "mqttServerIsActive" in _function(mqtt, "updateRow")
-    assert "mqttServerIsActive" in _function(mqtt, "deleteServer")
+    assert "mqttServerGuardReason" in _function(mqtt, "updateRow")
+    assert "mqttServerGuardReason" in _function(mqtt, "deleteServer")
+
+
+def test_mqtt_server_switch_retargets_scan_and_referenced_servers_are_locked() -> None:
+    source = _source(MQTT)
+    change = _function(source, "onServerChange")
+    load = _function(source, "loadServers")
+    update = _function(source, "updateRow")
+    delete = _function(source, "deleteServer")
+    assert "scanning" in change
+    assert "startSSE()" in change
+    assert "is_referenced" in load
+    assert "references" in load
+    assert "mqttServerGuardReason" in update
+    assert "mqttServerGuardReason" in delete
+
+
+def test_mqtt_reference_metadata_covers_every_backend_category() -> None:
+    source = _source(MQTT)
+    helpers = "\n".join(_function(source, name) for name in ("describeMqttReferences", "rememberMqttServerReferences"))
+    script = f"""
+let mqttServerReferenceInfo = new Map();
+{helpers}
+const result = rememberMqttServerReferences([{{
+  id: 3,
+  is_referenced: true,
+  references: {{
+    zones: [1],
+    groups_master: [2],
+    groups_pressure: [3],
+    groups_water: [4],
+    groups_float: [5],
+    settings: ['rain'],
+  }},
+}}]).get(3);
+process.stdout.write(JSON.stringify(result));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = json.loads(completed.stdout)
+    assert result["referenced"] is True
+    for label in (
+        "зоны",
+        "мастер-клапаны групп",
+        "датчики давления групп",
+        "счётчики воды групп",
+        "поплавковые датчики групп",
+        "системные настройки",
+    ):
+        assert label in result["reason"]
 
 
 def test_bulk_delete_requires_confirmation_and_reports_each_response() -> None:
@@ -243,6 +515,24 @@ def test_program_enabled_payload_and_wizard_defaults_use_json_booleans() -> None
     assert "enabled: true" in create
 
 
+def test_program_color_is_canonical_before_style_interpolation() -> None:
+    source = _source(PROGRAMS)
+    helper = _function(source, "safeProgramColor")
+    render = _function(source, "renderList")
+    script = f"""
+const DEFAULT_PROGRAM_COLOR = '#42a5f5';
+{helper}
+process.stdout.write(JSON.stringify([
+  safeProgramColor('#abcdef'),
+  safeProgramColor('red;\" onmouseover=\"alert(1)'),
+  safeProgramColor(null),
+]));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert json.loads(completed.stdout) == ["#abcdef", "#42a5f5", "#42a5f5"]
+    assert "safeProgramColor(p.color)" in render
+
+
 def test_password_confirmation_and_whitespace_contract() -> None:
     source = _source(SETTINGS)
     assert 'id="new_password2"' in source
@@ -257,6 +547,10 @@ def test_geo_detection_does_not_violate_connect_src_self() -> None:
     source = _source(SETTINGS)
     assert "ipapi.co" not in source
     assert "{timeout:5000}" not in source
+    availability = _function(source, "configureGeolocationAvailability")
+    assert "window.isSecureContext" in availability
+    assert "button.disabled" in availability
+    assert "Введите координаты вручную" in availability
 
 
 def test_mqtt_tree_is_prototype_safe_and_enforces_count_and_byte_caps() -> None:
@@ -326,6 +620,43 @@ def test_map_cache_key_is_stable_and_service_worker_prunes_maps() -> None:
     assert "url.pathname.startsWith('/static/media/maps/')" in sw_source
 
 
+def test_map_ui_never_renders_more_than_the_retention_limit() -> None:
+    source = _source(MAP)
+    load = _function(source, "loadMap")
+    script = f"""
+const MAX_MAP_ITEMS = 20;
+const container = {{
+  children: [],
+  innerHTML: '',
+  appendChild(node) {{ this.children.push(node); }},
+}};
+function makeNode() {{
+  return {{
+    children: [],
+    appendChild(node) {{ this.children.push(node); }},
+    addEventListener() {{}},
+    setAttribute() {{}},
+  }};
+}}
+const document = {{
+  getElementById(id) {{ return id === 'map-container' ? container : null; }},
+  createElement() {{ return makeNode(); }},
+}};
+const window = {{AUTH_ROLE: 'guest'}};
+const api = {{get: async () => ({{
+  success: true,
+  items: Array.from({{length: 27}}, (_, i) => ({{
+    name: `map-${{i}}.webp`, path: `media/maps/map-${{i}}.webp`, mtime: 100 - i,
+  }})),
+}})}};
+function showNotification() {{}}
+{load}
+loadMap().then(() => process.stdout.write(String(container.children.length)));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert completed.stdout == "20"
+
+
 def test_history_and_log_filters_ignore_stale_responses() -> None:
     history = _source(HISTORY)
     logs = _source(LOGS)
@@ -336,6 +667,55 @@ def test_history_and_log_filters_ignore_stale_responses() -> None:
     assert "state.refreshGeneration" in close
     assert "eventRequestGeneration" in _function(logs, "applyFilter")
     assert "auditRequestGeneration" in _function(logs, "loadAudit")
+
+
+def test_failed_history_refresh_clears_every_stale_surface() -> None:
+    source = _source(HISTORY)
+    refresh = _function(source, "refresh")
+    clear = _function(source, "clearHistoryView")
+    assert "clearHistoryView" in refresh
+    assert "state.lastData = null" in clear
+    assert "state.chart.destroy()" in clear
+    for element_id in (
+        "historyTotalMinutes",
+        "historyTotalRuns",
+        "historyLitersCard",
+        "historyChartEmpty",
+        "historySavingsBanner",
+        "historyNoPlanNote",
+        "historyRunsList",
+        "historyFooterStats",
+        "historyTitle",
+    ):
+        assert element_id in clear
+
+
+def test_history_savings_waits_for_backend_availability_contract() -> None:
+    banner = _function(_source(HISTORY), "renderBanner")
+    chart = _function(_source(HISTORY), "renderChart")
+    assert "savings_available" in banner
+    assert "plan_available" in banner
+    assert "cohort_matches_current" in banner
+    assert "savings_unavailable_reason" in banner
+    assert "plan_unavailable" in banner
+    assert "historical_zone_cohort_changed" in banner
+    assert "actual_run_open" in banner
+    assert "actuals_complete" in banner
+    assert "plan_available" in chart
+
+
+def test_failed_log_refresh_clears_stale_rows_and_export_state() -> None:
+    source = _source(LOGS)
+    events = _function(source, "clearEventLogsError")
+    audit = _function(source, "clearAuditError")
+    assert "logsData = []" in events
+    assert "filteredLogs = []" in events
+    assert "updateEventTypeOptions" in events
+    assert "auditRows = []" in audit
+    assert "auditStats" in audit
+    assert "clearEventLogsError" in _function(source, "loadLogs")
+    assert "clearEventLogsError" in _function(source, "applyFilter")
+    assert "clearAuditError" in _function(source, "loadAudit")
 
 
 def test_history_day_totals_use_backend_counts_as_actual_truth() -> None:

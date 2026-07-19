@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import tempfile
 import time
 from datetime import datetime, timedelta
 
@@ -34,6 +35,12 @@ system_config_api_bp = Blueprint("system_config_api", __name__)
 
 # Password blocklist (TASK-013)
 _PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
+
+# Maps are full-size images stored on the controller's limited flash.  Keep
+# both the API response and the on-disk collection bounded to the same newest
+# set so a long-running installation cannot grow this directory indefinitely.
+MAX_MAP_FILES = 20
+_MAP_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 
 
 # ===== Auth / Password =====
@@ -112,24 +119,60 @@ def api_change_password():
 # ===== Map =====
 
 
+def _list_map_items() -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for filename in os.listdir(MAP_DIR):
+        path = os.path.join(MAP_DIR, filename)
+        try:
+            extension = os.path.splitext(filename)[1].lower()
+            if os.path.isfile(path) and extension in _MAP_EXTENSIONS:
+                items.append(
+                    {
+                        "name": filename,
+                        "path": f"media/maps/{filename}",
+                        "mtime": os.path.getmtime(path),
+                    }
+                )
+        except (OSError, PermissionError) as exc:
+            logger.debug("Exception while listing maps: %s", exc)
+    items.sort(key=lambda item: (float(item["mtime"]), str(item["name"])), reverse=True)
+    return items
+
+
+def _prune_old_maps(new_filename: str) -> None:
+    """Retain the just-written map and the newest prior maps up to the cap."""
+    items = _list_map_items()
+    prior_items = [item for item in items if item["name"] != new_filename]
+    keep_names = {new_filename}
+    keep_names.update(str(item["name"]) for item in prior_items[: MAX_MAP_FILES - 1])
+    for item in items:
+        filename = str(item["name"])
+        if filename in keep_names:
+            continue
+        try:
+            os.remove(os.path.join(MAP_DIR, filename))
+        except (OSError, PermissionError) as exc:
+            logger.warning("map retention: failed to remove %s: %s", filename, exc)
+
+
+def _cleanup_stale_map_temps() -> None:
+    for filename in os.listdir(MAP_DIR):
+        if not (filename.startswith(".zones_map_") and filename.endswith(".tmp")):
+            continue
+        path = os.path.join(MAP_DIR, filename)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except (OSError, PermissionError) as exc:
+            logger.warning("map retention: failed to remove stale temporary %s: %s", filename, exc)
+
+
 @system_config_api_bp.route("/api/map", methods=["GET", "POST"])
 @audit_log("map_upload", target_extractor=lambda *a, **kw: "map")
 def api_map():
     try:
         if request.method == "GET":
-            allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-            items = []
-            for f in os.listdir(MAP_DIR):
-                p = os.path.join(MAP_DIR, f)
-                try:
-                    ext = os.path.splitext(f)[1].lower()
-                    if os.path.isfile(p) and ext in allowed_ext:
-                        items.append({"name": f, "path": f"media/maps/{f}", "mtime": os.path.getmtime(p)})
-                except (OSError, PermissionError) as e:
-                    logger.debug("Exception in api_map: %s", e)
-                    continue
-            items.sort(key=lambda x: x["mtime"], reverse=True)
-            return jsonify({"success": True, "items": items})
+            return jsonify({"success": True, "items": _list_map_items()[:MAX_MAP_FILES]})
         else:
             if not (current_app.config.get("TESTING") or session.get("role") == "admin"):
                 return jsonify({"success": False, "message": "Только администратор может загружать карты"}), 403
@@ -139,7 +182,7 @@ def api_map():
             if file.filename == "":
                 return jsonify({"success": False, "message": "Файл не выбран"}), 400
             ext = os.path.splitext(file.filename)[1].lower()
-            if ext not in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
+            if ext not in _MAP_EXTENSIONS:
                 return jsonify({"success": False, "message": "Неподдерживаемый формат"}), 400
             m = request.files.get("file")
             if not m or (getattr(m, "mimetype", None) not in ALLOWED_MIME_TYPES):
@@ -167,10 +210,33 @@ def api_map():
                         "error_code": "IMAGE_PROCESSING_FAILED",
                     }
                 ), 400
-            filename = f"zones_map_{int(time.time())}{out_ext}"
+            filename = f"zones_map_{time.time_ns()}{out_ext}"
             save_path = os.path.join(MAP_DIR, filename)
-            with open(save_path, "wb") as f:
-                f.write(out_bytes)
+            os.makedirs(MAP_DIR, exist_ok=True)
+            _cleanup_stale_map_temps()
+            temporary_path: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=MAP_DIR,
+                    prefix=".zones_map_",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temporary:
+                    temporary_path = temporary.name
+                    temporary.write(out_bytes)
+                    temporary.flush()
+                    os.fchmod(temporary.fileno(), 0o644)
+                    os.fsync(temporary.fileno())
+                os.replace(temporary_path, save_path)
+                temporary_path = None
+            finally:
+                if temporary_path is not None:
+                    with contextlib.suppress(OSError, PermissionError):
+                        os.remove(temporary_path)
+            # Pruning happens strictly after the complete image has been
+            # atomically published at its final path.
+            _prune_old_maps(filename)
             return jsonify({"success": True, "message": "Карта загружена", "path": f"media/maps/{filename}"})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка работы с картой зон: {e}")

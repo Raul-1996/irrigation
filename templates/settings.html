@@ -92,6 +92,7 @@
                   data-audit-action="settings_geo_detect"
                   data-audit-target="setting:weather_location">📍 Геопозиция</button>
         </div>
+        <div class="settings-note" id="geo-guidance" hidden></div>
       </div>
       <div class="settings-row">
         <label for="rain_threshold">Порог дождя (mm за 24ч) → пропуск</label>
@@ -397,10 +398,30 @@
 
   // Browser geolocation stays within CSP connect-src 'self': no third-party
   // request is made from the controller UI.
+  function configureGeolocationAvailability() {
+    const button = document.getElementById('geo-detect');
+    const guidance = document.getElementById('geo-guidance');
+    const available = window.isSecureContext === true && !!navigator.geolocation;
+    button.disabled = !available;
+    if (!available) {
+      button.textContent = '📍 Нужен HTTPS';
+      button.title = 'Автоопределение браузером недоступно по обычному HTTP';
+      guidance.hidden = false;
+      guidance.textContent = 'Автоопределение доступно только в защищённом контексте (HTTPS). Введите координаты вручную.';
+    } else {
+      button.textContent = '📍 Геопозиция';
+      button.title = '';
+      guidance.hidden = true;
+      guidance.textContent = '';
+    }
+    return available;
+  }
+
+  configureGeolocationAvailability();
   document.getElementById('geo-detect').addEventListener('click', async ()=>{
     const msg = document.getElementById('weather-msg'); msg.textContent='Определяем...'; msg.style.color='#666';
-    if (!navigator.geolocation) {
-      msg.textContent='Геопозиция не поддерживается браузером. Введите координаты вручную.'; msg.style.color='#c62828';
+    if (!configureGeolocationAvailability()) {
+      msg.textContent='Автоопределение недоступно по HTTP. Введите координаты вручную.'; msg.style.color='#c62828';
       return;
     }
     navigator.geolocation.getCurrentPosition(position => {

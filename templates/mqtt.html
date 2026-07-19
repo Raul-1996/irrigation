@@ -98,6 +98,7 @@
   <script>
   let statusPollTimer = null;
   let activeMqttServerIds = new Set();
+  let mqttServerReferenceInfo = new Map();
 
   function mqttErrorMessage(response, fallback) {
     if (response && typeof response === 'object') {
@@ -116,6 +117,43 @@
       return null;
     }
     return port;
+  }
+
+  function describeMqttReferences(references) {
+    const labels = {
+      zones: 'зоны',
+      groups_master: 'мастер-клапаны групп',
+      groups_pressure: 'датчики давления групп',
+      groups_water: 'счётчики воды групп',
+      groups_float: 'поплавковые датчики групп',
+      settings: 'системные настройки'
+    };
+    return Object.entries(references || {})
+      .filter(([, values]) => Array.isArray(values) && values.length)
+      .map(([category, values]) => `${labels[category] || category}: ${values.join(', ')}`)
+      .join('; ');
+  }
+
+  function rememberMqttServerReferences(servers) {
+    mqttServerReferenceInfo = new Map();
+    (servers || []).forEach(server => {
+      const references = server && typeof server.references === 'object' ? server.references : {};
+      const referenced = !!server && (server.is_referenced === true || Object.keys(references).length > 0);
+      mqttServerReferenceInfo.set(Number(server.id), {
+        referenced,
+        reason: referenced ? describeMqttReferences(references) : ''
+      });
+    });
+    return mqttServerReferenceInfo;
+  }
+
+  async function refreshMqttServerReferences() {
+    const response = await fetch('/api/mqtt/servers', {cache: 'no-store'});
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data || data.success === false || !Array.isArray(data.servers)) {
+      throw new Error(mqttErrorMessage(data, 'dependencies unavailable'));
+    }
+    return rememberMqttServerReferences(data.servers);
   }
 
   async function refreshActiveMqttServerIds(servers) {
@@ -165,38 +203,60 @@
     return activeIds.has(Number(id));
   }
 
+  async function mqttServerGuardReason(id) {
+    if (await mqttServerIsActive(id)) {
+      return 'Остановите активный полив перед изменением MQTT сервера';
+    }
+    try {
+      const references = await refreshMqttServerReferences();
+      const info = references.get(Number(id));
+      if (info && info.referenced) {
+        return `Сервер используется (${info.reason || 'есть зависимости'})`;
+      }
+    } catch (_) {
+      return 'Не удалось проверить зависимости MQTT сервера; изменение временно заблокировано';
+    }
+    return '';
+  }
+
   async function loadServers() {
     try {
       const res = await api.get('/api/mqtt/servers');
       if (!res || res.success === false || !Array.isArray(res.servers)) {
         throw new Error(mqttErrorMessage(res, 'Некорректный ответ MQTT серверов'));
       }
+      rememberMqttServerReferences(res.servers);
       await refreshActiveMqttServerIds(res.servers);
       const tbody = document.getElementById('servers_body');
       tbody.innerHTML = '';
       (res.servers || []).forEach(s => {
         const tr = document.createElement('tr');
-        const hardwareLocked = activeMqttServerIds.has(Number(s.id));
+        const referenceInfo = mqttServerReferenceInfo.get(Number(s.id));
+        const referenced = s.is_referenced === true || !!(s.references && Object.keys(s.references).length);
+        const hardwareLocked = activeMqttServerIds.has(Number(s.id)) || referenced;
         const disabled = hardwareLocked ? 'disabled' : '';
-        const title = hardwareLocked ? 'Остановите активный полив перед изменением MQTT сервера' : '';
+        const title = activeMqttServerIds.has(Number(s.id))
+          ? 'Остановите активный полив перед изменением MQTT сервера'
+          : (referenced ? `Сервер используется (${referenceInfo && referenceInfo.reason || 'есть зависимости'})` : '');
+        const safeTitle = escapeHtml(title);
         tr.innerHTML = `
           <td><span class="status-dot bad" data-id="${s.id}" title="offline"></span><span class="server-id">${s.id}</span></td>
-          <td><input value="${escapeHtml(s.name || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
-          <td><input value="${escapeHtml(s.host || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
-          <td><input type="number" value="${s.port || 1883}" ${disabled} title="${title}" min="1" max="65535" step="1" oninput="this.dataset.v=this.value"></td>
-          <td><input value="${escapeHtml(s.username || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
-          <td><input value="${escapeHtml(s.client_id || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.name || '')}" ${disabled} title="${safeTitle}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.host || '')}" ${disabled} title="${safeTitle}" oninput="this.dataset.v=this.value"></td>
+          <td><input type="number" value="${s.port || 1883}" ${disabled} title="${safeTitle}" min="1" max="65535" step="1" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.username || '')}" ${disabled} title="${safeTitle}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.client_id || '')}" ${disabled} title="${safeTitle}" oninput="this.dataset.v=this.value"></td>
           <td>
-            <select ${disabled} title="${title}" oninput="this.dataset.v=this.value">
+            <select ${disabled} title="${safeTitle}" oninput="this.dataset.v=this.value">
               <option value="true" ${s.enabled ? 'selected' : ''}>Да</option>
               <option value="false" ${!s.enabled ? 'selected' : ''}>Нет</option>
             </select>
           </td>
           <td>
-            <button class="btn btn-primary" ${disabled} title="${title}" onclick="updateRow(this, ${s.id})"
+            <button class="btn btn-primary" ${disabled} title="${safeTitle}" onclick="updateRow(this, ${s.id})"
                     data-audit-action="mqtt_server_update_click"
                     data-audit-target="mqtt:${s.id}">Сохранить</button>
-            <button class="btn btn-danger" ${disabled} title="${title}" onclick="deleteServer(${s.id})"
+            <button class="btn btn-danger" ${disabled} title="${safeTitle}" onclick="deleteServer(${s.id})"
                     data-audit-action="mqtt_server_delete_click"
                     data-audit-target="mqtt:${s.id}">Удалить</button>
           </td>
@@ -244,8 +304,9 @@
   }
 
   async function updateRow(btn, id) {
-    if (await mqttServerIsActive(id)) {
-      showNotification('Остановите активный полив перед изменением MQTT сервера', 'warning');
+    const guardReason = await mqttServerGuardReason(id);
+    if (guardReason) {
+      showNotification(guardReason, 'warning');
       return;
     }
     const tds = btn.closest('tr').querySelectorAll('td');
@@ -275,8 +336,9 @@
   }
 
   async function deleteServer(id) {
-    if (await mqttServerIsActive(id)) {
-      showNotification('Остановите активный полив перед удалением MQTT сервера', 'warning');
+    const guardReason = await mqttServerGuardReason(id);
+    if (guardReason) {
+      showNotification(guardReason, 'warning');
       return;
     }
     if (!confirm('Удалить сервер?')) return;
@@ -369,6 +431,7 @@
   function onServerChange(){
     resetTopicState();
     updateSelectedBadge();
+    if (scanning) startSSE();
     if (subscribed) startPolling();
   }
 

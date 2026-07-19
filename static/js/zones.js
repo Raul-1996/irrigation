@@ -14,7 +14,7 @@
         'use_master_valve', 'master_mqtt_server_id', 'master_mqtt_topic', 'master_mode',
         'master_close_delay_sec', 'use_pressure_sensor', 'pressure_mqtt_server_id',
         'pressure_mqtt_topic', 'pressure_unit', 'use_water_meter', 'water_mqtt_server_id',
-        'water_mqtt_topic', 'water_pulse_size'
+        'water_mqtt_topic', 'water_pulse_size', 'water_base_value_m3', 'water_base_pulses'
     ]);
     const ZONE_HARDWARE_FIELDS = new Set(['group_id', 'topic', 'mqtt_server_id']);
 
@@ -331,7 +331,8 @@
                             <div class="form-group">
                                 <label>MQTT сервер</label>
                                 <select id="mv-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.master_mqtt_server_id||'')?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+                                    <option value="" ${group.master_mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.master_mqtt_server_id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
@@ -366,7 +367,8 @@
                             <div class="form-group">
                                 <label>MQTT сервер</label>
                                 <select id="pressure-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.pressure_mqtt_server_id||'')?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+                                    <option value="" ${group.pressure_mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.pressure_mqtt_server_id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
@@ -397,17 +399,18 @@
                         <div class="modal-form ${group.use_water_meter ? '' : 'dim'}">
                             <div class="form-group">
                                 <label>MQTT сервер</label>
-                                <select id="water-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
-                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.water_mqtt_server_id||'')?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+                                <select id="water-server-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleWaterAutoSave(${group.id})">
+                                    <option value="" ${group.water_mqtt_server_id == null ? 'selected' : ''}>Не выбран</option>
+                                    ${(window.mqttServers||[]).map(s=>`<option value="${s.id}" ${String(s.id)===String(group.water_mqtt_server_id)?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>Топик MQTT счётчика воды</label>
-                                <input type="text" id="water-topic-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" value="${(group.water_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-water/controls/meter" oninput="scheduleAutoSave(${group.id})">
+                                <input type="text" id="water-topic-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" value="${(group.water_mqtt_topic||'').replaceAll('"','&quot;')}" placeholder="/devices/wb-water/controls/meter" oninput="scheduleWaterAutoSave(${group.id})">
                             </div>
                             <div class="form-group">
                                 <label>Величина импульса</label>
-                                <select id="water-pulse-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleAutoSave(${group.id})">
+                                <select id="water-pulse-${group.id}" ${hardwareDisabled} title="${hardwareTitle}" onchange="scheduleWaterAutoSave(${group.id})">
                                     <option value="1l" ${(group.water_pulse_size||'1l')==='1l'?'selected':''}>1 л</option>
                                     <option value="10l" ${(group.water_pulse_size||'1l')==='10l'?'selected':''}>10 л</option>
                                     <option value="100l" ${(group.water_pulse_size||'1l')==='100l'?'selected':''}>100 л</option>
@@ -422,9 +425,9 @@
                                 <div class="water-digits" id="water-digits-${group.id}" aria-label="Показание счётчика">
                                     ${[0,1,2,3,4,5,6,7].map(i=>`
                                     <div class="digit-col" data-i="${i}">
-                                        <button type="button" class="btn-small" onclick="waterIncDigit(${group.id}, ${i}, 1)">+</button>
+                                        <button type="button" class="btn-small" ${hardwareDisabled} title="${hardwareTitle}" onclick="waterIncDigit(${group.id}, ${i}, 1)">+</button>
                                         <div class="digit" id="water-digit-${group.id}-${i}">0</div>
-                                        <button type="button" class="btn-small" onclick="waterIncDigit(${group.id}, ${i}, -1)">−</button>
+                                        <button type="button" class="btn-small" ${hardwareDisabled} title="${hardwareTitle}" onclick="waterIncDigit(${group.id}, ${i}, -1)">−</button>
                                     </div>`).join('')}
                                 </div>
                                 
@@ -458,6 +461,7 @@
     
     // Загрузка селекторов групп
     function loadGroupSelectors() {
+        const nullOption = '<option value="">Не выбран</option>';
         const selectors = ['bulkGroup', 'zoneGroup'];
         selectors.forEach(selectorId => {
             const selector = document.getElementById(selectorId);
@@ -476,13 +480,13 @@
         // Rain server selector
         const rs = document.getElementById('rain-server');
         if (rs) {
-            rs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+            rs.innerHTML = nullOption + (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         }
         // Env servers
         const ets = document.getElementById('env-temp-server');
-        if (ets) ets.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+        if (ets) ets.innerHTML = nullOption + (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
         const ehs = document.getElementById('env-hum-server');
-        if (ehs) ehs.innerHTML = (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+        if (ehs) ehs.innerHTML = nullOption + (window.mqttServers||[]).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
     }
     
     // Обновление счетчика зон
@@ -517,7 +521,7 @@
             document.getElementById('rain-type').value = (cfg.type==='NC'?'NC':'NO');
             document.getElementById('rain-topic').value = cfg.topic || '';
             const rs = document.getElementById('rain-server');
-            if (rs && cfg.server_id) rs.value = String(cfg.server_id);
+            if (rs) rs.value = cfg.server_id == null ? '' : String(cfg.server_id);
             try{ updateGlobalToggleTitles(); }catch(e){}
         } catch {}
     }
@@ -558,12 +562,14 @@
     function initEnvUi() {
         try {
             const cfg = window.envConfig || { temp:{enabled:false}, hum:{enabled:false} };
+            const tempServerId = cfg.temp ? cfg.temp.server_id : null;
+            const humServerId = cfg.hum ? cfg.hum.server_id : null;
             document.getElementById('env-temp-enabled').checked = !!(cfg.temp && cfg.temp.enabled);
             document.getElementById('env-temp-topic').value = (cfg.temp && cfg.temp.topic) || '';
-            if (cfg.temp && cfg.temp.server_id) document.getElementById('env-temp-server').value = String(cfg.temp.server_id);
+            document.getElementById('env-temp-server').value = tempServerId == null ? '' : String(tempServerId);
             document.getElementById('env-hum-enabled').checked = !!(cfg.hum && cfg.hum.enabled);
             document.getElementById('env-hum-topic').value = (cfg.hum && cfg.hum.topic) || '';
-            if (cfg.hum && cfg.hum.server_id) document.getElementById('env-hum-server').value = String(cfg.hum.server_id);
+            document.getElementById('env-hum-server').value = humServerId == null ? '' : String(humServerId);
             try{ updateGlobalToggleTitles(); }catch(e){}
         } catch {}
     }
@@ -593,7 +599,7 @@
             const payload = { use_master_valve: !!enabled };
             if (topic) payload.master_mqtt_topic = topic;
             if (modeEl && modeEl.value) payload.master_mode = modeEl.value;
-            if (serverEl && serverEl.value) payload.master_mqtt_server_id = parseInt(serverEl.value);
+            if (serverEl) payload.master_mqtt_server_id = serverEl.value ? parseInt(serverEl.value) : null;
             const result = await putGroupSettings(groupId, payload);
             if (!result.ok) {
                 showNotification(result.message || 'Не удалось сохранить настройки мастер-клапана', 'error');
@@ -604,7 +610,7 @@
                     groupsData[gi].use_master_valve = !!enabled;
                     if (topic) groupsData[gi].master_mqtt_topic = topic;
                     if (modeEl && modeEl.value) groupsData[gi].master_mode = modeEl.value;
-                    if (serverEl && serverEl.value) groupsData[gi].master_mqtt_server_id = parseInt(serverEl.value);
+                    if (serverEl) groupsData[gi].master_mqtt_server_id = serverEl.value ? parseInt(serverEl.value) : null;
                 }
                 showNotification('Настройки мастер-клапана сохранены', 'success');
             }
@@ -735,14 +741,20 @@
     function closeMasterSettings(groupId){ closeModalById(`modal-master-${groupId}`); }
     function openPressureSettings(groupId){ openModalById(`modal-pressure-${groupId}`); }
     function closePressureSettings(groupId){ closeModalById(`modal-pressure-${groupId}`); }
+    const __waterClosing = {};
     function openWaterSettings(groupId){
         openModalById(`modal-water-${groupId}`);
         try { waterStartLive(groupId); } catch(e){}
     }
-    function closeWaterSettings(groupId){
+    async function closeWaterSettings(groupId){
+        __waterClosing[groupId] = true;
         try { waterStopLive(groupId); } catch(e){}
-        try { waterFlushSave(groupId); } catch(e){}
-        closeModalById(`modal-water-${groupId}`);
+        try {
+            const saved = await waterFlushSave(groupId, {restartLive: false});
+            if (saved === false && __waterState[groupId]?.editing) return;
+        } catch(e){}
+        finally { delete __waterClosing[groupId]; }
+        if (!__waterState[groupId]?.editing) closeModalById(`modal-water-${groupId}`);
     }
 
     // Safety: recenter on resize/orientationchange
@@ -872,6 +884,7 @@
         d = (d + delta + 10) % 10;
         el.textContent = String(d);
         waterMarkDirty(groupId);
+        scheduleWaterAutoSave(groupId);
     }
     function waterCurrentFromPulses(groupId){
         const st = __waterState[groupId] || {};
@@ -882,17 +895,33 @@
         const deltaM3 = (deltaPulses * litersPerPulse) / 1000.0;
         return Math.max(0, baseM3 + deltaM3);
     }
-    async function waterProbeOnce(groupId){
+    const __waterLiveGenerations = {};
+    async function waterProbeOnce(groupId, options = {}){
+        const generation = options.generation;
+        const isCurrent = () => generation == null || __waterLiveGenerations[groupId] === generation;
         try{
             const serverEl = document.getElementById(`water-server-${groupId}`);
             const topicEl = document.getElementById(`water-topic-${groupId}`);
             const sid = serverEl && serverEl.value ? parseInt(serverEl.value) : null;
             const topic = topicEl && topicEl.value ? topicEl.value.trim() : '';
-            if (!sid || !topic){ showNotification('Укажите MQTT сервер и MQTT-топик счётчика воды', 'warning'); return; }
-            const res = await fetch(`/api/mqtt/${sid}/probe`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ filter: topic, duration: 1.5 })});
-            const data = await res.json();
+            if (!sid || !topic){
+                if (!options.silent) showNotification('Укажите MQTT сервер и MQTT-топик счётчика воды', 'warning');
+                return false;
+            }
+            const res = await fetch(`/api/mqtt/${sid}/probe`, {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ filter: topic, duration: 1.5 }),
+                signal: options.signal
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data || data.success === false) throw new Error(responseMessage(data, `HTTP ${res.status}`));
+            if (!isCurrent()) return false;
             const item = (data && data.items || []).find(it=> it.topic===topic);
-            if (!item){ showNotification(`Нет данных по топику: ${topic}`, 'warning'); return; }
+            if (!item){
+                if (!options.silent) showNotification(`Нет данных по топику: ${topic}`, 'warning');
+                return false;
+            }
             const pulses = parseInt((item.payload||'').replace(/[^0-9-]/g,''))||0;
             const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
             if (pulsesEl) pulsesEl.value = String(pulses);
@@ -902,35 +931,37 @@
                 const val = waterCurrentFromPulses(groupId);
                 waterSetDigits(groupId, val);
             }
-        }catch(e){ showNotification('Ошибка запроса MQTT', 'error'); }
+            return true;
+        }catch(e){
+            if (e && e.name === 'AbortError') return false;
+            if (isCurrent() && !options.silent) showNotification('Ошибка запроса MQTT', 'error');
+            return false;
+        }
     }
     function waterCancel(groupId){
+        if (__waterSaveTimers[groupId]) {
+            clearTimeout(__waterSaveTimers[groupId]);
+            delete __waterSaveTimers[groupId];
+        }
         const st = __waterState[groupId] || {};
         __waterState[groupId].editing = false;
         const actions = document.getElementById(`water-actions-${groupId}`);
         if (actions) actions.style.display = 'none';
         waterSetDigits(groupId, Number(st.baseValueM3||0));
-    }
-    async function waterAutoSave(groupId){
-        try{
-            const newVal = waterDigitsToValue(groupId);
-            const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
-            const curP = pulsesEl ? parseInt(pulsesEl.value||'0')||0 : (__waterState[groupId]?.currentPulses||0);
-            const payload = { water_base_value_m3: newVal, water_base_pulses: curP };
-            const result = await putGroupSettings(groupId, payload);
-            if (!result.ok){ return; }
-            __waterState[groupId] = __waterState[groupId] || {};
-            __waterState[groupId].baseValueM3 = newVal;
-            __waterState[groupId].basePulses = curP;
-            __waterState[groupId].editing = false;
-        }catch(e){}
+        if (waterModalIsOpen(groupId)) waterStartLive(groupId);
     }
     const __waterSaveTimers = {};
+    const __waterSaveRevisions = {};
+    const __waterSaveInFlight = {};
     function scheduleWaterAutoSave(groupId){
+        // A response for the previous topic/pulse snapshot must never update
+        // the calibration UI after the user has edited it.
+        waterStopLive(groupId);
+        __waterSaveRevisions[groupId] = (__waterSaveRevisions[groupId] || 0) + 1;
         if (__waterSaveTimers[groupId]) clearTimeout(__waterSaveTimers[groupId]);
-        __waterSaveTimers[groupId] = setTimeout(()=>{ waterAutoSave(groupId); }, 600);
+        __waterSaveTimers[groupId] = setTimeout(()=>{ waterFlushSave(groupId); }, 600);
     }
-    async function waterFlushSave(groupId){
+    async function performWaterSave(groupId, revision){
         try{
             const wServerSel = document.getElementById(`water-server-${groupId}`);
             const wServer = wServerSel ? parseInt(wServerSel.value) : null;
@@ -942,8 +973,73 @@
                 water_mqtt_topic: wTopic,
                 water_pulse_size: wPulse
             };
-            await putGroupSettings(groupId, payload);
-        }catch(e){ /* no-op */ }
+            const state = __waterState[groupId] || {};
+            let newValue = null;
+            let currentPulses = null;
+            const editing = state.editing === true;
+            if (editing) {
+                newValue = waterDigitsToValue(groupId);
+                const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
+                const rawPulses = pulsesEl ? String(pulsesEl.value || '').trim() : '';
+                currentPulses = rawPulses
+                    ? (parseInt(rawPulses, 10) || 0)
+                    : Number(state.currentPulses ?? state.basePulses ?? 0);
+                payload.water_base_value_m3 = newValue;
+                payload.water_base_pulses = currentPulses;
+            }
+            const result = await putGroupSettings(groupId, payload);
+            if (!result.ok) {
+                showNotification(result.message || 'Не удалось сохранить настройки счётчика воды', 'error');
+                return false;
+            }
+            if (editing && (__waterSaveRevisions[groupId] || 0) === revision) {
+                state.baseValueM3 = newValue;
+                state.basePulses = currentPulses;
+                state.editing = false;
+                const actions = document.getElementById(`water-actions-${groupId}`);
+                if (actions) actions.style.display = 'none';
+            }
+            const group = groupsData.find(item => Number(item.id) === Number(groupId));
+            if (group && (__waterSaveRevisions[groupId] || 0) === revision) Object.assign(group, payload);
+            return true;
+        }catch(e){
+            showNotification('Ошибка сохранения настроек счётчика воды', 'error');
+            return false;
+        }
+    }
+    async function waterFlushSave(groupId, options = {}){
+        const restartLive = options.restartLive !== false;
+        if (__waterSaveTimers[groupId]) {
+            clearTimeout(__waterSaveTimers[groupId]);
+            delete __waterSaveTimers[groupId];
+        }
+        const revision = __waterSaveRevisions[groupId] || 0;
+        const active = __waterSaveInFlight[groupId];
+        if (active) {
+            const activeResult = await active.promise;
+            if ((__waterSaveRevisions[groupId] || 0) !== active.revision) {
+                return waterFlushSave(groupId, options);
+            }
+            if (activeResult && restartLive && !__waterClosing[groupId] && waterModalIsOpen(groupId)) {
+                waterStartLive(groupId);
+            }
+            return activeResult;
+        }
+        const entry = {revision: revision, promise: performWaterSave(groupId, revision)};
+        __waterSaveInFlight[groupId] = entry;
+        let result;
+        try {
+            result = await entry.promise;
+        } finally {
+            if (__waterSaveInFlight[groupId] === entry) delete __waterSaveInFlight[groupId];
+        }
+        if ((__waterSaveRevisions[groupId] || 0) !== revision) {
+            return waterFlushSave(groupId, options);
+        }
+        if (result && restartLive && !__waterClosing[groupId] && waterModalIsOpen(groupId)) {
+            waterStartLive(groupId);
+        }
+        return result;
     }
     function waterInitForGroup(group){
         __waterState[group.id] = __waterState[group.id] || {};
@@ -956,21 +1052,53 @@
         setTimeout(()=>{ try{ waterSetDigits(group.id, __waterState[group.id].baseValueM3); }catch(e){} }, 0);
     }
     const __waterLiveTimers = {};
+    const __waterLiveControllers = {};
+    const __waterLiveInFlight = {};
+    function waterModalIsOpen(groupId){
+        const modal = document.getElementById(`modal-water-${groupId}`);
+        return !!modal && modal.style.display !== 'none';
+    }
     function waterStartLive(groupId){
         waterStopLive(groupId);
-        const fn = async ()=>{
-            if (__waterState[groupId]?.editing) return; // don't live-update while editing
-            await waterProbeOnce(groupId);
-            if (!__waterState[groupId]?.editing){
-                const val = waterCurrentFromPulses(groupId);
-                waterSetDigits(groupId, val);
+        const generation = (__waterLiveGenerations[groupId] || 0) + 1;
+        __waterLiveGenerations[groupId] = generation;
+        const scheduleNext = () => {
+            if (__waterLiveGenerations[groupId] !== generation) return;
+            __waterLiveTimers[groupId] = setTimeout(run, 3000);
+        };
+        const run = async ()=>{
+            if (__waterLiveGenerations[groupId] !== generation) return;
+            if (__waterLiveInFlight[groupId] || __waterState[groupId]?.editing) {
+                scheduleNext();
+                return;
+            }
+            const controller = new AbortController();
+            __waterLiveControllers[groupId] = controller;
+            __waterLiveInFlight[groupId] = true;
+            try {
+                await waterProbeOnce(groupId, {
+                    generation,
+                    signal: controller.signal,
+                    silent: true
+                });
+            } finally {
+                if (__waterLiveGenerations[groupId] === generation) {
+                    __waterLiveInFlight[groupId] = false;
+                    delete __waterLiveControllers[groupId];
+                    scheduleNext();
+                }
             }
         };
-        __waterLiveTimers[groupId] = setInterval(fn, 3000);
-        fn();
+        run();
     }
     function waterStopLive(groupId){
-        if (__waterLiveTimers[groupId]){ clearInterval(__waterLiveTimers[groupId]); delete __waterLiveTimers[groupId]; }
+        __waterLiveGenerations[groupId] = (__waterLiveGenerations[groupId] || 0) + 1;
+        if (__waterLiveTimers[groupId]){ clearTimeout(__waterLiveTimers[groupId]); delete __waterLiveTimers[groupId]; }
+        if (__waterLiveControllers[groupId]) {
+            __waterLiveControllers[groupId].abort();
+            delete __waterLiveControllers[groupId];
+        }
+        delete __waterLiveInFlight[groupId];
     }
 
     async function saveGroupMasterTopic(groupId) {
@@ -2228,10 +2356,10 @@
     
     // Обработка импорта CSV файла
     async function handleCSVImport(event) {
-        const file = event.target.files[0];
-        if (!file) return;
-        
+        const input = event.currentTarget || event.target;
         try {
+            const file = input && input.files ? input.files[0] : null;
+            if (!file) return;
             const text = await file.text();
             const rows = parseCSV(text).filter(row => row.some(cell => cell.trim()));
             if (rows.length === 0) {
@@ -2343,10 +2471,11 @@
         } catch (error) {
             console.error('Ошибка импорта CSV:', error);
             showNotification(error.message || 'Ошибка чтения CSV файла', 'error');
+        } finally {
+            // Selecting the same corrected file must always fire `change`
+            // after any validation, conflict, cancellation, or network exit.
+            if (input) input.value = '';
         }
-        
-        // Очищаем input
-        event.target.value = '';
     }
     
     // Импорт зон в базу данных
