@@ -36,7 +36,7 @@ def test_finding_52_api_returns_explicit_safe_lost_key_contract(admin_client):
     import utils
 
     error_type = getattr(utils, "SecretDecryptionError", RuntimeError)
-    with patch.object(mqtt_api.db, "get_mqtt_servers", side_effect=error_type("unsafe crypto detail")):
+    with patch.object(mqtt_api.db, "get_mqtt_servers_strict", side_effect=error_type("unsafe crypto detail")):
         response = admin_client.get("/api/mqtt/servers")
 
     assert response.status_code == 500
@@ -204,6 +204,11 @@ def test_finding_86_scan_timeout_ends_stream_and_releases_slot(app):
 
     server = {"id": 86, "host": "broker", "port": 1883}
     client = MagicMock(name="scan_client")
+
+    def confirm_connect():
+        client.on_connect(client, None, {}, 0)
+
+    client.loop_start.side_effect = confirm_connect
     fake_mqtt = SimpleNamespace(
         CallbackAPIVersion=SimpleNamespace(VERSION2=2),
         Client=MagicMock(return_value=client),
@@ -221,9 +226,9 @@ def test_finding_86_scan_timeout_ends_stream_and_releases_slot(app):
     mqtt_api._scan_sse_connections.clear()
     with (
         app.test_request_context("/api/mqtt/86/scan-sse", environ_base={"REMOTE_ADDR": "10.0.0.86"}),
-        patch.object(mqtt_api.db, "get_mqtt_server", return_value=server),
+        patch.object(mqtt_api.db, "get_mqtt_server_strict", return_value=server),
         patch.object(mqtt_api, "mqtt", fake_mqtt),
-        patch("time.time", side_effect=fake_time),
+        patch("time.monotonic", side_effect=fake_time),
     ):
         response = mqtt_api.api_mqtt_scan_sse.__wrapped__(86)
         iterator = iter(response.response)
@@ -263,7 +268,7 @@ def test_finding_116_scan_connect_error_is_reported_and_stream_ends(app):
     mqtt_api._scan_sse_connections.clear()
     with (
         app.test_request_context("/api/mqtt/116/scan-sse", environ_base={"REMOTE_ADDR": "10.0.0.116"}),
-        patch.object(mqtt_api.db, "get_mqtt_server", return_value=server),
+        patch.object(mqtt_api.db, "get_mqtt_server_strict", return_value=server),
         patch.object(mqtt_api, "mqtt", fake_mqtt),
     ):
         response = mqtt_api.api_mqtt_scan_sse.__wrapped__(116)

@@ -2,8 +2,21 @@
 
 import json
 import os
+from unittest.mock import patch
 
 os.environ["TESTING"] = "1"
+
+
+def _complete_stop_result(group_id, zone_ids=()):
+    return {
+        "success": True,
+        "group_id": int(group_id),
+        "aggregate_valid": True,
+        "stopped": list(zone_ids),
+        "unresolved": [],
+        "unverified_zone_ids": [],
+        "retry_scheduled": False,
+    }
 
 
 class TestGroupsAPI:
@@ -51,28 +64,37 @@ class TestGroupSequenceAPI:
 
     def test_stop_group(self, admin_client, app):
         g = app.db.create_group("StopG")
-        resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
-        assert resp.status_code in (200, 400, 500)
+        with patch("routes.groups_api.get_scheduler") as get_scheduler:
+            get_scheduler.return_value.cancel_group_jobs.return_value = _complete_stop_result(g["id"])
+            resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
+        assert resp.status_code == 200
 
 
 class TestGroupMasterValveAPI:
     def test_update_master_valve(self, admin_client, app):
         g = app.db.create_group("MV")
         srv = app.db.create_mqtt_server({"name": "T", "host": "127.0.0.1", "port": 1883})
-        resp = admin_client.put(
-            f"/api/groups/{g['id']}",
-            data=json.dumps(
-                {
-                    "name": "MV Group",
-                    "use_master_valve": 1,
-                    "master_mqtt_topic": "/master/valve",
-                    "master_mqtt_server_id": srv["id"],
-                    "master_mode": "NC",
-                }
+        with (
+            patch(
+                "routes.groups_api._close_master_valve_confirmed",
+                side_effect=lambda _sid, _topic, _mode, publish_command: bool(publish_command()),
             ),
-            content_type="application/json",
-        )
-        assert resp.status_code in (200, 400, 404, 500)
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+        ):
+            resp = admin_client.put(
+                f"/api/groups/{g['id']}",
+                data=json.dumps(
+                    {
+                        "name": "MV Group",
+                        "use_master_valve": 1,
+                        "master_mqtt_topic": "/master/valve",
+                        "master_mqtt_server_id": srv["id"],
+                        "master_mode": "NC",
+                    }
+                ),
+                content_type="application/json",
+            )
+        assert resp.status_code == 200
 
 
 class TestGroupRainAPI:

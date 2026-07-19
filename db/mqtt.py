@@ -135,6 +135,149 @@ class MqttRepository(BaseRepository):
             logger.error("Ошибка получения ссылок MQTT сервера %s: %s", server_id, e)
             raise
 
+    @staticmethod
+    def _references_within_settings_scope(
+        references: dict[str, list[Any]],
+        allowed_settings: set[str] | frozenset[str],
+    ) -> bool:
+        for kind, items in references.items():
+            if not items:
+                continue
+            if kind != "settings":
+                return False
+            if not set(str(item) for item in items).issubset(set(allowed_settings)):
+                return False
+        return True
+
+    @staticmethod
+    def _rain_config_from_connection(conn: sqlite3.Connection) -> dict[str, Any]:
+        rows = dict(
+            conn.execute(
+                "SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?)",
+                ("rain.enabled", "rain.topic", "rain.type", "rain.server_id"),
+            ).fetchall()
+        )
+        server_value = rows.get("rain.server_id")
+        return {
+            "enabled": str(rows.get("rain.enabled") or "0") in ("1", "true", "True"),
+            "topic": str(rows.get("rain.topic") or ""),
+            "type": rows.get("rain.type") if rows.get("rain.type") in ("NO", "NC") else "NO",
+            "server_id": int(server_value) if server_value and str(server_value).isdigit() else None,
+        }
+
+    @staticmethod
+    def _update_assignments(data: dict[str, Any]) -> tuple[list[str], list[Any]]:
+        assignments: list[str] = []
+        params: list[Any] = []
+        converters = {
+            "name": lambda value: value,
+            "host": lambda value: value,
+            "port": int,
+            "username": lambda value: value,
+            "client_id": lambda value: value,
+            "enabled": lambda value: 1 if value else 0,
+            "tls_enabled": lambda value: 1 if value else 0,
+            "tls_ca_path": lambda value: value,
+            "tls_cert_path": lambda value: value,
+            "tls_key_path": lambda value: value,
+            "tls_insecure": lambda value: 1 if value else 0,
+            "tls_version": lambda value: value,
+        }
+        for field, converter in converters.items():
+            if field in data:
+                assignments.append(f"{field} = ?")
+                params.append(converter(data[field]))
+
+        raw_password = data.get("password")
+        set_password = "password" in data and raw_password != "***" and raw_password is not None
+        if set_password:
+            assignments.append("password = ?")
+            params.append(("ENC:" + encrypt_secret(raw_password)) if raw_password else None)
+        return assignments, params
+
+    @retry_on_busy()
+    def update_mqtt_server_reference_guarded(
+        self,
+        server_id: int,
+        data: dict[str, Any],
+        *,
+        allowed_settings: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        """Atomically check reference scope and update one runtime row."""
+        assignments, params = self._update_assignments(data)
+        set_clause = ", ".join((*assignments, "updated_at = CURRENT_TIMESTAMP"))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            before_row = conn.execute(
+                "SELECT * FROM mqtt_servers WHERE id = ?",
+                (int(server_id),),
+            ).fetchone()
+            if before_row is None:
+                conn.rollback()
+                return {"status": "not_found", "references": {}, "rain_config": None}
+            before_snapshot = dict(before_row)
+            references = self._collect_server_references(conn, server_id)
+            nonempty_references = {kind: items for kind, items in references.items() if items}
+            if not self._references_within_settings_scope(references, allowed_settings):
+                conn.rollback()
+                return {"status": "blocked", "references": nonempty_references, "rain_config": None}
+            cursor = conn.execute(
+                f"UPDATE mqtt_servers SET {set_clause} WHERE id = ?",
+                (*params, int(server_id)),
+            )
+            updated_row = conn.execute(
+                "SELECT * FROM mqtt_servers WHERE id = ?",
+                (int(server_id),),
+            ).fetchone()
+            if cursor.rowcount != 1 or updated_row is None:
+                conn.rollback()
+                return {"status": "not_found", "references": {}, "rain_config": None, "snapshot": None}
+            rain_config = self._rain_config_from_connection(conn)
+            snapshot = dict(updated_row)
+            conn.commit()
+            return {
+                "status": "updated",
+                "references": nonempty_references,
+                "rain_config": rain_config,
+                "before_snapshot": before_snapshot,
+                "snapshot": snapshot,
+            }
+
+    @retry_on_busy()
+    def restore_mqtt_server_snapshot_reference_guarded(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any],
+        *,
+        allowed_settings: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        """CAS rollback only while no disallowed reference appeared."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            columns = self._storage_columns(conn, "mqtt_servers")
+            before_values = self._validated_snapshot_values(before, columns)
+            if before_values is None:
+                conn.rollback()
+                return {"restored": False, "references": {}}
+            server_id = int(before["id"])
+            references = self._collect_server_references(conn, server_id)
+            nonempty_references = {kind: items for kind, items in references.items() if items}
+            if not self._references_within_settings_scope(references, allowed_settings):
+                conn.rollback()
+                return {"restored": False, "references": nonempty_references}
+            current = conn.execute("SELECT * FROM mqtt_servers WHERE id = ?", (server_id,)).fetchone()
+            if not self._snapshot_matches(current, expected_current, columns):
+                conn.rollback()
+                return {"restored": False, "references": nonempty_references}
+            mutable_columns = tuple(column for column in columns if column != "id")
+            assignments = ", ".join(f'"{column}" = ?' for column in mutable_columns)
+            conn.execute(
+                f'UPDATE mqtt_servers SET {assignments} WHERE id = ?',
+                (*[before[column] for column in mutable_columns], server_id),
+            )
+            conn.commit()
+            return {"restored": True, "references": nonempty_references}
+
     @retry_on_busy()
     def create_mqtt_server(self, data: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -173,43 +316,14 @@ class MqttRepository(BaseRepository):
     @retry_on_busy()
     def update_mqtt_server(self, server_id: int, data: dict[str, Any]) -> bool:
         try:
-            assignments: list[str] = []
-            params: list[Any] = []
-
-            converters = {
-                "name": lambda value: value,
-                "host": lambda value: value,
-                "port": int,
-                "username": lambda value: value,
-                "client_id": lambda value: value,
-                "enabled": lambda value: 1 if value else 0,
-                "tls_enabled": lambda value: 1 if value else 0,
-                "tls_ca_path": lambda value: value,
-                "tls_cert_path": lambda value: value,
-                "tls_key_path": lambda value: value,
-                "tls_insecure": lambda value: 1 if value else 0,
-                "tls_version": lambda value: value,
-            }
-            for field, converter in converters.items():
-                if field in data:
-                    assignments.append(f"{field} = ?")
-                    params.append(converter(data[field]))
-
-            # An absent password and the API mask mean "leave unchanged".
-            # An explicit empty string clears authentication.
-            raw_password = data.get("password")
-            set_password = "password" in data and raw_password != "***" and raw_password is not None
-            if set_password:
-                assignments.append("password = ?")
-                params.append(("ENC:" + encrypt_secret(raw_password)) if raw_password else None)
-
-            assignments.append("updated_at = CURRENT_TIMESTAMP")
+            assignments, params = self._update_assignments(data)
+            set_clause = ", ".join((*assignments, "updated_at = CURRENT_TIMESTAMP"))
             params.append(server_id)
             with self._connect() as conn:
                 cursor = conn.execute(
                     f"""
                     UPDATE mqtt_servers
-                    SET {", ".join(assignments)}
+                    SET {set_clause}
                     WHERE id = ?
                 """,
                     params,

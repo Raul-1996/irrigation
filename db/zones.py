@@ -196,7 +196,7 @@ class ZoneRepository(BaseRepository):
             with self._connect() as conn:
                 topic = (zone_data.get("topic") or "").strip()
                 mqtt_sid = zone_data.get("mqtt_server_id")
-                if mqtt_sid is None:
+                if mqtt_sid is None and "mqtt_server_id" not in zone_data:
                     # Auto-select only when exactly one enabled server exists
                     try:
                         rows = conn.execute(

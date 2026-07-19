@@ -73,9 +73,10 @@ class TestMqttServersAPI:
 class TestMqttProbeStatus:
     def test_probe_server_not_found(self, admin_client):
         resp = admin_client.post("/api/mqtt/99999/probe", content_type="application/json")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         data = resp.get_json()
-        assert "items" in data
+        assert data["success"] is False
+        assert data["error_code"] == "MQTT_SERVER_NOT_FOUND"
 
     def test_probe_existing_server(self, admin_client, app):
         server = app.db.create_mqtt_server(
@@ -94,8 +95,9 @@ class TestMqttProbeStatus:
 
     def test_status_server_not_found(self, admin_client):
         resp = admin_client.get("/api/mqtt/99999/status")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         data = resp.get_json()
+        assert data["success"] is False
         assert data["connected"] is False
 
     def test_status_existing_server(self, admin_client, app):

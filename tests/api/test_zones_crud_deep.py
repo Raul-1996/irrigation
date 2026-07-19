@@ -56,6 +56,7 @@ class TestZonesCRUD:
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
+        app.db.update_zone(zid, {"state": "off", "commanded_state": "off", "observed_state": "off"})
         resp = admin_client.delete(f"/api/zones/{zid}")
         assert resp.status_code in (200, 204)
 
@@ -76,7 +77,10 @@ class TestZonesWatering:
         )
         zones = app.db.get_zones()
         zid = zones[0]["id"]
-        with patch("services.zone_control.exclusive_start_zone"):
+        with patch(
+            "services.zone_control.start_zone_orchestrated",
+            return_value=("started", {"warnings": [], "duration": 10}),
+        ):
             resp = admin_client.post(f"/api/zones/{zid}/start")
         assert resp.status_code == 200
 
@@ -121,6 +125,7 @@ class TestSseHubReloadOnWiringChange:
         z = app.db.create_zone(
             {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
+        app.db.update_zone(z["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
@@ -135,6 +140,7 @@ class TestSseHubReloadOnWiringChange:
         z = app.db.create_zone(
             {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
+        app.db.update_zone(z["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
@@ -163,6 +169,7 @@ class TestSseHubReloadOnWiringChange:
         z = app.db.create_zone(
             {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
+        app.db.update_zone(z["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.delete(f"/api/zones/{z['id']}")
         assert resp.status_code in (200, 204)
