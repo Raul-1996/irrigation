@@ -191,8 +191,19 @@ def _do_group_stop(group_id: int) -> str:
 
         scheduler = get_scheduler()
         stop_results: dict[int, bool] = {}
+        scheduler_unresolved: list[int] = []
+        scheduler_failed = False
         if scheduler:
-            scheduler.cancel_group_jobs(int(group_id))
+            summary = scheduler.cancel_group_jobs(int(group_id))
+            if isinstance(summary, dict):
+                raw_unresolved = summary.get("unresolved") or []
+                for item in raw_unresolved:
+                    try:
+                        value = item.get("zone_id", item.get("id")) if isinstance(item, dict) else item
+                        scheduler_unresolved.append(int(value))
+                    except (TypeError, ValueError):
+                        logger.warning("Invalid unresolved zone in scheduler stop result: %r", item)
+                scheduler_failed = summary.get("success") is False or bool(scheduler_unresolved)
         else:
             from services.zone_control import stop_zone
 
@@ -215,10 +226,24 @@ def _do_group_stop(group_id: int) -> str:
             int(zone["id"]): _zone_off_status(zone, stop_results.get(int(zone["id"])))
             for zone in zones
         }
-        failed = [zone_id for zone_id, status in statuses.items() if status == "failed"]
-        pending = [zone_id for zone_id, status in statuses.items() if status == "pending"]
+        failed = list(
+            dict.fromkeys(
+                scheduler_unresolved
+                + [zone_id for zone_id, status in statuses.items() if status == "failed"]
+            )
+        )
+        if scheduler_failed and not failed:
+            # A structured failure without IDs is still authoritative.  Attach
+            # known group zones for retries; if the DB also has none, the generic
+            # group-level error below remains visible to the operator.
+            failed = list(statuses)
+        pending = [
+            zone_id
+            for zone_id, status in statuses.items()
+            if status == "pending" and zone_id not in failed
+        ]
         unresolved = failed + pending
-        if not unresolved:
+        if not unresolved and not scheduler_failed:
             return "⏹ Полив группы остановлен"
 
         retry_at = datetime.now() + timedelta(seconds=15)
@@ -240,6 +265,8 @@ def _do_group_stop(group_id: int) -> str:
         if failed:
             ids = ", ".join(str(zone_id) for zone_id in failed)
             messages.append(f"⚠️ OFF не подтверждён для зон: {ids}.")
+        elif scheduler_failed:
+            messages.append(f"⚠️ OFF не подтверждён для группы {int(group_id)}.")
         if pending:
             ids = ", ".join(str(zone_id) for zone_id in pending)
             messages.append(f"⏳ Команда OFF принята для зон: {ids}; ожидается свежее подтверждение реле.")

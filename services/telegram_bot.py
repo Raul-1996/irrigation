@@ -13,7 +13,6 @@ from database import db
 from utils import decrypt_secret
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))  # .../irrigation/services
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 # --- надёжная загрузка локального routes-модуля по пути файла ---
 _routes_mod = None
@@ -60,25 +59,9 @@ except ImportError as e:
     _AInlineKeyboardMarkup = None
     _AInlineKeyboardButton = None
 
-try:
-    if not getattr(logger, "_telegram_configured", False):
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        log_path = os.path.join(LOGS_DIR, "telegram.txt")
-        fh = logging.FileHandler(log_path, encoding="utf-8")
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-        # консоль
-        if not any(isinstance(h, logging.StreamHandler) for h in getattr(logger, "handlers", [])):
-            sh = logging.StreamHandler()
-            sh.setFormatter(fmt)
-            logger.addHandler(sh)
-        logger.setLevel(logging.INFO)
-        logger.propagate = True
-        logger._telegram_configured = True  # type: ignore[attr-defined]
-        logger.info(f"telegram service logger initialized -> {log_path}")
-except (OSError, PermissionError) as e:
-    logger.debug("Handled exception in line_74: %s", e)
+# Telegram inherits the application's hardened root handlers.  A dedicated
+# handler previously created services/logs/telegram.txt under the process umask
+# and duplicated unfiltered PII outside the protected application log.
 
 
 def _redact_url(url: str) -> str:
@@ -202,9 +185,14 @@ class TelegramNotifier:
                 return False
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             payload = {"chat_id": int(chat_id), "text": str(text)}
-            logger.info(f"http POST {_redact_url(url)} payload={payload}")
+            logger.info(
+                "http POST %s chat_id=%s text_len=%s",
+                _redact_url(url),
+                int(chat_id),
+                len(str(text)),
+            )
             resp = requests.post(url, json=payload, timeout=10)
-            logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
+            logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
         except (ValueError, TypeError, KeyError) as e:
@@ -249,7 +237,7 @@ class TelegramNotifier:
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             logger.info(f"http POST {_redact_url(url)} payload_keys={list(payload.keys())}")
             resp = requests.post(url, json=payload, timeout=10)
-            logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
+            logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
         except (ValueError, TypeError, KeyError) as e:
@@ -291,7 +279,7 @@ class TelegramNotifier:
             url = f"https://api.telegram.org/bot{token}/editMessageText"
             logger.info(f"http POST {_redact_url(url)} payload_keys={list(payload.keys())}")
             resp = requests.post(url, json=payload, timeout=10)
-            logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
+            logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
         except (ValueError, TypeError, KeyError) as e:
@@ -843,6 +831,15 @@ def _start_runtime_locked() -> bool:
     return _http_poller.start()
 
 
+def _start_runtime_safely_locked() -> bool:
+    """Normalize both bootstrap rejection and Thread.start exceptions."""
+    try:
+        return bool(_start_runtime_locked())
+    except (OSError, RuntimeError, TypeError, ValueError) as e:
+        logger.error("Telegram polling runtime start failed: %s", e)
+        return False
+
+
 def _stop_runtime_locked() -> bool:
     """Stop current pollers before a token transition; caller holds lock."""
     global _aiogram_runner, _http_poller
@@ -887,20 +884,23 @@ def reconfigure_bot_token(token_encrypted: str | None) -> bool:
 
             if not persisted:
                 if old_encrypted:
-                    _start_runtime_locked()
+                    _start_runtime_safely_locked()
                 return False
             if not token_encrypted:
                 return True
-            if _start_runtime_locked():
+            if _start_runtime_safely_locked():
                 return True
 
             logger.error("Telegram token change rolled back: new polling runtime did not start")
-            _stop_runtime_locked()
+            try:
+                _stop_runtime_locked()
+            except (OSError, RuntimeError, TypeError, ValueError) as e:
+                logger.error("Failed to stop rejected Telegram runtime: %s", e)
             with notifier._lock:
                 restored = db.set_setting_value("telegram_bot_token_encrypted", old_encrypted)
                 notifier.invalidate_token()
             if old_encrypted:
-                restored = _start_runtime_locked() and restored
+                restored = _start_runtime_safely_locked() and restored
             if not restored:
                 logger.critical("Telegram token rollback failed; polling remains stopped")
             return False
@@ -918,7 +918,7 @@ def start_long_polling_if_needed():
             logger.debug("TESTING mode: skipping telegram long polling")
             return
         with _runtime_lock:
-            if _start_runtime_locked():
+            if _start_runtime_safely_locked():
                 logger.info("telegram polling runtime started")
             else:
                 logger.error("telegram polling runtime failed to start")

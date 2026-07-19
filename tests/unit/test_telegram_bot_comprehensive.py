@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -524,3 +526,92 @@ def test_reconfigure_token_rolls_back_when_new_runtime_cannot_start() -> None:
         (("telegram_bot_token_encrypted", "old-encrypted"),),
     ]
     assert start.call_count == 2
+
+
+def test_reconfigure_token_rolls_back_when_runtime_start_raises() -> None:
+    from services import telegram_bot
+
+    telegram_bot.notifier._token = "old-plaintext"
+    starts = 0
+
+    def start_runtime() -> bool:
+        nonlocal starts
+        starts += 1
+        if starts == 1:
+            raise RuntimeError("thread start rejected")
+        telegram_bot.notifier._token = "old-plaintext"
+        return True
+
+    with (
+        patch.object(telegram_bot.db, "get_setting_value", return_value="old-encrypted"),
+        patch.object(telegram_bot, "_stop_runtime_locked", return_value=True),
+        patch.object(telegram_bot.db, "set_setting_value", return_value=True) as persist,
+        patch.object(telegram_bot, "_start_runtime_locked", side_effect=start_runtime),
+    ):
+        assert telegram_bot.reconfigure_bot_token("new-encrypted") is False
+
+    assert persist.call_args_list == [
+        (("telegram_bot_token_encrypted", "new-encrypted"),),
+        (("telegram_bot_token_encrypted", "old-encrypted"),),
+    ]
+    assert starts == 2
+    assert telegram_bot.notifier._token == "old-plaintext"
+    telegram_bot.notifier.invalidate_token()
+
+
+def test_permissive_umask_import_does_not_install_telegram_file_handler() -> None:
+    """Telegram logging must inherit hardened root handlers, never create 0644 PII logs."""
+    script = """
+import logging
+import os
+
+os.umask(0)
+
+def forbidden_file_handler(*args, **kwargs):
+    raise AssertionError("dedicated Telegram FileHandler is forbidden")
+
+logging.FileHandler = forbidden_file_handler
+import services.telegram_bot as telegram_bot
+assert telegram_bot.logger.handlers == []
+"""
+    env = dict(os.environ)
+    env["TESTING"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_outgoing_http_logs_never_include_message_or_response_body(caplog) -> None:
+    from services import telegram_bot
+
+    class Response:
+        ok = True
+        status_code = 200
+        text = "SECRET TELEGRAM RESPONSE BODY"
+
+        @staticmethod
+        def json() -> dict:
+            return {"ok": True}
+
+    notifier = telegram_bot.TelegramNotifier()
+    with (
+        patch("config.TESTING", False),
+        patch.object(telegram_bot, "Bot", None),
+        patch.object(notifier, "_ensure_token", return_value="123456:SECRET_TOKEN"),
+        patch.object(telegram_bot.requests, "post", return_value=Response()),
+        caplog.at_level("INFO", logger="TELEGRAM"),
+    ):
+        assert notifier.send_text(12345, "TOP SECRET CUSTOMER MESSAGE") is True
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "TOP SECRET CUSTOMER MESSAGE" not in logged
+    assert "SECRET TELEGRAM RESPONSE BODY" not in logged
+    assert "SECRET_TOKEN" not in logged
+    assert "chat_id=12345" in logged

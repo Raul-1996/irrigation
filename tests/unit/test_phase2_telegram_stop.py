@@ -52,6 +52,45 @@ def test_group_stop_reports_unresolved_off_and_replants_hard_stop() -> None:
     assert isinstance(run_at, datetime)
 
 
+def test_group_stop_honors_structured_scheduler_unresolved_result() -> None:
+    scheduler = Mock()
+    scheduler.cancel_group_jobs.return_value = {
+        "success": False,
+        "stopped": [],
+        "unresolved": [74],
+        "group_id": 7,
+    }
+    stale_logical_off = [{"id": 74, "group_id": 7, "state": "off", "observed_state": None}]
+
+    with (
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch.object(telegram.db, "get_zones_by_group", return_value=stale_logical_off),
+    ):
+        result = telegram._do_group_stop(7)
+
+    assert "OFF не подтверждён" in result
+    assert "74" in result
+    scheduler.schedule_zone_hard_stop.assert_called_once()
+
+
+def test_group_stop_honors_structured_scheduler_failure_without_ids() -> None:
+    scheduler = Mock()
+    scheduler.cancel_group_jobs.return_value = {
+        "success": False,
+        "stopped": [],
+        "unresolved": [],
+        "group_id": 7,
+    }
+
+    with (
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch.object(telegram.db, "get_zones_by_group", return_value=[]),
+    ):
+        result = telegram._do_group_stop(7)
+
+    assert "OFF не подтверждён для группы 7" in result
+
+
 def test_group_stop_treats_logical_off_with_observed_on_as_unresolved() -> None:
     scheduler = Mock()
     physically_on = [
