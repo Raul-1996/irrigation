@@ -506,12 +506,46 @@ def _response_status(events: list[dict]) -> int:
     return next(event["status"] for event in events if event["type"] == "http.response.start")
 
 
-def test_sse_saturation_preserves_workers_for_ready_and_control(app, monkeypatch):
+def test_sse_response_close_is_cross_context_safe_and_idempotent(admin_client, monkeypatch, recwarn):
+    import routes.zones_watering_api as route
+
+    msg_queue: queue.Queue = queue.Queue()
+    unregistered = []
+    close_errors: list[BaseException] = []
+    monkeypatch.setattr(route, "_SSE_HTTP_ACTIVE", 0)
+    monkeypatch.setattr(route._sse_hub, "ensure_hub_started", lambda: None)
+    monkeypatch.setattr(route._sse_hub, "register_client", lambda: msg_queue)
+    monkeypatch.setattr(route._sse_hub, "unregister_client", unregistered.append)
+
+    response = admin_client.get("/api/mqtt/zones-sse", buffered=False)
+    assert response.status_code == 200
+    assert next(response.response) == b": connected\n\n"
+
+    def close_response():
+        try:
+            response.close()
+            response.close()
+        except BaseException as exc:  # surfaced below instead of becoming unraisable
+            close_errors.append(exc)
+
+    closer = threading.Thread(target=close_response, name="cross-context-sse-close")
+    closer.start()
+    closer.join(timeout=1.0)
+    assert not closer.is_alive()
+
+    assert close_errors == []
+    assert unregistered == [msg_queue]
+    assert route._SSE_HTTP_ACTIVE == 0
+    assert not any("ContextVar" in str(warning.message) for warning in recwarn)
+
+
+def test_sse_saturation_preserves_workers_for_ready_and_control(app, monkeypatch, recwarn):
     """One live stream on a two-worker executor must leave one control worker."""
     import routes.zones_watering_api as route
     from run import _get_asgi_app, _http_executor_workers
 
     queues: list[queue.Queue] = []
+    unregistered: list[queue.Queue] = []
 
     def register_client():
         msg_queue: queue.Queue = queue.Queue()
@@ -520,12 +554,13 @@ def test_sse_saturation_preserves_workers_for_ready_and_control(app, monkeypatch
 
     monkeypatch.setattr(route._sse_hub, "ensure_hub_started", lambda: None)
     monkeypatch.setattr(route._sse_hub, "register_client", register_client)
-    monkeypatch.setattr(route._sse_hub, "unregister_client", lambda _queue: None)
+    monkeypatch.setattr(route._sse_hub, "unregister_client", unregistered.append)
     app.config.update(
         HTTP_EXECUTOR_WORKERS=2,
         HTTP_CONTROL_WORKER_RESERVE=1,
         SSE_HTTP_MAX_CLIENTS=1,
     )
+    assert route._SSE_HTTP_ACTIVE == 0
     assert _http_executor_workers(app) == 2
 
     async def scenario():
@@ -563,3 +598,6 @@ def test_sse_saturation_preserves_workers_for_ready_and_control(app, monkeypatch
                 await asyncio.wait_for(asyncio.gather(*stream_tasks, return_exceptions=True), timeout=2.0)
 
     asyncio.run(scenario())
+    assert unregistered == queues
+    assert route._SSE_HTTP_ACTIVE == 0
+    assert not any("ContextVar" in str(warning.message) for warning in recwarn)

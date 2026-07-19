@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from datetime import datetime
 
-from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+from flask import Blueprint, Response, current_app, jsonify, request
 
 from database import db
 from irrigation_scheduler import get_scheduler
@@ -359,12 +359,29 @@ def api_mqtt_zones_sse():
         release_slot()
         raise
 
+    close_lock = threading.Lock()
+    stream_closed = False
+
+    def _close_stream() -> None:
+        nonlocal stream_closed
+        with close_lock:
+            if stream_closed:
+                return
+            stream_closed = True
+        try:
+            _sse_hub.unregister_client(msg_queue)
+        except Exception:
+            logger.exception("SSE client unregister failed")
+        finally:
+            release_slot()
+
     def _generate():
         import queue as _q
 
-        # Initial handshake + snapshot trigger
-        yield ": connected\n\n"
         try:
+            # Keep the first yield inside the cleanup scope: clients commonly
+            # close immediately after the handshake.
+            yield ": connected\n\n"
             while True:
                 try:
                     data = msg_queue.get(timeout=15.0)
@@ -375,14 +392,15 @@ def api_mqtt_zones_sse():
                     break  # eviction sentinel
                 yield f"data: {data}\n\n"
         finally:
-            _sse_hub.unregister_client(msg_queue)
-            release_slot()
+            _close_stream()
 
-    resp = Response(stream_with_context(_generate()), mimetype="text/event-stream")
+    # The generator uses no request-local state, so wrapping it in
+    # stream_with_context is unnecessary and makes cross-context close unsafe.
+    resp = Response(_generate(), mimetype="text/event-stream")
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
     resp.headers["Connection"] = "keep-alive"
-    resp.call_on_close(release_slot)
+    resp.call_on_close(_close_stream)
     return resp
 
 
