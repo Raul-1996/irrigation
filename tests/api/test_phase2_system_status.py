@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -142,6 +143,7 @@ def test_status_preserves_recent_runtime_health_when_snapshot_is_temporarily_una
         lambda server_ids: snapshots.pop(0),
         raising=False,
     )
+    monkeypatch.setattr(system_status_api, "_runtime_generation_token", lambda: b"stable-runtime")
     reset_cache = getattr(system_status_api, "_reset_runtime_mqtt_health_cache", None)
     assert reset_cache is not None
     reset_cache()
@@ -151,6 +153,85 @@ def test_status_preserves_recent_runtime_health_when_snapshot_is_temporarily_una
 
     assert first.get_json()["mqtt_connected"] is True
     assert second.get_json()["mqtt_connected"] is True
+
+
+def test_status_does_not_carry_cached_health_across_password_rotation(admin_client, app, monkeypatch):
+    """A connected old credential set says nothing about the rotated one."""
+    from routes import system_status_api
+
+    server = app.db.create_mqtt_server(
+        {
+            "name": "credential-rotation",
+            "host": "broker.invalid",
+            "port": 1883,
+            "username": "irrigation",
+            "password": "old-password",
+            "enabled": 1,
+        }
+    )
+    sid = int(server["id"])
+
+    class AcceptedClient:
+        @staticmethod
+        def is_connected():
+            return True
+
+    old_config = app.db.get_mqtt_server(sid)
+    fake_hub = SimpleNamespace(
+        _SSE_HUB_LOCK=threading.Lock(),
+        _SSE_HUB_MQTT={sid: AcceptedClient()},
+        _SSE_HUB_SERVER_KEYS={sid: system_status_api._server_runtime_config(old_config)},
+        _SSE_HUB_REQUESTED_GENERATION=7,
+        _SSE_HUB_APPLIED_GENERATION=7,
+    )
+    monkeypatch.setattr(system_status_api, "_sse_hub", fake_hub)
+    system_status_api._reset_runtime_mqtt_health_cache()
+
+    healthy = admin_client.get("/api/status").get_json()
+    assert healthy["mqtt_connected"] is True
+
+    assert app.db.update_mqtt_server(sid, {"password": "rotated-password"}) is True
+    rotated = admin_client.get("/api/status").get_json()
+
+    assert rotated["mqtt_connected"] is False
+    assert rotated["mqtt_health"]["status"] == "unknown"
+
+
+def test_status_does_not_carry_cached_health_across_runtime_rebuild(admin_client, app, monkeypatch):
+    """A rebuilt client generation needs its own accepted CONNACK."""
+    from routes import system_status_api
+
+    server = app.db.create_mqtt_server(
+        {
+            "name": "runtime-rebuild",
+            "host": "broker.invalid",
+            "port": 1883,
+            "enabled": 1,
+        }
+    )
+    snapshots = [{int(server["id"]): True}, {}]
+    generation = {"value": b"generation-1"}
+    monkeypatch.setattr(
+        system_status_api,
+        "_snapshot_runtime_mqtt_health",
+        lambda servers: snapshots.pop(0),
+    )
+    monkeypatch.setattr(
+        system_status_api,
+        "_runtime_generation_token",
+        lambda: generation["value"],
+        raising=False,
+    )
+    system_status_api._reset_runtime_mqtt_health_cache()
+
+    healthy = admin_client.get("/api/status").get_json()
+    assert healthy["mqtt_connected"] is True
+
+    generation["value"] = b"generation-2"
+    rebuilt = admin_client.get("/api/status").get_json()
+
+    assert rebuilt["mqtt_connected"] is False
+    assert rebuilt["mqtt_health"]["status"] == "unknown"
 
 
 def test_status_runtime_health_cache_is_bounded(monkeypatch):
@@ -179,6 +260,39 @@ def test_status_runtime_health_cache_is_bounded(monkeypatch):
     runtime_health(servers)
 
     assert len(system_status_api._MQTT_RUNTIME_HEALTH_CACHE) <= system_status_api.MQTT_RUNTIME_HEALTH_CACHE_MAX
+
+
+def test_status_runtime_cache_key_does_not_store_plaintext_secret(monkeypatch):
+    from routes import system_status_api
+
+    secret = "cache-key-must-not-contain-this-password"
+    system_status_api._reset_runtime_mqtt_health_cache()
+    monkeypatch.setattr(
+        system_status_api,
+        "_snapshot_runtime_mqtt_health",
+        lambda servers: {47: True},
+    )
+    monkeypatch.setattr(
+        system_status_api,
+        "_runtime_generation_token",
+        lambda: b"test-generation",
+        raising=False,
+    )
+
+    system_status_api._runtime_mqtt_health(
+        [
+            {
+                "id": 47,
+                "host": "broker.invalid",
+                "port": 1883,
+                "username": "irrigation",
+                "password": secret,
+                "enabled": 1,
+            }
+        ]
+    )
+
+    assert secret not in repr(tuple(system_status_api._MQTT_RUNTIME_HEALTH_CACHE))
 
 
 def test_status_degrades_structurally_when_mqtt_secret_cannot_be_decrypted(admin_client, app, monkeypatch):

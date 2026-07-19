@@ -1,6 +1,9 @@
 """System Status API — status, health, scheduler, logs, water, server-time."""
 
+import hashlib
+import json
 import logging
+import secrets
 import sqlite3
 import threading
 import time
@@ -37,33 +40,61 @@ MQTT_RUNTIME_HEALTH_CACHE_TTL_SEC = 30.0
 MQTT_RUNTIME_HEALTH_CACHE_MAX = 64
 _MQTT_RUNTIME_HEALTH_CACHE: "OrderedDict[tuple[Any, ...], tuple[bool, float]]" = OrderedDict()
 _MQTT_RUNTIME_HEALTH_CACHE_LOCK = threading.Lock()
+_MQTT_RUNTIME_FINGERPRINT_KEY = secrets.token_bytes(32)
+_MQTT_RUNTIME_TOKEN_LOCK = threading.Lock()
+_MQTT_LAST_SSE_RUNTIME_TOKEN = b""
+_MQTT_LAST_PUBLISHER_RUNTIME_TOKEN = b""
+_MQTT_CONNECTION_FIELDS = (
+    "host",
+    "port",
+    "username",
+    "password",
+    "client_id",
+    "enabled",
+    "tls_enabled",
+    "tls_ca_path",
+    "tls_cert_path",
+    "tls_key_path",
+    "tls_insecure",
+    "tls_version",
+)
 
 
 def _reset_runtime_mqtt_health_cache() -> None:
     """Clear process-local health state (also used for deterministic tests)."""
+    global _MQTT_LAST_PUBLISHER_RUNTIME_TOKEN, _MQTT_LAST_SSE_RUNTIME_TOKEN
     with _MQTT_RUNTIME_HEALTH_CACHE_LOCK:
         _MQTT_RUNTIME_HEALTH_CACHE.clear()
+    with _MQTT_RUNTIME_TOKEN_LOCK:
+        _MQTT_LAST_SSE_RUNTIME_TOKEN = b""
+        _MQTT_LAST_PUBLISHER_RUNTIME_TOKEN = b""
 
 
-def _server_health_cache_key(server: dict[str, Any]) -> tuple[Any, ...]:
-    """Tie cached state to this DB instance and immutable connection identity."""
-    try:
-        port = int(server.get("port") or 1883)
-    except (TypeError, ValueError):
-        port = 1883
+def _opaque_runtime_fingerprint(value: Any) -> bytes:
+    """Return a process-keyed digest; plaintext credentials never enter a key."""
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.blake2s(encoded, key=_MQTT_RUNTIME_FINGERPRINT_KEY, digest_size=16).digest()
+
+
+def _server_runtime_config(server: dict[str, Any]) -> tuple[Any, ...]:
+    """Match the exact connection settings used by long-lived clients."""
+    return tuple(server.get(field) for field in _MQTT_CONNECTION_FIELDS)
+
+
+def _server_config_fingerprint(server: dict[str, Any]) -> bytes:
+    # updated_at invalidates cache even for a same-value explicit rotation;
+    # the keyed digest includes the decrypted password without retaining it.
+    values = (*_server_runtime_config(server), server.get("updated_at"))
+    return _opaque_runtime_fingerprint(values)
+
+
+def _server_health_cache_key(server: dict[str, Any], runtime_token: bytes) -> tuple[Any, ...]:
+    """Tie cached state to DB, full config and the concrete runtime generation."""
     return (
         id(db),
         int(server.get("id") or 0),
-        str(server.get("host") or ""),
-        port,
-        str(server.get("username") or ""),
-        str(server.get("client_id") or ""),
-        int(server.get("tls_enabled") or 0),
-        str(server.get("tls_ca_path") or ""),
-        str(server.get("tls_cert_path") or ""),
-        str(server.get("tls_key_path") or ""),
-        int(server.get("tls_insecure") or 0),
-        str(server.get("tls_version") or ""),
+        _server_config_fingerprint(server),
+        runtime_token,
     )
 
 
@@ -85,24 +116,99 @@ def _copy_runtime_clients(lock: Any, clients: Any, server_ids: set[int]) -> dict
                 pass
 
 
-def _snapshot_runtime_mqtt_health(server_ids: set[int]) -> dict[int, bool]:
+def _runtime_generation_token() -> bytes:
+    """Fingerprint live registries, preserving the last token during lock races."""
+    global _MQTT_LAST_PUBLISHER_RUNTIME_TOKEN, _MQTT_LAST_SSE_RUNTIME_TOKEN
+    sse_token: bytes | None = None
+    acquired = False
+    try:
+        acquired = bool(_sse_hub._SSE_HUB_LOCK.acquire(blocking=False))
+        if acquired:
+            entries = [
+                (
+                    int(sid),
+                    id(client),
+                    _opaque_runtime_fingerprint(_sse_hub._SSE_HUB_SERVER_KEYS.get(sid)),
+                )
+                for sid, client in sorted(_sse_hub._SSE_HUB_MQTT.items())
+            ]
+            sse_token = _opaque_runtime_fingerprint(
+                (
+                    int(_sse_hub._SSE_HUB_REQUESTED_GENERATION),
+                    int(_sse_hub._SSE_HUB_APPLIED_GENERATION),
+                    entries,
+                )
+            )
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        sse_token = None
+    finally:
+        if acquired:
+            try:
+                _sse_hub._SSE_HUB_LOCK.release()
+            except (AttributeError, RuntimeError):
+                pass
+
+    publisher_token: bytes | None = None
+    acquired = False
+    try:
+        from services import mqtt_pub
+
+        acquired = bool(mqtt_pub._MQTT_CLIENTS_LOCK.acquire(blocking=False))
+        if acquired:
+            publisher_token = _opaque_runtime_fingerprint(
+                [(int(sid), id(client)) for sid, client in sorted(mqtt_pub._MQTT_CLIENTS.items())]
+            )
+    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
+        publisher_token = None
+    finally:
+        if acquired:
+            try:
+                mqtt_pub._MQTT_CLIENTS_LOCK.release()
+            except (AttributeError, NameError, RuntimeError):
+                pass
+
+    with _MQTT_RUNTIME_TOKEN_LOCK:
+        if sse_token is not None:
+            _MQTT_LAST_SSE_RUNTIME_TOKEN = sse_token
+        if publisher_token is not None:
+            _MQTT_LAST_PUBLISHER_RUNTIME_TOKEN = publisher_token
+        return _opaque_runtime_fingerprint(
+            (_MQTT_LAST_SSE_RUNTIME_TOKEN.hex(), _MQTT_LAST_PUBLISHER_RUNTIME_TOKEN.hex())
+        )
+
+
+def _snapshot_runtime_mqtt_health(servers: dict[int, dict[str, Any]]) -> dict[int, bool]:
     """Return non-blocking health observations from permanent MQTT clients.
 
     Paho's ``is_connected()`` becomes true only after an accepted CONNACK.
     Merely having a client object, a socket, or a successful ``connect()``
     return code is deliberately not treated as broker health.
     """
-    if not server_ids:
+    if not servers:
         return {}
+    server_ids = set(servers)
     candidates: dict[int, list[Any]] = {}
+    acquired = False
     try:
-        hub_clients = _copy_runtime_clients(
-            _sse_hub._SSE_HUB_LOCK,
-            _sse_hub._SSE_HUB_MQTT,
-            server_ids,
-        )
-    except AttributeError:
+        acquired = bool(_sse_hub._SSE_HUB_LOCK.acquire(blocking=False))
+        if acquired:
+            hub_clients = {
+                int(sid): client
+                for sid, client in _sse_hub._SSE_HUB_MQTT.items()
+                if int(sid) in server_ids
+                and _sse_hub._SSE_HUB_SERVER_KEYS.get(sid) == _server_runtime_config(servers[int(sid)])
+            }
+        else:
+            hub_clients = {}
+    except (AttributeError, RuntimeError, TypeError, ValueError):
         hub_clients = {}
+    finally:
+        if acquired:
+            try:
+                _sse_hub._SSE_HUB_LOCK.release()
+            except (AttributeError, RuntimeError):
+                pass
+    acquired = False
     try:
         from services import mqtt_pub
 
@@ -111,8 +217,30 @@ def _snapshot_runtime_mqtt_health(server_ids: set[int]) -> dict[int, bool]:
             mqtt_pub._MQTT_CLIENTS,
             server_ids,
         )
-    except (AttributeError, ImportError):
+        acquired = bool(mqtt_pub._SERVER_CACHE_LOCK.acquire(blocking=False))
+        if acquired:
+            publisher_configs = {
+                int(sid): entry[0]
+                for sid, entry in mqtt_pub._SERVER_CACHE.items()
+                if int(sid) in server_ids and isinstance(entry, tuple) and entry
+            }
+        else:
+            publisher_configs = {}
+    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
         publisher_clients = {}
+        publisher_configs = {}
+    finally:
+        if acquired:
+            try:
+                mqtt_pub._SERVER_CACHE_LOCK.release()
+            except (AttributeError, NameError, RuntimeError):
+                pass
+    publisher_clients = {
+        sid: client
+        for sid, client in publisher_clients.items()
+        if sid in publisher_configs
+        and _server_runtime_config(publisher_configs[sid]) == _server_runtime_config(servers[sid])
+    }
     for source in (hub_clients, publisher_clients):
         for sid, client in source.items():
             candidates.setdefault(sid, []).append(client)
@@ -150,15 +278,21 @@ def _runtime_mqtt_health(servers: list[dict[str, Any]]) -> dict[str, Any]:
             "known_servers": 0,
         }
 
-    server_ids = {int(server.get("id") or 0) for server in servers}
-    observed = _snapshot_runtime_mqtt_health(server_ids)
+    servers_by_id = {int(server.get("id") or 0): server for server in servers}
+    generation_before = _runtime_generation_token()
+    observed = _snapshot_runtime_mqtt_health(servers_by_id)
+    runtime_token = _runtime_generation_token()
+    if runtime_token != generation_before:
+        # Registry changed while it was being inspected. Do not attach the
+        # old observation to the new generation; the next poll can confirm it.
+        observed = {}
     now = time.monotonic()
     states: dict[int, bool] = {}
     with _MQTT_RUNTIME_HEALTH_CACHE_LOCK:
         _prune_runtime_mqtt_health_cache(now)
         for server in servers:
             sid = int(server.get("id") or 0)
-            key = _server_health_cache_key(server)
+            key = _server_health_cache_key(server, runtime_token)
             if sid in observed:
                 _MQTT_RUNTIME_HEALTH_CACHE[key] = (bool(observed[sid]), now)
                 _MQTT_RUNTIME_HEALTH_CACHE.move_to_end(key)
@@ -185,12 +319,13 @@ def _runtime_mqtt_health(servers: list[dict[str, Any]]) -> dict[str, Any]:
 def _last_known_runtime_mqtt_health() -> dict[str, Any]:
     """Preserve a recent signal when encrypted configuration is unavailable."""
     now = time.monotonic()
+    runtime_token = _runtime_generation_token()
     with _MQTT_RUNTIME_HEALTH_CACHE_LOCK:
         _prune_runtime_mqtt_health_cache(now)
         states = [
             connected
             for key, (connected, _observed_at) in _MQTT_RUNTIME_HEALTH_CACHE.items()
-            if key and key[0] == id(db)
+            if key and key[0] == id(db) and len(key) > 3 and key[3] == runtime_token
         ]
     return {
         "status": "degraded",
