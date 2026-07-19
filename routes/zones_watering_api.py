@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
@@ -18,6 +19,84 @@ from utils import normalize_topic
 logger = logging.getLogger(__name__)
 
 zones_watering_api_bp = Blueprint("zones_watering_api", __name__)
+
+_SSE_HTTP_LOCK = threading.Lock()
+_SSE_HTTP_ACTIVE = 0
+
+
+def _sse_http_limit() -> int:
+    """Compute a cap that always leaves the configured control reserve."""
+    try:
+        workers = max(2, int(current_app.config.get("HTTP_EXECUTOR_WORKERS", 8)))
+        reserve = min(workers - 1, max(1, int(current_app.config.get("HTTP_CONTROL_WORKER_RESERVE", 2))))
+        configured = max(1, int(current_app.config.get("SSE_HTTP_MAX_CLIENTS", 4)))
+        return min(configured, workers - reserve)
+    except (AttributeError, TypeError, ValueError):
+        return 1
+
+
+def _acquire_sse_http_slot(limit: int):
+    """Acquire a global stream lease and return an idempotent releaser."""
+    global _SSE_HTTP_ACTIVE
+    with _SSE_HTTP_LOCK:
+        if max(1, int(limit)) <= _SSE_HTTP_ACTIVE:
+            return None
+        _SSE_HTTP_ACTIVE += 1
+
+    released = False
+
+    def _release() -> None:
+        nonlocal released
+        global _SSE_HTTP_ACTIVE
+        with _SSE_HTTP_LOCK:
+            if released:
+                return
+            released = True
+            _SSE_HTTP_ACTIVE = max(0, _SSE_HTTP_ACTIVE - 1)
+
+    return _release
+
+
+def _signal_group_session_cancel(scheduler, group_id: int) -> None:
+    """Stop the sequencer advancing while physical OFF is being confirmed."""
+    try:
+        event = scheduler.group_cancel_events.get(int(group_id))
+        if event is not None:
+            event.set()
+    except (AttributeError, KeyError, TypeError, ValueError):
+        logger.exception("group session cancel signal failed group=%s", group_id)
+
+
+def _abort_group_session_after_off(scheduler, group_id: int) -> bool:
+    """Cancel scheduler retries only after every group OFF command succeeds."""
+    _signal_group_session_cancel(scheduler, int(group_id))
+    try:
+        zones = db.get_zones_by_group(int(group_id)) or []
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        logger.exception("session abort: unable to load group zones group=%s", group_id)
+        return False
+
+    from services.zone_control import stop_zone as _stop_central
+
+    all_stopped = True
+    for member in zones:
+        try:
+            stopped = _stop_central(int(member["id"]), reason="manual_session_abort", force=True)
+        except (ValueError, TypeError, KeyError, RuntimeError):
+            logger.exception("session abort OFF failed zone=%s", member.get("id"))
+            stopped = False
+        if not stopped:
+            all_stopped = False
+    if not all_stopped:
+        # Keep zone_stop / hard_stop jobs planted.  They are the remaining
+        # recovery path when the immediate physical OFF command failed.
+        return False
+    try:
+        scheduler.cancel_group_jobs(int(group_id))
+        return True
+    except (ValueError, TypeError, KeyError, RuntimeError):
+        logger.exception("session abort cleanup failed group=%s", group_id)
+        return False
 
 
 # ---- Zone start/stop ----
@@ -86,7 +165,9 @@ def stop_zone(zone_id):
             except Exception:
                 logger.exception("session_aborted_by_user audit failed")
             try:
-                sched.cancel_group_jobs(int(gid))
+                session_stopped = _abort_group_session_after_off(sched, int(gid))
+                if not session_stopped:
+                    return jsonify({"success": False, "message": "Не удалось остановить сессию группы"}), 500
                 return jsonify(
                     {
                         "success": True,
@@ -254,12 +335,29 @@ def api_mqtt_zones_sse():
       clients don't get mass-evicted during burst; (2) MAX_SSE_CLIENTS
       hard cap so hub thread doesn't accumulate unbounded queues.
     """
+    release_slot = _acquire_sse_http_slot(_sse_http_limit())
+    if release_slot is None:
+        response = jsonify(
+            {
+                "success": False,
+                "message": "Too many live-update connections",
+                "error_code": "SSE_CAPACITY",
+            }
+        )
+        response.status_code = 503
+        response.headers["Retry-After"] = "5"
+        return response
+
     try:
         _sse_hub.ensure_hub_started()
     except (OSError, RuntimeError) as e:
         logger.debug("SSE hub start (background): %s", e)
 
-    msg_queue = _sse_hub.register_client()
+    try:
+        msg_queue = _sse_hub.register_client()
+    except Exception:
+        release_slot()
+        raise
 
     def _generate():
         import queue as _q
@@ -278,11 +376,13 @@ def api_mqtt_zones_sse():
                 yield f"data: {data}\n\n"
         finally:
             _sse_hub.unregister_client(msg_queue)
+            release_slot()
 
     resp = Response(stream_with_context(_generate()), mimetype="text/event-stream")
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
     resp.headers["Connection"] = "keep-alive"
+    resp.call_on_close(release_slot)
     return resp
 
 
@@ -417,9 +517,9 @@ def api_zone_mqtt_stop(zone_id: int):
         except Exception:
             logger.exception("session_aborted_by_user audit failed")
         try:
-            sched.cancel_group_jobs(int(gid))
-            # cancel_group_jobs already invokes stop_all_in_group(force=True)
-            # which stops THIS zone too, so we don't need an extra stop_zone.
+            session_stopped = _abort_group_session_after_off(sched, int(gid))
+            if not session_stopped:
+                return jsonify({"success": False, "message": "Не удалось остановить сессию группы"}), 500
             return jsonify({"success": True, "message": "Сессия группы остановлена", "session_aborted": True})
         except (ValueError, TypeError, KeyError, RuntimeError):
             # Best-effort safety net: fall through to the legacy single-zone
@@ -444,7 +544,10 @@ def api_zone_mqtt_stop(zone_id: int):
         if not server:
             return jsonify({"success": False, "message": "MQTT server not found"}), 400
         logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
-        _publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
+        published = _publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
+        if not published:
+            logger.error("HTTP publish OFF was not acknowledged zone=%s topic=%s", zone_id, t)
+            return jsonify({"success": False, "message": "MQTT publish failed"}), 500
         try:
             # Manual MQTT stop — operator action, audited.
             from services.zones_state import update_zone_state as _uzs

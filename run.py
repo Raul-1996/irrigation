@@ -7,10 +7,19 @@ import logging
 import os
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from app import app
 
 logger = logging.getLogger(__name__)
+
+
+def _http_executor_workers(flask_app) -> int:
+    """Return the explicit WSGI executor size used by Hypercorn."""
+    try:
+        return max(2, int(flask_app.config.get("HTTP_EXECUTOR_WORKERS", 8)))
+    except (AttributeError, TypeError, ValueError):
+        return 8
 
 
 def _graceful_shutdown(signum, frame):
@@ -75,7 +84,17 @@ if __name__ == "__main__":
         cfg = Config()
         cfg.bind = [f"0.0.0.0:{port}"]
         asgi_app = _get_asgi_app(app)
-        asyncio.run(serve(asgi_app, cfg))
+
+        async def _serve_with_bounded_executor():
+            loop = asyncio.get_running_loop()
+            executor = ThreadPoolExecutor(
+                max_workers=_http_executor_workers(app),
+                thread_name_prefix="wb-http",
+            )
+            loop.set_default_executor(executor)
+            await serve(asgi_app, cfg)
+
+        asyncio.run(_serve_with_bounded_executor())
     except ImportError:
         # Fallback to Flask dev server
         logger.info("Hypercorn not available, using Flask dev server")

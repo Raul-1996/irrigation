@@ -18,11 +18,50 @@ This file handles: app creation, config, logging, middleware, blueprint registra
 # tests/unit/test_logging_setup.py.
 import logging
 import os as _os_early
+import time as _time_early
+
+from dotenv import load_dotenv as _load_dotenv_early
+
+
+def _load_runtime_environment(dotenv_path: str | None = None) -> str | None:
+    """Load deployment env before logging and scheduler imports.
+
+    ``config.py`` also calls ``load_dotenv()``, but importing it after the
+    scheduler is too late for import-time timezone/logging setup.  WB_TZ is
+    the scheduler-specific override; when it is the only configured timezone
+    we also use it as the process timezone so logs and local timestamps agree.
+    The explicit WB_TZ value is returned because legacy logging setup may
+    otherwise replace it with the generic TZ value.
+    """
+    if dotenv_path is None:
+        _load_dotenv_early()
+    else:
+        _load_dotenv_early(dotenv_path=dotenv_path)
+
+    scheduler_tz = (_os_early.environ.get("WB_TZ") or "").strip() or None
+    process_tz = (_os_early.environ.get("TZ") or "").strip() or None
+    if scheduler_tz and not process_tz:
+        process_tz = scheduler_tz
+        _os_early.environ["TZ"] = scheduler_tz
+    if process_tz and hasattr(_time_early, "tzset"):
+        try:
+            _time_early.tzset()
+        except (OSError, ValueError):
+            pass
+    return scheduler_tz
+
+
+_EXPLICIT_WB_TZ = _load_runtime_environment()
 
 if _os_early.environ.get("TESTING") != "1" and "PYTEST_CURRENT_TEST" not in _os_early.environ:
     from services.logging_setup import setup_logging as _setup_logging_early
 
     _setup_logging_early(logging.getLogger("app"))
+    if _EXPLICIT_WB_TZ:
+        # setup_logging historically synchronises WB_TZ from TZ.  Restore the
+        # documented scheduler-specific override before irrigation_scheduler
+        # is imported below.
+        _os_early.environ["WB_TZ"] = _EXPLICIT_WB_TZ
 logger = logging.getLogger(__name__)
 
 import json
@@ -120,6 +159,31 @@ else:
 app.config["MAX_CONTENT_LENGTH"] = (
     22 * 1024 * 1024
 )  # 22MB (issue #11: route-level MAX_FILE_SIZE enforces 20MB; +2MB for multipart envelope)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# Hypercorn's WSGI bridge runs each request in the asyncio default executor.
+# Long-lived SSE generators therefore need a cap strictly below that pool so
+# readiness and emergency/control requests always retain worker capacity.
+_default_http_workers = max(8, min(32, (os.cpu_count() or 1) + 4))
+_http_workers = max(2, _positive_int_env("WB_HTTP_EXECUTOR_WORKERS", _default_http_workers))
+_control_reserve = min(
+    _http_workers - 1,
+    _positive_int_env("WB_HTTP_CONTROL_WORKER_RESERVE", 2),
+)
+_sse_http_cap = min(
+    _http_workers - _control_reserve,
+    _positive_int_env("WB_SSE_HTTP_MAX_CLIENTS", 4),
+)
+app.config["HTTP_EXECUTOR_WORKERS"] = _http_workers
+app.config["HTTP_CONTROL_WORKER_RESERVE"] = _control_reserve
+app.config["SSE_HTTP_MAX_CLIENTS"] = _sse_http_cap
 app.db = db
 csrf = CSRFProtect(app)
 
@@ -131,42 +195,30 @@ csrf.exempt(_api_login_view)
 # ── CSRF policy (SEC-003 fix) ──────────────────────────────────────────────
 # Previously every API blueprint was `csrf.exempt(bp)`, leaving all mutating
 # endpoints open to CSRF from any site the admin visits.  Now we exempt
-# ONLY the endpoints that are meant to be callable by the nginx-basic-auth
-# guest flow (the gardener who does not hold a Flask session / CSRF token),
-# which corresponds 1-to-1 with `_ALLOWED_PUBLIC_POSTS` /
-# `_ALLOWED_PUBLIC_PATTERNS` below.  Every other admin-only CRUD endpoint
+# ONLY read-only POSTs and fail-safe OFF endpoints that must remain callable
+# without an authenticated session.  Native production deploy has no
+# authenticating reverse proxy.  Every ON/resume action and admin-only CRUD
 # (photo upload/delete/rotate, zone/program/group create/update/delete,
 # weather settings, MQTT config, etc.) now requires the X-CSRFToken header
 # that `static/js/app.js` already attaches on all non-GET fetch calls.
 #
 # Guest-accessible endpoints (remain CSRF-exempt):
 from routes.audit_api import api_audit_ui_event
-from routes.groups_api import (
-    api_master_valve_toggle,
-    api_start_group_from_first,
-    api_start_zone_exclusive,
-    api_stop_group,
-)
+from routes.groups_api import api_stop_group
 from routes.system_config_api import api_postpone
-from routes.system_emergency_api import api_emergency_resume, api_emergency_stop
+from routes.system_emergency_api import api_emergency_stop
 from routes.system_status_api import api_status
 from routes.zones_crud_api import api_zones_next_watering_bulk
-from routes.zones_watering_api import api_zone_mqtt_start, api_zone_mqtt_stop, start_zone, stop_zone
+from routes.zones_watering_api import api_zone_mqtt_stop, stop_zone
 
 for _view in (
     api_postpone,  # /api/postpone
     api_emergency_stop,  # /api/emergency-stop
-    api_emergency_resume,  # /api/emergency-resume
     api_status,  # /api/status
-    start_zone,  # /api/zones/<id>/start
     stop_zone,  # /api/zones/<id>/stop
-    api_zone_mqtt_start,  # /api/zones/<id>/mqtt/start
     api_zone_mqtt_stop,  # /api/zones/<id>/mqtt/stop
     api_zones_next_watering_bulk,  # /api/zones/next-watering-bulk
     api_stop_group,  # /api/groups/<id>/stop
-    api_start_group_from_first,  # /api/groups/<id>/start-from-first
-    api_start_zone_exclusive,  # /api/groups/<id>/start-zone/<zid>
-    api_master_valve_toggle,  # /api/groups/<id>/master-valve/<action>
     api_audit_ui_event,  # /api/audit/ui — guests/viewers must record clicks
 ):
     csrf.exempt(_view)
@@ -181,7 +233,7 @@ for _view in (
 #   mqtt_api_bp         (MQTT server config)
 #   system_config_api_bp except /api/postpone above
 #   system_status_api_bp except /api/status
-#   groups_api_bp       (admin group CRUD; control endpoints exempt above)
+#   groups_api_bp       (admin group CRUD/ON/master; group OFF exempt above)
 
 _sse_hub.init(
     db=db,
@@ -333,6 +385,10 @@ def _reset_correlation_id_on_teardown(exc):
     """
     token = getattr(request, "_correlation_id_token", None)
     if token is not None:
+        # Streaming responses can cause Flask/Werkzeug to run teardown more
+        # than once for the same request context.  Clear the request-owned
+        # reference before reset so the same Token is never reused.
+        request._correlation_id_token = None
         _reset_correlation_id(token)
 
 
@@ -367,13 +423,21 @@ def _strip_conditional_revalidation(resp):
     return resp
 
 
+def _configure_session_cookie_secure(flask_app: Flask) -> None:
+    """Apply an explicit SESSION_COOKIE_SECURE env override.
+
+    Flask pre-populates this config key with ``False``, so checking whether
+    the key exists silently ignores the deployment environment.
+    """
+    raw = os.environ.get("SESSION_COOKIE_SECURE")
+    if raw is not None:
+        flask_app.config["SESSION_COOKIE_SECURE"] = raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 try:
     app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
-    if not Config.TESTING and "SESSION_COOKIE_SECURE" not in app.config:
-        app.config["SESSION_COOKIE_SECURE"] = bool(
-            os.environ.get("SESSION_COOKIE_SECURE", "0") in ("1", "true", "True")
-        )
+    _configure_session_cookie_secure(app)
 except (TypeError, KeyError) as e:
     logger.debug("Session cookie config: %s", e)
 
@@ -395,33 +459,25 @@ def dlog(msg: str, *args) -> None:
             logger.debug("dlog format error: %s", e)
 
 
-# ── Shared helper: check if a path is a "status action" allowed without admin ──
-# Service runs behind nginx basic auth. Internal Flask auth for zone/group
-# control is unnecessary — gardeners need start/stop without admin password.
+# ── Shared helper: check paths allowed without an admin session ────────────
+# Only read-only POSTs and fail-safe OFF actions are public.  Native WB deploy
+# exposes Flask directly on the LAN and does not install an auth proxy.
 import re as _re
 
 _ALLOWED_PUBLIC_POSTS = {
     "/api/login",
     "/api/status",
     "/api/emergency-stop",
-    "/api/emergency-resume",
     "/api/postpone",
     "/api/zones/next-watering-bulk",
     "/api/audit/ui",
 }
 
-# Patterns for zone/group control endpoints that guests (nginx basic auth users) can access
+# Explicit OFF actions remain available for incident response.
 _ALLOWED_PUBLIC_PATTERNS = [
-    _re.compile(r"^/api/zones/\d+/mqtt/start$"),
     _re.compile(r"^/api/zones/\d+/mqtt/stop$"),
-    _re.compile(r"^/api/zones/\d+/start$"),
     _re.compile(r"^/api/zones/\d+/stop$"),
-    _re.compile(r"^/api/groups/\d+/start-from-first$"),
     _re.compile(r"^/api/groups/\d+/stop$"),
-    _re.compile(r"^/api/groups/\d+/master-valve/\w+$"),
-    _re.compile(r"^/api/groups/\d+/start-zone/\d+$"),
-    _re.compile(r"^/api/groups/\d+/run-selected$"),
-    _re.compile(r"^/api/groups/\d+/skip-current$"),
 ]
 
 
