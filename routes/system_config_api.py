@@ -19,7 +19,7 @@ from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
 from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
 from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
-from services.monitors import env_monitor, probe_env_values
+from services.monitors import env_monitor, probe_env_values, rain_monitor
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from utils import normalize_topic
 
@@ -205,27 +205,61 @@ def api_rain_config():
     try:
         if request.method == "GET":
             return jsonify({"success": True, "config": db.get_rain_config()})
-        data = request.get_json() or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError("request body must be an object")
+        if "enabled" in data and not isinstance(data["enabled"], bool):
+            raise ValueError("enabled must be boolean")
+        sensor_type = data.get("type", "NO")
+        if sensor_type not in ("NO", "NC"):
+            raise ValueError("type must be NO or NC")
+        server_id = data.get("server_id")
+        if isinstance(server_id, bool):
+            raise ValueError("server_id must be an integer")
+        if isinstance(server_id, float) and not server_id.is_integer():
+            raise ValueError("server_id must be an integer")
+        if server_id is not None:
+            server_id = int(server_id)
+            if server_id <= 0:
+                raise ValueError("server_id must be positive")
         cfg = {
             "enabled": bool(data.get("enabled")),
             "topic": (data.get("topic") or "").strip(),
-            "type": data.get("type") if data.get("type") in ("NO", "NC") else "NO",
-            "server_id": data.get("server_id"),
+            "type": sensor_type,
+            "server_id": server_id,
         }
         if cfg["enabled"] and not cfg["topic"]:
             return jsonify({"success": False, "message": "Требуется MQTT-топик для датчика дождя"}), 400
-        ok = db.set_rain_config(cfg)
-        if ok and cfg.get("enabled"):
-            try:
-                for g in db.get_groups() or []:
-                    gid = int(g.get("id"))
-                    if gid == 999:
-                        continue
-                    db.set_group_use_rain(gid, True)
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("Handled exception in api_rain_config: %s", e)
-        return jsonify({"success": bool(ok)})
-    except (ConnectionError, TimeoutError, OSError) as e:
+        if cfg["enabled"] and cfg["server_id"] is None:
+            return jsonify({"success": False, "message": "Требуется MQTT-сервер для датчика дождя"}), 400
+
+        updates = [
+            ("rain.enabled", "1" if cfg["enabled"] else "0"),
+            ("rain.topic", cfg["topic"]),
+            ("rain.type", cfg["type"]),
+            ("rain.server_id", str(cfg["server_id"]) if cfg["server_id"] is not None else None),
+        ]
+        with db.settings._connect() as conn:
+            for key, value in updates:
+                if value is None:
+                    conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+                else:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                        (key, value),
+                    )
+            if cfg["enabled"]:
+                conn.execute("UPDATE groups SET use_rain_sensor = 1, updated_at = CURRENT_TIMESTAMP WHERE id != 999")
+            conn.commit()
+
+        # Apply every enable/change/disable immediately.  RainMonitor.start()
+        # owns replacement of the old MQTT client and cleanup of old rain state.
+        rain_monitor.start(cfg)
+        return jsonify({"success": True})
+    except (ValueError, TypeError) as e:
+        logger.debug("rain config validation failed: %s", e)
+        return jsonify({"success": False, "message": str(e)}), 400
+    except (sqlite3.Error, ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"rain config failed: {e}")
         return jsonify({"success": False}), 500
 

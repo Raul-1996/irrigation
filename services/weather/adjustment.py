@@ -47,7 +47,8 @@ class WeatherAdjustment:
     # Local WB-MSW sensor sanity bounds + mismatch thresholds vs Open-Meteo.
     # Local temp/hum take priority over the API forecast when present, sane
     # and fresh; a temperature gap beyond the hard threshold flags a faulty
-    # sensor and forces an Open-Meteo fallback for the whole calculation.
+    # sensor.  The colder source is retained for freeze safety while humidity
+    # falls back to Open-Meteo.
     SENSOR_TEMP_MIN_C = -50.0
     SENSOR_TEMP_MAX_C = 60.0
     SENSOR_HUM_MIN_PCT = 0.0
@@ -150,8 +151,9 @@ class WeatherAdjustment:
         The local WB-MSW sensor wins over the Open-Meteo forecast when its
         reading is present, physically sane and fresh (handled by
         ``_get_env_state``). A temperature gap vs the API beyond the *hard*
-        threshold is treated as a faulty sensor: the whole calculation falls
-        back to Open-Meteo and a ``mismatch`` of level ``'hard'`` is returned.
+        threshold is treated as a faulty sensor and a ``mismatch`` of level
+        ``'hard'`` is returned. Temperature keeps the colder of local/API so
+        the mismatch cannot mask a freeze; humidity falls back to Open-Meteo.
         A gap beyond the *soft* threshold keeps the local value but flags
         ``'soft'`` for the UI. Precipitation/wind/ET₀ are untouched (API only).
 
@@ -180,7 +182,13 @@ class WeatherAdjustment:
                 delta = abs(local_t - float(api_t))
                 if delta > hard:
                     mismatch = {"level": "hard", "local": local_t, "api": float(api_t), "delta": round(delta, 1)}
-                    temp_value, temp_source = float(api_t), "api_fallback"
+                    # A hard mismatch still must not discard the colder input
+                    # before the freeze gate.  Fall back only when the API is
+                    # the safer (colder) source; retain a colder local reading.
+                    if local_t <= float(api_t):
+                        temp_value, temp_source = local_t, "local"
+                    else:
+                        temp_value, temp_source = float(api_t), "api_fallback"
                 else:
                     if delta > soft:
                         mismatch = {"level": "soft", "local": local_t, "api": float(api_t), "delta": round(delta, 1)}
@@ -267,20 +275,27 @@ class WeatherAdjustment:
         rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
         rain_24h = weather.precipitation_24h or 0.0
         rain_forecast = weather.precipitation_forecast_6h or 0.0
-        if rain_24h > rain_threshold or rain_forecast > rain_threshold:
+        if self._rain_reaches_threshold(rain_24h, rain_threshold) or self._rain_reaches_threshold(
+            rain_forecast, rain_threshold
+        ):
             return True
 
         freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
         temp = weather.temperature
-        if temp is not None and temp < freeze_threshold:
+        if temp is not None and temp <= freeze_threshold:
             return True
         min_temp_6h = getattr(weather, "min_temp_forecast_6h", None)
-        if isinstance(min_temp_6h, (int, float)) and min_temp_6h < freeze_threshold:
+        if isinstance(min_temp_6h, (int, float)) and min_temp_6h <= freeze_threshold:
             return True
 
         wind = weather.wind_speed
         exceeds, _ = self._get_wind_check(settings, wind)
         return bool(exceeds)
+
+    @staticmethod
+    def _rain_reaches_threshold(value: float, threshold: float) -> bool:
+        """Inclusive rain threshold without treating dry zero as a hit at 0 mm."""
+        return value > 0 if threshold <= 0 else value >= threshold
 
     def _has_ms_threshold(self):
         # type: () -> bool
@@ -309,18 +324,18 @@ class WeatherAdjustment:
             return (False, "")
         if self._has_ms_threshold():
             threshold = float(settings.get("wind_threshold_ms", self.DEFAULT_WIND_THRESHOLD_MS))
-            exceeds = wind_value > threshold
+            exceeds = wind_value >= threshold
             detail = (
-                f"{wind_value:.1f} м/с > {threshold:.1f} м/с"
+                f"{wind_value:.1f} м/с ≥ {threshold:.1f} м/с"
                 if exceeds
                 else f"{wind_value:.1f} м/с < {threshold:.1f} м/с"
             )
             return (exceeds, f"wind_skip: {wind_value:.1f} м/с (порог {threshold:.1f} м/с)" if exceeds else detail)
         else:
             threshold = float(settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH))
-            exceeds = wind_value > threshold
+            exceeds = wind_value >= threshold
             detail = (
-                f"{wind_value:.1f} км/ч > {threshold:.0f} км/ч"
+                f"{wind_value:.1f} км/ч ≥ {threshold:.0f} км/ч"
                 if exceeds
                 else f"{wind_value:.1f} км/ч < {threshold:.0f} км/ч"
             )
@@ -355,13 +370,13 @@ class WeatherAdjustment:
             rain_24h = weather.precipitation_24h or 0.0
             rain_forecast = weather.precipitation_forecast_6h or 0.0
 
-            if rain_24h > rain_threshold:
+            if self._rain_reaches_threshold(rain_24h, rain_threshold):
                 result["skip"] = True
                 result["reason"] = f"rain_skip: {rain_24h:.1f}mm за 24ч (порог {rain_threshold:.0f}mm)"
                 result["details"] = {"type": "rain", "value": rain_24h, "threshold": rain_threshold}
                 return result
 
-            if rain_forecast > rain_threshold:
+            if self._rain_reaches_threshold(rain_forecast, rain_threshold):
                 result["skip"] = True
                 result["reason"] = (
                     f"rain_forecast_skip: прогноз {rain_forecast:.1f}mm за 6ч (порог {rain_threshold:.0f}mm)"
@@ -374,14 +389,14 @@ class WeatherAdjustment:
             freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
             temp = weather.temperature
 
-            if temp is not None and temp < freeze_threshold:
+            if temp is not None and temp <= freeze_threshold:
                 result["skip"] = True
                 result["reason"] = f"freeze_skip: {temp:.1f}°C (порог {freeze_threshold:.0f}°C)"
                 result["details"] = {"type": "freeze", "value": temp, "threshold": freeze_threshold}
                 return result
 
             min_temp_6h = getattr(weather, "min_temp_forecast_6h", None)
-            if min_temp_6h is not None and isinstance(min_temp_6h, (int, float)) and min_temp_6h < freeze_threshold:
+            if min_temp_6h is not None and isinstance(min_temp_6h, (int, float)) and min_temp_6h <= freeze_threshold:
                 result["skip"] = True
                 result["reason"] = (
                     f"freeze_forecast_skip: прогноз мин {min_temp_6h:.1f}°C за 6ч (порог {freeze_threshold:.0f}°C)"
@@ -444,7 +459,7 @@ class WeatherAdjustment:
         # Humidity factor (Zimmerman-style)
         hum = weather.humidity
         humidity_factor = 1.0
-        if hum is not None:
+        if hum is not None and settings.get("factor_humidity", True):
             if hum > 90:
                 humidity_factor = 0.5
             elif hum > 80:
@@ -590,9 +605,9 @@ class WeatherAdjustment:
 
         rain_status = "ok"
         rain_detail = f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
-        if rain_24h > rain_threshold:
+        if self._rain_reaches_threshold(rain_24h, rain_threshold):
             rain_status = "danger"
-            rain_detail = f"{rain_24h:.1f} мм > {rain_threshold:.0f} мм (skip)"
+            rain_detail = f"{rain_24h:.1f} мм ≥ {rain_threshold:.0f} мм (skip)"
         elif rain_24h > rain_threshold * 0.5:
             rain_status = "warn"
             rain_detail = f"{rain_24h:.1f} мм (прогноз +{rain_forecast:.1f} мм)"
@@ -608,10 +623,10 @@ class WeatherAdjustment:
 
         freeze_status = "ok"
         if temp is not None:
-            if temp < freeze_threshold:
+            if temp <= freeze_threshold:
                 freeze_status = "danger"
-                freeze_detail = f"{temp:.1f}°C < {freeze_threshold:.0f}°C (skip)"
-            elif min_temp_6h is not None and min_temp_6h < freeze_threshold:
+                freeze_detail = f"{temp:.1f}°C ≤ {freeze_threshold:.0f}°C (skip)"
+            elif min_temp_6h is not None and min_temp_6h <= freeze_threshold:
                 freeze_status = "danger"
                 freeze_detail = f"прогноз мин {min_temp_6h:.1f}°C за 6ч (skip)"
             elif min_temp_6h is not None and min_temp_6h < freeze_threshold + 3:
@@ -640,9 +655,9 @@ class WeatherAdjustment:
             else:
                 wind_thr = float(settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH))
                 unit = "км/ч"
-            if wind > wind_thr:
+            if wind >= wind_thr:
                 wind_status = "danger"
-                wind_detail = f"{wind:.1f} {unit} > {wind_thr:.1f} {unit} (skip)"
+                wind_detail = f"{wind:.1f} {unit} ≥ {wind_thr:.1f} {unit} (skip)"
             elif wind > wind_thr * 0.7:
                 wind_status = "warn"
                 wind_detail = f"{wind:.1f} {unit} (близко к порогу)"
@@ -659,7 +674,9 @@ class WeatherAdjustment:
         hum = weather.humidity if weather else None
 
         hum_status = "ok"
-        if hum is not None:
+        if not hum_enabled:
+            hum_detail = "фактор отключён"
+        elif hum is not None:
             if hum > hum_threshold:
                 hum_status = "warn"
                 hum_detail = f"{hum:.0f}% > {hum_threshold:.0f}% (коэфф. снижен)"

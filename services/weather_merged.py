@@ -6,6 +6,7 @@ The canonical weather package now builds forecasts and astronomy through
 that is not part of that service payload.
 """
 
+import copy
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -88,6 +89,71 @@ def _api_rain(precipitation: Any) -> bool:
         return precipitation is not None and float(precipitation) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _sensor_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+    return _get_env_state(time.time()), _get_rain_state()
+
+
+def merge_weather_response(extended: dict[str, Any]) -> dict[str, Any]:
+    """Overlay fresh local sensors onto the canonical live API response.
+
+    Unlike :func:`get_merged_weather`, this preserves the extended endpoint's
+    backward-compatible flat numeric fields and all forecast/adjustment keys.
+    """
+    if not extended.get("available"):
+        return extended
+
+    result = copy.deepcopy(extended)
+    current = result.setdefault("current", {})
+    env_state, rain_state = _sensor_snapshot()
+
+    temperature = _merge_env_field(
+        _api_field(current, "temperature", unit="°C"),
+        enabled=bool(env_state.get("temp_enabled")),
+        online=bool(env_state.get("temp_online")),
+        local_value=env_state.get("temp_value"),
+    )
+    humidity = _merge_env_field(
+        _api_field(current, "humidity", unit="%"),
+        enabled=bool(env_state.get("hum_enabled")),
+        online=bool(env_state.get("hum_online")),
+        local_value=env_state.get("hum_value"),
+    )
+    current["temperature"] = temperature
+    current["humidity"] = humidity
+    result["temperature"] = temperature.get("value")
+    result["humidity"] = humidity.get("value")
+
+    rain_enabled = bool(rain_state.get("enabled"))
+    rain_value = rain_state.get("is_rain")
+    if rain_enabled and rain_value is not None:
+        current["rain"] = {"value": bool(rain_value), "source": "local"}
+    else:
+        precipitation = (current.get("precipitation_mm") or {}).get("value")
+        current["rain"] = {
+            "value": _api_rain(precipitation),
+            "source": "api_fallback" if rain_enabled else "api",
+        }
+
+    result["sensors"] = {
+        "temperature": {
+            "enabled": bool(env_state.get("temp_enabled")),
+            "online": bool(env_state.get("temp_online")),
+            "last_rx": env_state.get("temp_last_rx", 0),
+        },
+        "humidity": {
+            "enabled": bool(env_state.get("hum_enabled")),
+            "online": bool(env_state.get("hum_online")),
+            "last_rx": env_state.get("hum_last_rx", 0),
+        },
+        "rain": {
+            "enabled": rain_enabled,
+            "online": rain_enabled and rain_value is not None,
+            "value": rain_value,
+        },
+    }
+    return result
 
 
 def get_merged_weather(db_path: str) -> dict[str, Any]:
@@ -178,4 +244,4 @@ def get_merged_weather(db_path: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["SENSOR_STALE_TIMEOUT", "get_merged_weather"]
+__all__ = ["SENSOR_STALE_TIMEOUT", "get_merged_weather", "merge_weather_response"]

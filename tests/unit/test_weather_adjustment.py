@@ -154,23 +154,25 @@ class TestWeatherAdjustmentSkip:
 
     @patch("services.weather_adjustment.WeatherAdjustment._get_weather")
     def test_skip_rain_at_threshold(self, mock_get, adj_db):
-        """Rain exactly at threshold should NOT skip (only > threshold)."""
+        """Rain exactly at the configured safety threshold skips."""
         mock_get.return_value = _mock_weather(precipitation_24h=5.0)
         from services.weather_adjustment import WeatherAdjustment
 
         adj = WeatherAdjustment(adj_db)
         result = adj.should_skip()
-        assert result["skip"] is False
+        assert result["skip"] is True
+        assert result["details"]["type"] == "rain"
 
     @patch("services.weather_adjustment.WeatherAdjustment._get_weather")
     def test_skip_freeze_at_threshold(self, mock_get, adj_db):
-        """Temp exactly at threshold should NOT skip (only < threshold)."""
+        """Temperature exactly at the freeze threshold skips."""
         mock_get.return_value = _mock_weather(temperature=2.0)
         from services.weather_adjustment import WeatherAdjustment
 
         adj = WeatherAdjustment(adj_db)
         result = adj.should_skip()
-        assert result["skip"] is False
+        assert result["skip"] is True
+        assert result["details"]["type"] == "freeze"
 
 
 class TestWeatherCoefficient:
