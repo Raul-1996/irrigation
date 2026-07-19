@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 
 # Supported native updater for Wirenboard.
-# The application service is quiesced while a verified SQLite snapshot and
-# restorable code/secret archive are created. Docker is intentionally not part
-# of the production update path.
+# A verified backup is followed by a staged runtime activation. Any failure
+# restores the previous Git revision, venv and external configuration before
+# returning the previously active service to operation.
 
 set -euo pipefail
 umask 077
 
 REPO_DIR=${REPO_DIR:-/opt/wb-irrigation/irrigation}
 BRANCH=${BRANCH:-main}
+TARGET_COMMIT=${TARGET_COMMIT:-}
 SERVICE=${SERVICE:-wb-irrigation}
 PY_VERSION=${PY_VERSION:-3.11}
 UV_BIN=${UV_BIN:-/root/.local/bin/uv}
@@ -21,7 +22,7 @@ NONINTERACTIVE=${NONINTERACTIVE:-0}
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--repo-dir DIR] [--branch BRANCH] [--service NAME] [--backup-dir DIR] [--yes]
-Env vars: REPO_DIR, BRANCH, SERVICE, BACKUP_BASE, BACKUP_KEEP, PY_VERSION, UV_BIN, ENV_FILE, NONINTERACTIVE=1
+Env vars: REPO_DIR, BRANCH, TARGET_COMMIT, SERVICE, BACKUP_BASE, BACKUP_KEEP, PY_VERSION, UV_BIN, ENV_FILE
 Examples:
   sudo bash $0 --yes
   BRANCH=main REPO_DIR=/opt/wb-irrigation/irrigation bash $0 -y
@@ -68,25 +69,35 @@ ok() { echo -e "\033[1;32m[$(ts)] OK\033[0m $*"; }
 warn() { echo -e "\033[1;33m[$(ts)] WARN\033[0m $*"; }
 err() { echo -e "\033[1;31m[$(ts)] ERROR\033[0m $*" >&2; }
 
-confirm() {
-  if [[ "$NONINTERACTIVE" == "1" ]]; then
-    return 0
-  fi
-  read -r -p "$1 [y/N]: " ans || true
-  [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
+read_env_port() {
+  local env_file=$1
+  local value
+
+  [[ -f "$env_file" ]] || return 1
+  grep -q '^[[:space:]]*PORT[[:space:]]*=' "$env_file" || return 1
+  value=$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)
+  printf '%s' "$value" | tr -d "'\"[:space:]"
 }
 
 configured_port() {
-  local env_file=$1
-  local port=${PORT:-}
+  local environment_file=$1
+  local repository_file=${2:-}
+  local port=""
+  local found=0
 
-  if [[ -z "$port" && -f "$env_file" ]]; then
-    port=$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)
-    port=$(printf '%s' "$port" | tr -d "'\"[:space:]")
+  if [[ ${PORT+x} ]]; then
+    port=$PORT
+    found=1
+  elif port=$(read_env_port "$environment_file"); then
+    found=1
+  elif [[ -n "$repository_file" ]] && port=$(read_env_port "$repository_file"); then
+    found=1
   fi
-  port=${port:-8080}
+  if [[ "$found" == "0" ]]; then
+    port=8080
+  fi
   if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
-    err "Invalid PORT value: $port"
+    err "Invalid PORT value: ${port:-<empty>}"
     return 1
   fi
   printf '%s\n' "$port"
@@ -109,6 +120,37 @@ upsert_env_value() {
   chmod 600 "$env_file"
 }
 
+canonicalize_backup_base() {
+  local backup_parent
+  local backup_name
+
+  if [[ -z "${REPO_DIR_REAL:-}" || "$REPO_DIR_REAL" != /* ]]; then
+    err "Repository path must be canonical before validating backups"
+    return 1
+  fi
+  if [[ -z "${BACKUP_BASE:-}" || "$BACKUP_BASE" != /* ]]; then
+    err "BACKUP_BASE must be an absolute dedicated directory"
+    return 1
+  fi
+  if [[ -L "$BACKUP_BASE" ]]; then
+    err "BACKUP_BASE must not be a symlink: $BACKUP_BASE"
+    return 1
+  fi
+
+  backup_parent=$(dirname -- "$BACKUP_BASE")
+  backup_name=$(basename -- "$BACKUP_BASE")
+  if [[ "$backup_name" != "backups" || "$backup_parent" != "$REPO_DIR_REAL" ]]; then
+    err "BACKUP_BASE must be the dedicated child $REPO_DIR_REAL/backups"
+    return 1
+  fi
+  if [[ -e "$BACKUP_BASE" && ! -d "$BACKUP_BASE" ]]; then
+    err "BACKUP_BASE exists but is not a directory: $BACKUP_BASE"
+    return 1
+  fi
+
+  BACKUP_BASE="$REPO_DIR_REAL/backups"
+}
+
 ensure_logrotate_ready() {
   if ! command -v logrotate >/dev/null 2>&1; then
     info "Installing required logrotate package"
@@ -120,10 +162,7 @@ ensure_logrotate_ready() {
     return 1
   fi
 
-  # Validate the complete include tree, not only our file: duplicate targets
-  # across package-owned configs otherwise fail later from cron/timer.
   logrotate -d "/etc/logrotate.conf"
-
   if systemctl cat logrotate.timer >/dev/null 2>&1; then
     systemctl enable --now logrotate.timer
     if ! systemctl is-enabled logrotate.timer >/dev/null 2>&1 \
@@ -138,6 +177,44 @@ ensure_logrotate_ready() {
     err "No active logrotate.timer or cron execution path found"
     return 1
   fi
+}
+
+retire_telegram_file_logs() {
+  local application_root=$1
+  local application_root_real
+  local expected_logs_dir
+  local logs_dir_real
+  local candidate
+  local candidate_name
+
+  application_root_real=$(cd "$application_root" && pwd -P) || return 1
+  expected_logs_dir="$application_root_real/services/logs"
+  if [[ ! -e "$expected_logs_dir" && ! -L "$expected_logs_dir" ]]; then
+    return 0
+  fi
+  if [[ -L "$application_root_real/services" || -L "$expected_logs_dir" || ! -d "$expected_logs_dir" ]]; then
+    err "Refusing to traverse a non-canonical application logs directory: $expected_logs_dir"
+    return 1
+  fi
+  logs_dir_real=$(cd "$expected_logs_dir" && pwd -P) || return 1
+  if [[ "$logs_dir_real" != "$expected_logs_dir" ]]; then
+    err "Application logs directory escapes the canonical repository: $logs_dir_real"
+    return 1
+  fi
+
+  while IFS= read -r -d '' candidate; do
+    candidate_name=${candidate##*/}
+    if [[ "$candidate_name" == "telegram.txt" \
+      || "$candidate_name" =~ ^telegram[.]txt([.][0-9]+|-[0-9]{8})([.]gz)?$ ]]; then
+      if [[ -f "$candidate" || -L "$candidate" ]]; then
+        rm -f -- "$candidate"
+        info "Removed retired Telegram file log: $candidate"
+      elif [[ -e "$candidate" ]]; then
+        err "Refusing to remove non-file historical log path: $candidate"
+        return 1
+      fi
+    fi
+  done < <(find -P "$logs_dir_real" -mindepth 1 -maxdepth 1 -print0)
 }
 
 prune_old_backups() {
@@ -156,6 +233,160 @@ prune_old_backups() {
   done
 }
 
+backup_sqlite_database() {
+  local database_path=$1
+  local backup_path=$2
+  local database_name=$3
+  local check_result
+
+  if ! sqlite3 "$database_path" ".backup '$backup_path'"; then
+    err "Could not back up $database_name"
+    return 1
+  fi
+  if ! check_result=$(sqlite3 "$backup_path" "PRAGMA quick_check;"); then
+    err "Could not verify $database_name backup"
+    return 1
+  fi
+  if [[ "$check_result" != "ok" ]]; then
+    err "$database_name backup verification failed: $check_result"
+    return 1
+  fi
+  chmod 600 "$backup_path"
+}
+
+restore_sqlite_database() {
+  local database_path=$1
+  local backup_path=$2
+  local existed_before=$3
+  local database_name=$4
+  local check_result
+
+  if ! rm -f -- "${database_path}-wal" "${database_path}-shm"; then
+    err "Could not remove stale $database_name WAL files"
+    return 1
+  fi
+  if [[ "$existed_before" == "0" ]]; then
+    if ! rm -f -- "$database_path"; then
+      err "Could not remove $database_name created by the failed update"
+      return 1
+    fi
+    return 0
+  fi
+  if [[ ! -f "$backup_path" ]]; then
+    err "$database_name rollback backup is missing: $backup_path"
+    return 1
+  fi
+  if ! rm -f -- "$database_path"; then
+    err "Could not remove the failed-update copy of $database_name"
+    return 1
+  fi
+  if ! sqlite3 "$database_path" ".restore '$backup_path'"; then
+    err "Could not restore $database_name"
+    return 1
+  fi
+  if ! check_result=$(sqlite3 "$database_path" "PRAGMA quick_check;"); then
+    err "Could not verify restored $database_name"
+    return 1
+  fi
+  if [[ "$check_result" != "ok" ]]; then
+    err "$database_name rollback verification failed: $check_result"
+    return 1
+  fi
+  chmod 600 "$database_path"
+}
+
+rollback_update() {
+  local rollback_failed=0
+
+  warn "Update failed; restoring previous code and runtime"
+  if [[ "${CODE_UPDATED:-0}" == "1" || "${SERVICE_WAS_ACTIVE:-0}" == "1" ]]; then
+    if ! systemctl stop "${SERVICE:-wb-irrigation}"; then
+      err "Rollback could not stop ${SERVICE:-wb-irrigation}"
+      rollback_failed=1
+    fi
+  fi
+
+  if [[ "${VENV_SWAPPED:-0}" == "1" ]]; then
+    if [[ -e "${VENV_DIR:-}" ]] && ! rm -rf -- "$VENV_DIR"; then
+      err "Rollback could not remove staged live venv"
+      rollback_failed=1
+    fi
+    if [[ "${HAD_OLD_VENV:-0}" == "1" && -e "${OLD_VENV_BACKUP:-}" ]]; then
+      if ! mv "$OLD_VENV_BACKUP" "$VENV_DIR"; then
+        err "Rollback could not restore previous venv"
+        rollback_failed=1
+      fi
+    fi
+  fi
+  if [[ -n "${STAGED_VENV:-}" && -e "${STAGED_VENV:-}" ]] && ! rm -rf -- "$STAGED_VENV"; then
+    err "Rollback could not remove incomplete staged venv"
+    rollback_failed=1
+  fi
+
+  if [[ "${CODE_UPDATED:-0}" == "1" ]]; then
+    if ! git -C "$REPO_DIR_REAL" reset --hard "$ORIGINAL_COMMIT" -q; then
+      err "Rollback could not restore Git revision $ORIGINAL_COMMIT"
+      rollback_failed=1
+    fi
+    if ! restore_sqlite_database "$DB_PATH" "$DB_BACKUP" "${HAD_DB:-0}" "irrigation.db"; then
+      rollback_failed=1
+    fi
+    if ! restore_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "${HAD_JOBS_DB:-0}" "jobs.db"; then
+      rollback_failed=1
+    fi
+  fi
+
+  if [[ "${UNIT_CHANGED:-0}" == "1" ]]; then
+    if [[ "${HAD_SERVICE_FILE:-0}" == "1" ]]; then
+      install -m 0644 "$SERVICE_FILE_BACKUP" "$SERVICE_FILE" || rollback_failed=1
+    else
+      rm -f -- "$SERVICE_FILE" || rollback_failed=1
+    fi
+    systemctl daemon-reload || rollback_failed=1
+  fi
+  if [[ "${LOGROTATE_CHANGED:-0}" == "1" ]]; then
+    if [[ "${HAD_LOGROTATE_FILE:-0}" == "1" ]]; then
+      install -m 0644 "$LOGROTATE_FILE_BACKUP" "$LOGROTATE_TARGET" || rollback_failed=1
+    else
+      rm -f -- "$LOGROTATE_TARGET" || rollback_failed=1
+    fi
+  fi
+  if [[ "${ENV_CHANGED:-0}" == "1" ]]; then
+    if [[ "${HAD_ENV_FILE:-0}" == "1" ]]; then
+      install -m 0600 "$ENV_FILE_BACKUP" "$ENV_FILE" || rollback_failed=1
+    else
+      rm -f -- "$ENV_FILE" || rollback_failed=1
+    fi
+  fi
+
+  if [[ "${SERVICE_WAS_ACTIVE:-0}" == "1" ]]; then
+    if ! systemctl start "${SERVICE:-wb-irrigation}"; then
+      err "Rollback could not restart ${SERVICE:-wb-irrigation}"
+      rollback_failed=1
+    fi
+  fi
+  if [[ "$rollback_failed" == "1" ]]; then
+    err "Rollback completed with errors; manual recovery from ${BACKUP_DIR:-<unknown>} is required"
+    return 1
+  fi
+  ok "Previous code and runtime restored"
+}
+
+finish_update() {
+  local status=$?
+  trap - EXIT
+  if [[ "$status" -ne 0 && "${UPDATE_SUCCEEDED:-0}" != "1" ]]; then
+    rollback_update || true
+  fi
+  exit "$status"
+}
+
+# Unit tests source the real helper functions and inject failures without
+# executing the privileged deployment body.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 if [[ "$(id -u)" -ne 0 ]]; then
   err "Run as root (sudo bash $0)"
   exit 1
@@ -171,32 +402,41 @@ fi
 
 REPO_DIR_REAL=$(cd "$REPO_DIR" && pwd -P)
 BACKUP_BASE=${BACKUP_BASE:-"${REPO_DIR_REAL}/backups"}
-case "$BACKUP_BASE" in
-  / | /opt | /mnt | /mnt/data | "$REPO_DIR_REAL")
-    err "Unsafe backup directory: $BACKUP_BASE"
-    exit 1
-    ;;
-esac
-
+canonicalize_backup_base
 cd "$REPO_DIR_REAL"
 info "Target repo: $REPO_DIR_REAL (branch: $BRANCH)"
 
-# If anything fails after stopping a previously active service, make a best
-# effort to return it to service. Preserve the original non-zero exit status.
+if [[ -n $(git status --porcelain --untracked-files=normal) ]]; then
+  err "Deployment checkout has local changes; refusing an update that cannot be rolled back exactly"
+  exit 1
+fi
+ORIGINAL_COMMIT=$(git rev-parse --verify HEAD)
+info "Fetching target branch origin/$BRANCH"
+git fetch --quiet origin "$BRANCH"
+UPDATE_REF=${TARGET_COMMIT:-origin/$BRANCH}
+RESOLVED_TARGET=$(git rev-parse --verify "${UPDATE_REF}^{commit}")
+if [[ -n "$TARGET_COMMIT" && "$RESOLVED_TARGET" != "$TARGET_COMMIT" ]]; then
+  err "Fetched target does not match requested TARGET_COMMIT=$TARGET_COMMIT"
+  exit 1
+fi
+
+UPDATE_SUCCEEDED=0
 SERVICE_WAS_ACTIVE=0
-SERVICE_RESTORED=0
-restore_service_on_failure() {
-  local status=$?
-  trap - EXIT
-  if [[ "$status" -ne 0 && "$SERVICE_WAS_ACTIVE" == "1" && "$SERVICE_RESTORED" == "0" ]]; then
-    warn "Update failed; restoring previously active service $SERVICE"
-    if ! systemctl start "$SERVICE"; then
-      err "Failed to restore $SERVICE; inspect journalctl -u $SERVICE"
-    fi
-  fi
-  exit "$status"
-}
-trap restore_service_on_failure EXIT
+CODE_UPDATED=0
+VENV_SWAPPED=0
+HAD_OLD_VENV=0
+UNIT_CHANGED=0
+LOGROTATE_CHANGED=0
+ENV_CHANGED=0
+HAD_SERVICE_FILE=0
+HAD_LOGROTATE_FILE=0
+HAD_ENV_FILE=0
+HAD_DB=0
+HAD_JOBS_DB=0
+STAGED_VENV=""
+OLD_VENV_BACKUP=""
+BACKUP_DIR=""
+trap finish_update EXIT
 
 if systemctl is-active "$SERVICE" >/dev/null 2>&1; then
   SERVICE_WAS_ACTIVE=1
@@ -208,8 +448,8 @@ if systemctl is-active "$SERVICE" >/dev/null 2>&1; then
   fi
 fi
 
-# Create a private, self-contained backup on the same data partition as the
-# physical repository. SQLite's backup API consolidates WAL state atomically.
+retire_telegram_file_logs "$REPO_DIR_REAL"
+
 mkdir -p -m 700 "$BACKUP_BASE"
 chmod 700 "$BACKUP_BASE"
 STAMP=$(date +"%Y%m%d_%H%M%S")
@@ -219,16 +459,17 @@ info "Creating verified backup at $BACKUP_DIR"
 
 DB_PATH="$REPO_DIR_REAL/irrigation.db"
 DB_BACKUP="$BACKUP_DIR/irrigation.db"
+JOBS_DB_PATH="$REPO_DIR_REAL/jobs.db"
+JOBS_DB_BACKUP="$BACKUP_DIR/jobs.db"
 if [[ -f "$DB_PATH" ]]; then
-  sqlite3 "$DB_PATH" ".backup '$DB_BACKUP'"
-  DB_CHECK=$(sqlite3 "$DB_BACKUP" "PRAGMA quick_check;")
-  if [[ "$DB_CHECK" != "ok" ]]; then
-    err "SQLite backup verification failed: $DB_CHECK"
-    exit 1
-  fi
-  chmod 600 "$DB_BACKUP"
+  backup_sqlite_database "$DB_PATH" "$DB_BACKUP" "irrigation.db"
+  HAD_DB=1
 else
   warn "Database does not exist yet; code and secrets will still be backed up"
+fi
+if [[ -f "$JOBS_DB_PATH" ]]; then
+  backup_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "jobs.db"
+  HAD_JOBS_DB=1
 fi
 
 for secret_file in "$REPO_DIR_REAL/.secret_key" "$REPO_DIR_REAL/.irrig_secret_key" "$REPO_DIR_REAL/.env"; do
@@ -241,28 +482,37 @@ ARCHIVE="$BACKUP_DIR/repo_snapshot.tar.gz"
 tar --exclude="./venv" --exclude="./.git" --exclude="./__pycache__" \
   --exclude="./backups" --exclude="./*.pid" \
   --exclude="./irrigation.db" --exclude="./irrigation.db-wal" --exclude="./irrigation.db-shm" \
+  --exclude="./jobs.db" --exclude="./jobs.db-wal" --exclude="./jobs.db-shm" \
   -czf "$ARCHIVE" .
 chmod 600 "$ARCHIVE"
 
-# The EnvironmentFile is outside the repository. Preserve it explicitly;
-# repository-local .secret_key/.irrig_secret_key remain in the private archive.
+SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+LOGROTATE_TARGET="/etc/logrotate.d/wb-irrigation"
+SERVICE_FILE_BACKUP="$BACKUP_DIR/systemd-unit.service"
+LOGROTATE_FILE_BACKUP="$BACKUP_DIR/logrotate.conf"
+ENV_FILE_BACKUP="$BACKUP_DIR/environment.env"
+if [[ -f "$SERVICE_FILE" ]]; then
+  HAD_SERVICE_FILE=1
+  install -m 0600 "$SERVICE_FILE" "$SERVICE_FILE_BACKUP"
+fi
+if [[ -f "$LOGROTATE_TARGET" ]]; then
+  HAD_LOGROTATE_FILE=1
+  install -m 0600 "$LOGROTATE_TARGET" "$LOGROTATE_FILE_BACKUP"
+fi
 if [[ -f "$ENV_FILE" ]]; then
+  HAD_ENV_FILE=1
   chmod 600 "$ENV_FILE"
-  install -m 600 "$ENV_FILE" "$BACKUP_DIR/environment.env"
+  install -m 0600 "$ENV_FILE" "$ENV_FILE_BACKUP"
 fi
 ok "Verified backup created: $BACKUP_DIR"
 
-info "Fetching latest code"
-git fetch --all -q
-info "Resetting to origin/$BRANCH"
-git reset --hard "origin/$BRANCH" -q
+info "Activating target code $RESOLVED_TARGET"
+CODE_UPDATED=1
+git reset --hard "$RESOLVED_TARGET" -q
 ok "Code updated to $(git rev-parse --short HEAD)"
 
-info "Purging stale __pycache__"
 find . -path ./venv -prune -o -path ./.git -prune -o -type d -name __pycache__ -print -exec rm -rf -- {} +
 
-# The WB system Python is 3.9. Always provision and validate the application
-# runtime through uv. A broken or wrong-version venv is rebuilt deterministically.
 if [[ ! -x "$UV_BIN" ]]; then
   if command -v uv >/dev/null 2>&1; then
     UV_BIN=$(command -v uv)
@@ -279,49 +529,51 @@ export PATH="$(dirname "$UV_BIN"):$PATH"
 uv python install "$PY_VERSION"
 
 VENV_DIR="$REPO_DIR_REAL/venv"
-VENV_VERSION=""
-if [[ -x "$VENV_DIR/bin/python" ]]; then
-  VENV_VERSION=$(
-    "$VENV_DIR/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))' 2>/dev/null || true
-  )
-fi
-if [[ "$VENV_VERSION" != "$PY_VERSION" ]]; then
-  warn "Rebuilding venv (found ${VENV_VERSION:-broken}, need $PY_VERSION)"
-  rm -rf -- "$VENV_DIR"
-  uv venv --python "$PY_VERSION" "$VENV_DIR"
-fi
-if [[ $("$VENV_DIR/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))') != "$PY_VERSION" ]]; then
-  err "venv does not use Python $PY_VERSION"
+STAGED_VENV="$REPO_DIR_REAL/.venv-staged-$STAMP-$$"
+OLD_VENV_BACKUP="$REPO_DIR_REAL/.venv-rollback-$STAMP-$$"
+uv venv --python "$PY_VERSION" "$STAGED_VENV"
+uv pip install --python "$STAGED_VENV/bin/python" -r requirements.txt
+STAGED_VERSION=$("$STAGED_VENV/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+if [[ "$STAGED_VERSION" != "$PY_VERSION" ]]; then
+  err "Staged venv uses Python $STAGED_VERSION instead of $PY_VERSION"
   exit 1
 fi
-uv pip install --python "$VENV_DIR/bin/python" -r requirements.txt
-ok "Dependencies installed with $($VENV_DIR/bin/python -V)"
 
-SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+if [[ -e "$VENV_DIR" ]]; then
+  mv "$VENV_DIR" "$OLD_VENV_BACKUP"
+  HAD_OLD_VENV=1
+fi
+VENV_SWAPPED=1
+mv "$STAGED_VENV" "$VENV_DIR"
+ok "Staged runtime activated with $($VENV_DIR/bin/python -V)"
+
 REPO_UNIT="$REPO_DIR_REAL/wb-irrigation.service"
 if [[ ! -f "$REPO_UNIT" ]]; then
   err "Repository systemd unit is missing: $REPO_UNIT"
   exit 1
 fi
 if ! cmp -s "$REPO_UNIT" "$SERVICE_FILE" 2>/dev/null; then
-  info "Updating systemd unit"
+  UNIT_CHANGED=1
   install -m 0644 "$REPO_UNIT" "$SERVICE_FILE"
   systemctl daemon-reload
 fi
 
 LOGROTATE_SOURCE="$REPO_DIR_REAL/configs/logrotate.d/wb-irrigation"
-LOGROTATE_TARGET="/etc/logrotate.d/wb-irrigation"
 if [[ ! -f "$LOGROTATE_SOURCE" ]]; then
   err "Repository logrotate config is missing: $LOGROTATE_SOURCE"
   exit 1
 fi
-install -m 0644 "$LOGROTATE_SOURCE" "$LOGROTATE_TARGET"
+if ! cmp -s "$LOGROTATE_SOURCE" "$LOGROTATE_TARGET" 2>/dev/null; then
+  LOGROTATE_CHANGED=1
+  install -m 0644 "$LOGROTATE_SOURCE" "$LOGROTATE_TARGET"
+fi
 ensure_logrotate_ready
 
 CURRENT_COMMIT=$(git rev-parse HEAD)
+ENV_CHANGED=1
 upsert_env_value GIT_COMMIT "$CURRENT_COMMIT" "$ENV_FILE"
-if [[ -n "${PORT:-}" ]]; then
-  VALIDATED_PORT=$(configured_port "$ENV_FILE")
+if [[ ${PORT+x} ]]; then
+  VALIDATED_PORT=$(configured_port "$ENV_FILE" "$REPO_DIR_REAL/.env")
   upsert_env_value PORT "$VALIDATED_PORT" "$ENV_FILE"
 fi
 info "GIT_COMMIT updated in $ENV_FILE -> ${CURRENT_COMMIT:0:12}"
@@ -330,15 +582,13 @@ if ! systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then
   err "Service is not enabled: $SERVICE"
   exit 1
 fi
-info "Restarting service: $SERVICE"
 systemctl restart "$SERVICE"
 if ! systemctl is-active "$SERVICE" >/dev/null 2>&1; then
   err "Service failed to start. Check: journalctl -u $SERVICE -n 200"
   exit 1
 fi
-SERVICE_RESTORED=1
 
-APP_PORT=$(configured_port "$ENV_FILE")
+APP_PORT=$(configured_port "$ENV_FILE" "$REPO_DIR_REAL/.env")
 info "Waiting up to 30s for /readyz on 127.0.0.1:${APP_PORT}"
 READYZ_BODY=""
 for attempt in $(seq 1 15); do
@@ -361,4 +611,9 @@ for attempt in $(seq 1 15); do
 done
 
 prune_old_backups
+UPDATE_SUCCEEDED=1
+VENV_SWAPPED=0
+if [[ "$HAD_OLD_VENV" == "1" ]] && ! rm -rf -- "$OLD_VENV_BACKUP"; then
+  warn "Update succeeded, but old venv cleanup failed: $OLD_VENV_BACKUP"
+fi
 ok "Update completed successfully. Backup stored at: $BACKUP_DIR"

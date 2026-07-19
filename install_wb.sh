@@ -60,17 +60,35 @@ confirm(){
   [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
 }
 
-configured_port() {
+read_env_port() {
   local env_file=$1
-  local port=${PORT:-}
+  local value
 
-  if [[ -z "$port" && -f "$env_file" ]]; then
-    port=$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)
-    port=$(printf '%s' "$port" | tr -d "'\"[:space:]")
+  [[ -f "$env_file" ]] || return 1
+  grep -q '^[[:space:]]*PORT[[:space:]]*=' "$env_file" || return 1
+  value=$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)
+  printf '%s' "$value" | tr -d "'\"[:space:]"
+}
+
+configured_port() {
+  local environment_file=$1
+  local repository_file=${2:-}
+  local port=""
+  local found=0
+
+  if [[ ${PORT+x} ]]; then
+    port=$PORT
+    found=1
+  elif port=$(read_env_port "$environment_file"); then
+    found=1
+  elif [[ -n "$repository_file" ]] && port=$(read_env_port "$repository_file"); then
+    found=1
   fi
-  port=${port:-8080}
+  if [[ "$found" == "0" ]]; then
+    port=8080
+  fi
   if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
-    err "Некорректное значение PORT: $port"
+    err "Некорректное значение PORT: ${port:-<пусто>}"
     return 1
   fi
   printf '%s\n' "$port"
@@ -124,45 +142,147 @@ ensure_logrotate_ready() {
   fi
 }
 
+retire_telegram_file_logs() {
+  local application_root=$1
+  local application_root_real
+  local expected_logs_dir
+  local logs_dir_real
+  local candidate
+  local candidate_name
+
+  application_root_real=$(cd "$application_root" && pwd -P) || return 1
+  expected_logs_dir="$application_root_real/services/logs"
+  if [[ ! -e "$expected_logs_dir" && ! -L "$expected_logs_dir" ]]; then
+    return 0
+  fi
+  if [[ -L "$application_root_real/services" || -L "$expected_logs_dir" || ! -d "$expected_logs_dir" ]]; then
+    err "Отказываюсь обходить неканонический каталог логов: $expected_logs_dir"
+    return 1
+  fi
+  logs_dir_real=$(cd "$expected_logs_dir" && pwd -P) || return 1
+  if [[ "$logs_dir_real" != "$expected_logs_dir" ]]; then
+    err "Каталог логов выходит за пределы канонического репозитория: $logs_dir_real"
+    return 1
+  fi
+
+  while IFS= read -r -d '' candidate; do
+    candidate_name=${candidate##*/}
+    if [[ "$candidate_name" == "telegram.txt" \
+      || "$candidate_name" =~ ^telegram[.]txt([.][0-9]+|-[0-9]{8})([.]gz)?$ ]]; then
+      if [[ -f "$candidate" || -L "$candidate" ]]; then
+        rm -f -- "$candidate"
+        info "Удалён устаревший файловый Telegram-лог: $candidate"
+      elif [[ -e "$candidate" ]]; then
+        err "Отказываюсь удалять не-файл по пути исторического лога: $candidate"
+        return 1
+      fi
+    fi
+  done < <(find -P "$logs_dir_real" -mindepth 1 -maxdepth 1 -print0)
+}
+
+atomic_switch_app_link() {
+  local legacy_backup=${1:-}
+  local link_stage="${APP_LINK}.new-$$"
+
+  if [[ -e "$link_stage" || -L "$link_stage" ]]; then
+    err "Временный симлинк уже существует: $link_stage"
+    return 1
+  fi
+  ln -s "$DATA_DIR" "$link_stage"
+
+  if [[ -n "$legacy_backup" ]]; then
+    if ! mv "$APP_LINK" "$legacy_backup"; then
+      rm -f -- "$link_stage"
+      return 1
+    fi
+  fi
+  if ! mv -Tf "$link_stage" "$APP_LINK"; then
+    rm -f -- "$link_stage"
+    if [[ -n "$legacy_backup" && -d "$legacy_backup" && ! -e "$APP_LINK" ]]; then
+      if ! mv "$legacy_backup" "$APP_LINK"; then
+        err "Legacy tree remains preserved at $legacy_backup; APP_LINK recovery failed"
+      fi
+    fi
+    return 1
+  fi
+}
+
 migrate_legacy_app_tree() {
   local current=""
-  local preserved=""
+  local desired=""
+  local migration_stage=""
+  local preserved_data=""
+  local legacy_backup=""
 
   if [[ "$APP_LINK" == "$DATA_DIR" ]]; then
     return 0
   fi
-
   mkdir -p "$(dirname "$APP_LINK")" "$(dirname "$DATA_DIR")"
+  desired=$(readlink -f "$DATA_DIR" 2>/dev/null || printf '%s' "$DATA_DIR")
+
   if [[ -L "$APP_LINK" ]]; then
     current=$(readlink -f "$APP_LINK" 2>/dev/null || true)
-    if [[ "$current" == "$(readlink -f "$DATA_DIR" 2>/dev/null || printf '%s' "$DATA_DIR")" ]]; then
+    if [[ "$current" == "$desired" ]]; then
       return 0
     fi
-    rm "$APP_LINK"
-    if [[ -n "$current" && -d "$current/.git" ]]; then
-      if [[ -e "$DATA_DIR" ]]; then
-        preserved="${DATA_DIR}.pre-migration-$(date +%Y%m%d_%H%M%S)"
-        warn "Сохраняю неиспользуемое дерево $DATA_DIR как $preserved"
-        mv "$DATA_DIR" "$preserved"
-      fi
-      info "Переношу активное legacy-дерево $current в $DATA_DIR"
-      mv "$current" "$DATA_DIR"
-    fi
+    # A broken/non-repository link is replaced only after DATA_DIR is cloned.
+    [[ -n "$current" && -d "$current/.git" ]] || return 0
   elif [[ -d "$APP_LINK" ]]; then
-    if [[ -e "$DATA_DIR" ]]; then
-      preserved="${DATA_DIR}.pre-migration-$(date +%Y%m%d_%H%M%S)"
-      warn "Сохраняю неиспользуемое дерево $DATA_DIR как $preserved"
-      mv "$DATA_DIR" "$preserved"
+    current=$APP_LINK
+    if [[ ! -d "$current/.git" ]]; then
+      err "Legacy application tree is not a Git repository: $current"
+      return 1
     fi
-    info "Переношу legacy-установку $APP_LINK на data-раздел"
-    mv "$APP_LINK" "$DATA_DIR"
+    legacy_backup="${APP_LINK}.legacy-$(date +%Y%m%d_%H%M%S)-$$"
   elif [[ -e "$APP_LINK" ]]; then
     err "$APP_LINK существует и не является каталогом или симлинком"
     return 1
+  else
+    return 0
   fi
 
-  ln -s "$DATA_DIR" "$APP_LINK"
+  migration_stage="${DATA_DIR}.migration-$(date +%Y%m%d_%H%M%S)-$$"
+  mkdir -m 700 "$migration_stage"
+  info "Копирую legacy-дерево в staging на data-разделе"
+  if ! cp -a "$current/." "$migration_stage/"; then
+    rm -rf -- "$migration_stage"
+    err "Не удалось полностью скопировать legacy-дерево; активный путь не изменён"
+    return 1
+  fi
+  if [[ ! -d "$migration_stage/.git" ]]; then
+    rm -rf -- "$migration_stage"
+    err "Staging-копия legacy-дерева не прошла проверку"
+    return 1
+  fi
+
+  if [[ -e "$DATA_DIR" || -L "$DATA_DIR" ]]; then
+    preserved_data="${DATA_DIR}.pre-migration-$(date +%Y%m%d_%H%M%S)-$$"
+    if ! mv "$DATA_DIR" "$preserved_data"; then
+      rm -rf -- "$migration_stage"
+      return 1
+    fi
+  fi
+  if ! mv "$migration_stage" "$DATA_DIR"; then
+    if [[ -n "$preserved_data" && ! -e "$DATA_DIR" ]]; then
+      if ! mv "$preserved_data" "$DATA_DIR"; then
+        err "Previous data tree remains preserved at $preserved_data"
+      fi
+    fi
+    rm -rf -- "$migration_stage"
+    return 1
+  fi
+
+  if ! atomic_switch_app_link "$legacy_backup"; then
+    err "Не удалось атомарно переключить APP_LINK; старый путь сохранён"
+    return 1
+  fi
 }
+
+# Tests source the actual migration helpers and inject an ENOSPC-like copy
+# failure without running the privileged bootstrap body.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 # -----------------------------------------------------------------------------
 # Step 0: проверки окружения
@@ -265,6 +385,15 @@ if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
   systemctl stop "$SERVICE_NAME"
 fi
 
+ACTIVE_APP_DIR=$(readlink -f "$APP_LINK" 2>/dev/null || true)
+if [[ -n "$ACTIVE_APP_DIR" && -d "$ACTIVE_APP_DIR/.git" ]]; then
+  retire_telegram_file_logs "$ACTIVE_APP_DIR"
+fi
+ACTIVE_DATA_DIR=$(readlink -f "$DATA_DIR" 2>/dev/null || true)
+if [[ -n "$ACTIVE_DATA_DIR" && "$ACTIVE_DATA_DIR" != "$ACTIVE_APP_DIR" && -d "$ACTIVE_DATA_DIR/.git" ]]; then
+  retire_telegram_file_logs "$ACTIVE_DATA_DIR"
+fi
+
 migrate_legacy_app_tree
 
 mkdir -p "$(dirname "$DATA_DIR")"
@@ -280,8 +409,14 @@ fi
 if [[ "$APP_LINK" == "$DATA_DIR" ]]; then
   APP_DIR=$(readlink -f "$DATA_DIR")
 else
+  current=$(readlink -f "$APP_LINK" 2>/dev/null || true)
+  desired=$(readlink -f "$DATA_DIR")
+  if [[ "$current" != "$desired" ]]; then
+    atomic_switch_app_link ""
+  fi
   APP_DIR=$(readlink -f "$APP_LINK")
 fi
+retire_telegram_file_logs "$APP_DIR"
 for secret_file in "$APP_DIR/.secret_key" "$APP_DIR/.irrig_secret_key" "$APP_DIR/.env"; do
   if [[ -f "$secret_file" ]]; then
     chmod 600 "$secret_file"
@@ -341,11 +476,10 @@ ensure_logrotate_ready
 ok "Logrotate-конфиг установлен: $LOGROTATE_TARGET"
 
 CURRENT_COMMIT=$(git -C "$APP_DIR" rev-parse HEAD)
+APP_PORT=$(configured_port "$ENV_FILE" "$APP_DIR/.env")
 upsert_env_value GIT_COMMIT "$CURRENT_COMMIT" "$ENV_FILE"
-if [[ -n "${PORT:-}" ]]; then
-  # configured_port performs numeric/range validation before persistence.
-  VALIDATED_PORT=$(configured_port "$ENV_FILE")
-  upsert_env_value PORT "$VALIDATED_PORT" "$ENV_FILE"
+if [[ ${PORT+x} ]]; then
+  upsert_env_value PORT "$APP_PORT" "$ENV_FILE"
 fi
 
 # `enable --now` is a no-op for an already active service. Always restart so a
@@ -363,7 +497,6 @@ SERVICE_RESTORED=1
 # -----------------------------------------------------------------------------
 info "Шаг 6/6 — smoke check /readyz"
 
-APP_PORT=$(configured_port "$ENV_FILE")
 # Дать сервису подняться (sd_notify READY ставится после старта планировщика).
 for i in $(seq 1 15); do
   if curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/readyz" >/dev/null 2>&1; then

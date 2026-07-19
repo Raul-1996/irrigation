@@ -26,5 +26,12 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/wb-irrigation/irrigation
+            git fetch --quiet origin main
+            TARGET_COMMIT=$(git rev-parse --verify 'origin/main^{commit}')
+            STAGED_UPDATER=$(mktemp /tmp/wb-irrigation-update.XXXXXX)
+            trap 'rm -f "$STAGED_UPDATER"' EXIT
+            git show "${TARGET_COMMIT}:update_server.sh" > "$STAGED_UPDATER"
+            chmod 0700 "$STAGED_UPDATER"
             export BRANCH=main
-            bash ./update_server.sh --yes
+            export TARGET_COMMIT
+            bash "$STAGED_UPDATER" --yes

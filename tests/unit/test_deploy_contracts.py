@@ -17,7 +17,9 @@ SERVICE = (ROOT / "wb-irrigation.service").read_text(encoding="utf-8")
 
 def test_update_quiesces_service_and_uses_verified_sqlite_backup():
     assert 'systemctl stop "$SERVICE"' in UPDATE
-    assert 'sqlite3 "$DB_PATH" ".backup \'$DB_BACKUP\'"' in UPDATE
+    assert 'sqlite3 "$database_path" ".backup \'$backup_path\'"' in UPDATE
+    assert 'backup_sqlite_database "$DB_PATH" "$DB_BACKUP" "irrigation.db"' in UPDATE
+    assert 'backup_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "jobs.db"' in UPDATE
     assert 'PRAGMA quick_check' in UPDATE
     assert "DB_FILES=(irrigation.db irrigation.db-wal irrigation.db-shm)" not in UPDATE
     assert 'cp -v "$f" "$BACKUP_DIR/" || true' not in UPDATE
@@ -25,28 +27,39 @@ def test_update_quiesces_service_and_uses_verified_sqlite_backup():
     assert '-czf "$ARCHIVE" . || true' not in UPDATE
 
 
-def test_update_restores_previously_active_service_on_early_failure():
+def test_update_rolls_back_code_runtime_and_service_on_every_failure():
     assert "SERVICE_WAS_ACTIVE=0" in UPDATE
-    assert "restore_service_on_failure" in UPDATE
-    assert "trap restore_service_on_failure EXIT" in UPDATE
+    assert "rollback_update" in UPDATE
+    assert "trap finish_update EXIT" in UPDATE
+    assert 'git -C "$REPO_DIR_REAL" reset --hard "$ORIGINAL_COMMIT"' in UPDATE
+    assert 'mv "$OLD_VENV_BACKUP" "$VENV_DIR"' in UPDATE
+    assert 'restore_sqlite_database "$DB_PATH" "$DB_BACKUP"' in UPDATE
+    assert 'restore_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP"' in UPDATE
+    assert "UPDATE_SUCCEEDED=0" in UPDATE
+    assert "git status --porcelain --untracked-files=normal" in UPDATE
 
 
 def test_update_rebuilds_invalid_venv_with_uv_python_311():
     assert "PY_VERSION=${PY_VERSION:-3.11}" in UPDATE
     assert 'uv python install "$PY_VERSION"' in UPDATE
-    assert 'uv venv --python "$PY_VERSION" "$VENV_DIR"' in UPDATE
     assert "sys.version_info[:2]" in UPDATE
     assert "$PY_BIN -m venv venv" not in UPDATE
     assert "requirements-dev.txt" not in UPDATE
+    assert 'STAGED_VENV="$REPO_DIR_REAL/.venv-staged-$STAMP-$$"' in UPDATE
+    assert 'uv venv --python "$PY_VERSION" "$STAGED_VENV"' in UPDATE
+    assert 'uv pip install --python "$STAGED_VENV/bin/python"' in UPDATE
 
 
 def test_update_backups_are_private_restorable_and_retained_on_data_partition():
     assert "umask 077" in UPDATE
     assert 'REPO_DIR_REAL=$(cd "$REPO_DIR" && pwd -P)' in UPDATE
     assert 'BACKUP_BASE=${BACKUP_BASE:-"${REPO_DIR_REAL}/backups"}' in UPDATE
+    assert "canonicalize_backup_base" in UPDATE
+    assert '[[ -L "$BACKUP_BASE" ]]' in UPDATE
+    assert '[[ "$backup_name" != "backups"' in UPDATE
     assert 'mkdir -p -m 700 "$BACKUP_BASE"' in UPDATE
     assert 'mkdir -m 700 "$BACKUP_DIR"' in UPDATE
-    assert 'chmod 600 "$DB_BACKUP"' in UPDATE
+    assert 'chmod 600 "$backup_path"' in UPDATE
     assert 'chmod 600 "$ARCHIVE"' in UPDATE
     assert "BACKUP_KEEP=${BACKUP_KEEP:-10}" in UPDATE
     assert "prune_old_backups" in UPDATE
@@ -55,14 +68,18 @@ def test_update_backups_are_private_restorable_and_retained_on_data_partition():
     assert '--exclude="./.secret_key"' not in UPDATE
     assert '--exclude="./.irrig_secret_key"' not in UPDATE
     assert 'chmod 600 "$secret_file"' in UPDATE
-    assert 'install -m 600 "$ENV_FILE" "$BACKUP_DIR/environment.env"' in UPDATE
+    assert 'install -m 0600 "$ENV_FILE" "$ENV_FILE_BACKUP"' in UPDATE
     assert 'chmod 600 "$env_file"' in UPDATE
     assert 'chmod 644 "$ENV_FILE"' not in UPDATE
 
 
 def test_deploy_workflow_uses_only_supported_update_path_and_propagates_failures():
     assert "set -euo pipefail" in DEPLOY
-    assert "bash ./update_server.sh --yes" in DEPLOY
+    assert "git fetch --quiet origin main" in DEPLOY
+    assert 'git show "${TARGET_COMMIT}:update_server.sh"' in DEPLOY
+    assert 'bash "$STAGED_UPDATER" --yes' in DEPLOY
+    assert "export TARGET_COMMIT" in DEPLOY
+    assert "bash ./update_server.sh --yes" not in DEPLOY
     assert "git pull" not in DEPLOY
     assert "pip install" not in DEPLOY
     assert "systemctl restart" not in DEPLOY
@@ -71,8 +88,10 @@ def test_deploy_workflow_uses_only_supported_update_path_and_propagates_failures
 
 def test_install_migrates_legacy_tree_and_restarts_on_rerun():
     assert "migrate_legacy_app_tree" in INSTALL
-    assert 'mv "$APP_LINK" "$DATA_DIR"' in INSTALL
-    assert 'ln -s "$DATA_DIR" "$APP_LINK"' in INSTALL
+    assert 'cp -a "$current/." "$migration_stage/"' in INSTALL
+    assert 'atomic_switch_app_link "$legacy_backup"' in INSTALL
+    assert 'ln -s "$DATA_DIR" "$link_stage"' in INSTALL
+    assert 'rm "$APP_LINK"' not in INSTALL
     assert 'systemctl enable "$SERVICE_NAME"' in INSTALL
     assert 'systemctl restart "$SERVICE_NAME"' in INSTALL
     assert 'systemctl enable --now "$SERVICE_NAME"' not in INSTALL
@@ -85,6 +104,8 @@ def test_port_contract_is_shared_by_service_and_both_smoke_checks():
     assert "SMOKE_PORT" not in INSTALL
     assert "SMOKE_PORT" not in UPDATE
     assert 'upsert_env_value PORT "$VALIDATED_PORT" "$ENV_FILE"' in UPDATE
+    assert 'configured_port "$ENV_FILE" "$REPO_DIR_REAL/.env"' in UPDATE
+    assert 'configured_port "$ENV_FILE" "$APP_DIR/.env"' in INSTALL
     assert '127.0.0.1:${APP_PORT}/readyz' in INSTALL
     assert '127.0.0.1:${APP_PORT}/readyz' in UPDATE
 
@@ -101,6 +122,18 @@ def test_install_and_update_activate_repo_logrotate_config():
         assert "logrotate.timer" in script
         assert "/etc/cron.daily/logrotate" in script
     assert "apt-get install -y logrotate" in UPDATE
+
+
+def test_install_and_update_purge_retired_telegram_file_logs_before_activation():
+    for script in (INSTALL, UPDATE):
+        assert "retire_telegram_file_logs" in script
+        assert "find -P" in script
+        assert "telegram[.]txt" in script
+        assert 'rm -f -- "$candidate"' in script
+    assert 'retire_telegram_file_logs "$REPO_DIR_REAL"' in UPDATE
+    assert 'retire_telegram_file_logs "$ACTIVE_APP_DIR"' in INSTALL
+    assert 'retire_telegram_file_logs "$ACTIVE_DATA_DIR"' in INSTALL
+    assert 'retire_telegram_file_logs "$APP_DIR"' in INSTALL
 
 
 def test_ci_runs_the_complete_default_selected_suite():
