@@ -8,7 +8,7 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 import json
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
 
 from config import TESTING
 from database import IrrigationDB
@@ -186,6 +187,45 @@ def job_stop_zone(zone_id: int):
             s._stop_zone(int(zone_id))
     except (sqlite3.Error, OSError, ValueError, TypeError):
         logger.exception("job_stop_zone failed (zone_id=%s)", zone_id)
+
+
+def job_stop_zone_if_activation(zone_id: int, activation_token: str | None):
+    """Stop only the zone activation that planted this safety timer.
+
+    A DateTrigger can already be queued in an executor while a new manual run
+    replaces its job id.  Binding the callback to ``watering_start_time`` keeps
+    that stale callback from stopping the new physical activation.
+    """
+    _audit_timer_fire(
+        "scheduler_timer_fire",
+        f"zone:{int(zone_id)}",
+        {"job": "activation_bound_stop", "activation_token": activation_token},
+    )
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        s = get_scheduler()
+        if s is None:
+            return
+        zone = s.db.get_zone(int(zone_id))
+        if not zone:
+            return
+        current_token = zone.get("watering_start_time")
+        if activation_token is not None and str(current_token or "") != str(activation_token):
+            logger.info(
+                "Stale stop callback ignored for zone %s (expected activation=%s, current=%s)",
+                zone_id,
+                activation_token,
+                current_token,
+            )
+            return
+        s._stop_zone(
+            int(zone_id),
+            reason="activation_bound_stop",
+            activation_token=None if activation_token is None else str(activation_token),
+        )
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        logger.exception("job_stop_zone_if_activation failed (zone_id=%s)", zone_id)
 
 
 def job_close_master_valve(group_id: int):
@@ -389,6 +429,10 @@ class IrrigationScheduler:
         self._program_jobs_lock = threading.RLock()
         self._group_session_lock = threading.RLock()
         self.group_cancel_events: dict[int, threading.Event] = {}
+        # Distinguish an executor-owned session from a DateTrigger that is
+        # merely pending.  Cancelling a pending ``group_seq`` must release its
+        # claim because no runner ``finally`` block will ever execute.
+        self._running_group_sessions: set[int] = set()
         # Per-group "skip current zone" events. Lifetime mirrors group_cancel_events:
         # populated lazily by request_skip_current_zone, cleared in the same finally
         # block as the cancel event. The in-thread sequencer loop polls .is_set()
@@ -415,6 +459,30 @@ class IrrigationScheduler:
         self._boot_interrupted_zone_ids: set[int] = set()
         self._boot_recovery_completed = False
         self._started_paused = False
+
+    def _controller_timezone(self) -> tzinfo | None:
+        value = getattr(self.scheduler, "timezone", None)
+        return value if isinstance(value, tzinfo) else None
+
+    def _controller_now(self, *, naive: bool = False) -> datetime:
+        """Return now in the scheduler/controller timezone.
+
+        ``WB_TZ`` may intentionally differ from the process ``TZ``.  All
+        scheduler-owned wall-clock calculations must therefore derive from the
+        APScheduler timezone rather than bare ``datetime.now()``.
+        """
+        timezone = self._controller_timezone()
+        value = datetime.now(timezone) if timezone is not None else datetime.now().astimezone()
+        return value.replace(tzinfo=None) if naive else value
+
+    def _current_activation_token(self, zone_id: int) -> str | None:
+        try:
+            zone = self.db.get_zone(int(zone_id))
+            token = (zone or {}).get("watering_start_time")
+            return None if token in (None, "") else str(token)
+        except (sqlite3.Error, OSError, TypeError, ValueError, KeyError):
+            logger.debug("activation token lookup failed for zone %s", zone_id, exc_info=True)
+            return None
 
     @property
     def active_runner_count(self) -> int:
@@ -571,7 +639,7 @@ class IrrigationScheduler:
         """Сбрасывает отложенный полив для зон, у которых срок истек."""
         try:
             zones = self.db.get_zones()
-            now = datetime.now()
+            now = self._controller_now(naive=True)
             expired: list[int] = []
             for z in zones:
                 pu = z.get("postpone_until")
@@ -597,39 +665,48 @@ class IrrigationScheduler:
     def schedule_postpone_sweeper(self) -> None:
         """Планирует периодическую очистку истекших отложек (каждую минуту)."""
         try:
+            if self.scheduler.get_job("postpone_sweeper") is not None:
+                logger.info("postpone_sweeper restored; next_run_time preserved")
+            else:
+                self.scheduler.add_job(
+                    job_clear_expired_postpones,
+                    trigger=IntervalTrigger(minutes=1, timezone=self._controller_timezone()),
+                    id="postpone_sweeper",
+                    replace_existing=False,
+                    coalesce=False,
+                    max_instances=1,
+                    next_run_time=self._controller_now(),
+                )
             # первая отработка — немедленно
-            self.scheduler.add_job(
-                job_clear_expired_postpones,
-                trigger=IntervalTrigger(minutes=1),
-                id="postpone_sweeper",
-                replace_existing=True,
-                coalesce=False,
-                max_instances=1,
-                next_run_time=datetime.now(),
-            )
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Не удалось добавить джоб postpone_sweeper: {e}")
         try:
-            self.scheduler.add_job(
-                job_dispatch_bot_subscriptions,
-                trigger=IntervalTrigger(minutes=1),
-                id="bot_sub_dispatcher",
-                replace_existing=True,
-                coalesce=False,
-                max_instances=1,
-                next_run_time=datetime.now(),
-            )
+            if self.scheduler.get_job("bot_sub_dispatcher") is not None:
+                logger.info("bot_sub_dispatcher restored; next_run_time preserved")
+            else:
+                self.scheduler.add_job(
+                    job_dispatch_bot_subscriptions,
+                    trigger=IntervalTrigger(minutes=1, timezone=self._controller_timezone()),
+                    id="bot_sub_dispatcher",
+                    replace_existing=False,
+                    coalesce=False,
+                    max_instances=1,
+                    next_run_time=self._controller_now(),
+                )
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Не удалось добавить джоб bot_sub_dispatcher: {e}")
 
     def schedule_audit_cleanup(self) -> None:
         """Plan daily audit_log cleanup at 03:30 (rows older than 7 days)."""
         try:
+            if self.scheduler.get_job("audit_cleanup") is not None:
+                logger.info("audit_cleanup restored; next_run_time preserved")
+                return
             self.scheduler.add_job(
                 job_audit_cleanup,
-                trigger=CronTrigger(hour=3, minute=30),
+                trigger=CronTrigger(hour=3, minute=30, timezone=self._controller_timezone()),
                 id="audit_cleanup",
-                replace_existing=True,
+                replace_existing=False,
                 coalesce=True,
                 max_instances=1,
             )
@@ -640,12 +717,15 @@ class IrrigationScheduler:
     def schedule_daily_backup(self) -> None:
         """Plan daily DB backup at 03:15 (sanity-checked, see LogRepository.create_backup)."""
         try:
+            if self.scheduler.get_job("daily_backup") is not None:
+                logger.info("daily_backup restored; next_run_time preserved")
+                return
             self.scheduler.add_job(
                 job_daily_backup,
-                trigger=CronTrigger(hour=3, minute=15),
+                trigger=CronTrigger(hour=3, minute=15, timezone=self._controller_timezone()),
                 id="daily_backup",
                 name="daily DB backup",
-                replace_existing=True,
+                replace_existing=False,
                 coalesce=True,
                 max_instances=1,
             )
@@ -665,12 +745,15 @@ class IrrigationScheduler:
         try:
             from scheduler.jobs import job_recalc_water_balance
 
+            if self.scheduler.get_job("water_balance_recalc") is not None:
+                logger.info("water_balance_recalc restored; next_run_time preserved")
+                return
             self.scheduler.add_job(
                 job_recalc_water_balance,
-                trigger=CronTrigger(hour=3, minute=35),
+                trigger=CronTrigger(hour=3, minute=35, timezone=self._controller_timezone()),
                 id="water_balance_recalc",
                 name="nightly water-balance recalc",
-                replace_existing=True,
+                replace_existing=False,
                 coalesce=True,
                 max_instances=1,
             )
@@ -678,47 +761,55 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError, ImportError) as e:
             logger.error(f"Не удалось добавить джоб water_balance_recalc: {e}")
 
-    def _stop_zone(self, zone_id: int):
+    def _stop_zone(
+        self,
+        zone_id: int,
+        *,
+        reason: str = "auto_stop",
+        activation_token: str | None = None,
+    ) -> bool:
+        """Issue a physical OFF and keep a retry armed until it succeeds.
+
+        A failed publish must never be converted into a DB-only ``off`` state:
+        that would hide the energised relay from both watchdogs.  The current
+        activation token is captured before the command so a delayed retry
+        cannot stop a later activation of the same zone.
+        """
+        zid = int(zone_id)
+        token = activation_token if activation_token is not None else self._current_activation_token(zid)
         try:
-            # Централизованный OFF для автостопа.
-            # last_watering_time is no longer stored on zones — it is derived
-            # from zone_runs.end_utc, which is closed by zone_control.stop_zone
-            # (or its fallback path) via finish_zone_run.
-            try:
-                from services.zone_control import stop_zone as _stop_zone_central
+            from services.zone_control import stop_zone as _stop_zone_central
 
-                _stop_zone_central(zone_id, reason="auto_stop")
-            except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                logger.debug("Exception in _stop_zone: %s", e)
-                # Fallback на локальный апдейт, если контроллер недоступен.
-                # Идём через update_zone_state, чтобы fault-fallback тоже
-                # попадал в zone_state_change audit (reason=auto_stop_fallback).
-                try:
-                    from services.zones_state import update_zone_state as _uzs
+            stopped = bool(_stop_zone_central(zid, reason=reason))
+        except (sqlite3.Error, OSError, ImportError, ValueError, TypeError):
+            logger.exception("Scheduler OFF failed for zone %s", zid)
+            stopped = False
 
-                    _uzs(
-                        zone_id,
-                        {"state": "off", "watering_start_time": None},
-                        audit_reason="auto_stop_fallback",
-                        db=self.db,
-                    )
-                except (sqlite3.Error, OSError, ImportError) as e2:
-                    logger.exception(
-                        "irrigation_scheduler._stop_zone: audited fallback failed (%s) — doing raw update_zone",
-                        e2,
-                    )
-                    self.db.update_zone(zone_id, {"state": "off", "watering_start_time": None})
+        if not stopped:
+            # A DateTrigger removes itself when submitted.  Re-arm the exact
+            # hard-stop id so every failed OFF retains a future retry.
+            retry_at = self._controller_now(naive=True) + timedelta(seconds=30)
             try:
-                pass  # dlog replaced by logger
-                logger.debug("auto-stop zone=%s", zone_id)
-            except (ValueError, KeyError, RuntimeError) as e:
-                logger.debug("Handled exception in _stop_zone: %s", e)
-            zone = self.db.get_zone(zone_id)
+                self.schedule_zone_hard_stop(zid, retry_at, activation_token=token)
+            except (RuntimeError, ValueError, TypeError, KeyError):
+                logger.exception("Failed to re-arm OFF retry for zone %s", zid)
+            logger.error("Zone %s OFF unresolved; safety retry retained", zid)
+            return False
+
+        # Confirmed/idempotent OFF is the only point where safety timers for
+        # this activation may be removed.
+        # Remove ordinary/hard deadlines, but keep the absolute cap until a
+        # fresh observed-OFF echo proves the physical relay is closed.  The
+        # verifier/SSE confirmation path owns cancel_zone_cap().
+        self.cancel_zone_jobs(zid)
+        try:
+            zone = self.db.get_zone(zid)
             if zone:
-                self.db.add_log("zone_auto_stop", f"Зона {zone_id} ({zone['name']}) автоматически остановлена")
-            logger.info(f"Зона {zone_id} остановлена")
-        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-            logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
+                self.db.add_log("zone_auto_stop", f"Зона {zid} ({zone['name']}) автоматически остановлена")
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+            logger.debug("zone_auto_stop log failed for %s", zid, exc_info=True)
+        logger.info("Зона %s остановлена", zid)
+        return True
 
     def _check_weather_skip(self, zone_id: int, program_id: int = 0) -> dict:
         """Check if watering should be skipped due to weather. Returns skip info dict."""
@@ -871,6 +962,7 @@ class IrrigationScheduler:
                         for gid in program_gids:
                             new_event = threading.Event()
                             self.group_cancel_events[gid] = new_event
+                            self._running_group_sessions.add(gid)
                             registered_gids.append((gid, new_event))
                 if blocking_gids:
                     try:
@@ -881,7 +973,7 @@ class IrrigationScheduler:
                                     "program_id": program_id,
                                     "program_name": program_name,
                                     "blocking_gids": blocking_gids,
-                                    "scheduled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "scheduled_at": self._controller_now(naive=True).strftime("%Y-%m-%d %H:%M:%S"),
                                 }
                             ),
                         )
@@ -969,7 +1061,7 @@ class IrrigationScheduler:
                 group_id = int(zone.get("group_id") or 0)
                 # Проверяем отмену текущего запуска программы для этой группы на сегодня
                 try:
-                    today = datetime.now().strftime("%Y-%m-%d")
+                    today = self._controller_now(naive=True).strftime("%Y-%m-%d")
                     from database import db as _db
 
                     if _db.is_program_run_cancelled_for_group(int(program_id), today, int(group_id)):
@@ -993,7 +1085,7 @@ class IrrigationScheduler:
                 postpone_until = zone.get("postpone_until")
                 if postpone_until:
                     postpone_dt = self._parse_dt(postpone_until)
-                    if postpone_dt is None or datetime.now() >= postpone_dt:
+                    if postpone_dt is None or self._controller_now(naive=True) >= postpone_dt:
                         # истекло или непарсибельно — сбрасываем
                         self.db.update_zone_postpone(zone_id, None, None)
                     else:
@@ -1036,7 +1128,7 @@ class IrrigationScheduler:
                     if latest_state == "fault":
                         logger.error("Программа %s: зона %s перешла в fault при старте", program_id, zone_id)
                         continue
-                    end_time = datetime.now() + timedelta(minutes=duration)
+                    end_time = self._controller_now(naive=True) + timedelta(minutes=duration)
                     self.active_zones[zone_id] = end_time
                     # write planned_end_time for watchdogs/diagnostics
                     try:
@@ -1110,15 +1202,11 @@ class IrrigationScheduler:
                         break
                     remaining -= 1
 
-                # Centralized stop to ensure MV delayed close
-                try:
-                    from services.zone_control import stop_zone as _stop_central
-
-                    _stop_central(int(zone_id), reason="auto", force=False)
-                except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                    logger.debug("Exception in line_458: %s", e)
-                    self._stop_zone(zone_id)
-                self.active_zones.pop(zone_id, None)
+                # Keep hard/cap retries and active ownership until physical OFF
+                # succeeds.  _stop_zone removes them only on confirmed success.
+                stopped = self._stop_zone(int(zone_id), reason="auto")
+                if not stopped:
+                    logger.error("Программа %s: OFF зоны %s не подтверждён", program_id, zone_id)
 
                 if skipped_this_zone:
                     try:
@@ -1176,6 +1264,7 @@ class IrrigationScheduler:
             for gid, our_event in registered_gids:
                 try:
                     with self._group_session_lock:
+                        self._running_group_sessions.discard(gid)
                         if self.group_cancel_events.get(gid) is our_event:
                             our_event.clear()
                             self.group_cancel_events.pop(gid, None)
@@ -1204,11 +1293,200 @@ class IrrigationScheduler:
         return sorted(job_ids)
 
     def schedule_program(self, program_id: int, program_data: dict[str, Any]):
-        """Atomically replace a program schedule with the current DB revision."""
+        """Reconcile one program without destroying valid persistent jobs.
+
+        Returns ``True`` when the persisted scheduler state matches the DB
+        revision.  Invalid payloads and jobstore failures fail closed (no
+        partial/legacy jobs remain) and return ``False``.
+        """
         with self._program_jobs_lock:
             return self._schedule_program_locked(int(program_id), program_data)
 
-    def _schedule_program_locked(self, program_id: int, program_data: dict[str, Any]):
+    @staticmethod
+    def _parse_program_time(value: object) -> tuple[int, int, str]:
+        if not isinstance(value, str):
+            raise ValueError("program time must be HH:MM")
+        parts = value.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError("program time must be HH:MM")
+        hours, minutes = (int(part) for part in parts)
+        if not 0 <= hours <= 23 or not 0 <= minutes <= 59:
+            raise ValueError("program time is outside 00:00..23:59")
+        return hours, minutes, f"{hours:02d}:{minutes:02d}"
+
+    @staticmethod
+    def _trigger_timezone_key(trigger: object) -> str:
+        timezone = getattr(trigger, "timezone", None)
+        return str(getattr(timezone, "key", timezone))
+
+    def _trigger_semantics_match(self, current: object, desired: object) -> bool:
+        if type(current) is not type(desired):
+            return False
+        if self._trigger_timezone_key(current) != self._trigger_timezone_key(desired):
+            return False
+        if isinstance(current, CronTrigger):
+            return [str(field) for field in current.fields] == [str(field) for field in desired.fields]
+        if isinstance(current, IntervalTrigger):
+            current_start = current.start_date.astimezone(current.timezone)
+            desired_start = desired.start_date.astimezone(desired.timezone)
+            return current.interval == desired.interval and (
+                current_start.hour,
+                current_start.minute,
+                current_start.second,
+            ) == (
+                desired_start.hour,
+                desired_start.minute,
+                desired_start.second,
+            )
+        return current == desired
+
+    def _normalise_program_payload(self, program_id: int, raw: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise ValueError("program payload must be an object")
+        enabled = bool(raw.get("enabled", True))
+        if not enabled:
+            return {"id": int(program_id), "enabled": False}
+
+        hours, minutes, time_value = self._parse_program_time(raw.get("time"))
+        name = str(raw.get("name") or f"program_{program_id}")
+        raw_zones = raw.get("zones")
+        if not isinstance(raw_zones, (list, tuple)) or isinstance(raw_zones, (str, bytes)):
+            raise ValueError("program zones must be a list")
+        zones = sorted({int(zone_id) for zone_id in raw_zones})
+        if not zones or any(zone_id <= 0 for zone_id in zones):
+            raise ValueError("program must contain positive zone ids")
+
+        schedule_type = str(raw.get("schedule_type") or "weekdays").replace("_", "-")
+        if schedule_type not in {"weekdays", "interval", "even-odd"}:
+            raise ValueError(f"unsupported schedule_type: {schedule_type}")
+        raw_days = raw.get("days") or []
+        if not isinstance(raw_days, (list, tuple)) or isinstance(raw_days, (str, bytes)):
+            raise ValueError("program days must be a list")
+        days = sorted({int(day) for day in raw_days})
+        if any(day < 0 or day > 6 for day in days):
+            raise ValueError("program weekdays must be in 0..6")
+        if schedule_type == "weekdays" and not days:
+            raise ValueError("weekdays program must contain at least one day")
+
+        interval_days = 1
+        if schedule_type == "interval":
+            value = raw.get("interval_days")
+            if isinstance(value, bool):
+                raise ValueError("interval_days must be an integer")
+            interval_days = int(value)
+            if not 1 <= interval_days <= 30:
+                raise ValueError("interval_days must be in 1..30")
+
+        even_odd = str(raw.get("even_odd") or "even")
+        if schedule_type == "even-odd" and even_odd not in {"even", "odd"}:
+            raise ValueError("even_odd must be even or odd")
+
+        extra_times = raw.get("extra_times") or []
+        if isinstance(extra_times, str):
+            try:
+                extra_times = json.loads(extra_times)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("extra_times must be a JSON list") from exc
+        if not isinstance(extra_times, (list, tuple)) or isinstance(extra_times, (str, bytes)):
+            raise ValueError("extra_times must be a list")
+        canonical_extra = [self._parse_program_time(value)[2] for value in extra_times]
+
+        return {
+            "id": int(program_id),
+            "enabled": True,
+            "name": name,
+            "time": time_value,
+            "hours": hours,
+            "minutes": minutes,
+            "zones": zones,
+            "schedule_type": schedule_type,
+            "days": days,
+            "interval_days": interval_days,
+            "even_odd": even_odd,
+            "extra_times": canonical_extra,
+        }
+
+    def _build_program_job_specs(self, program: dict[str, Any], existing_jobs: dict[str, Any]) -> list[dict[str, Any]]:
+        timezone = self._controller_timezone()
+        slots = [("main", program["time"])] + [
+            (f"extra:{index}", value) for index, value in enumerate(program["extra_times"])
+        ]
+        specs: list[dict[str, Any]] = []
+        for suffix, time_value in slots:
+            hours, minutes, _ = self._parse_program_time(time_value)
+            schedule_type = program["schedule_type"]
+            triggers: list[tuple[str, object]] = []
+            if schedule_type == "weekdays":
+                triggers.extend(
+                    (
+                        f"program:{program['id']}:{suffix}:d{day}",
+                        CronTrigger(day_of_week=day, hour=hours, minute=minutes, timezone=timezone),
+                    )
+                    for day in program["days"]
+                )
+            elif schedule_type == "interval":
+                now = self._controller_now()
+                start_date = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+                if start_date <= now:
+                    start_date += timedelta(days=1)
+                triggers.append(
+                    (
+                        f"program:{program['id']}:{suffix}",
+                        IntervalTrigger(
+                            days=program["interval_days"],
+                            start_date=start_date,
+                            timezone=timezone,
+                        ),
+                    )
+                )
+            else:
+                day_value = (
+                    "2,4,6,8,10,12,14,16,18,20,22,24,26,28,30"
+                    if program["even_odd"] == "even"
+                    else "1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31"
+                )
+                triggers.append(
+                    (
+                        f"program:{program['id']}:{suffix}",
+                        CronTrigger(day=day_value, hour=hours, minute=minutes, timezone=timezone),
+                    )
+                )
+
+            for job_id, desired_trigger in triggers:
+                current = existing_jobs.get(job_id)
+                next_run_time = None
+                if current is not None and self._trigger_semantics_match(current.trigger, desired_trigger):
+                    # Preserve cadence anchors and a pending valid misfire even
+                    # when only args/name/zones changed.
+                    desired_trigger = current.trigger
+                    next_run_time = getattr(current, "next_run_time", None)
+                specs.append(
+                    {
+                        "id": job_id,
+                        "trigger": desired_trigger,
+                        "next_run_time": next_run_time,
+                        "args": [program["id"], program["zones"], program["name"]],
+                    }
+                )
+        return specs
+
+    def _program_job_matches_spec(self, job: object, spec: dict[str, Any]) -> bool:
+        try:
+            func_ref = str(getattr(job, "func_ref", ""))
+            return (
+                str(job.id) == spec["id"]
+                and func_ref.endswith(":job_run_program")
+                and list(job.args) == spec["args"]
+                and not dict(job.kwargs or {})
+                and self._trigger_semantics_match(job.trigger, spec["trigger"])
+                and job.misfire_grace_time == 3600
+                and job.coalesce is False
+                and job.max_instances == 1
+            )
+        except (AttributeError, TypeError, ValueError, KeyError):
+            return False
+
+    def _schedule_program_locked(self, program_id: int, program_data: dict[str, Any]) -> bool:
         try:
             # PUT/DELETE mutate the DB before entering this scheduler boundary.
             # Re-read under the scheduler lock: if DELETE won, a delayed PUT
@@ -1222,67 +1500,88 @@ class IrrigationScheduler:
                 if not TESTING or known_job:
                     self._cancel_program_jobs_locked(program_id)
                     logger.info("Программа %s уже удалена; stale schedule отклонён", program_id)
-                    return
+                    return False
             elif not TESTING:
                 program_data = persisted
 
-            # Проверка enabled — если выключена, отменяем и выходим
-            if not program_data.get("enabled", True):
-                logger.info(f"Программа {program_id} выключена (enabled=0), отменяем расписание")
-                self.cancel_program(program_id)
-                return
+            program = self._normalise_program_payload(program_id, program_data)
+            if not program["enabled"]:
+                logger.info("Программа %s выключена; расписание снято", program_id)
+                self._cancel_program_jobs_locked(program_id)
+                return True
 
-            time_str = program_data["time"]  # 'HH:MM'
-            hours, minutes = map(int, time_str.split(":"))
-            zones: list[int] = list(program_data["zones"])
-            zones.sort()
+            existing = {
+                str(job.id): job
+                for job in self.scheduler.get_jobs()
+                if str(job.id).startswith(f"program:{program_id}:")
+            }
+            specs = self._build_program_job_specs(program, existing)
+            desired_ids = {spec["id"] for spec in specs}
+            if not specs:
+                raise ValueError("program produces no scheduler jobs")
 
-            if not zones:
-                logger.warning(f"Программа {program_id} имеет пустые зоны, пропуск")
-                self.cancel_program(program_id)
-                return
+            if desired_ids == set(existing) and all(
+                self._program_job_matches_spec(existing[spec["id"]], spec) for spec in specs
+            ):
+                job_ids = sorted(desired_ids)
+                self.program_jobs[program_id] = job_ids
+                self._update_program_scheduled_starts(program_id, program["zones"], job_ids)
+                logger.info("Программа %s восстановлена без пересоздания (%d jobs)", program_id, len(job_ids))
+                return True
 
-            schedule_type = program_data.get("schedule_type", "weekdays")
-            days: list[int] = program_data.get("days", [])  # 0-6, где 0=Пн
+            was_running = getattr(self.scheduler, "state", None) == STATE_RUNNING
+            if was_running:
+                self.scheduler.pause()
+            try:
+                for spec in specs:
+                    current = existing.get(spec["id"])
+                    if current is not None and self._program_job_matches_spec(current, spec):
+                        continue
+                    kwargs = {
+                        "args": spec["args"],
+                        "id": spec["id"],
+                        "replace_existing": True,
+                        "misfire_grace_time": 3600,
+                        "coalesce": False,
+                        "max_instances": 1,
+                    }
+                    if getattr(self, "has_default_jobstore", False):
+                        kwargs["jobstore"] = "default"
+                    if spec["next_run_time"] is not None:
+                        kwargs["next_run_time"] = spec["next_run_time"]
+                    self.scheduler.add_job(job_run_program, spec["trigger"], **kwargs)
 
-            # Для weekdays нужны дни, для interval/even-odd — нет
-            if schedule_type == "weekdays" and not days:
-                logger.warning(f"Программа {program_id} имеет schedule_type=weekdays но пустые дни, пропуск")
-                self.cancel_program(program_id)
-                return
+                for stale_id in set(existing) - desired_ids:
+                    self.scheduler.remove_job(stale_id)
+            except (sqlite3.Error, OSError, RuntimeError, KeyError, ValueError, TypeError):
+                logger.exception("Atomic program reconcile failed for %s; failing closed", program_id)
+                self._cancel_program_jobs_locked(program_id)
+                return False
+            finally:
+                if was_running and getattr(self.scheduler, "state", None) == STATE_PAUSED:
+                    self.scheduler.resume()
 
-            # Удаляем прежние задания программы
-            self.cancel_program(program_id)
-
-            job_ids: list[str] = []
-
-            # Основное время старта
-            self._schedule_single_time(program_id, program_data, time_str, "main", job_ids)
-
-            # Дополнительные времена (extra_times)
-            extra_times = program_data.get("extra_times", [])
-            if isinstance(extra_times, str):
-                try:
-                    extra_times = json.loads(extra_times)
-                except (json.JSONDecodeError, TypeError):
-                    extra_times = []
-
-            for idx, extra_time in enumerate(extra_times):
-                self._schedule_single_time(program_id, program_data, extra_time, f"extra:{idx}", job_ids)
-
+            job_ids = sorted(desired_ids)
             self.program_jobs[program_id] = job_ids
-            self._update_program_scheduled_starts(program_id, zones, job_ids)
+            self._update_program_scheduled_starts(program_id, program["zones"], job_ids)
             logger.info(
-                f"Программа {program_id} ({program_data['name']}) запланирована: {schedule_type}, {len(job_ids)} jobs"
+                "Программа %s (%s) согласована: %s, %d jobs",
+                program_id,
+                program["name"],
+                program["schedule_type"],
+                len(job_ids),
             )
-        except (sqlite3.Error, OSError, KeyError, ValueError) as e:
-            logger.error(f"Ошибка планирования программы {program_id}: {e}")
+            return True
+        except (sqlite3.Error, OSError, KeyError, ValueError, TypeError, RuntimeError) as e:
+            logger.error("Ошибка планирования программы %s: %s", program_id, e)
+            self._cancel_program_jobs_locked(program_id)
+            return False
 
     def _update_program_scheduled_starts(self, program_id: int, zones: list[int], job_ids: list[str]) -> None:
         """Store zone offsets from the program's next actual trigger fire."""
         try:
-            tz = getattr(self.scheduler, "timezone", None)
-            now = datetime.now(tz) if tz is not None else datetime.now()
+            tz = self._controller_timezone()
+            now = self._controller_now()
             next_fires: list[datetime] = []
             for job_id in job_ids:
                 job = self.scheduler.get_job(job_id)
@@ -1296,7 +1595,11 @@ class IrrigationScheduler:
                 return
             base = min(next_fires)
             if base.tzinfo is not None:
-                base = base.astimezone(tz).replace(tzinfo=None) if tz is not None else base.astimezone().replace(tzinfo=None)
+                base = (
+                    base.astimezone(tz).replace(tzinfo=None)
+                    if tz is not None
+                    else base.astimezone().replace(tzinfo=None)
+                )
             cumulative = 0
             for zone_id in zones:
                 zone = self.db.get_zone(zone_id)
@@ -1307,95 +1610,6 @@ class IrrigationScheduler:
                 cumulative += int(zone.get("duration") or 0)
         except (sqlite3.Error, OSError, AttributeError, TypeError, ValueError) as e:
             logger.error("Ошибка расчета следующего старта программы %s: %s", program_id, e)
-
-    def _schedule_single_time(
-        self, program_id: int, program_data: dict[str, Any], time_str: str, suffix: str, job_ids: list[str]
-    ):
-        """Создать jobs для одного времени старта (main или extra_times)."""
-        try:
-            hours, minutes = map(int, time_str.split(":"))
-            zones: list[int] = list(program_data["zones"])
-            zones.sort()
-            schedule_type = program_data.get("schedule_type", "weekdays")
-            days: list[int] = program_data.get("days", [])
-
-            if schedule_type == "weekdays":
-                # Текущая логика: CronTrigger для каждого дня
-                for day in days:
-                    trigger = CronTrigger(day_of_week=day, hour=hours, minute=minutes)
-                    _kwargs = dict(
-                        args=[program_id, zones, program_data["name"]],
-                        id=f"program:{program_id}:{suffix}:d{day}",
-                        replace_existing=True,
-                        misfire_grace_time=3600,
-                        coalesce=False,
-                        max_instances=1,
-                    )
-                    if getattr(self, "has_default_jobstore", False):
-                        _kwargs["jobstore"] = "default"
-                    job = self.scheduler.add_job(
-                        job_run_program,
-                        trigger,
-                        **_kwargs,
-                    )
-                    job_ids.append(job.id)
-
-            elif schedule_type == "interval":
-                # IntervalTrigger: каждые N дней
-                interval_days = int(program_data.get("interval_days", 1))
-                # Первый запуск — сегодня в указанное время (если ещё не прошло) или завтра
-                now = datetime.now()
-                start_date = datetime(now.year, now.month, now.day, hours, minutes, 0, 0)
-                if start_date <= now:
-                    # Если время уже прошло сегодня — первый запуск завтра
-                    start_date += timedelta(days=1)
-
-                trigger = IntervalTrigger(days=interval_days, start_date=start_date)
-                _kwargs = dict(
-                    args=[program_id, zones, program_data["name"]],
-                    id=f"program:{program_id}:{suffix}",
-                    replace_existing=True,
-                    misfire_grace_time=3600,
-                    coalesce=False,
-                    max_instances=1,
-                )
-                if getattr(self, "has_default_jobstore", False):
-                    _kwargs["jobstore"] = "default"
-                job = self.scheduler.add_job(
-                    job_run_program,
-                    trigger,
-                    **_kwargs,
-                )
-                job_ids.append(job.id)
-
-            elif schedule_type == "even-odd":
-                # CronTrigger с днями месяца (чётные/нечётные)
-                even_odd = program_data.get("even_odd", "even")
-                if even_odd == "even":
-                    day_str = "2,4,6,8,10,12,14,16,18,20,22,24,26,28,30"
-                else:
-                    day_str = "1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31"
-
-                trigger = CronTrigger(day=day_str, hour=hours, minute=minutes)
-                _kwargs = dict(
-                    args=[program_id, zones, program_data["name"]],
-                    id=f"program:{program_id}:{suffix}",
-                    replace_existing=True,
-                    misfire_grace_time=3600,
-                    coalesce=False,
-                    max_instances=1,
-                )
-                if getattr(self, "has_default_jobstore", False):
-                    _kwargs["jobstore"] = "default"
-                job = self.scheduler.add_job(
-                    job_run_program,
-                    trigger,
-                    **_kwargs,
-                )
-                job_ids.append(job.id)
-
-        except (ValueError, KeyError, TypeError) as e:
-            logger.error(f"Ошибка планирования времени {time_str} для программы {program_id}: {e}")
 
     def cancel_program(self, program_id: int):
         with self._program_jobs_lock:
@@ -1455,16 +1669,21 @@ class IrrigationScheduler:
             if TESTING:
                 total_seconds = min(6, max(1, int(duration_minutes)))
                 early = 0
-                run_at = datetime.now() + timedelta(seconds=total_seconds)
+                run_at = self._controller_now(naive=True) + timedelta(seconds=total_seconds)
             else:
-                run_at = datetime.now() + timedelta(minutes=int(duration_minutes)) - timedelta(seconds=early)
+                run_at = (
+                    self._controller_now(naive=True)
+                    + timedelta(minutes=int(duration_minutes))
+                    - timedelta(seconds=early)
+                )
             # Гарантируем, что время в будущем (минимум +1 сек)
-            now = datetime.now()
+            now = self._controller_now(naive=True)
             if run_at <= now:
                 run_at = now + timedelta(seconds=1)
+            activation_token = self._current_activation_token(int(zone_id))
             # Стандартизованный ID (используем command_id при наличии)
             _kwargs = dict(
-                args=[zone_id],
+                args=[zone_id, activation_token],
                 id=(
                     f"zone_stop:{int(zone_id)}:{command_id!s}"
                     if command_id
@@ -1476,8 +1695,8 @@ class IrrigationScheduler:
             if getattr(self, "has_volatile_jobstore", False):
                 _kwargs["jobstore"] = "volatile"
             self.scheduler.add_job(
-                job_stop_zone,
-                DateTrigger(run_date=run_at),
+                job_stop_zone_if_activation,
+                DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
                 **_kwargs,
             )
             self.active_zones[zone_id] = run_at
@@ -1495,14 +1714,29 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования автоостановки зоны {zone_id}: {e}")
 
-    def schedule_zone_hard_stop(self, zone_id: int, run_at: datetime):
+    def schedule_zone_hard_stop(
+        self,
+        zone_id: int,
+        run_at: datetime,
+        *,
+        activation_token: str | None = None,
+    ):
         """Жёсткий watchdog-стоп зоны на точное время run_at (доп. страховка)."""
         try:
-            now = datetime.now()
+            now = self._controller_now(naive=True)
+            if run_at.tzinfo is not None:
+                timezone = self._controller_timezone()
+                run_at = (
+                    run_at.astimezone(timezone).replace(tzinfo=None)
+                    if timezone is not None
+                    else run_at.replace(tzinfo=None)
+                )
             if run_at <= now:
                 run_at = now + timedelta(seconds=1)
+            if activation_token is None:
+                activation_token = self._current_activation_token(int(zone_id))
             _kwargs = dict(
-                args=[zone_id],
+                args=[zone_id, activation_token],
                 id=f"zone_hard_stop:{int(zone_id)}",
                 replace_existing=True,
                 misfire_grace_time=60,
@@ -1512,8 +1746,8 @@ class IrrigationScheduler:
             if getattr(self, "has_volatile_jobstore", False):
                 _kwargs["jobstore"] = "volatile"
             self.scheduler.add_job(
-                job_stop_zone,
-                DateTrigger(run_date=run_at),
+                job_stop_zone_if_activation,
+                DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
                 **_kwargs,
             )
             self._emit_timer_audit(
@@ -1525,14 +1759,21 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования watchdog-стопа зоны {zone_id}: {e}")
 
-    def schedule_zone_cap(self, zone_id: int, cap_minutes: int = 240):
+    def schedule_zone_cap(
+        self,
+        zone_id: int,
+        cap_minutes: int = 240,
+        activation_token: str | None = None,
+    ):
         """Абсолютный лимит работы зоны: форс-стоп через cap_minutes от текущего момента."""
         try:
-            run_at = datetime.now() + timedelta(minutes=int(cap_minutes))
+            run_at = self._controller_now(naive=True) + timedelta(minutes=int(cap_minutes))
+            if activation_token is None:
+                activation_token = self._current_activation_token(int(zone_id))
             # Уникальный job id для капа
             job_id = f"zone_cap_stop:{int(zone_id)}"
             _kwargs = dict(
-                args=[zone_id],
+                args=[zone_id, activation_token],
                 id=job_id,
                 replace_existing=True,
                 misfire_grace_time=300,
@@ -1541,7 +1782,11 @@ class IrrigationScheduler:
             )
             if getattr(self, "has_volatile_jobstore", False):
                 _kwargs["jobstore"] = "volatile"
-            self.scheduler.add_job(job_stop_zone, DateTrigger(run_date=run_at), **_kwargs)
+            self.scheduler.add_job(
+                job_stop_zone_if_activation,
+                DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
+                **_kwargs,
+            )
             self._emit_timer_audit(
                 "scheduler_timer_plant",
                 f"zone:{int(zone_id)}",
@@ -1576,7 +1821,7 @@ class IrrigationScheduler:
         Перепланируется при повторных вызовах.
         """
         try:
-            run_at = datetime.now() + timedelta(hours=int(hours))
+            run_at = self._controller_now(naive=True) + timedelta(hours=int(hours))
             job_id = f"master_cap_close:{int(group_id)}"
             _kwargs = dict(
                 args=[group_id],
@@ -1588,7 +1833,11 @@ class IrrigationScheduler:
             )
             if getattr(self, "has_volatile_jobstore", False):
                 _kwargs["jobstore"] = "volatile"
-            self.scheduler.add_job(job_close_master_valve, DateTrigger(run_date=run_at), **_kwargs)
+            self.scheduler.add_job(
+                job_close_master_valve,
+                DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
+                **_kwargs,
+            )
             self._emit_timer_audit(
                 "scheduler_timer_plant",
                 f"group:{int(group_id)}",
@@ -1719,7 +1968,7 @@ class IrrigationScheduler:
             try:
                 from services.zone_control import per_zone_dur as _per_zone_dur
 
-                start_base = datetime.now()
+                start_base = self._controller_now(naive=True)
                 cumulative = 0
                 schedule_map: dict[int, str] = {}
                 for z in group_zones:
@@ -1782,7 +2031,7 @@ class IrrigationScheduler:
                         "ad_hoc_program_name": ad_hoc_program_name,
                         "manual": manual,
                     },
-                    id=f"group_seq:{group_id}:{int(datetime.now().timestamp())}",
+                    id=f"group_seq:{group_id}:{int(self._controller_now().timestamp())}",
                     replace_existing=False,
                     misfire_grace_time=120,
                     coalesce=False,
@@ -1792,7 +2041,10 @@ class IrrigationScheduler:
                     _kwargs["jobstore"] = "volatile"
                 self.scheduler.add_job(
                     job_run_group_sequence,
-                    DateTrigger(run_date=datetime.now()),
+                    DateTrigger(
+                        run_date=self._controller_now(naive=True),
+                        timezone=self._controller_timezone(),
+                    ),
                     **_kwargs,
                 )
             sequence_handed_off = True
@@ -1859,8 +2111,10 @@ class IrrigationScheduler:
                 duration, _ = _per_zone_dur(zone, override_duration, override_percent)
                 if duration <= 0:
                     continue
-                start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                planned_end = (datetime.now() + timedelta(minutes=duration)).strftime("%Y-%m-%d %H:%M:%S")
+                start_ts = self._controller_now(naive=True).strftime("%Y-%m-%d %H:%M:%S")
+                planned_end = (self._controller_now(naive=True) + timedelta(minutes=duration)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 # TESTING-mode start — flagged via audit_reason so any audit
                 # log scrub on prod can filter these synthetic transitions out.
                 try:
@@ -1889,6 +2143,8 @@ class IrrigationScheduler:
             logger.info("Группа %s не запущена: scheduler quiescing", group_id)
             self._release_group_session(group_id, cancel_event)
             return
+        with self._group_session_lock:
+            self._running_group_sessions.add(int(group_id))
         try:
             # Weather check before group sequence.
             # Issue #31: manual runs bypass weather skip entirely.
@@ -1981,7 +2237,7 @@ class IrrigationScheduler:
                 if latest_state == "fault":
                     logger.error("Группа %s: зона %s перешла в fault при старте", group_id, zone_id)
                     continue
-                end_time = datetime.now() + timedelta(minutes=duration)
+                end_time = self._controller_now(naive=True) + timedelta(minutes=duration)
                 self.active_zones[int(zone_id)] = end_time
                 try:
                     metadata = {
@@ -2052,20 +2308,16 @@ class IrrigationScheduler:
                         logger.info(f"Группа {group_id}: shutdown, досрочно останавливаем зону {zone_id}")
                         break
                     remaining -= 1
-                # Централизованный OFF и снятие активности
-                try:
-                    from services.zone_control import stop_zone as _stop_zone_central
-
-                    _stop_zone_central(zone_id, reason="group_sequence")
-                except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-                    logger.debug("Exception in line_892: %s", e)
-                    self._stop_zone(zone_id)
-                self.active_zones.pop(zone_id, None)
-                try:
-                    # очищаем planned_end_time у завершенной зоны
-                    self.db.update_zone(zone_id, {"planned_end_time": None})
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Handled exception in line_899: %s", e)
+                # Централизованный OFF и снятие активности только после
+                # подтверждённого результата. Failed OFF сохраняет safety retry.
+                stopped = self._stop_zone(int(zone_id), reason="group_sequence")
+                if stopped:
+                    try:
+                        self.db.update_zone(zone_id, {"planned_end_time": None})
+                    except (sqlite3.Error, OSError) as e:
+                        logger.debug("Handled exception in line_899: %s", e)
+                else:
+                    logger.error("Группа %s: OFF зоны %s не подтверждён", group_id, zone_id)
                 if skipped_this_zone:
                     try:
                         self.db.add_log(
@@ -2116,6 +2368,8 @@ class IrrigationScheduler:
             # own Event between our setdefault and now, or vice-versa),
             # leave that Event alone — its planter owns the cleanup.
             try:
+                with self._group_session_lock:
+                    self._running_group_sessions.discard(int(group_id))
                 self._release_group_session(group_id, cancel_event)
             except (KeyError, TypeError, ValueError) as e:
                 logger.debug("_run_group_sequence cleanup gid=%s: %s", group_id, e)
@@ -2131,6 +2385,108 @@ class IrrigationScheduler:
     def get_active_programs(self) -> dict[int, dict[str, Any]]:
         # Возвращаем список запланированных программ и их job_ids
         return {pid: {"job_ids": jobs} for pid, jobs in self.program_jobs.items()}
+
+    @staticmethod
+    def _program_slot_from_job_id(program_id: int, job_id: str) -> str | None:
+        prefix = f"program:{int(program_id)}:"
+        if not str(job_id).startswith(prefix):
+            return None
+        tail = str(job_id)[len(prefix) :]
+        if tail.startswith("extra:"):
+            parts = tail.split(":")
+            return f"extra:{parts[1]}" if len(parts) > 1 else None
+        return tail.split(":", 1)[0] or None
+
+    def get_program_trigger_metadata(self, program_id: int) -> dict[str, Any]:
+        """Read live persistent trigger metadata without mutating job state.
+
+        ``slots`` groups weekday fan-out jobs under ``main``/``extra:N`` and
+        exposes an IntervalTrigger's authoritative anchor.  Callers must treat
+        a missing interval anchor as unknown rather than inventing a new one.
+        """
+        pid = int(program_id)
+        result: dict[str, Any] = {
+            "program_id": pid,
+            "timezone": str(getattr(self.scheduler, "timezone", "")),
+            "slots": {},
+        }
+        with self._program_jobs_lock:
+            jobs = sorted(
+                (job for job in self.scheduler.get_jobs() if str(job.id).startswith(f"program:{pid}:")),
+                key=lambda job: str(job.id),
+            )
+            for job in jobs:
+                slot = self._program_slot_from_job_id(pid, str(job.id))
+                if slot is None:
+                    continue
+                trigger = job.trigger
+                entry = {
+                    "job_id": str(job.id),
+                    "trigger_type": type(trigger).__name__,
+                    "next_run_time": getattr(job, "next_run_time", None),
+                    "interval_days": None,
+                    "anchor": None,
+                }
+                if isinstance(trigger, IntervalTrigger):
+                    entry["interval_days"] = int(trigger.interval.total_seconds() // 86400)
+                    entry["anchor"] = trigger.start_date
+                result["slots"].setdefault(slot, []).append(entry)
+        return result
+
+    def get_program_interval_anchors(self, program_id: int) -> dict[str, datetime]:
+        """Return authoritative live anchors keyed by ``main``/``extra:N``."""
+        metadata = self.get_program_trigger_metadata(int(program_id))
+        anchors: dict[str, datetime] = {}
+        for slot, entries in metadata["slots"].items():
+            values = [entry["anchor"] for entry in entries if entry.get("anchor") is not None]
+            if values:
+                anchors[str(slot)] = min(values)
+        return anchors
+
+    def get_program_occurrences(
+        self,
+        program_id: int,
+        start: datetime,
+        end: datetime,
+        *,
+        limit: int = 512,
+    ) -> dict[str, list[datetime]]:
+        """Enumerate live trigger occurrences over a bounded horizon by slot."""
+        bounded_limit = max(1, min(int(limit), 4096))
+        timezone = self._controller_timezone()
+
+        def aware(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone) if timezone is not None else value.astimezone()
+            return value.astimezone(timezone) if timezone is not None else value
+
+        range_start = aware(start)
+        range_end = aware(end)
+        if range_end < range_start:
+            raise ValueError("end must not precede start")
+        result: dict[str, list[datetime]] = {}
+        pid = int(program_id)
+        with self._program_jobs_lock:
+            jobs = [job for job in self.scheduler.get_jobs() if str(job.id).startswith(f"program:{pid}:")]
+            for job in jobs:
+                slot = self._program_slot_from_job_id(pid, str(job.id))
+                if slot is None:
+                    continue
+                previous = None
+                fire = job.trigger.get_next_fire_time(previous, range_start)
+                emitted = 0
+                while fire is not None and fire <= range_end and emitted < bounded_limit:
+                    if fire >= range_start:
+                        result.setdefault(slot, []).append(fire)
+                        emitted += 1
+                    next_fire = job.trigger.get_next_fire_time(fire, fire)
+                    if next_fire is None or next_fire <= fire:
+                        break
+                    previous, fire = fire, next_fire
+
+        for slot, values in result.items():
+            result[slot] = sorted(set(values))[:bounded_limit]
+        return result
 
     def get_active_zones(self) -> dict[int, datetime]:
         return self.active_zones.copy()
@@ -2183,28 +2539,37 @@ class IrrigationScheduler:
         ev.set()
         return "ok"
 
-    def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False):
+    def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False) -> dict[str, Any]:
         """Отменяет все активные задачи планировщика для указанной группы.
 
         master_close_immediately: при True мастер-клапан закрывается без задержки.
         Используется emergency_stop, чтобы внутренний _stop_all не перезаписал
         уже выполненный синхронный master close таймером с delay=60.
+
+        Returns a structured physical outcome.  Safety timers are removed only
+        for confirmed/idempotent OFF zones; unresolved relays retain (or gain)
+        an activation-bound hard retry.
         """
+        gid = int(group_id)
+        result: dict[str, Any] = {"success": False, "stopped": [], "unresolved": [], "group_id": gid}
         try:
             # Ставим флаг отмены немедленно
-            try:
-                with self._group_session_lock:
-                    if group_id in self.group_cancel_events:
-                        self.group_cancel_events[group_id].set()
-            except (KeyError, TypeError, ValueError) as e:
-                logger.debug("Handled exception in cancel_group_jobs: %s", e)
+            with self._group_session_lock:
+                owned_event = self.group_cancel_events.get(gid)
+                if owned_event is not None:
+                    owned_event.set()
+
+            zones = self.db.get_zones() or []
+            group_zones = [z for z in zones if int(z.get("group_id") or 0) == gid]
+            group_zone_ids = {int(z["id"]) for z in group_zones}
 
             # Немедленный OFF всем зонам группы через централизованный контроллер
+            stop_result: object = None
             try:
                 from services.zone_control import stop_all_in_group as _stop_all
 
-                _stop_all(
-                    int(group_id),
+                stop_result = _stop_all(
+                    gid,
                     reason="group_cancel",
                     force=True,
                     master_close_immediately=bool(master_close_immediately),
@@ -2212,50 +2577,128 @@ class IrrigationScheduler:
             except (sqlite3.Error, OSError, ValueError, TypeError):
                 logger.exception("cancel_group_jobs: stop_all_in_group failed")
 
-            # Получаем все зоны группы
-            zones = self.db.get_zones()
-            group_zones = [z for z in zones if z["group_id"] == group_id]
+            explicit_unresolved: set[int] = set()
+            explicit_stopped: set[int] = set()
+            if isinstance(stop_result, dict):
+                for value in stop_result.get("unresolved") or []:
+                    try:
+                        explicit_unresolved.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+                for value in stop_result.get("stopped") or []:
+                    try:
+                        explicit_stopped.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
 
-            # Отменяем задачи остановки зон
-            for zone in group_zones:
-                zone_id = zone["id"]
-                try:
-                    # Единообразно снимаем все job’ы зоны (включая hard_stop)
-                    self.cancel_zone_jobs(int(zone_id))
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Handled exception in cancel_group_jobs: %s", e)
+            refreshed = {
+                int(zone["id"]): zone for zone in (self.db.get_zones() or []) if int(zone.get("group_id") or 0) == gid
+            }
+            unresolved = explicit_unresolved | {
+                zone_id
+                for zone_id in group_zone_ids
+                if str((refreshed.get(zone_id) or {}).get("state") or "").lower() != "off"
+            }
+            stopped = (group_zone_ids | explicit_stopped) - unresolved
+
+            for zone_id in sorted(group_zone_ids | explicit_unresolved | explicit_stopped):
+                if zone_id in unresolved:
+                    # Remove ordinary deadlines but preserve hard/cap safety.
+                    self.cancel_zone_jobs(zone_id, preserve_safety=True)
+                    if not self._has_zone_safety_job(zone_id):
+                        self.schedule_zone_hard_stop(
+                            zone_id,
+                            self._controller_now(naive=True) + timedelta(seconds=30),
+                            activation_token=self._current_activation_token(zone_id),
+                        )
+                else:
+                    # A broker ACK is not a physical OFF observation.  Keep
+                    # the activation-bound cap until verifier/SSE confirmation.
+                    self.cancel_zone_jobs(zone_id)
 
             # Отменяем задачи последовательного полива группы
             job_ids_to_remove = []
             for job in self.scheduler.get_jobs():
                 jid = str(job.id)
-                if jid.startswith(f"group_seq:{int(group_id)}:"):
+                if jid.startswith(f"group_seq:{gid}:"):
                     job_ids_to_remove.append(job.id)
 
+            removed_sequence_jobs = 0
             for job_id in job_ids_to_remove:
                 try:
                     self.scheduler.remove_job(job_id)
+                    removed_sequence_jobs += 1
                 except (ValueError, KeyError, RuntimeError) as e:
                     logger.debug("Handled exception in line_980: %s", e)
 
+            # A removed pending DateTrigger has no runner/finally to release
+            # the claim.  Active executor sessions retain ownership until their
+            # identity-safe cleanup completes.
+            with self._group_session_lock:
+                can_release_pending = removed_sequence_jobs > 0 or TESTING
+                if (
+                    can_release_pending
+                    and gid not in self._running_group_sessions
+                    and self.group_cancel_events.get(gid) is owned_event
+                ):
+                    self.group_cancel_events.pop(gid, None)
+
             # Перестраиваем расписание группы на ближайшую программу
             try:
-                self.db.reschedule_group_to_next_program(group_id)
+                self.db.reschedule_group_to_next_program(gid)
             except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in line_986: %s", e)
 
-            logger.info(f"Отменены все задачи планировщика для группы {group_id}")
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Ошибка отмены задач группы {group_id}: {e}")
+            result.update(
+                {
+                    "success": not unresolved,
+                    "stopped": sorted(stopped),
+                    "unresolved": sorted(unresolved),
+                }
+            )
+            if unresolved:
+                logger.error(
+                    "Группа %s: OFF не подтверждён для зон %s; safety retries сохранены", gid, sorted(unresolved)
+                )
+            else:
+                logger.info("Отменены все задачи планировщика для группы %s", gid)
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
+            logger.error("Ошибка отмены задач группы %s: %s", gid, e)
+            if not result["unresolved"]:
+                result["unresolved"] = sorted(
+                    int(zone["id"]) for zone in (self.db.get_zones() or []) if int(zone.get("group_id") or 0) == gid
+                )
+        return result
 
-    def cancel_zone_jobs(self, zone_id: int):
-        """Отменяет все задачи автоостановки для зоны и убирает её из active_zones."""
+    def _has_zone_safety_job(self, zone_id: int) -> bool:
+        hard_id = f"zone_hard_stop:{int(zone_id)}"
+        cap_id = f"zone_cap_stop:{int(zone_id)}"
+        try:
+            return any(str(job.id) in {hard_id, cap_id} for job in self.scheduler.get_jobs())
+        except (AttributeError, RuntimeError, ValueError, TypeError):
+            return False
+
+    def cancel_zone_jobs(
+        self,
+        zone_id: int,
+        *,
+        include_cap: bool = False,
+        preserve_safety: bool = False,
+    ):
+        """Cancel deadlines after a confirmed OFF.
+
+        ``preserve_safety`` is used by failed group cancellation: ordinary
+        stop jobs are removed, while the last hard/cap retry and active-zone
+        marker remain authoritative.
+        """
         try:
             job_ids_to_remove = []
             for job in self.scheduler.get_jobs():
                 if job.id.startswith(f"zone_stop:{int(zone_id)}:"):
                     job_ids_to_remove.append(job.id)
-                if job.id == f"zone_hard_stop:{int(zone_id)}":
+                if not preserve_safety and job.id == f"zone_hard_stop:{int(zone_id)}":
+                    job_ids_to_remove.append(job.id)
+                if not preserve_safety and include_cap and job.id == f"zone_cap_stop:{int(zone_id)}":
                     job_ids_to_remove.append(job.id)
             for job_id in job_ids_to_remove:
                 try:
@@ -2267,19 +2710,96 @@ class IrrigationScheduler:
                     )
                 except (ValueError, KeyError, RuntimeError) as e:
                     logger.debug("Handled exception in cancel_zone_jobs: %s", e)
-            self.active_zones.pop(int(zone_id), None)
+            if not preserve_safety:
+                self.active_zones.pop(int(zone_id), None)
             logger.info(f"Отменены задачи автоостановки для зоны {zone_id}")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка отмены задач зоны {zone_id}: {e}")
 
-    def load_programs(self):
+    def _read_programs_for_reconcile(self) -> list[dict[str, Any]] | None:
+        """Read programs with a row-isolating fallback for corrupt JSON.
+
+        ProgramRepository historically deserializes the whole result set in a
+        single loop.  One legacy row containing malformed JSON can therefore
+        raise before later valid rows are returned.  The fallback preserves
+        malformed fields verbatim so the strict scheduler validator can fail
+        that row closed while continuing with the rest.
+        """
         try:
-            programs = self.db.get_programs()
-            for program in programs:
-                self.schedule_program(program["id"], program)
-            logger.info(f"Загружено {len(programs)} программ")
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Ошибка загрузки программ: {e}")
+            return self.db.get_programs() or []
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            logger.exception("Program facade decode failed; falling back to isolated raw rows")
+        try:
+            with sqlite3.connect(self.db.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute("SELECT * FROM programs ORDER BY id").fetchall()
+            programs: list[dict[str, Any]] = []
+            for row in rows:
+                program = dict(row)
+                for field in ("days", "zones", "extra_times"):
+                    value = program.get(field)
+                    if isinstance(value, str):
+                        try:
+                            program[field] = json.loads(value)
+                        except (json.JSONDecodeError, TypeError):
+                            # Keep the invalid scalar; normalisation rejects it
+                            # without preventing later rows from loading.
+                            program[field] = value
+                program["enabled"] = bool(program.get("enabled", 1))
+                programs.append(program)
+            return programs
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            logger.exception("Raw program fallback failed")
+            return None
+
+    def load_programs(self) -> bool:
+        """Reconcile every DB program while preserving valid restored jobs.
+
+        Corrupt legacy rows are isolated per program: their potentially stale
+        persistent jobs are removed, other programs still load, and startup
+        remains alive.  ``False`` reports that at least one row failed.
+        """
+        programs = self._read_programs_for_reconcile()
+        if programs is None:
+            return False
+
+        all_ok = True
+        seen_ids: set[int] = set()
+        for program in programs:
+            try:
+                program_id = int(program["id"])
+                seen_ids.add(program_id)
+                if not self.schedule_program(program_id, program):
+                    all_ok = False
+            except (sqlite3.Error, OSError, KeyError, TypeError, ValueError, RuntimeError):
+                all_ok = False
+                logger.exception("Malformed persisted program skipped: %r", program)
+                try:
+                    if isinstance(program, dict) and program.get("id") is not None:
+                        self.cancel_program(int(program["id"]))
+                except (TypeError, ValueError, KeyError, RuntimeError):
+                    logger.debug("Could not cancel malformed program jobs", exc_info=True)
+
+        # Direct load_programs() callers do not necessarily run boot cleanup.
+        # Remove orphan recurring jobs whose DB row no longer exists.
+        for job in list(self.scheduler.get_jobs()):
+            job_id = str(job.id)
+            if not job_id.startswith("program:"):
+                continue
+            try:
+                program_id = int(job_id.split(":", 2)[1])
+            except (IndexError, TypeError, ValueError):
+                try:
+                    self.scheduler.remove_job(job_id)
+                except (KeyError, RuntimeError, ValueError):
+                    logger.debug("Could not remove malformed program job %s", job_id, exc_info=True)
+                all_ok = False
+                continue
+            if program_id not in seen_ids:
+                self.cancel_program(program_id)
+
+        logger.info("Согласовано %d программ (ok=%s)", len(programs), all_ok)
+        return all_ok
 
     @staticmethod
     def _program_start_times(p: dict[str, Any]) -> list[str]:
@@ -2328,7 +2848,7 @@ class IrrigationScheduler:
         """
         try:
             programs = self.db.get_programs()
-            now = datetime.now()
+            now = self._controller_now(naive=True)
             zones_all = self.db.get_zones()
             zones_by_id = {int(z["id"]): z for z in zones_all}
             for p in programs:
@@ -2401,9 +2921,19 @@ class IrrigationScheduler:
                     )
                     if getattr(self, "has_volatile_jobstore", False):
                         _kwargs["jobstore"] = "volatile"
+                    recovery_run_at = self._controller_now(naive=True)
+                    if getattr(self.scheduler, "state", None) == STATE_RUNNING:
+                        recovery_run_at += timedelta(seconds=1)
                     self.scheduler.add_job(
                         job_run_program,
-                        DateTrigger(run_date=datetime.now()),
+                        DateTrigger(
+                            # Avoid an APScheduler remove-vs-submit race when a
+                            # caller schedules recovery and immediately begins
+                            # shutdown. Production remains paused until boot
+                            # reconciliation and the one-second delay is benign.
+                            run_date=recovery_run_at,
+                            timezone=self._controller_timezone(),
+                        ),
                         **_kwargs,
                     )
                     logger.info(f"Recovery: программа {p['id']} — запущены оставшиеся зоны с индекса {start_idx}")
@@ -2438,7 +2968,9 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Boot cleanup failed: {e}")
 
-    def stop_on_boot_active_zones(self) -> None:
+    def stop_on_boot_active_zones(self) -> bool:
+        """Abort crash-open history before issuing ordinary forced OFF paths."""
+        all_ok = True
         try:
             zones = self.db.get_zones()
             interrupted = {
@@ -2447,18 +2979,37 @@ class IrrigationScheduler:
                 if str(z.get("state") or "").lower() in ("starting", "on", "stopping", "paused")
             }
             self._boot_interrupted_zone_ids = interrupted
+            # init_scheduler runs before services.app_init._boot_sync.  Closing
+            # crash-open rows here is therefore mandatory: otherwise the first
+            # normal stop_zone call below finalizes yesterday's interrupted run
+            # as a successful watering at boot time.
+            try:
+                with sqlite3.connect(self.db.db_path, timeout=5) as conn:
+                    conn.execute(
+                        "UPDATE zone_runs SET end_utc = CURRENT_TIMESTAMP, "
+                        "status = 'aborted', updated_at = CURRENT_TIMESTAMP "
+                        "WHERE end_utc IS NULL"
+                    )
+                    conn.commit()
+            except (sqlite3.Error, OSError):
+                all_ok = False
+                logger.exception("Boot remediation: could not abort crash-open zone_runs")
             for z in zones:
                 st = str(z.get("state") or "").lower()
                 if st in ("starting", "on", "stopping", "paused"):
                     try:
                         from services.zone_control import stop_zone as _stop
 
-                        _stop(int(z["id"]), reason="recovery_boot", force=True)
+                        if not _stop(int(z["id"]), reason="recovery_boot", force=True):
+                            all_ok = False
                     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                        all_ok = False
                         logger.debug("Handled exception in stop_on_boot_active_zones: %s", e)
             logger.info("Boot remediation: active zones forced to OFF")
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+            all_ok = False
             logger.error(f"Boot remediation failed: {e}")
+        return all_ok
 
     def complete_boot_recovery(self) -> bool:
         """Recover interrupted runs and unpause jobs after external boot OFF.

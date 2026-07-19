@@ -305,8 +305,7 @@ class TestSchedulerAutoStopEndTime:
         test_db.mark_zone_run_confirmed(int(zone["id"]))
         from irrigation_scheduler import IrrigationScheduler
 
-        class _StubSched:
-            db = test_db
+        scheduler = IrrigationScheduler(test_db)
 
         with (
             patch("services.zone_control.db", test_db),
@@ -316,7 +315,7 @@ class TestSchedulerAutoStopEndTime:
         ):
             before = datetime.now().replace(microsecond=0)
             _time.sleep(0.01)
-            IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
+            assert scheduler._stop_zone(zone["id"]) is True
             after = datetime.now()
 
         z = test_db.get_zone(zone["id"])
@@ -328,9 +327,10 @@ class TestSchedulerAutoStopEndTime:
         assert before <= last <= after
 
     def test_irrigation_scheduler_fallback_when_central_fails(self, test_db):
-        """If the central stop_zone raises, the fallback still flips the
-        zone state to 'off'. The open zone_run is left for boot_sync to
-        abort — we assert state transition and clean watering_start_time.
+        """A central OFF failure stays visible and retains a hard retry.
+
+        A DB-only ``off`` fallback would hide a still-energised relay from the
+        watchdog and make the retry impossible.
         """
         zone = test_db.create_zone(
             {
@@ -350,12 +350,12 @@ class TestSchedulerAutoStopEndTime:
         )
         from irrigation_scheduler import IrrigationScheduler
 
-        class _StubSched:
-            db = test_db
+        scheduler = IrrigationScheduler(test_db)
 
         with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
-            IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
+            assert scheduler._stop_zone(zone["id"]) is False
 
         z = test_db.get_zone(zone["id"])
-        assert z["state"] == "off"
-        assert z["watering_start_time"] is None
+        assert z["state"] == "on"
+        assert z["watering_start_time"] == old_start
+        assert scheduler.scheduler.get_job(f"zone_hard_stop:{zone['id']}") is not None
