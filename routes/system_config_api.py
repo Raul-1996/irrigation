@@ -355,22 +355,32 @@ def api_postpone():
                 jsonify({"success": False, "message": str(exc), "error_code": exc.error_code}),
                 409,
             )
-        success = res.get("success") is True and not res.get("unresolved")
+        success = res.get("success") is True
+        error_code = res.get("error_code")
+        if success:
+            message = f"Полив отложен на {days} дней"
+        elif error_code == "POSTPONE_STOP_UNAVAILABLE":
+            message = "Отсрочка сохранена, результат физического подтверждения недоступен"
+        elif error_code == "POSTPONE_SESSION_NOT_QUIESCED":
+            message = "Отсрочка сохранена, сессия полива не остановлена гарантированно"
+        else:
+            message = "Отсрочка сохранена, физическое выключение ещё не подтверждено"
         payload = {
             "success": success,
             "pending": not success,
-            "message": (
-                f"Полив отложен на {days} дней"
-                if success
-                else "Отсрочка сохранена, физическое выключение ещё не подтверждено"
-            ),
+            "message": message,
             "group_id": group_id,
             "postpone_until": res["postpone_until"],
             "stopped": res.get("stopped", []),
             "unresolved": res.get("unresolved", []),
+            "unverified_zone_ids": res.get("unverified_zone_ids", []),
+            "aggregate_valid": res.get("aggregate_valid") is True,
+            "retry_scheduled": res.get("retry_scheduled") is True,
+            "session_quiesced": res.get("session_quiesced") is True,
+            "physical_stop_confirmed": res.get("physical_stop_confirmed") is True,
         }
         if not success:
-            payload["error_code"] = res.get("error_code") or "POSTPONE_STOP_PENDING"
+            payload["error_code"] = error_code or "POSTPONE_STOP_PENDING"
         return jsonify(payload), 200 if success else 503
 
     return jsonify({"success": False, "message": "Неверное действие"}), 400

@@ -137,8 +137,11 @@ class TestZoneNextWateringPostpone:
                 {
                     "cancel_group_jobs": lambda self, group_id, **kwargs: {
                         "success": True,
+                        "aggregate_valid": True,
                         "stopped": [z["id"]],
                         "unresolved": [],
+                        "unverified_zone_ids": [],
+                        "retry_scheduled": False,
                         "group_id": group_id,
                     }
                 },
