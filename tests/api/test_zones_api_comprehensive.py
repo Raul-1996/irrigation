@@ -150,13 +150,21 @@ class TestViewerAccess:
         resp = viewer_client.get("/api/zones")
         assert resp.status_code == 200
 
-    def test_viewer_create_attempt(self, viewer_client):
-        """Viewer role may or may not be restricted from creating zones (depends on admin_required decorator)."""
-        resp = viewer_client.post(
-            "/api/zones", data=json.dumps({"name": "No", "duration": 10}), content_type="application/json"
-        )
-        # Accept any response — viewer may be allowed or forbidden
-        assert resp.status_code in (200, 201, 403, 401, 302)
+    def test_viewer_create_attempt(self, viewer_client, app):
+        """Viewer role is read-only even on routes without a decorator."""
+        zone_ids_before = {zone["id"] for zone in app.db.get_zones()}
+        testing_before = app.config["TESTING"]
+        app.config["TESTING"] = False
+        try:
+            resp = viewer_client.post(
+                "/api/zones", data=json.dumps({"name": "No", "duration": 10}), content_type="application/json"
+            )
+        finally:
+            app.config["TESTING"] = testing_before
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error_code"] == "FORBIDDEN"
+        assert {zone["id"] for zone in app.db.get_zones()} == zone_ids_before
 
 
 # ── Issue #12: %-of-norm override on /api/zones/<id>/mqtt/start ────────────
