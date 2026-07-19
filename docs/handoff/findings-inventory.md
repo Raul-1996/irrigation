@@ -8,7 +8,7 @@
 - `INTENTIONAL_LIMITATION`: **2**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Remediation disposition: **141 fixed · 7 deferred · 67 pending · 9 not_applicable**.
+- Remediation disposition: **144 fixed · 7 deferred · 64 pending · 9 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -22,7 +22,11 @@
 - **Репродукция/сценарий:** Без Cookie и CSRF выполнить POST /api/zones/1/start, /api/groups/1/master-valve/open или /api/emergency-resume: production-like probe получает success и достигает hardware control path.
 - **Evidence:** Global auth назначает анониму guest, public allowlist и CSRF exemptions пропускают start/stop зон и групп, master-valve и emergency-resume; native Hypercorn слушает 0.0.0.0, а поддерживаемая установка не ставит nginx Basic Auth.
 - **Owner packages:** `p4-auth-http`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Production auth boundary теперь оставляет публичными только fail-safe OFF/postpone/status paths; все ON/resume/master actions требуют logged-in admin, а authenticated unsafe mutations проходят CSRF. Native bind на 0.0.0.0 больше не считается доверенной границей.
+- **Пакет:** `p4-auth-http`.
+- **Fix commit:** `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+- **Regression tests:** `tests/api/test_guest_zone_control.py::TestGuestEndpointAccess::test_guest_cannot_issue_on_or_resume_actions`, `tests/api/test_guest_zone_control.py::TestGuestEndpointAccess::test_stale_admin_role_without_logged_in_cannot_control`, `tests/integration/test_phase4_auth_http.py::test_authenticated_unsafe_physical_actions_require_csrf`.
 
 ### #154 / PR-002 [high] `run.py:28-59,75-78; routes/zones_watering_api.py:238-286; services/sse_hub.py:25,767-779` — Публичные SSE-соединения исчерпывают WSGI executor и блокируют control plane
 
@@ -32,7 +36,11 @@
 - **Репродукция/сценарий:** Открыть восемь curl -N /api/mqtt/zones-sse и затем вызвать /readyz с двухсекундным timeout: запрос не получает executor thread.
 - **Evidence:** AsyncioWSGIMiddleware исполняет бесконечный WSGI response iterator в default executor. На 4-ядерном WB обычно восемь потоков, а SSE cap равен 20 и не резервирует потоки для ready/control API.
 - **Owner packages:** `p4-auth-http`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Hypercorn WSGI bridge получил явно bounded executor и зарезервированные control workers; SSE использует меньший global cap и idempotent lease cleanup при setup failure, eviction и response close, поэтому streams не могут занять весь ready/control plane.
+- **Пакет:** `p4-auth-http`.
+- **Fix commit:** `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+- **Regression tests:** `tests/integration/test_phase4_auth_http.py::test_sse_setup_exception_releases_lease_and_next_stream_is_accepted`, `tests/integration/test_phase4_auth_http.py::test_sse_response_close_is_cross_context_safe_and_idempotent`, `tests/integration/test_phase4_auth_http.py::test_sse_saturation_preserves_workers_for_ready_and_control`.
 
 ### #155 / PR-003 [high] `services/zone_control.py:1129-1281; routes/zones_watering_api.py:403-455; routes/groups_api.py:182-242; routes/system_emergency_api.py:73-82; routes/telegram.py:150-170; irrigation_scheduler.py:2186-2239` — Пути stop отбрасывают неуспешный OFF, удаляют страховочные jobs и сообщают успех
 
@@ -44,6 +52,11 @@
 - **Переоткрывает:** #132.
 - **Owner packages:** `p4-auth-http`, `p4-topology-api`, `p4-telegram`, `p4-scheduler`, `p4-mqtt-core`.
 - **Решение оркестратора:** Post-package refinement: every HTTP, Telegram, scheduler and emergency stop/cancel caller must propagate structured unresolved physical-OFF truth. Broker ACK or logical state is insufficient, and failed OFF must preserve or re-arm hard-stop/cap retries.
+- **Partial remediation `p4-auth-http`:** HTTP session-stop adapters now preserve retry jobs, propagate structured unresolved results, force fail-safe OFF and reject a failed direct MQTT fallback instead of reporting success.
+  - Fix commits: `b040ddd640b6e0b8c7ece40811f853050a72d48c`, `b4258adc23f7de38e44e43f54512798e709ae57c`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_session_stop_keeps_retry_jobs_when_any_physical_off_fails`, `tests/integration/test_phase4_auth_http.py::test_session_stop_propagates_scheduler_unresolved_aggregate`, `tests/integration/test_phase4_auth_http.py::test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false`, `tests/integration/test_phase4_auth_http.py::test_public_stop_forces_off_retry_when_observed_state_is_not_off`.
+  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
+  - Осталось: PR-003 remains open until scheduler cancellation returns a real structured aggregate and the shared zone/scheduler/MQTT paths prove physical OFF before removing safety retries or reporting success.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #156 / PR-004 [high] `routes/zones_crud_api.py:127-152,213-250; db/zones.py:247-283,464-471; services/zone_control.py:1008-1078` — Удаление или перепривязка активной зоны теряет старый relay/master channel
@@ -354,7 +367,11 @@
 - **Репродукция/сценарий:** buffered=False, прочитать первое SSE event и response.close(): стабильно RuntimeError Token has already been used once и PytestUnraisableExceptionWarning.
 - **Evidence:** Token хранится на request и после reset не очищается; stream_with_context выполняет teardown/close повторно, RuntimeError не входит в suppress list.
 - **Owner packages:** `p4-auth-http`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Teardown очищает request-owned token до reset, correlation reset idempotently tolerates reused/context-mismatched tokens, а SSE generator больше не переносит Flask request context и закрывается ровно один раз без RuntimeError/PytestUnraisable warnings.
+- **Пакет:** `p4-auth-http`.
+- **Fix commit:** `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+- **Regression tests:** `tests/integration/test_phase4_auth_http.py::test_correlation_reset_is_idempotent`, `tests/integration/test_phase4_auth_http.py::test_sse_response_close_is_cross_context_safe_and_idempotent`.
 
 ### #186 / PR-034 [medium] `services/monitors/env_monitor.py:71-120; routes/system_config_api.py:246-270` — EnvMonitor Paho-v2 disconnect callback очищает не тот client и течёт loops
 
@@ -445,6 +462,11 @@
 - **Репродукция/сценарий:** Ввести разные confirmation либо сменить пароль на ' abcdefgh ': save success; login тем же вводом strip-ит его и возвращает 401.
 - **Evidence:** new_password2 не читается; backend хеширует exact string, login всегда strip. UI может сохранить ошибочный либо whitespace-padded password, которым затем нельзя войти.
 - **Owner packages:** `p4-frontend`, `p4-auth-http`.
+- **Partial remediation `p4-auth-http`:** Old and new password edge whitespace is normalized before policy, hash and persistence checks, so padding no longer causes login lockout or bypasses the strength/blocklist policy.
+  - Fix commits: `5e0783c47028b2974b813cb3651fded379cc0fc7`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_password_change_normalizes_old_and_new_edge_whitespace`, `tests/integration/test_phase4_auth_http.py::test_password_policy_cannot_be_bypassed_with_edge_whitespace`.
+  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
+  - Осталось: PR-042 remains open because new_password2 confirmation is still not compared by the shipped UI/backend contract; the p4-frontend portion must be integrated and regression-tested.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #195 / PR-043 [medium] `update_server.sh:63-89,142-155; db/settings.py:41-60; services/logging_setup.py:345-362; app.py:370-376; run.py:75-82` — Deploy/runtime permissions и cookie transport раскрывают ключи и bootstrap access
@@ -459,7 +481,12 @@
   - Fix commits: `d0fb6f1b1e481581ea05da0ba79fd94fde2cab95`, `85ec3c60d977b3de49c244e4696f9733850843b6`; merge: `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
   - Regression tests: `tests/unit/test_phase4_security_secrets.py`.
   - Verification: Full serial evidence: 2090 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX bind failure passed as an exact rerun outside the sandbox. Ruff and git diff --check were clean.
-  - Осталось: PR-043 remains open until the default 1234 database seed is removed, auth cookie/trim policy is integrated, and deploy cleanup plus runtime file permissions are integrated.
+  - Осталось: PR-043 remains open until the default 1234 database seed is removed and deploy cleanup plus runtime file permissions are integrated.
+- **Partial remediation `p4-auth-http`:** An explicit SESSION_COOKIE_SECURE environment value now reaches Flask config and Set-Cookie, while the authentication/password boundary consistently trims edge whitespace before policy and hash checks.
+  - Fix commits: `194a44e2ab94cac8ca66459fe47dca3cf5f7e3a6`, `5e0783c47028b2974b813cb3651fded379cc0fc7`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_session_cookie_secure_environment_override_is_applied`, `tests/integration/test_phase4_auth_http.py::test_session_cookie_secure_override_reaches_set_cookie`, `tests/integration/test_phase4_auth_http.py::test_password_change_normalizes_old_and_new_edge_whitespace`, `tests/integration/test_phase4_auth_http.py::test_password_policy_cannot_be_bypassed_with_edge_whitespace`.
+  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
+  - Осталось: PR-043 remains open until the default 1234 database seed is removed and deploy cleanup plus runtime file permissions are integrated.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #196 / PR-044 [medium] `app.py:438-464; routes/audit_api.py:113-190; routes/system_status_api.py:176-240,682-760` — Sensitive logs/audit/scheduler GET endpoints доступны анонимно
@@ -632,6 +659,11 @@
 - **Репродукция/сценарий:** Сохранить manual postpone_until=2099-12-31, вызвать rain start и rain stop: deadline сначала сокращается до конца текущего дня, затем очищается. Параллельные HTTP/Telegram/cancel writers также дают last-writer-wins вместо monotonic max.
 - **Evidence:** HTTP/Telegram service без bound и compare-and-extend перезаписывает postpone_until, rain monitor пишет deadline напрямую, а cancel/sweeper обходят общий group mutation lock. Более короткий либо rain deadline может заменить долгую manual protection и затем быть очищен как rain.
 - **Owner packages:** `p4-auth-http`, `p4-weather`, `p4-telegram`.
+- **Partial remediation `p4-auth-http`:** Public and Telegram postpone now share bounded 1..3-day validation, a monotonic compare-and-extend lock and fail-closed malformed-deadline handling; an exact CAS helper prevents an expiry writer from clearing a concurrent extension.
+  - Fix commits: `491bb5bff5b0b56aa456c5447fab71f90a585f67`, `f9382ea22af08874cd377c793c613da91d3aab97`, `b4258adc23f7de38e44e43f54512798e709ae57c`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_public_postpone_never_shortens_existing_safety_deadline`, `tests/integration/test_phase4_auth_http.py::test_public_postpone_requires_bounded_positive_integer_days`, `tests/integration/test_phase4_auth_http.py::test_concurrent_public_and_telegram_postpone_is_monotonic`, `tests/integration/test_phase4_auth_http.py::test_expired_postpone_cas_preserves_concurrent_longer_deadline`, `tests/integration/test_phase4_auth_http.py::test_apply_and_expired_clear_share_one_postpone_lock`.
+  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
+  - Осталось: PR-061 remains open because rain monitor and scheduler expiry writers still bypass the shared monotonic/CAS helpers; their integration must preserve deadline provenance and never shorten or clear a newer protection.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #218 / PR-062 [medium] `routes/programs_api.py:84-91,489-521; db/programs.py:384-393,498-562` — Unbounded extra_times вызывает квадратичный conflict-check и позволяет малым запросом исчерпать CPU/RAM; preview не rate-limited
