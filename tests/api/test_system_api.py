@@ -104,8 +104,26 @@ class TestPostponeAPI:
         assert resp.status_code == 400
         assert app.db.get_zone(zone["id"])["postpone_until"] is None
 
-    def test_postpone(self, admin_client, app):
-        app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
+    def test_postpone(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
+        zone = app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "stopped": [zone["id"]],
+                        "unresolved": [],
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         resp = admin_client.post(
             "/api/postpone",
             data=json.dumps(

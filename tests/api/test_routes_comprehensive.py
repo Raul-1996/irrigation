@@ -122,10 +122,28 @@ class TestZoneNextWateringPostpone:
         item2 = self._bulk(admin_client, z2["id"])
         assert item2["next_datetime"] is not None
 
-    def test_bulk_group_postpone_via_api(self, admin_client, app):
+    def test_bulk_group_postpone_via_api(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
         # POST /api/postpone for the group, then verify bulk respects it.
         g = app.db.create_group("PPGroup")
         z = app.db.create_zone({"name": "PP3", "duration": 10, "group_id": g["id"]})
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "stopped": [z["id"]],
+                        "unresolved": [],
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         app.db.create_program(
             {
                 "name": "DailyDawn",

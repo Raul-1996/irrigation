@@ -89,9 +89,19 @@ def test_guest_cannot_cancel_postpone_or_clear_database_state(guest_client, app)
         app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
 
 
-def test_guest_can_still_apply_fail_safe_postpone(guest_client, app):
+def test_guest_can_still_apply_fail_safe_postpone(guest_client, app, monkeypatch):
+    import irrigation_scheduler
+
     group = app.db.create_group("public fail-safe postpone")
     zone = app.db.create_zone({"name": "delay me", "duration": 5, "group_id": group["id"]})
+    scheduler = Mock()
+    scheduler.cancel_group_jobs.return_value = {
+        "success": True,
+        "stopped": [zone["id"]],
+        "unresolved": [],
+        "group_id": group["id"],
+    }
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: scheduler)
     app.db.set_setting_value("password_must_change", "0")
     app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
     try:
@@ -449,13 +459,309 @@ def test_clear_group_rain_postpone_rolls_back_on_write_failure(app):
     assert app.db.get_zone(second["id"])["postpone_reason"] == "rain"
 
 
-def test_public_postpone_can_extend_existing_safety_deadline(guest_client, app):
+def test_equal_manual_postpone_claims_rain_provenance_before_dry_clear(app):
+    from services.postpone import (
+        apply_group_postpone_deadline,
+        clear_group_rain_postpone,
+    )
+
+    group = app.db.create_group("manual equal rain ownership")
+    zone = app.db.create_zone({"name": "claimed by operator", "duration": 5, "group_id": group["id"]})
+    deadline = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(zone["id"], deadline, "rain")
+
+    result = apply_group_postpone_deadline(group["id"], deadline, reason="manual")
+
+    assert result["updated_zone_ids"] == [zone["id"]]
+    claimed = app.db.get_zone(zone["id"])
+    assert claimed["postpone_until"] == deadline
+    assert claimed["postpone_reason"] == "manual"
+    assert clear_group_rain_postpone(group["id"], db_facade=app.db) is True
+    preserved = app.db.get_zone(zone["id"])
+    assert preserved["postpone_until"] == deadline
+    assert preserved["postpone_reason"] == "manual"
+
+
+def test_postpone_scheduler_unresolved_is_pending_without_raw_fallback(app, monkeypatch):
+    import irrigation_scheduler
+    import services.zone_control as zone_control
+    from services.postpone import postpone_group
+
+    group = app.db.create_group("postpone structured unresolved")
+    zone = app.db.create_zone({"name": "physically unknown", "duration": 5, "group_id": group["id"]})
+    started_at = "2026-07-19 10:00:00"
+    command_id = "postpone-unresolved-command"
+    app.db.update_zone_versioned(
+        zone["id"],
+        {
+            "state": "on",
+            "commanded_state": "on",
+            "observed_state": "on",
+            "watering_start_time": started_at,
+            "command_id": command_id,
+        },
+    )
+    scheduler = Mock()
+    scheduler.cancel_group_jobs.return_value = {
+        "success": False,
+        "stopped": [],
+        "unresolved": [zone["id"]],
+        "group_id": group["id"],
+    }
+    raw_fallback = Mock()
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: scheduler)
+    monkeypatch.setattr(zone_control, "stop_all_in_group", raw_fallback)
+
+    result = postpone_group(group["id"], 1, source="api")
+
+    assert result["success"] is False
+    assert result["pending"] is True
+    assert result["error_code"] == "POSTPONE_STOP_PENDING"
+    assert result["unresolved"] == [zone["id"]]
+    scheduler.cancel_group_jobs.assert_called_once_with(group["id"], master_close_immediately=True)
+    raw_fallback.assert_not_called()
+    persisted = app.db.get_zone(zone["id"])
+    assert persisted["postpone_until"] == result["postpone_until"]
+    assert persisted["postpone_reason"] == "manual"
+    assert persisted["watering_start_time"] == started_at
+    assert persisted["command_id"] == command_id
+
+
+def test_postpone_without_scheduler_cancels_session_before_confirmed_bulk_stop(app, monkeypatch):
+    import irrigation_scheduler
+    import services.zone_control as zone_control
+    from services.postpone import postpone_group
+
+    group = app.db.create_group("postpone safe fallback ordering")
+    zone = app.db.create_zone({"name": "fallback", "duration": 5, "group_id": group["id"]})
+    events: list[str] = []
+
+    def cancel_session(group_id):
+        assert group_id == group["id"]
+        events.append("cancel-session")
+        return True
+
+    def confirmed_stop(group_id, **kwargs):
+        assert group_id == group["id"]
+        assert kwargs == {
+            "reason": "postpone",
+            "force": True,
+            "master_close_immediately": True,
+            "require_observed_confirmation": True,
+        }
+        events.append("confirmed-stop")
+        return {"success": True, "stopped": [zone["id"]], "unresolved": []}
+
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: None)
+    monkeypatch.setattr(zone_control, "cancel_group_program_execution", cancel_session)
+    monkeypatch.setattr(zone_control, "stop_all_in_group", confirmed_stop)
+
+    result = postpone_group(group["id"], 1, source="telegram")
+
+    assert result["success"] is True
+    assert result["pending"] is False
+    assert result["stopped"] == [zone["id"]]
+    assert result["unresolved"] == []
+    assert events == ["cancel-session", "confirmed-stop"]
+
+
+def test_postpone_api_returns_503_with_durable_deadline_when_stop_is_unresolved(guest_client, app, monkeypatch):
+    import irrigation_scheduler
+    from services.api_rate_limiter import reset_all
+
+    group = app.db.create_group("postpone pending HTTP")
+    zone = app.db.create_zone({"name": "pending HTTP", "duration": 5, "group_id": group["id"]})
+    app.db.update_zone_versioned(
+        zone["id"],
+        {
+            "state": "on",
+            "commanded_state": "on",
+            "observed_state": "on",
+            "watering_start_time": "2026-07-19 10:00:00",
+            "command_id": "pending-http-command",
+        },
+    )
+    scheduler = Mock()
+    scheduler.cancel_group_jobs.return_value = {
+        "success": False,
+        "stopped": [],
+        "unresolved": [zone["id"]],
+        "group_id": group["id"],
+    }
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: scheduler)
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "days": 1, "action": "postpone"},
+        )
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["success"] is False
+    assert body["pending"] is True
+    assert body["error_code"] == "POSTPONE_STOP_PENDING"
+    assert body["unresolved"] == [zone["id"]]
+    assert app.db.get_zone(zone["id"])["postpone_until"] == body["postpone_until"]
+
+
+def test_postpone_ack_without_fresh_off_echo_keeps_activation_and_safety_jobs(guest_client, app, monkeypatch):
+    import irrigation_scheduler
+    import services.zone_control as zone_control
+    from irrigation_scheduler import IrrigationScheduler
+    from services.api_rate_limiter import reset_all
+
+    group = app.db.create_group("postpone ACK without physical echo")
+    server = app.db.create_mqtt_server(
+        {
+            "name": "postpone broker ACK",
+            "host": "127.0.0.1",
+            "port": 1883,
+        }
+    )
+    zone = app.db.create_zone(
+        {
+            "name": "still physically unknown",
+            "duration": 5,
+            "group_id": group["id"],
+            "mqtt_server_id": server["id"],
+            "topic": "/zones/postpone-ack-only",
+        }
+    )
+    started_at = "2026-07-19 10:00:00"
+    command_id = "postpone-ack-only-command"
+    app.db.update_zone_versioned(
+        zone["id"],
+        {
+            "state": "on",
+            "commanded_state": "on",
+            "observed_state": "on",
+            "watering_start_time": started_at,
+            "command_id": command_id,
+        },
+    )
+
+    scheduler = IrrigationScheduler(app.db)
+    hard = Mock(id=f"zone_hard_stop:{zone['id']}")
+    cap = Mock(id=f"zone_cap_stop:{zone['id']}")
+    scheduler_backend = Mock()
+    scheduler_backend.get_jobs.return_value = [hard, cap]
+    scheduler.scheduler = scheduler_backend
+    scheduler.active_zones[zone["id"]] = datetime.now() + timedelta(minutes=5)
+    verifier = Mock()
+    prepared = object()
+    verifier.register_command.return_value = 101
+    verifier.prepare_verification.return_value = prepared
+    verifier.verify.return_value = False
+    publish = Mock(return_value=True)
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: scheduler)
+
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        with (
+            patch.object(zone_control, "db", app.db),
+            patch.object(zone_control, "state_verifier", verifier),
+            patch.object(zone_control, "publish_mqtt_value", publish),
+            patch.object(zone_control, "water_monitor"),
+        ):
+            response = guest_client.post(
+                "/api/postpone",
+                json={"group_id": group["id"], "days": 1, "action": "postpone"},
+            )
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["success"] is False
+    assert body["pending"] is True
+    assert body["error_code"] == "POSTPONE_STOP_PENDING"
+    assert body["stopped"] == []
+    assert body["unresolved"] == [zone["id"]]
+    publish.assert_called_once()
+    assert publish.call_args.args[2] == "0"
+    verifier.verify.assert_called_once_with(
+        zone["id"],
+        "off",
+        generation=101,
+        prepared=prepared,
+    )
+
+    persisted = app.db.get_zone(zone["id"])
+    assert persisted["postpone_until"] == body["postpone_until"]
+    assert persisted["postpone_reason"] == "manual"
+    assert persisted["commanded_state"] == "off"
+    assert persisted["observed_state"] == "unconfirmed"
+    assert persisted["watering_start_time"] == started_at
+    assert persisted["command_id"] == command_id
+    removed_jobs = {call.args[0] for call in scheduler_backend.remove_job.call_args_list}
+    assert hard.id not in removed_jobs
+    assert cap.id not in removed_jobs
+    assert zone["id"] in scheduler.active_zones
+    app.db.update_zone_versioned(
+        zone["id"],
+        {
+            "state": "off",
+            "commanded_state": "off",
+            "observed_state": "off",
+            "watering_start_time": None,
+            "command_id": None,
+            "mqtt_server_id": None,
+            "topic": "",
+        },
+    )
+    scheduler.active_zones.pop(zone["id"], None)
+
+
+def test_telegram_postpone_reports_pending_physical_stop(monkeypatch):
+    import services.postpone as postpone_service
+    from routes.telegram import _do_group_postpone
+
+    monkeypatch.setattr(
+        postpone_service,
+        "postpone_group",
+        lambda group_id, days, source: {
+            "success": False,
+            "pending": True,
+            "error_code": "POSTPONE_STOP_PENDING",
+            "stopped": [],
+            "unresolved": [7],
+            "postpone_until": "2026-07-20 23:59:59",
+        },
+    )
+
+    message = _do_group_postpone(3, 1)
+
+    assert "Отсрочка установлена" in message
+    assert "физическое выключение пока не подтверждено" in message
+    assert "7" in message
+    assert "Защитные повторы продолжаются" in message
+
+
+def test_public_postpone_can_extend_existing_safety_deadline(guest_client, app, monkeypatch):
+    import irrigation_scheduler
     from services.api_rate_limiter import reset_all
 
     group = app.db.create_group("extend public postpone")
     zone = app.db.create_zone({"name": "extend protection", "duration": 5, "group_id": group["id"]})
     previous = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
     app.db.update_zone_postpone(zone["id"], previous, "manual")
+    scheduler = Mock()
+    scheduler.cancel_group_jobs.return_value = {
+        "success": True,
+        "stopped": [zone["id"]],
+        "unresolved": [],
+        "group_id": group["id"],
+    }
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: scheduler)
     app.db.set_setting_value("password_must_change", "0")
     app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
     reset_all()

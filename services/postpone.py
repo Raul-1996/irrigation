@@ -1,10 +1,10 @@
 """Единый postpone-сервис: откладывание полива группы.
 
 Полный набор шагов для любого канала (HTTP API, Telegram):
-postpone_until всем зонам группы, аудируемая остановка активных зон
-с публикацией MQTT '0', снятие заданий планировщика (cancel_group_jobs
-ставит cancel-event, снимает zone/group_seq-job'ы и перестраивает
-расписание группы) и запись postpone_set в журнал.
+postpone_until всем зонам группы, отмена активной последовательности до OFF,
+физически подтверждённая остановка через центральный scheduler/zone-control
+контракт, безопасное сохранение retry/cap-задач для неподтверждённых зон и
+запись postpone_set в журнал.
 """
 
 import json
@@ -14,13 +14,6 @@ import threading
 from datetime import datetime, timedelta
 
 from database import db
-from services.mqtt_pub import publish_mqtt_value
-from utils import normalize_topic
-
-try:
-    import paho.mqtt.client as mqtt
-except ImportError:
-    mqtt = None
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +110,11 @@ def apply_group_postpone_deadline(
                     zone_id=int(zone["id"]),
                 )
             if requested > current:
+                zones_to_update.append(zone)
+            elif requested == current and reason == "manual" and zone.get("postpone_reason") != "manual":
+                # An explicit operator/Telegram postpone owns its intent even
+                # when the selected deadline equals a rain-owned deadline.
+                # Otherwise the later dry edge would clear the user's request.
                 zones_to_update.append(zone)
 
         for zone in zones_to_update:
@@ -249,10 +247,161 @@ def clear_zone_postpone_if_expired(
         return bool(facade.update_zone_postpone(zone_id, None, None))
 
 
+def _postpone_group_zone_ids(group_zones: list[dict]) -> list[int]:
+    """Return the complete validated zone-ID set from the postpone snapshot."""
+    zone_ids: list[int] = []
+    for zone in group_zones:
+        try:
+            zone_ids.append(int(zone["id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sorted(set(zone_ids))
+
+
+def _normalize_postpone_stop_result(result, *, group_id: int, fallback_unresolved: list[int]) -> dict:
+    """Validate the central structured stop result and fail closed."""
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "stopped": [],
+            "unresolved": list(fallback_unresolved),
+            "group_id": int(group_id),
+            "error_code": "POSTPONE_STOP_UNAVAILABLE",
+        }
+    raw_stopped = result.get("stopped", [])
+    raw_unresolved = result.get("unresolved", [])
+    if not isinstance(raw_stopped, (list, tuple, set)) or not isinstance(raw_unresolved, (list, tuple, set)):
+        return {
+            "success": False,
+            "stopped": [],
+            "unresolved": list(fallback_unresolved),
+            "group_id": int(group_id),
+            "error_code": "POSTPONE_STOP_UNAVAILABLE",
+        }
+    try:
+        result_group_id = int(result.get("group_id", group_id))
+        stopped = sorted({int(zone_id) for zone_id in raw_stopped})
+        unresolved = sorted({int(zone_id) for zone_id in raw_unresolved})
+    except (TypeError, ValueError):
+        return {
+            "success": False,
+            "stopped": [],
+            "unresolved": list(fallback_unresolved),
+            "group_id": int(group_id),
+            "error_code": "POSTPONE_STOP_UNAVAILABLE",
+        }
+    if result_group_id != int(group_id):
+        return {
+            "success": False,
+            "stopped": [],
+            "unresolved": list(fallback_unresolved),
+            "group_id": int(group_id),
+            "error_code": "POSTPONE_STOP_UNAVAILABLE",
+        }
+    expected = set(fallback_unresolved)
+    reported = set(stopped) | set(unresolved)
+    if reported - expected:
+        return {
+            "success": False,
+            "stopped": [],
+            "unresolved": list(fallback_unresolved),
+            "group_id": int(group_id),
+            "error_code": "POSTPONE_STOP_UNAVAILABLE",
+        }
+    missing = expected - reported
+    unresolved = sorted(set(unresolved) | missing)
+    stopped = [zone_id for zone_id in stopped if zone_id not in unresolved]
+    success = result.get("success") is True and not unresolved
+    if not success and not unresolved:
+        unresolved = list(fallback_unresolved)
+    return {
+        "success": success,
+        "stopped": stopped,
+        "unresolved": unresolved,
+        "group_id": int(group_id),
+        "error_code": None if success else "POSTPONE_STOP_PENDING",
+    }
+
+
+def _stop_group_for_postpone(group_id: int, group_zones: list[dict]) -> dict:
+    """Cancel the active session first, then require confirmed physical OFF.
+
+    The scheduler is the primary owner because it can atomically set the
+    sequence cancel-event before issuing OFF commands and preserve/replant
+    hard-stop and cap retries for unresolved zones.  A central zone-control
+    fallback is used only when no scheduler instance exists, and only after its
+    public session-cancellation primitive succeeds.
+    """
+    # If the structured owner is missing or malformed, every zone in the
+    # original complete snapshot is unresolved.  Guessing from stale logical
+    # state could omit a concurrent/physically active relay.
+    fallback_unresolved = _postpone_group_zone_ids(group_zones)
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+    except ImportError:
+        scheduler = None
+    except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError):
+        logger.exception("postpone_group: scheduler lookup failed group=%s", group_id)
+        return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+
+    if scheduler is not None:
+        cancel_group_jobs = getattr(scheduler, "cancel_group_jobs", None)
+        if not callable(cancel_group_jobs):
+            logger.error("postpone_group: scheduler has no structured cancel_group_jobs group=%s", group_id)
+            return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+        try:
+            result = cancel_group_jobs(int(group_id), master_close_immediately=True)
+        except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+            logger.exception("postpone_group: structured scheduler stop failed group=%s", group_id)
+            result = None
+        return _normalize_postpone_stop_result(
+            result,
+            group_id=group_id,
+            fallback_unresolved=fallback_unresolved,
+        )
+
+    try:
+        from services.zone_control import cancel_group_program_execution, stop_all_in_group
+    except ImportError:
+        logger.exception("postpone_group: central zone-control stop unavailable group=%s", group_id)
+        return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+
+    try:
+        session_cancelled = cancel_group_program_execution(int(group_id))
+    except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+        logger.exception("postpone_group: fallback session cancellation failed group=%s", group_id)
+        session_cancelled = False
+    if session_cancelled is not True:
+        logger.error("postpone_group: fallback session cancellation unresolved group=%s", group_id)
+        return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+
+    try:
+        result = stop_all_in_group(
+            int(group_id),
+            reason="postpone",
+            force=True,
+            master_close_immediately=True,
+            require_observed_confirmation=True,
+        )
+    except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+        logger.exception("postpone_group: fallback confirmed stop failed group=%s", group_id)
+        result = None
+    return _normalize_postpone_stop_result(
+        result,
+        group_id=group_id,
+        fallback_unresolved=fallback_unresolved,
+    )
+
+
 def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     """Отложить полив всех зон группы на ``days`` дней (до конца дня).
 
-    Возвращает {"postpone_until": str-до-конца-дня, "postpone_date": datetime}.
+    Срок сохраняется до попытки остановки. Возвращает физически правдивый
+    structured result: ``success/pending/stopped/unresolved/error_code`` плюс
+    ``postpone_until`` и ``postpone_date``. При неподтверждённом OFF срок
+    остаётся установлен, а ``success`` равен ``False``.
     """
     group_id = int(group_id)
     if isinstance(days, bool) or not isinstance(days, int) or not MIN_POSTPONE_DAYS <= days <= MAX_POSTPONE_DAYS:
@@ -264,47 +413,28 @@ def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     applied = apply_group_postpone_deadline(group_id, requested_until, reason="manual")
     postpone_until = applied["postpone_until"]
     group_zones = applied["group_zones"]
-    try:
-        for zone in group_zones:
-            try:
-                if (zone.get("state") == "on") or zone.get("watering_start_time"):
-                    # Postpone applies to a group — each zone going OFF
-                    # is an audited transition (operator action) that we
-                    # want to see in audit_log.
-                    try:
-                        from services.zones_state import update_zone_state as _uzs
-
-                        _uzs(
-                            zone["id"],
-                            {"state": "off", "watering_start_time": None},
-                            audit_reason="postpone_action",
-                        )
-                    except (sqlite3.Error, OSError, ImportError):
-                        logger.exception(
-                            "postpone_group: audited path failed zone=%s — falling back to raw update_zone",
-                            zone.get("id"),
-                        )
-                        db.update_zone(zone["id"], {"state": "off", "watering_start_time": None})
-                    sid = zone.get("mqtt_server_id")
-                    topic = (zone.get("topic") or "").strip()
-                    if mqtt and sid and topic:
-                        t = normalize_topic(topic)
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
-            except (ConnectionError, TimeoutError, OSError):
-                logger.exception("Ошибка остановки зоны при установке отложенного полива")
-        try:
-            from irrigation_scheduler import get_scheduler
-
-            scheduler = get_scheduler()
-            if scheduler:
-                scheduler.cancel_group_jobs(group_id)
-        except (ImportError, ValueError, KeyError, RuntimeError):
-            logger.exception("Ошибка отмены заданий планировщика при отложенном поливе группы")
-    except (ConnectionError, TimeoutError, OSError):
-        logger.exception("Ошибка массовой остановки зон при отложенном поливе группы")
+    stop_result = _stop_group_for_postpone(group_id, group_zones)
     db.add_log(
-        "postpone_set", json.dumps({"group": group_id, "days": days, "until": postpone_until, "source": source})
+        "postpone_set",
+        json.dumps(
+            {
+                "group": group_id,
+                "days": days,
+                "until": postpone_until,
+                "source": source,
+                "success": stop_result["success"],
+                "stopped": stop_result["stopped"],
+                "unresolved": stop_result["unresolved"],
+            }
+        ),
     )
-    return {"postpone_until": postpone_until, "postpone_date": postpone_date}
+    return {
+        "success": stop_result["success"],
+        "pending": not stop_result["success"],
+        "error_code": stop_result["error_code"],
+        "group_id": group_id,
+        "stopped": stop_result["stopped"],
+        "unresolved": stop_result["unresolved"],
+        "postpone_until": postpone_until,
+        "postpone_date": postpone_date,
+    }
