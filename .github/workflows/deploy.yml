@@ -22,10 +22,9 @@ jobs:
           proxy_host: ${{ secrets.JUMP_HOST }}
           proxy_username: ${{ secrets.JUMP_USER }}
           proxy_key: ${{ secrets.JUMP_SSH_KEY }}
+          command_timeout: 20m
           script: |
+            set -euo pipefail
             cd /opt/wb-irrigation/irrigation
-            git pull origin main
-            venv/bin/pip install -r requirements.txt
-            systemctl restart wb-irrigation
-            sleep 3
-            systemctl is-active wb-irrigation && echo "✅ Deploy OK" || echo "❌ Deploy FAILED"
+            export BRANCH=main
+            bash ./update_server.sh --yes

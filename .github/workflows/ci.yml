@@ -27,7 +27,9 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: pytest tests/unit tests/db tests/api --tb=short -q --cov --cov-report=xml
+      # pytest.ini is the single selection source: the complete local suite runs
+      # by default, while hardware-backed e2e/mqtt_real tests remain opt-in.
+      - run: pytest --tb=short -q --cov --cov-report=xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
