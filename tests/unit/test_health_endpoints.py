@@ -136,6 +136,7 @@ def test_readyz_boot_reconcile_gate(client, health_api, monkeypatch):
     assert data["checks"]["boot_reconcile"]["status"] == "fail"
     # And once we flip the gate, readyz goes back to ok.
     monkeypatch.setattr(app_init, "_boot_sync_done", True, raising=False)
+    monkeypatch.setattr(app_init, "_boot_recovery_done", True, raising=False)
     with patch.multiple(
         health_api,
         _check_disk_space=lambda min_free_mb=50: {"status": "ok", "free_mb": 1000},

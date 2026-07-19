@@ -7,8 +7,13 @@ at module level) instead of running heavy init on every HTTP request.
 
 import contextlib
 import logging
+import os
+import queue
 import sqlite3
+import threading
 import time
+from datetime import datetime
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +25,30 @@ _INIT_DONE = False
 # module-level bool (not a threading primitive) because /readyz is a simple
 # read-only check.
 _boot_sync_done = False
+_boot_recovery_done = False
+_boot_reconcile_error = "boot reconciliation not started"
+_boot_interrupted_zone_ids: set[int] = set()
+_boot_zone_count = 0
+
+_HEALTH_HEARTBEAT_THREAD: threading.Thread | None = None
+_HEALTH_HEARTBEAT_STOP = threading.Event()
+
+_DEFAULT_BOOT_RECONCILE_TIMEOUT_SEC = 40.0
+_MAX_BOOT_RECONCILE_TIMEOUT_SEC = 45.0
+_BOOT_EVIDENCE_CLEAR_TIMEOUT_SEC = 5.0
 
 
 def reset_init():
     """Allow re-init in tests."""
-    global _INIT_DONE, _boot_sync_done
+    global _INIT_DONE, _boot_sync_done, _boot_recovery_done, _boot_reconcile_error
+    global _boot_interrupted_zone_ids, _boot_zone_count
+    _stop_health_bound_heartbeat(timeout=0.2)
     _INIT_DONE = False
     _boot_sync_done = False
+    _boot_recovery_done = False
+    _boot_reconcile_error = "boot reconciliation not started"
+    _boot_interrupted_zone_ids = set()
+    _boot_zone_count = 0
 
 
 def initialize_app(app, db, *, start_watchdog_fn=None):
@@ -41,7 +63,7 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     Safe to call multiple times — only the first invocation does real work.
     Skipped entirely when ``app.config['TESTING']`` is truthy.
     """
-    global _INIT_DONE
+    global _INIT_DONE, _boot_sync_done, _boot_recovery_done, _boot_reconcile_error
     if _INIT_DONE:
         return
     _INIT_DONE = True
@@ -49,60 +71,98 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     if app.config.get("TESTING"):
         return
 
-    # ── 1. Scheduler ────────────────────────────────────────────────
-    try:
-        from irrigation_scheduler import init_scheduler
+    # ── 1. Strict bounded physical reconciliation ───────────────────
+    # This MUST precede scheduler/watchdog startup.  Otherwise their ordinary
+    # stop paths can close a crash-open run as successful before we classify it
+    # as aborted, and can issue sequential MQTT OFF outside the boot deadline.
+    boot_sync_ok = bool(_boot_sync(app, db))
+    _boot_sync_done = boot_sync_ok
 
-        init_scheduler(db)
-        logger.info("Scheduler initialised")
-    except ImportError as e:
-        logger.error(f"Scheduler init failed: {e}")
-
-    # ── 2. Single-zone exclusivity watchdog ─────────────────────────
-    if start_watchdog_fn is not None:
+    # ── 2. Load the scheduler paused, then release boot recovery ─────
+    _boot_recovery_done = False
+    if boot_sync_ok:
         try:
-            start_watchdog_fn()
-        except Exception:
-            logger.exception("single-zone watchdog start failed")
+            from irrigation_scheduler import get_scheduler, init_scheduler
+
+            init_scheduler(db)
+            logger.info("Scheduler initialised after physical reconciliation")
+            scheduler = get_scheduler()
+            interrupted = getattr(scheduler, "_boot_interrupted_zone_ids", None)
+            if isinstance(interrupted, set):
+                interrupted.update(_boot_interrupted_zone_ids)
+            elif _boot_interrupted_zone_ids:
+                scheduler._boot_interrupted_zone_ids = set(_boot_interrupted_zone_ids)
+            complete_boot = getattr(scheduler, "complete_boot_recovery", None)
+            if complete_boot is None:
+                _boot_reconcile_error = "scheduler boot recovery API unavailable"
+                logger.error(_boot_reconcile_error)
+            elif complete_boot() is True:
+                durable_ack = getattr(scheduler, "boot_recovery_handoff_is_durable", None)
+                try:
+                    handoff_durable = callable(durable_ack) and durable_ack() is True
+                except Exception:
+                    handoff_durable = False
+                    logger.exception("Scheduler durable recovery acknowledgement failed")
+                if not handoff_durable:
+                    _boot_reconcile_error = "scheduler recovery handoff is not durable"
+                    logger.critical(_boot_reconcile_error)
+                    with contextlib.suppress(Exception):
+                        scheduler.stop()
+                else:
+                    from services.lifecycle_storage import clear_boot_interrupted_evidence, run_bounded
+
+                    db_path = getattr(db, "db_path", None)
+                    clear_deadline = time.monotonic() + _BOOT_EVIDENCE_CLEAR_TIMEOUT_SEC
+                    if not isinstance(db_path, str) or not db_path:
+                        cleared, clear_error = False, "db_path missing"
+                    else:
+                        cleared, _unused, clear_error = run_bounded(
+                            lambda: clear_boot_interrupted_evidence(db_path, deadline=clear_deadline),
+                            deadline=clear_deadline,
+                            name="boot interruption marker clear",
+                        )
+                    if cleared:
+                        _boot_recovery_done = True
+                        logger.info("Scheduler boot recovery completed")
+                    else:
+                        _boot_reconcile_error = clear_error or "boot interruption marker clear failed"
+                        logger.critical("Scheduler recovery evidence was not consumed: %s", _boot_reconcile_error)
+                        with contextlib.suppress(Exception):
+                            scheduler.stop()
+            else:
+                _boot_reconcile_error = "scheduler boot recovery did not complete"
+                logger.error(_boot_reconcile_error)
+        except (ImportError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            _boot_reconcile_error = f"scheduler boot recovery failed: {type(exc).__name__}"
+            logger.exception("Scheduler boot recovery completion failed")
     else:
-        logger.warning("start_watchdog_fn not provided, skipping watchdog")
+        logger.critical("Scheduler remains boot-paused: %s", _boot_reconcile_error)
 
-    # ── 3. Cap-time watchdog (TASK-010) ─────────────────────────────
-    try:
-        import services.zone_control as _zc_module
-        from services.watchdog import start_watchdog as _start_cap_watchdog
+    # ── 3. Safety watchdogs and monitors only after full recovery ───
+    if _boot_sync_done and _boot_recovery_done:
+        if start_watchdog_fn is not None:
+            try:
+                start_watchdog_fn()
+            except Exception:
+                logger.exception("single-zone watchdog start failed")
+        else:
+            logger.warning("start_watchdog_fn not provided, skipping watchdog")
 
-        _start_cap_watchdog(db, _zc_module, interval=30)
-    except ImportError:
-        logger.exception("cap-time watchdog start failed")
+        try:
+            import services.zone_control as _zc_module
+            from services.watchdog import start_watchdog as _start_cap_watchdog
 
-    # ── 4. Boot sync: turn OFF all zones + master valves ────────────
-    _boot_sync(app, db)
+            _start_cap_watchdog(db, _zc_module, interval=30)
+        except ImportError:
+            logger.exception("cap-time watchdog start failed")
 
-    # ── 5. Release paused scheduler after physical reconciliation ───
-    try:
-        from irrigation_scheduler import get_scheduler
+        _start_monitors(app, db)
+        _warm_mqtt_clients(db)
 
-        scheduler = get_scheduler()
-        complete_boot = getattr(scheduler, "complete_boot_recovery", None)
-        if complete_boot is not None:
-            complete_boot()
-            logger.info("Scheduler boot recovery completed")
-        elif scheduler is not None:
-            logger.warning("Scheduler has no complete_boot_recovery API")
-    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
-        logger.exception("Scheduler boot recovery completion failed")
-
-    # ── 6. Monitors (water, rain, env) ──────────────────────────────
-    _start_monitors(app, db)
-
-    # ── 7. MQTT publisher warm-up ───────────────────────────────────
-    _warm_mqtt_clients(db)
-
-    # ── 8. Graceful shutdown handlers ───────────────────────────────
+    # ── 4. Graceful shutdown handlers ───────────────────────────────
     _register_shutdown_handlers(db)
 
-    # ── 9. Observability metrics (F2) ───────────────────────────────
+    # ── 5. Observability metrics (F2) ───────────────────────────────
     try:
         from routes.health_api import init_metrics as _init_metrics
 
@@ -112,19 +172,22 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     except Exception:
         logger.exception("init_metrics failed")
 
-    # ── 10. systemd sd_notify: watchdog heartbeat + READY=1 ─────────
-    # Must run LAST so that /readyz reflects true readiness before systemd
-    # marks the unit active (Type=notify).
-    try:
-        from services.systemd_notify import notify_ready, start_heartbeat
+    # ── 6. systemd sd_notify: health-bound watchdog + READY=1 ───────
+    # Fail closed: Type=notify must not become active while physical OFF or
+    # scheduler recovery remains unresolved.  Unlike the legacy unconditional
+    # heartbeat thread, this heartbeat is emitted only after the real HTTP
+    # health endpoint responds, so an exhausted/wedged request plane is visible
+    # to systemd.
+    if _boot_sync_done and _boot_recovery_done:
+        try:
+            from services.systemd_notify import notify_ready
 
-        start_heartbeat()  # start BEFORE notify_ready to close the gap
-        zone_count = 0
-        with contextlib.suppress(Exception):
-            zone_count = len(db.get_zones() or [])
-        notify_ready(status=f"boot_sync done, {zone_count} zones loaded")
-    except Exception:
-        logger.exception("systemd_notify wiring failed (non-fatal)")
+            _start_health_bound_heartbeat()
+            notify_ready(status=f"boot reconciliation done, {_boot_zone_count} zones loaded")
+        except Exception:
+            logger.exception("systemd_notify wiring failed (non-fatal)")
+    else:
+        logger.critical("Application remains NOT READY: %s", _boot_reconcile_error)
 
     logger.info("Application initialisation complete")
 
@@ -134,84 +197,243 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
 # ---------------------------------------------------------------------------
 
 
-def _boot_sync(app, db):
-    """Ensure all zones and master-valves are OFF at controller start."""
-    from services.master_valve import close_all_master_valves
-    from services.mqtt_pub import publish_mqtt_value as _publish
+def _boot_reconcile_timeout(timeout_sec: float | None) -> float:
+    """Return a bounded timeout that always leaves margin for systemd start."""
+    if timeout_sec is None:
+        raw = os.environ.get("WB_BOOT_RECONCILE_TIMEOUT_SEC", str(_DEFAULT_BOOT_RECONCILE_TIMEOUT_SEC))
+        try:
+            timeout_sec = float(raw)
+        except (TypeError, ValueError):
+            timeout_sec = _DEFAULT_BOOT_RECONCILE_TIMEOUT_SEC
+    try:
+        return min(_MAX_BOOT_RECONCILE_TIMEOUT_SEC, max(0.0, float(timeout_sec)))
+    except (TypeError, ValueError):
+        return _DEFAULT_BOOT_RECONCILE_TIMEOUT_SEC
+
+
+def _run_boot_tasks(
+    tasks: list[tuple[str, Callable[[], tuple[bool, str | None]]]],
+    *,
+    deadline: float,
+) -> tuple[dict[str, tuple[bool, str | None]], set[str]]:
+    """Run physical OFF operations concurrently within one global deadline.
+
+    MQTT connect/ack calls can block inside third-party code.  Daemon workers
+    allow startup to remain bounded; a worker that finishes after the deadline
+    can only publish the same fail-safe OFF value.  Its late result is ignored
+    and readiness stays closed until systemd restarts the process.
+    """
+    results: queue.Queue[tuple[str, bool, str | None]] = queue.Queue()
+
+    def run_one(key: str, fn: Callable[[], tuple[bool, str | None]]) -> None:
+        try:
+            ok, reason = fn()
+        except Exception as exc:  # worker boundary: report, never lose result
+            ok, reason = False, f"{type(exc).__name__}: {exc}"
+        results.put((key, bool(ok), reason))
+
+    pending = {key for key, _fn in tasks}
+    for key, fn in tasks:
+        threading.Thread(
+            target=run_one,
+            args=(key, fn),
+            name=f"boot-off-{key}",
+            daemon=True,
+        ).start()
+
+    completed: dict[str, tuple[bool, str | None]] = {}
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            key, ok, reason = results.get(timeout=remaining)
+        except queue.Empty:
+            break
+        completed[key] = (ok, reason)
+        pending.discard(key)
+    return completed, pending
+
+
+def _boot_sync(app, db, *, timeout_sec: float | None = None) -> bool:
+    """Reconcile every configured zone and master valve to confirmed OFF.
+
+    The whole sweep shares one deadline.  Readiness is opened only when every
+    physical target reports success and the crash-open history cleanup commits.
+    """
+    del app  # kept in the public helper signature for compatibility
+    from services.lifecycle_storage import (
+        abort_crash_open_runs,
+        persist_boot_zones_off,
+        run_bounded,
+        strict_snapshot,
+    )
+    from services.mqtt_pub import get_or_create_mqtt_client
+    from services.shutdown import _confirmed_publish
     from utils import normalize_topic
 
-    try:
-        # Mark any zone_runs left open by a previous (crashed / killed)
-        # process as 'aborted' before any ordinary stop path can finalize
-        # them as 'ok'/'failed'. Closing end_utc also removes them from
-        # get_open_zone_run, so stop_all_in_group cannot overwrite the
-        # crash outcome while forcing the physical relays OFF below.
-        # get_last_watering_time filters status='ok', so without this the
-        # aborted row remains excluded from successful watering history.
+    global _boot_sync_done, _boot_reconcile_error, _boot_interrupted_zone_ids, _boot_zone_count
+    _boot_sync_done = False
+    _boot_reconcile_error = "boot reconciliation in progress"
+    _boot_interrupted_zone_ids = set()
+    _boot_zone_count = 0
+    deadline = time.monotonic() + _boot_reconcile_timeout(timeout_sec)
+    failures: list[str] = []
+    db_path = getattr(db, "db_path", None)
+    if not isinstance(db_path, str) or not db_path:
+        _boot_reconcile_error = "strict lifecycle snapshot unavailable: db_path missing"
+        return False
+
+    # A crashed process leaves local-naive timestamps in zone_runs.  Use the
+    # controller's local wall clock rather than SQLite CURRENT_TIMESTAMP (UTC),
+    # and deliberately leave `confirmed` untouched for forensic truth.
+    crash_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_ok, interrupted, history_error = run_bounded(
+        lambda: abort_crash_open_runs(db_path, deadline=deadline, end_local=crash_end),
+        deadline=deadline,
+        name="crash history cleanup",
+    )
+    if not history_ok or interrupted is None:
+        _boot_reconcile_error = history_error or "crash history cleanup failed"
+        logger.critical("Boot reconciliation failed: %s", _boot_reconcile_error)
+        return False
+    _boot_interrupted_zone_ids = set(interrupted)
+    logger.info("boot_sync: aborted open zone_runs from prior run")
+
+    snapshot_ok, snapshot, snapshot_error = run_bounded(
+        lambda: strict_snapshot(db_path, deadline=deadline),
+        deadline=deadline,
+        name="strict topology snapshot",
+    )
+    if not snapshot_ok or snapshot is None:
+        _boot_reconcile_error = snapshot_error or "strict topology snapshot failed"
+        logger.critical("Boot reconciliation failed: %s", _boot_reconcile_error)
+        return False
+
+    zones = snapshot.zones
+    groups = snapshot.groups
+    servers = snapshot.servers
+    _boot_zone_count = len(zones)
+
+    tasks: list[tuple[str, Callable[[], tuple[bool, str | None]]]] = []
+    zone_states: list[tuple[int, str]] = []
+
+    def publish_command(server: dict, topic: str, value: str) -> tuple[bool, str | None]:
+        client = get_or_create_mqtt_client(server)
+        if client is None:
+            return False, "MQTT client unavailable"
+        target = normalize_topic(topic) + "/on"
+        info = client.publish(target, payload=value, qos=2, retain=True)
+        ok, reason = _confirmed_publish(info, deadline=deadline)
+        if not ok:
+            return False, f"{target}: {reason}"
+        return True, None
+
+    for index, zone in enumerate(zones):
         try:
-            import sqlite3 as _sq
+            zone_id = int(zone["id"])
+        except (KeyError, TypeError, ValueError):
+            failures.append(f"zone[{index}]: invalid id")
+            continue
+        current_state = str(zone.get("state") or "").lower()
+        zone_states.append((zone_id, current_state))
 
-            with _sq.connect(db.db_path, timeout=5) as conn:
-                conn.execute(
-                    "UPDATE zone_runs SET end_utc = CURRENT_TIMESTAMP, "
-                    "status = 'aborted', "
-                    "updated_at = CURRENT_TIMESTAMP "
-                    "WHERE end_utc IS NULL "
-                    "AND (status IS NULL OR status = '')"
-                )
-                conn.commit()
-            logger.info("boot_sync: aborted open zone_runs from prior run")
-        except (sqlite3.Error, OSError) as e:
-            logger.warning("boot_sync: aborted-run cleanup failed: %s", e)
+        def turn_zone_off(z: dict = zone, state: str = current_state) -> tuple[bool, str | None]:
+            sid = z.get("mqtt_server_id")
+            topic = str(z.get("topic") or "").strip()
+            if bool(sid) != bool(topic):
+                return False, "incomplete MQTT mapping"
+            if not sid and not topic and state != "off":
+                return False, f"active state {state!r} has no MQTT mapping"
+            if sid and topic:
+                server = servers.get(int(sid))
+                if not server:
+                    return False, "MQTT server missing"
+                ok, reason = publish_command(server, topic, "0")
+                if not ok:
+                    return False, reason or "OFF not confirmed"
+                if time.monotonic() > deadline:
+                    return False, "global deadline exceeded after OFF"
+            return True, None
 
-        # Centralised OFF via zone_control (if available)
+        tasks.append((f"zone:{zone_id}", turn_zone_off))
+
+    seen_masters: dict[tuple[int, str], str] = {}
+    for index, group in enumerate(groups):
         try:
-            from services.zone_control import stop_all_in_group as _stop_all
+            if int(group.get("use_master_valve") or 0) != 1:
+                continue
+            group_id = int(group.get("id") or 0)
+            sid_raw = group.get("master_mqtt_server_id")
+            topic_raw = str(group.get("master_mqtt_topic") or "").strip()
+            if not sid_raw or not topic_raw:
+                failures.append(f"master group:{group_id or index}: incomplete MQTT mapping")
+                continue
+            sid = int(sid_raw)
+            topic = normalize_topic(topic_raw)
+            mode = str(group.get("master_mode") or "NC").strip().upper()
+            close_value = "1" if mode == "NO" else "0"
+            master_key = (sid, topic)
+            prior_value = seen_masters.get(master_key)
+            if prior_value is not None:
+                if prior_value != close_value:
+                    failures.append(f"master group:{group_id or index}: conflicting close mode")
+                continue
+            seen_masters[master_key] = close_value
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            failures.append(f"master group:{index}: {type(exc).__name__}")
+            continue
 
-            groups = db.get_groups() or []
-            for g in groups:
-                try:
-                    _stop_all(int(g["id"]), reason="boot_sync", force=True)
-                except (ValueError, TypeError, KeyError) as e:
-                    logger.debug("Handled exception in _boot_sync: %s", e)
-        except ImportError as e:
-            logger.debug("Handled exception in _boot_sync: %s", e)
+        def close_master(
+            server_id: int = sid,
+            master_topic: str = topic,
+            value: str = close_value,
+        ) -> tuple[bool, str | None]:
+            server = servers.get(server_id)
+            if not server:
+                return False, "MQTT server missing"
+            ok, reason = publish_command(server, master_topic, value)
+            if not ok:
+                return False, reason or "OFF not confirmed"
+            if time.monotonic() > deadline:
+                return False, "global deadline exceeded after OFF"
+            return True, None
 
-        # Direct MQTT OFF publish per zone (secondary safety net with retries)
-        try:
-            zones = db.get_zones() or []
-            for z in zones:
-                try:
-                    sid = z.get("mqtt_server_id")
-                    t = (z.get("topic") or "").strip()
-                    if sid and t:
-                        server = db.get_mqtt_server(int(sid))
-                        if server:
-                            t_norm = normalize_topic(t)
-                            for attempt in range(3):
-                                ok = _publish(server, t_norm, "0", min_interval_sec=0.0, retain=True, qos=2)
-                                if ok:
-                                    break
-                                time.sleep(0.2 * (attempt + 1))
-                            time.sleep(0.01)
-                except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.debug("Handled exception in line_148: %s", e)
-        except (ConnectionError, TimeoutError, OSError) as e:
-            logger.debug("Handled exception in line_150: %s", e)
+        tasks.append((f"master:{sid}:{topic}", close_master))
 
-        # Close all configured master valves with retries (mode-aware, retain)
-        try:
-            close_all_master_valves(db, _publish)
-        except (ConnectionError, TimeoutError, OSError):
-            logger.exception("boot sync OFF (secondary) failed")
+    completed, pending = _run_boot_tasks(tasks, deadline=deadline)
+    for key, (ok, reason) in completed.items():
+        if not ok:
+            failures.append(f"{key}: {reason or 'failed'}")
+    failures.extend(f"{key}: deadline exceeded" for key in sorted(pending))
+    if time.monotonic() > deadline and not pending:
+        failures.append("global boot reconciliation deadline exceeded")
 
-        logger.info("Boot sync: all zones OFF, MQTT OFF published")
-        # F2 — readiness gate flipped on successful completion.  /readyz
-        # check #4 (boot_reconcile) reads this flag.
-        global _boot_sync_done
-        _boot_sync_done = True
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.error(f"Boot sync failed: {e}")
+    if failures:
+        _boot_reconcile_error = "; ".join(failures)
+        logger.critical("Boot reconciliation failed: %s", _boot_reconcile_error)
+        return False
+
+    persist_ok, _unused, persist_error = run_bounded(
+        lambda: persist_boot_zones_off(
+            db_path,
+            zone_states,
+            interrupted_zone_ids=_boot_interrupted_zone_ids,
+            deadline=deadline,
+            updated_local=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+        deadline=deadline,
+        name="boot zone state commit",
+    )
+    if not persist_ok:
+        _boot_reconcile_error = persist_error or "boot zone state commit failed"
+        logger.critical("Boot reconciliation failed: %s", _boot_reconcile_error)
+        return False
+
+    _boot_sync_done = True
+    _boot_reconcile_error = ""
+    logger.info("Boot reconciliation: every zone and master valve confirmed OFF")
+    return True
 
 
 def _start_monitors(app, db):
@@ -271,11 +493,90 @@ def _warm_mqtt_clients(db):
         logger.exception("MQTT warm-up failed")
 
 
+def _health_heartbeat_once(*, urlopen_fn=None, port: int | None = None, timeout_sec: float = 2.0) -> bool:
+    """Probe the real HTTP request plane, then emit one systemd heartbeat."""
+    if urlopen_fn is None:
+        from urllib.request import urlopen as urlopen_fn
+
+    try:
+        resolved_port = int(port if port is not None else os.environ.get("PORT", "8080"))
+        with urlopen_fn(
+            f"http://127.0.0.1:{resolved_port}/healthz",
+            timeout=max(0.05, float(timeout_sec)),
+        ) as response:
+            if int(getattr(response, "status", 0)) != 200:
+                return False
+    except (OSError, TimeoutError, ValueError, TypeError):
+        logger.warning("systemd watchdog HTTP health probe failed", exc_info=True)
+        return False
+
+    try:
+        from services.systemd_notify import notify_watchdog
+
+        sent = bool(notify_watchdog())
+        if sent:
+            with contextlib.suppress(Exception):
+                from routes.health_api import WB_WATCHDOG_HEARTBEATS
+
+                WB_WATCHDOG_HEARTBEATS.inc()
+        return sent
+    except Exception:
+        logger.warning("systemd watchdog notify failed", exc_info=True)
+        return False
+
+
+def _watchdog_interval_sec() -> float:
+    """Use one third of systemd's watchdog period, with a safe default."""
+    try:
+        watchdog_usec = int(os.environ.get("WATCHDOG_USEC", "60000000"))
+        return max(1.0, watchdog_usec / 3_000_000.0)
+    except (TypeError, ValueError):
+        return 20.0
+
+
+def _health_heartbeat_loop() -> None:
+    interval = _watchdog_interval_sec()
+    probe_timeout = min(5.0, max(0.5, interval / 4.0))
+    logger.info("health-bound systemd heartbeat started (interval=%.1fs)", interval)
+    while not _HEALTH_HEARTBEAT_STOP.wait(interval):
+        _health_heartbeat_once(timeout_sec=probe_timeout)
+    logger.info("health-bound systemd heartbeat stopped")
+
+
+def _start_health_bound_heartbeat() -> bool:
+    """Start the only production heartbeat, conditional on HTTP liveness."""
+    global _HEALTH_HEARTBEAT_THREAD, _HEALTH_HEARTBEAT_STOP
+    if os.environ.get("WB_WATCHDOG_ENABLED", "1") != "1":
+        logger.info("systemd watchdog disabled via WB_WATCHDOG_ENABLED=0")
+        return False
+    if not os.environ.get("NOTIFY_SOCKET"):
+        return False
+    if _HEALTH_HEARTBEAT_THREAD is not None and _HEALTH_HEARTBEAT_THREAD.is_alive():
+        return True
+    _HEALTH_HEARTBEAT_STOP = threading.Event()
+    _HEALTH_HEARTBEAT_THREAD = threading.Thread(
+        target=_health_heartbeat_loop,
+        name="sd-notify-health-heartbeat",
+        daemon=True,
+    )
+    _HEALTH_HEARTBEAT_THREAD.start()
+    return True
+
+
+def _stop_health_bound_heartbeat(timeout: float = 5.0) -> None:
+    global _HEALTH_HEARTBEAT_THREAD
+    _HEALTH_HEARTBEAT_STOP.set()
+    thread = _HEALTH_HEARTBEAT_THREAD
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=max(0.0, float(timeout)))
+    if thread is None or not thread.is_alive():
+        _HEALTH_HEARTBEAT_THREAD = None
+
+
 # ---------------------------------------------------------------------------
 # Graceful shutdown: delegate to services.shutdown
 # ---------------------------------------------------------------------------
 import atexit
-import os
 import signal
 
 from services.shutdown import reset_shutdown, shutdown_all_zones_off
@@ -300,10 +601,10 @@ def _register_shutdown_handlers(db=None):
     def _signal_handler(signum, frame):
         logger.info("Shutdown: received signal %s", signum)
         try:
-            from services.systemd_notify import notify_stopping, stop_heartbeat
+            from services.systemd_notify import notify_stopping
 
             notify_stopping()
-            stop_heartbeat(timeout=2.0)
+            _stop_health_bound_heartbeat(timeout=2.0)
         except Exception:
             logger.debug("systemd_notify stop failed (non-fatal)", exc_info=True)
         shutdown_all_zones_off(db=db)
@@ -313,9 +614,7 @@ def _register_shutdown_handlers(db=None):
 
     def _atexit_handler():
         try:
-            from services.systemd_notify import stop_heartbeat
-
-            stop_heartbeat(timeout=1.0)
+            _stop_health_bound_heartbeat(timeout=1.0)
         except Exception:
             pass
         shutdown_all_zones_off(db=db)

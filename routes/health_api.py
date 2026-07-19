@@ -115,7 +115,7 @@ WB_SCHEDULER_RUNNING = Gauge(
 
 WB_ZONES_TOTAL = Gauge(
     "wb_zones_total",
-    "Number of zones by state (on/off) — populated on every /metrics scrape",
+    "Number of zones by lifecycle state — populated on every /metrics scrape",
     ["state"],
     registry=REGISTRY,
 )
@@ -205,7 +205,7 @@ def init_metrics(app, db) -> None:
     for s in ("manual", "scheduler", "program", "other"):
         WB_ZONE_START.labels(source=s)
         WB_ZONE_STOP.labels(source=s)
-    for st in ("on", "off"):
+    for st in ("on", "off", "starting", "stopping", "paused", "fault", "unknown"):
         WB_ZONES_TOTAL.labels(state=st)
 
     # Install log-count handler on the ROOT logger (idempotent).
@@ -227,12 +227,16 @@ def _check_boot_reconcile() -> dict[str, Any]:
     try:
         from services import app_init
 
-        done = bool(getattr(app_init, "_boot_sync_done", False))
+        physical_done = bool(getattr(app_init, "_boot_sync_done", False))
+        recovery_done = bool(getattr(app_init, "_boot_recovery_done", False))
+        reason = str(getattr(app_init, "_boot_reconcile_error", "") or "")
     except ImportError:
         return {"status": "fail", "reason": "services.app_init import failed"}
-    if done:
+    if physical_done and recovery_done:
         return {"status": "ok"}
-    return {"status": "fail", "reason": "boot_sync not completed"}
+    if not physical_done:
+        return {"status": "fail", "reason": reason or "physical OFF reconciliation not completed"}
+    return {"status": "fail", "reason": reason or "scheduler boot recovery not completed"}
 
 
 def _check_disk_space(min_free_mb: int = 50) -> dict[str, Any]:
@@ -269,12 +273,48 @@ def _check_scheduler() -> dict[str, Any]:
     dur_ms = int((time.perf_counter() - t0) * 1000)
     if sched is None:
         return {"status": "fail", "duration_ms": dur_ms, "reason": "scheduler not initialised"}
-    running = bool(getattr(sched, "is_running", False))
+    recovery_completed = getattr(sched, "_boot_recovery_completed", None)
+    if recovery_completed is False:
+        return {
+            "status": "fail",
+            "duration_ms": dur_ms,
+            "reason": "scheduler boot recovery is still paused",
+        }
+    running = _scheduler_running(sched)
     return {
         "status": "ok" if running else "fail",
         "duration_ms": dur_ms,
         "reason": None if running else "scheduler.is_running is False",
     }
+
+
+def _scheduler_running(sched) -> bool:
+    """Read the IrrigationScheduler wrapper before APScheduler internals."""
+    if sched is None:
+        return False
+    wrapper_state = getattr(sched, "is_running", None)
+    if isinstance(wrapper_state, bool):
+        return wrapper_state
+    apscheduler = getattr(sched, "scheduler", None)
+    backend_state = getattr(apscheduler, "running", None)
+    if isinstance(backend_state, bool):
+        return backend_state
+    direct_state = getattr(sched, "running", None)
+    return direct_state if isinstance(direct_state, bool) else False
+
+
+def _scheduler_jobs(sched) -> list[Any]:
+    """Return jobs from the wrapped APScheduler, with direct fallback."""
+    if sched is None:
+        return []
+    apscheduler = getattr(sched, "scheduler", None)
+    get_backend_jobs = getattr(apscheduler, "get_jobs", None)
+    if callable(get_backend_jobs):
+        return list(get_backend_jobs() or [])
+    get_direct_jobs = getattr(sched, "get_jobs", None)
+    if callable(get_direct_jobs):
+        return list(get_direct_jobs() or [])
+    return []
 
 
 def _check_mqtt(db) -> dict[str, Any]:
@@ -417,8 +457,8 @@ def metrics() -> Response:
         from irrigation_scheduler import get_scheduler
 
         sched = get_scheduler()
-        WB_SCHEDULER_JOBS.set(len(sched.get_jobs()) if sched else 0)
-        WB_SCHEDULER_RUNNING.set(1 if (sched and getattr(sched, "running", False)) else 0)
+        WB_SCHEDULER_JOBS.set(len(_scheduler_jobs(sched)))
+        WB_SCHEDULER_RUNNING.set(1 if _scheduler_running(sched) else 0)
     except Exception as e:
         logger.debug("metrics scheduler snapshot: %s", e)
 
@@ -426,9 +466,13 @@ def metrics() -> Response:
     try:
         if db is not None:
             zones = db.get_zones() or []
-            on = sum(1 for z in zones if str(z.get("state")) == "on")
-            WB_ZONES_TOTAL.labels(state="on").set(on)
-            WB_ZONES_TOTAL.labels(state="off").set(len(zones) - on)
+            states = ("on", "off", "starting", "stopping", "paused", "fault", "unknown")
+            counts = dict.fromkeys(states, 0)
+            for zone in zones:
+                state = str(zone.get("state") or "unknown").lower()
+                counts[state if state in counts else "unknown"] += 1
+            for state, count in counts.items():
+                WB_ZONES_TOTAL.labels(state=state).set(count)
     except Exception as e:
         logger.debug("metrics zones snapshot: %s", e)
 

@@ -5,6 +5,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _confirmed_message_info() -> MagicMock:
+    info = MagicMock()
+    info.rc = 0
+    info.wait_for_publish.return_value = None
+    info.is_published.return_value = True
+    return info
+
+
 @pytest.fixture(autouse=True)
 def _reset_shutdown():
     """Reset shutdown state between tests."""
@@ -46,7 +54,7 @@ class TestShutdownAllZones:
         )
 
         mock_client = MagicMock()
-        mock_result = MagicMock()
+        mock_result = _confirmed_message_info()
         mock_client.publish.return_value = mock_result
 
         with patch("services.mqtt_pub.get_or_create_mqtt_client", return_value=mock_client):
@@ -54,13 +62,13 @@ class TestShutdownAllZones:
 
             shutdown_all_zones(db=test_db)
 
-        # 2 zones * 2 topics (base + /on) = 4
-        assert mock_client.publish.call_count == 4
+        # One actuator command topic (/on) per zone; never write report/base.
+        assert mock_client.publish.call_count == 2
 
     def test_shutdown_idempotent(self, test_db, mqtt_server_id):
         """Should only run once."""
         mock_client = MagicMock()
-        mock_result = MagicMock()
+        mock_result = _confirmed_message_info()
         mock_client.publish.return_value = mock_result
         test_db.create_zone(
             {
@@ -98,7 +106,7 @@ class TestShutdownAllZones:
             }
         )
 
-        mock_result = MagicMock()
+        mock_result = _confirmed_message_info()
         mock_client = MagicMock()
         mock_client.publish.return_value = mock_result
 
@@ -108,7 +116,8 @@ class TestShutdownAllZones:
             shutdown_all_zones(db=test_db)
 
         assert mock_result.wait_for_publish.call_count >= 1
-        mock_result.wait_for_publish.assert_called_with(timeout=10.0)
+        waited = mock_result.wait_for_publish.call_args.kwargs["timeout"]
+        assert 0 < waited <= 10.0
 
     def test_shutdown_handles_publish_timeout(self, test_db, mqtt_server_id):
         """Should handle wait_for_publish timeout gracefully."""
@@ -122,7 +131,7 @@ class TestShutdownAllZones:
             }
         )
 
-        mock_result = MagicMock()
+        mock_result = _confirmed_message_info()
         mock_result.wait_for_publish.side_effect = RuntimeError("timeout")
         mock_client = MagicMock()
         mock_client.publish.return_value = mock_result
@@ -163,7 +172,7 @@ class TestShutdownAllZones:
         )
 
         mock_client = MagicMock()
-        mock_result = MagicMock()
+        mock_result = _confirmed_message_info()
         mock_client.publish.return_value = mock_result
 
         with patch("services.mqtt_pub.get_or_create_mqtt_client", return_value=mock_client):
@@ -171,4 +180,4 @@ class TestShutdownAllZones:
 
             shutdown_all_zones(db=test_db)
 
-        assert mock_client.publish.call_count == 2  # Only Z2
+        assert mock_client.publish.call_count == 1  # Only Z2 actuator /on
