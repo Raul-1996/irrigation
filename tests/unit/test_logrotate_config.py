@@ -33,11 +33,17 @@ def test_blocks_are_balanced(config_text):
     """Each opening `{` must have a matching `}` at block-end."""
     opens = config_text.count("{")
     closes = config_text.count("}")
-    assert opens == closes and opens >= 2, f"brace count mismatch: {{ {opens} vs }} {closes}"
+    assert opens == closes == 1, f"expected one owned block: {{ {opens} vs }} {closes}"
 
 
-def test_mosquitto_block_present(config_text):
-    assert "/var/log/mosquitto/mosquitto.log" in config_text
+def test_mosquitto_package_log_is_not_redeclared(config_text):
+    """Debian's mosquitto package owns this target in its own config.
+
+    Declaring the same path twice makes the complete logrotate run fail with
+    ``duplicate log entry`` and prevents Telegram rotation as collateral.
+    """
+    non_comment = "\n".join(line for line in config_text.splitlines() if not line.lstrip().startswith("#"))
+    assert "/var/log/mosquitto/mosquitto.log" not in non_comment
 
 
 def test_telegram_block_present(config_text):
@@ -60,10 +66,9 @@ def test_app_log_NOT_in_config(config_text):
 
 
 def test_copytruncate_used_on_all_blocks(config_text):
-    """Neither mosquitto nor telegram bot supports SIGHUP reopen contract;
-    both blocks must use `copytruncate`."""
+    """The Telegram bot does not implement a SIGHUP reopen contract."""
     blocks = re.findall(r"\{([^}]+)\}", config_text, flags=re.DOTALL)
-    assert len(blocks) >= 2
+    assert len(blocks) == 1
     for i, block in enumerate(blocks):
         assert "copytruncate" in block, f"block #{i + 1} is missing `copytruncate`: {block.strip()[:120]}"
 

@@ -95,6 +95,12 @@ def test_install_and_update_activate_repo_logrotate_config():
     assert expected in UPDATE
     assert "/etc/logrotate.d/wb-irrigation" in INSTALL
     assert "/etc/logrotate.d/wb-irrigation" in UPDATE
+    for script in (INSTALL, UPDATE):
+        assert "ensure_logrotate_ready" in script
+        assert 'logrotate -d "/etc/logrotate.conf"' in script
+        assert "logrotate.timer" in script
+        assert "/etc/cron.daily/logrotate" in script
+    assert "apt-get install -y logrotate" in UPDATE
 
 
 def test_ci_runs_the_complete_default_selected_suite():

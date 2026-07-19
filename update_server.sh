@@ -109,6 +109,37 @@ upsert_env_value() {
   chmod 600 "$env_file"
 }
 
+ensure_logrotate_ready() {
+  if ! command -v logrotate >/dev/null 2>&1; then
+    info "Installing required logrotate package"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y logrotate
+  fi
+  if ! command -v logrotate >/dev/null 2>&1 || [[ ! -f /etc/logrotate.conf ]]; then
+    err "logrotate runtime is incomplete"
+    return 1
+  fi
+
+  # Validate the complete include tree, not only our file: duplicate targets
+  # across package-owned configs otherwise fail later from cron/timer.
+  logrotate -d "/etc/logrotate.conf"
+
+  if systemctl cat logrotate.timer >/dev/null 2>&1; then
+    systemctl enable --now logrotate.timer
+    if ! systemctl is-enabled logrotate.timer >/dev/null 2>&1 \
+      || ! systemctl is-active logrotate.timer >/dev/null 2>&1; then
+      err "logrotate.timer is installed but not active"
+      return 1
+    fi
+    info "logrotate.timer is enabled and active"
+  elif [[ -x /etc/cron.daily/logrotate ]] && systemctl is-active cron >/dev/null 2>&1; then
+    info "logrotate is scheduled by active cron"
+  else
+    err "No active logrotate.timer or cron execution path found"
+    return 1
+  fi
+}
+
 prune_old_backups() {
   local -a backups=()
   local old_backup
@@ -285,6 +316,7 @@ if [[ ! -f "$LOGROTATE_SOURCE" ]]; then
   exit 1
 fi
 install -m 0644 "$LOGROTATE_SOURCE" "$LOGROTATE_TARGET"
+ensure_logrotate_ready
 
 CURRENT_COMMIT=$(git rev-parse HEAD)
 upsert_env_value GIT_COMMIT "$CURRENT_COMMIT" "$ENV_FILE"

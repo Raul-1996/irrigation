@@ -93,6 +93,37 @@ upsert_env_value() {
   chmod 600 "$env_file"
 }
 
+ensure_logrotate_ready() {
+  if ! command -v logrotate >/dev/null 2>&1; then
+    info "Устанавливаю обязательный пакет logrotate"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y logrotate
+  fi
+  if ! command -v logrotate >/dev/null 2>&1 || [[ ! -f /etc/logrotate.conf ]]; then
+    err "Среда logrotate установлена не полностью"
+    return 1
+  fi
+
+  # Проверяем всё дерево include: так обнаруживаются дубли с package-owned
+  # конфигами, которые не видны при проверке только нашего файла.
+  logrotate -d "/etc/logrotate.conf"
+
+  if systemctl cat logrotate.timer >/dev/null 2>&1; then
+    systemctl enable --now logrotate.timer
+    if ! systemctl is-enabled logrotate.timer >/dev/null 2>&1 \
+      || ! systemctl is-active logrotate.timer >/dev/null 2>&1; then
+      err "logrotate.timer установлен, но не активен"
+      return 1
+    fi
+    info "logrotate.timer включён и активен"
+  elif [[ -x /etc/cron.daily/logrotate ]] && systemctl is-active cron >/dev/null 2>&1; then
+    info "logrotate запускается активным cron"
+  else
+    err "Не найден активный logrotate.timer или cron"
+    return 1
+  fi
+}
+
 migrate_legacy_app_tree() {
   local current=""
   local preserved=""
@@ -306,6 +337,7 @@ if [[ ! -f "$LOGROTATE_SOURCE" ]]; then
   exit 1
 fi
 install -m 0644 "$LOGROTATE_SOURCE" "$LOGROTATE_TARGET"
+ensure_logrotate_ready
 ok "Logrotate-конфиг установлен: $LOGROTATE_TARGET"
 
 CURRENT_COMMIT=$(git -C "$APP_DIR" rev-parse HEAD)
