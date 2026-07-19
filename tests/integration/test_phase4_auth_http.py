@@ -641,6 +641,70 @@ def test_postpone_preserves_valid_unresolved_without_claiming_retry_owner(app, m
     assert result["retry_scheduled"] is False
 
 
+def test_postpone_rejects_core_retry_ownership_claim(app, monkeypatch):
+    import irrigation_scheduler
+    import services.zone_control as zone_control
+    from services.postpone import postpone_group
+
+    group = app.db.create_group("core cannot own postpone retry")
+    zone = app.db.create_zone({"name": "unverified core retry", "duration": 5, "group_id": group["id"]})
+    central_stop = Mock(
+        return_value={
+            "success": False,
+            "group_id": group["id"],
+            "stopped": [],
+            "unresolved": [zone["id"]],
+            "retry_scheduled": True,
+        }
+    )
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: None)
+    monkeypatch.setattr(irrigation_scheduler, "quiesce_group_session", lambda group_id: True)
+    monkeypatch.setattr(zone_control, "stop_all_in_group", central_stop)
+
+    result = postpone_group(group["id"], 1, source="api")
+
+    assert result["success"] is False
+    assert result["aggregate_valid"] is False
+    assert result["error_code"] == "POSTPONE_STOP_UNAVAILABLE"
+    assert result["stopped"] == []
+    assert result["unresolved"] == []
+    assert result["unverified_zone_ids"] == [zone["id"]]
+    assert result["retry_scheduled"] is False
+    central_stop.assert_called_once()
+
+
+def test_postpone_accepts_core_unresolved_without_retry_claim(app, monkeypatch):
+    import irrigation_scheduler
+    import services.zone_control as zone_control
+    from services.postpone import postpone_group
+
+    group = app.db.create_group("core unresolved without retry")
+    zone = app.db.create_zone({"name": "valid core unresolved", "duration": 5, "group_id": group["id"]})
+    monkeypatch.setattr(irrigation_scheduler, "get_scheduler", lambda: None)
+    monkeypatch.setattr(irrigation_scheduler, "quiesce_group_session", lambda group_id: True)
+    monkeypatch.setattr(
+        zone_control,
+        "stop_all_in_group",
+        lambda group_id, **kwargs: {
+            "success": False,
+            "group_id": group["id"],
+            "stopped": [],
+            "unresolved": [zone["id"]],
+            "retry_scheduled": False,
+        },
+    )
+
+    result = postpone_group(group["id"], 1, source="api")
+
+    assert result["success"] is False
+    assert result["aggregate_valid"] is True
+    assert result["error_code"] == "POSTPONE_STOP_PENDING"
+    assert result["stopped"] == []
+    assert result["unresolved"] == [zone["id"]]
+    assert result["unverified_zone_ids"] == []
+    assert result["retry_scheduled"] is False
+
+
 def test_postpone_without_scheduler_quiesces_session_before_confirmed_bulk_stop(app, monkeypatch):
     import irrigation_scheduler
     import services.zone_control as zone_control
