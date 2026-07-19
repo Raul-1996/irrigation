@@ -144,7 +144,13 @@ def _audit_timer_fire(action: str, target: str, payload: dict) -> None:
         logger.exception("scheduler timer fire audit failed (action=%s)", action)
 
 
-def job_run_program(program_id: int, zones: list, program_name: str, manual: bool = False):
+def job_run_program(
+    program_id: int,
+    zones: list,
+    program_name: str,
+    manual: bool = False,
+    expected_fingerprint: str | None = None,
+):
     # Ручной запуск (POST /api/programs/<id>/run) уже аудируется роутом как
     # prog_manual_run — scheduler_timer_fire пишем только для срабатываний
     # таймера, чтобы ручное действие не маскировалось под планировщик.
@@ -164,10 +170,25 @@ def job_run_program(program_id: int, zones: list, program_name: str, manual: boo
             # fire cannot water deleted zones while a concurrent DELETE is
             # still cancelling jobstore rows.
             if isinstance(s, IrrigationScheduler):
-                current = s.db.get_program(int(program_id))
+                try:
+                    current = s._read_program_strict(int(program_id))
+                except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+                    # A fail-soft repository ``None`` is not deletion.  Timer
+                    # fires must preserve the current recurring revision until
+                    # a strict DB read can distinguish those states.
+                    logger.exception("Strict program fire read failed (program_id=%s)", program_id)
+                    return
                 if not current or not current.get("enabled", True) or not current.get("zones"):
                     s.cancel_program(int(program_id))
                     return
+                if expected_fingerprint is not None:
+                    current_fingerprint = s.program_schedule_fingerprint(int(program_id), current)
+                    if current_fingerprint != str(expected_fingerprint):
+                        logger.info(
+                            "Queued program fire ignored after revision change (program_id=%s)",
+                            program_id,
+                        )
+                        return
                 zones = sorted({int(z) for z in current.get("zones") or []})
                 program_name = str(current.get("name") or program_name)
             s._run_program_threaded(
@@ -318,41 +339,79 @@ def job_stop_zone_if_activation(
 
 
 def job_close_master_valve(group_id: int):
-    """Закрыть мастер-клапан у группы, если он включён."""
-    try:
-        from database import db
-        from services.mqtt_pub import publish_mqtt_value
+    """Legacy group-only cap callback retained as a safe upgrade no-op.
 
-        g = next((gg for gg in (db.get_groups() or []) if int(gg.get("id")) == int(group_id)), None)
-        if not g:
-            return
-        if int(g.get("use_master_valve") or 0) != 1:
-            return
-        topic = (g.get("master_mqtt_topic") or "").strip()
-        sid = g.get("master_mqtt_server_id")
-        if not topic or not sid:
-            return
-        server = db.get_mqtt_server(int(sid))
-        if not server:
-            return
-        try:
-            mode = (g.get("master_mode") or "NC").strip().upper()
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Exception in job_close_master_valve: %s", e)
-            mode = "NC"
-        close_val = "1" if mode == "NO" else "0"
-        publish_mqtt_value(
-            server,
-            normalize_topic(topic),
-            close_val,
-            min_interval_sec=0.0,
-            qos=2,
-            retain=True,
-            meta={"cmd": "master_cap_close"},
+    A persisted callback without physical identity and activation token cannot
+    distinguish an old OPEN from a newer one. Closing by a mutable group row is
+    therefore unsafe after wiring changes or rapid reopen.
+    """
+    logger.error("Ignored unsafe legacy master cap callback for group %s", group_id)
+
+
+def job_close_master_valve_if_activation(
+    group_id: int,
+    server_id: int,
+    topic: str,
+    mode: str,
+    activation_token: str,
+) -> bool:
+    """Close one exact master activation or retain a bounded retry."""
+    _audit_timer_fire(
+        "scheduler_timer_fire",
+        f"master:{int(server_id)}:{topic!s}",
+        {
+            "job": "master_cap_close",
+            "group_id": int(group_id),
+            "mode": str(mode),
+            "activation_token": str(activation_token),
+        },
+    )
+    try:
+        from irrigation_scheduler import get_scheduler
+        from services.zone_control import close_master_valve_if_activation
+
+        current = get_scheduler()
+        if current is None:
+            return False
+        closed_or_stale = bool(
+            close_master_valve_if_activation(
+                int(group_id),
+                int(server_id),
+                str(topic),
+                str(mode),
+                str(activation_token),
+            )
         )
-        logger.info(f"Master valve cap close: group {group_id}")
-    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
-        logger.error(f"Ошибка cap-закрытия мастер-клапана для группы {group_id}: {e}")
+        if closed_or_stale:
+            return True
+    except (sqlite3.Error, OSError, ImportError, RuntimeError, ValueError, TypeError, KeyError):
+        logger.exception("Exact master cap close failed (group=%s, server=%s)", group_id, server_id)
+        try:
+            from irrigation_scheduler import get_scheduler
+
+            current = get_scheduler()
+        except (ImportError, RuntimeError):
+            current = None
+
+    if current is None:
+        return False
+    retry_at = current._controller_now() + timedelta(seconds=30)
+    replanted = current._plant_master_valve_cap(
+        int(group_id),
+        int(server_id),
+        str(topic),
+        str(mode),
+        str(activation_token),
+        run_at=retry_at,
+        retry_generation=True,
+    )
+    if replanted is not True:
+        logger.critical(
+            "Master activation %s/%s has no retained close retry",
+            server_id,
+            activation_token,
+        )
+    return False
 
 
 def job_clear_expired_postpones():
@@ -369,10 +428,22 @@ def job_clear_expired_postpones():
 def job_dispatch_bot_subscriptions():
     try:
         from database import db
+        from irrigation_scheduler import get_scheduler
         from services.reports import build_report_text
         from services.telegram_bot import notifier
 
-        now = datetime.now()
+        scheduler = get_scheduler()
+        if scheduler is not None:
+            now = scheduler._controller_now()
+        else:
+            timezone = None
+            timezone_name = os.getenv("WB_TZ")
+            if ZoneInfo is not None and timezone_name:
+                try:
+                    timezone = ZoneInfo(timezone_name)
+                except (ValueError, OSError, KeyError):
+                    logger.warning("Invalid WB_TZ %r for bot subscriptions", timezone_name)
+            now = datetime.now(timezone) if timezone is not None else datetime.now().astimezone()
         due = db.get_due_bot_subscriptions(now)
         for sub in due:
             try:
@@ -519,6 +590,8 @@ class IrrigationScheduler:
         self.is_running = False
         self._program_jobs_lock = threading.RLock()
         self._group_session_lock = threading.RLock()
+        self._group_start_locks: dict[int, threading.RLock] = {}
+        self._master_cap_lock = threading.RLock()
         self.group_cancel_events: dict[int, threading.Event] = {}
         # Distinguish an executor-owned session from a DateTrigger that is
         # merely pending.  Cancelling a pending ``group_seq`` must release its
@@ -603,15 +676,22 @@ class IrrigationScheduler:
             logger.debug("activation token lookup failed for zone %s", zone_id, exc_info=True)
             return None
 
-    def _zone_requires_observed_off(self, zone_id: int) -> bool:
-        """Whether this zone has a physical MQTT channel to confirm."""
-        try:
-            zone = self.db.get_zone(int(zone_id)) or {}
-            return bool(zone.get("mqtt_server_id") and str(zone.get("topic") or "").strip())
-        except (sqlite3.Error, OSError, TypeError, ValueError, KeyError):
-            # Unknown topology is safety-sensitive: retain the retry.
-            logger.warning("Could not classify zone %s physical channel; retaining safety", zone_id)
-            return True
+    def _read_zone_strict(self, zone_id: int) -> dict[str, Any] | None:
+        """Read one zone without repository swallow-on-error semantics."""
+        with sqlite3.connect(self.db.db_path, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM zones WHERE id = ?", (int(zone_id),)).fetchone()
+        return None if row is None else dict(row)
+
+    def _read_group_zones_strict(self, group_id: int) -> list[dict[str, Any]]:
+        """Read one group's complete zone snapshot or raise on DB failure."""
+        with sqlite3.connect(self.db.db_path, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM zones WHERE group_id = ? ORDER BY id",
+                (int(group_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @property
     def active_runner_count(self) -> int:
@@ -993,39 +1073,54 @@ class IrrigationScheduler:
         zid = int(zone_id)
         token = activation_token if activation_token is not None else self._current_activation_token(zid)
         try:
+            initial_zone = self._read_zone_strict(zid) or {}
+            physical = bool(initial_zone.get("mqtt_server_id") and str(initial_zone.get("topic") or "").strip())
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            # Unknown topology is physical until proven otherwise.
+            logger.exception("Strict topology read failed before OFF for zone %s", zid)
+            physical = True
+        try:
             from services.zone_control import stop_zone as _stop_zone_central
 
-            stopped = bool(_stop_zone_central(zid, reason=reason, force=bool(force)))
-        except (sqlite3.Error, OSError, ImportError, ValueError, TypeError):
+            stop_kwargs: dict[str, Any] = {"reason": reason, "force": bool(force)}
+            if self._callable_accepts_keyword(_stop_zone_central, "activation_token"):
+                stop_kwargs["activation_token"] = token
+            if self._callable_accepts_keyword(_stop_zone_central, "require_observed_confirmation"):
+                stop_kwargs["require_observed_confirmation"] = True
+            elif physical:
+                logger.warning("Confirmed physical OFF API unavailable for zone %s", zid)
+            stopped = bool(_stop_zone_central(zid, **stop_kwargs))
+        except (sqlite3.Error, OSError, ImportError, RuntimeError, ValueError, TypeError):
             logger.exception("Scheduler OFF failed for zone %s", zid)
             stopped = False
 
+        if stopped and physical:
+            try:
+                observed = self._read_zone_strict(zid)
+                stopped = bool(observed and str(observed.get("observed_state") or "").lower() == "off")
+            except (sqlite3.Error, OSError, ValueError, TypeError):
+                logger.exception("Strict observed-OFF read failed for zone %s", zid)
+                stopped = False
+
         if not stopped:
-            # A DateTrigger removes itself when submitted.  Re-arm the exact
-            # hard-stop id so every failed OFF retains a future retry.
+            # A DateTrigger removes itself when submitted. Always replace the
+            # exact hard-stop id with a short retry for this activation. A cap
+            # hours in the future is not an acceptable substitute.
+            self.cancel_zone_jobs(zid, preserve_safety=True)
             retry_at = self._controller_now() + timedelta(seconds=30)
             try:
-                self.schedule_zone_hard_stop(zid, retry_at, activation_token=token)
-            except (RuntimeError, ValueError, TypeError, KeyError):
+                replanted = self.schedule_zone_hard_stop(zid, retry_at, activation_token=token)
+            except (RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error, OSError):
                 logger.exception("Failed to re-arm OFF retry for zone %s", zid)
+                replanted = False
+            if replanted is not True:
+                logger.critical("Zone %s OFF unresolved and short safety retry could not be retained", zid)
             logger.error("Zone %s OFF unresolved; safety retry retained", zid)
             return False
 
-        if not self._zone_requires_observed_off(zid):
-            # DB-only/virtual zones have no report channel and therefore no
-            # later physical echo. Their completed central transition is final.
-            self.cancel_zone_jobs(zid, include_cap=True)
-        else:
-            # A broker ACK is not physical OFF confirmation. Remove ordinary
-            # deadlines, but retain the activation's hard/cap safety ownership
-            # until the verifier/SSE path receives a fresh observed-OFF echo.
-            self.cancel_zone_jobs(zid, preserve_safety=True)
-            if not self._has_zone_safety_job(zid):
-                retry_at = self._controller_now() + timedelta(seconds=30)
-                replanted = self.schedule_zone_hard_stop(zid, retry_at, activation_token=token)
-                if replanted is False:
-                    logger.critical("Zone %s OFF acknowledged without a surviving safety retry", zid)
-                    return False
+        # Virtual zones complete synchronously; physical zones reach this point
+        # only after a fresh observed OFF. Both may now release every timer.
+        self.cancel_zone_jobs(zid, include_cap=True)
         try:
             zone = self.db.get_zone(zid)
             if zone:
@@ -1377,7 +1472,23 @@ class IrrigationScheduler:
                 try:
                     from services.zone_control import exclusive_start_zone as _start_central
 
-                    started = bool(_start_central(int(zone_id), source="program"))
+                    def cancel_guard() -> bool:
+                        with self._group_session_lock:
+                            return bool(
+                                cancel_event is not None
+                                and (
+                                    cancel_event.is_set()
+                                    or self.group_cancel_events.get(group_id) is not cancel_event
+                                )
+                            )
+
+                    start_kwargs: dict[str, Any] = {"source": "program"}
+                    if self._callable_accepts_keyword(_start_central, "cancel_guard"):
+                        start_kwargs["cancel_guard"] = cancel_guard
+                    if cancel_guard():
+                        started = False
+                    else:
+                        started = bool(_start_central(int(zone_id), **start_kwargs))
                 except (sqlite3.Error, OSError, ImportError, ValueError, TypeError):
                     logger.exception("Программа %s: central start failed zone=%s", program_id, zone_id)
                     started = False
@@ -1764,6 +1875,7 @@ class IrrigationScheduler:
         interval_anchors: dict[str, datetime] | None = None,
     ) -> list[dict[str, Any]]:
         timezone = self._controller_timezone()
+        revision_fingerprint = self.program_schedule_fingerprint(int(program["id"]), program)
         slots = [("main", program["time"])] + [
             (f"extra:{index}", value) for index, value in enumerate(program["extra_times"])
         ]
@@ -1833,7 +1945,13 @@ class IrrigationScheduler:
                         "id": job_id,
                         "trigger": desired_trigger,
                         "next_run_time": next_run_time,
-                        "args": [program["id"], program["zones"], program["name"]],
+                        "args": [
+                            program["id"],
+                            program["zones"],
+                            program["name"],
+                            False,
+                            revision_fingerprint,
+                        ],
                         "require_exact_anchor": require_exact_anchor,
                     }
                 )
@@ -1873,7 +1991,6 @@ class IrrigationScheduler:
             # unit callers historically schedule unpersisted dictionaries, so
             # that compatibility is retained only in TESTING and only for a
             # never-before-known id.
-            persisted = self.db.get_program(program_id)
             if expected_fingerprint is not None:
                 if (
                     not isinstance(expected_fingerprint, str)
@@ -1881,6 +1998,14 @@ class IrrigationScheduler:
                     or any(char not in "0123456789abcdef" for char in expected_fingerprint)
                 ):
                     logger.error("Program %s schedule fingerprint is invalid", program_id)
+                    return False
+                try:
+                    persisted = self._read_program_strict(program_id)
+                except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+                    # Preserve any already-valid job revision. A repository
+                    # fail-soft ``None`` cannot distinguish deletion from an
+                    # unreadable DB and therefore must not authorize mutation.
+                    logger.exception("Strict program revision read failed for %s", program_id)
                     return False
                 if persisted is None:
                     logger.info("Program %s schedule call is stale after delete; no-op", program_id)
@@ -1892,6 +2017,8 @@ class IrrigationScheduler:
                     logger.info("Program %s stale schedule revision ignored", program_id)
                     return True
                 program_data = persisted
+            else:
+                persisted = self.db.get_program(program_id)
             known_job = bool(self._program_job_ids(program_id)) or program_id in self.program_jobs
             if persisted is None:
                 if not TESTING or known_job:
@@ -2158,13 +2285,21 @@ class IrrigationScheduler:
                 coalesce=False,
                 max_instances=1,
             )
-            if getattr(self, "has_volatile_jobstore", False):
-                _kwargs["jobstore"] = "volatile"
+            if getattr(self, "has_default_jobstore", False):
+                _kwargs["jobstore"] = "default"
             self.scheduler.add_job(
                 job_stop_zone_if_activation,
                 DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
                 **_kwargs,
             )
+            if not self._has_zone_safety_job(
+                int(zone_id),
+                activation_token=activation_token,
+                roles={"hard"},
+                deadline=run_at + timedelta(seconds=1),
+            ):
+                logger.error("Watchdog hard-stop verification failed for zone %s", zone_id)
+                return False
             self._emit_timer_audit(
                 "scheduler_timer_plant",
                 f"zone:{int(zone_id)}",
@@ -2172,7 +2307,7 @@ class IrrigationScheduler:
             )
             logger.info(f"Watchdog: zone {zone_id} hard-stop at {run_at}")
             return True
-        except (ValueError, TypeError, KeyError) as e:
+        except (sqlite3.Error, OSError, RuntimeError, AttributeError, ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования watchdog-стопа зоны {zone_id}: {e}")
             return False
 
@@ -2181,10 +2316,10 @@ class IrrigationScheduler:
         zone_id: int,
         cap_minutes: int = 240,
         activation_token: str | None = None,
-    ):
+    ) -> bool:
         """Абсолютный лимит работы зоны: форс-стоп через cap_minutes от текущего момента."""
         try:
-            run_at = self._controller_now(naive=True) + timedelta(minutes=int(cap_minutes))
+            run_at = self._controller_now() + timedelta(minutes=int(cap_minutes))
             if activation_token is None:
                 activation_token = self._current_activation_token(int(zone_id))
             # Уникальный job id для капа
@@ -2197,13 +2332,21 @@ class IrrigationScheduler:
                 coalesce=False,
                 max_instances=1,
             )
-            if getattr(self, "has_volatile_jobstore", False):
-                _kwargs["jobstore"] = "volatile"
+            if getattr(self, "has_default_jobstore", False):
+                _kwargs["jobstore"] = "default"
             self.scheduler.add_job(
                 job_stop_zone_if_activation,
                 DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
                 **_kwargs,
             )
+            if not self._has_zone_safety_job(
+                int(zone_id),
+                activation_token=activation_token,
+                roles={"cap"},
+                deadline=run_at + timedelta(seconds=1),
+            ):
+                logger.error("Zone cap verification failed for zone %s", zone_id)
+                return False
             self._emit_timer_audit(
                 "scheduler_timer_plant",
                 f"zone:{int(zone_id)}",
@@ -2215,8 +2358,10 @@ class IrrigationScheduler:
                 },
             )
             logger.info(f"Zone cap: zone {zone_id} hard-stop at {run_at} (cap {cap_minutes}m)")
-        except (ValueError, TypeError, KeyError) as e:
+            return True
+        except (sqlite3.Error, OSError, RuntimeError, AttributeError, ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка планирования cap-стопа зоны {zone_id}: {e}")
+            return False
 
     def cancel_zone_cap(self, zone_id: int):
         try:
@@ -2233,56 +2378,213 @@ class IrrigationScheduler:
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка отмены cap-стопа зоны {zone_id}: {e}")
 
-    def schedule_master_valve_cap(self, group_id: int, hours: int = 24):
-        """Абсолютный лимит открытого мастер-клапана — закрыть через hours часов.
-        Перепланируется при повторных вызовах.
+    @staticmethod
+    def _normalise_master_cap_identity(
+        group_id: int,
+        server_id: int | None,
+        topic: str | None,
+        mode: str | None,
+        activation_token: str | None,
+    ) -> tuple[int, int, str, str, str]:
+        if isinstance(group_id, bool) or isinstance(server_id, bool):
+            raise ValueError("master cap identifiers must be integers")
+        gid = int(group_id)
+        sid = int(server_id) if server_id is not None else 0
+        canonical_topic = str(normalize_topic(str(topic or "")) or "")
+        canonical_mode = str(mode or "").strip().upper()
+        token = str(activation_token or "").strip()
+        if gid <= 0 or sid <= 0 or not canonical_topic or canonical_mode not in {"NC", "NO"} or not token:
+            raise ValueError("master cap requires exact physical identity, mode and activation token")
+        return gid, sid, canonical_topic, canonical_mode, token
+
+    @staticmethod
+    def _master_cap_job_id(server_id: int, topic: str, activation_token: str) -> str:
+        digest = hashlib.sha256(
+            json.dumps(
+                [int(server_id), str(topic), str(activation_token)],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        return f"master_cap_close:{int(server_id)}:{digest}"
+
+    @classmethod
+    def _master_cap_retry_job_id(cls, server_id: int, topic: str, activation_token: str) -> str:
+        """Return a generation id that cannot be consumed with the firing row.
+
+        APScheduler submits a one-shot callback before it removes that job from
+        the store.  Reusing the firing id inside the callback lets the
+        coordinator remove the freshly planted retry.  A distinct generation
+        keeps the persistent retry outside that removal window.
         """
+        base = cls._master_cap_job_id(server_id, topic, activation_token)
+        return f"{base}:retry:{time.time_ns():x}"
+
+    @staticmethod
+    def _master_cap_job_matches(job: object, job_id: str, args: list[object]) -> bool:
         try:
-            run_at = self._controller_now(naive=True) + timedelta(hours=int(hours))
-            job_id = f"master_cap_close:{int(group_id)}"
-            _kwargs = dict(
-                args=[group_id],
-                id=job_id,
-                replace_existing=True,
-                misfire_grace_time=600,
-                coalesce=False,
-                max_instances=1,
+            return bool(
+                str(job.id) == str(job_id)
+                and str(getattr(job, "func_ref", "")).endswith(":job_close_master_valve_if_activation")
+                and list(job.args) == list(args)
+                and not dict(job.kwargs or {})
+                and isinstance(job.trigger, DateTrigger)
+                and job.misfire_grace_time == 600
+                and job.coalesce is False
+                and job.max_instances == 1
+                and getattr(job, "_jobstore_alias", None) == "default"
             )
-            if getattr(self, "has_volatile_jobstore", False):
-                _kwargs["jobstore"] = "volatile"
-            self.scheduler.add_job(
-                job_close_master_valve,
-                DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
-                **_kwargs,
+        except (AttributeError, TypeError, ValueError, KeyError):
+            return False
+
+    def _plant_master_valve_cap(
+        self,
+        group_id: int,
+        server_id: int,
+        topic: str,
+        mode: str,
+        activation_token: str,
+        *,
+        run_at: datetime,
+        replace_existing: bool = False,
+        retry_generation: bool = False,
+    ) -> bool:
+        try:
+            identity = self._normalise_master_cap_identity(
+                group_id,
+                server_id,
+                topic,
+                mode,
+                activation_token,
             )
+            gid, sid, canonical_topic, canonical_mode, token = identity
+            if self.jobstore_backend != "sqlalchemy" or not self.has_default_jobstore:
+                logger.critical("Master cap requires durable SQLAlchemy jobstore")
+                return False
+            run_at = self._normalise_caller_run_at(run_at)
+            if run_at <= self._controller_now():
+                run_at = self._controller_now() + timedelta(seconds=1)
+            args: list[object] = [gid, sid, canonical_topic, canonical_mode, token]
+            job_id = (
+                self._master_cap_retry_job_id(sid, canonical_topic, token)
+                if retry_generation
+                else self._master_cap_job_id(sid, canonical_topic, token)
+            )
+            with self._master_cap_lock:
+                existing = self.scheduler.get_job(job_id, jobstore="default")
+                if existing is not None and not replace_existing:
+                    return self._master_cap_job_matches(existing, job_id, args)
+                self.scheduler.add_job(
+                    job_close_master_valve_if_activation,
+                    DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
+                    args=args,
+                    id=job_id,
+                    jobstore="default",
+                    replace_existing=bool(replace_existing),
+                    misfire_grace_time=600,
+                    coalesce=False,
+                    max_instances=1,
+                )
+                persisted = self.scheduler.get_job(job_id, jobstore="default")
+                if persisted is None or not self._master_cap_job_matches(persisted, job_id, args):
+                    logger.error("Master cap durable verification failed for %s", job_id)
+                    return False
             self._emit_timer_audit(
                 "scheduler_timer_plant",
-                f"group:{int(group_id)}",
+                f"master:{sid}:{canonical_topic}",
                 {
                     "job": "master_cap_close",
                     "job_id": job_id,
-                    "cap_hours": int(hours),
+                    "group_id": gid,
+                    "activation_token": token,
                     "run_at": run_at.isoformat(timespec="seconds"),
                 },
             )
-            logger.info(f"Master valve cap: group {group_id} close at {run_at} (cap {hours}h)")
-        except (ValueError, TypeError, KeyError) as e:
-            logger.error(f"Ошибка планирования cap-закрытия мастер-клапана для группы {group_id}: {e}")
+            return True
+        except (sqlite3.Error, OSError, RuntimeError, AttributeError, ValueError, TypeError, KeyError) as exc:
+            logger.error("Master cap plant failed for group %s: %s", group_id, exc)
+            return False
 
-    def cancel_master_valve_cap(self, group_id: int):
+    def schedule_master_valve_cap(
+        self,
+        group_id: int,
+        server_id: int | None = None,
+        topic: str | None = None,
+        mode: str | None = None,
+        activation_token: str | None = None,
+        *,
+        hours: int = 24,
+    ) -> bool:
+        """Durably cap one exact master activation without replacing others."""
         try:
-            job_id = f"master_cap_close:{int(group_id)}"
-            try:
-                self.scheduler.remove_job(job_id)
-                self._emit_timer_audit(
-                    "scheduler_timer_cancel",
-                    f"group:{int(group_id)}",
-                    {"job": "master_cap_close", "job_id": job_id},
-                )
-            except (ValueError, KeyError, RuntimeError) as e:
-                logger.debug("Handled exception in cancel_master_valve_cap: %s", e)
-        except (ValueError, TypeError, KeyError) as e:
-            logger.error(f"Ошибка отмены cap-закрытия мастер-клапана для группы {group_id}: {e}")
+            if isinstance(hours, bool) or int(hours) <= 0:
+                return False
+            run_at = self._controller_now() + timedelta(hours=int(hours))
+            return self._plant_master_valve_cap(
+                group_id,
+                int(server_id) if server_id is not None else 0,
+                str(topic or ""),
+                str(mode or ""),
+                str(activation_token or ""),
+                run_at=run_at,
+                replace_existing=False,
+            )
+        except (OverflowError, TypeError, ValueError):
+            return False
+
+    def cancel_master_valve_cap(
+        self,
+        group_id: int,
+        server_id: int | None = None,
+        topic: str | None = None,
+        mode: str | None = None,
+        activation_token: str | None = None,
+    ) -> bool:
+        """Remove only the cap belonging to the supplied physical activation."""
+        try:
+            gid, sid, canonical_topic, canonical_mode, token = self._normalise_master_cap_identity(
+                group_id,
+                server_id,
+                topic,
+                mode,
+                activation_token,
+            )
+            args: list[object] = [gid, sid, canonical_topic, canonical_mode, token]
+            with self._master_cap_lock:
+                matching = [
+                    job
+                    for job in self.scheduler.get_jobs(jobstore="default")
+                    if str(job.id).startswith("master_cap_close:")
+                    and list(getattr(job, "args", ()) or ()) == args
+                ]
+                if any(not self._master_cap_job_matches(job, str(job.id), args) for job in matching):
+                    return False
+                for job in matching:
+                    try:
+                        self.scheduler.remove_job(str(job.id), jobstore="default")
+                    except KeyError:
+                        pass
+                remaining = [
+                    job
+                    for job in self.scheduler.get_jobs(jobstore="default")
+                    if str(job.id).startswith("master_cap_close:")
+                    and list(getattr(job, "args", ()) or ()) == args
+                ]
+                if remaining:
+                    return False
+            self._emit_timer_audit(
+                "scheduler_timer_cancel",
+                f"master:{sid}:{canonical_topic}",
+                {
+                    "job": "master_cap_close",
+                    "job_ids": [str(job.id) for job in matching],
+                    "activation_token": token,
+                },
+            )
+            return True
+        except (sqlite3.Error, OSError, RuntimeError, AttributeError, ValueError, TypeError, KeyError):
+            logger.exception("Exact master cap cancel failed for group %s", group_id)
+            return False
 
     def _release_group_session(self, group_id: int, owned_event: threading.Event | None) -> None:
         """Identity-safe release for one group-session claim."""
@@ -2291,6 +2593,16 @@ class IrrigationScheduler:
         with self._group_session_lock:
             if self.group_cancel_events.get(int(group_id)) is owned_event:
                 self.group_cancel_events.pop(int(group_id), None)
+
+    def _group_start_lock_for(self, group_id: int) -> threading.RLock:
+        """Return the stable admission/cancel barrier for one group."""
+        gid = int(group_id)
+        with self._group_session_lock:
+            lock = self._group_start_locks.get(gid)
+            if lock is None:
+                lock = threading.RLock()
+                self._group_start_locks[gid] = lock
+            return lock
 
     # ===== Ручной последовательный запуск всех зон в группе =====
     def start_group_sequence(
@@ -2373,37 +2685,16 @@ class IrrigationScheduler:
             if self._is_group_rain_blocked(group_id):
                 logger.warning("Группа %s: дождь начался во время pre-OFF; запуск отменён", group_id)
                 return False
-            # Newer zone-control versions expose a structured aggregate.  Do
-            # not turn an explicitly unresolved physical OFF into a successful
-            # group start; the DB re-read below remains the compatibility and
-            # defence-in-depth check for older versions.
-            if isinstance(stop_outcome, dict):
-                unresolved = stop_outcome.get("unresolved")
-                if stop_outcome.get("success") is not True or not isinstance(unresolved, (list, tuple, set)):
-                    logger.error("Группа %s: invalid or unsuccessful bulk OFF outcome", group_id)
-                    return False
-                if unresolved:
-                    logger.error("Группа %s: bulk OFF unresolved for zones %s", group_id, sorted(unresolved))
-                    return False
-            elif stop_outcome is False:
-                logger.error("Группа %s: legacy bulk OFF explicitly failed", group_id)
+            aggregate_valid, _stopped, unresolved = self._parse_core_group_stop_aggregate(
+                group_id,
+                {int(zone["id"]) for zone in all_group_zones},
+                stop_outcome,
+            )
+            if not aggregate_valid:
+                logger.error("Группа %s: invalid core bulk OFF evidence", group_id)
                 return False
-
-            # Re-read the full group before deleting ordinary deadlines or
-            # planting a new ON sequence. P05 pins a failed OFF publish to
-            # ``fault``; any logical state other than ``off`` is unsafe.
-            refreshed = {int(z["id"]): z for z in (self.db.get_zones() or [])}
-            unsafe_after_stop = [
-                int(z["id"])
-                for z in all_group_zones
-                if str((refreshed.get(int(z["id"])) or z).get("state") or "").lower() != "off"
-            ]
-            if unsafe_after_stop:
-                logger.error(
-                    "Группа %s: sequence aborted, zones not safely off after stop: %s",
-                    group_id,
-                    unsafe_after_stop,
-                )
+            if unresolved:
+                logger.error("Группа %s: bulk OFF unresolved for zones %s", group_id, sorted(unresolved))
                 return False
 
             # Считаем и записываем плановые времена стартов для зон группы
@@ -2444,15 +2735,9 @@ class IrrigationScheduler:
                     except (ValueError, KeyError, RuntimeError) as e:
                         logger.debug("Handled exception in line_743: %s", e)
                 for zid in all_zone_ids:
-                    current = refreshed.get(zid) or {}
-                    physical_unconfirmed = (
-                        self._zone_requires_observed_off(zid)
-                        and str(current.get("observed_state") or "").lower() != "off"
-                    )
-                    if physical_unconfirmed:
-                        self.cancel_zone_jobs(zid, preserve_safety=True)
-                    else:
-                        self.cancel_zone_jobs(zid, include_cap=True)
+                    # The strict core aggregate is the sole physical proof;
+                    # DB state is not synthesized into confirmation.
+                    self.cancel_zone_jobs(zid, include_cap=True)
             except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Handled exception in line_747: %s", e)
 
@@ -2679,7 +2964,21 @@ class IrrigationScheduler:
                 try:
                     from services.zone_control import exclusive_start_zone as _start_central
 
-                    started = bool(_start_central(int(zone_id), source="program"))
+                    def cancel_guard() -> bool:
+                        with self._group_session_lock:
+                            return bool(
+                                cancel_event is None
+                                or cancel_event.is_set()
+                                or self.group_cancel_events.get(int(group_id)) is not cancel_event
+                            )
+
+                    start_kwargs: dict[str, Any] = {"source": "program"}
+                    if self._callable_accepts_keyword(_start_central, "cancel_guard"):
+                        start_kwargs["cancel_guard"] = cancel_guard
+                    if cancel_guard():
+                        started = False
+                    else:
+                        started = bool(_start_central(int(zone_id), **start_kwargs))
                 except (sqlite3.Error, OSError, ImportError, ValueError, TypeError):
                     logger.exception("Группа %s: central start failed zone=%s", group_id, zone_id)
                     started = False
@@ -2961,6 +3260,46 @@ class IrrigationScheduler:
         except (TypeError, ValueError, KeyError):
             return False
 
+    def quiesce_group_session(self, group_id: int) -> bool:
+        """Fence one group and report ``True`` only after ownership is gone.
+
+        A running executor receives its cancel event but retains ownership
+        until its identity-safe cleanup. Pending Date jobs are removed here so
+        their claim cannot be orphaned. Repeated calls are safe.
+        """
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return False
+        with self._group_session_lock:
+            owned_event = self.group_cancel_events.get(gid)
+            if owned_event is not None:
+                owned_event.set()
+        try:
+            pending_ids = [
+                str(job.id)
+                for job in self.scheduler.get_jobs()
+                if str(job.id).startswith(f"group_seq:{gid}:")
+            ]
+        except (AttributeError, RuntimeError, ValueError, TypeError, KeyError):
+            logger.exception("Could not enumerate pending group jobs for %s", gid)
+            return False
+        removed_all = True
+        for job_id in pending_ids:
+            try:
+                self.scheduler.remove_job(job_id)
+            except KeyError:
+                continue
+            except (RuntimeError, ValueError, TypeError):
+                removed_all = False
+                logger.exception("Could not remove pending group job %s", job_id)
+        with self._group_session_lock:
+            if gid in self._running_group_sessions or not removed_all:
+                return False
+            if owned_event is not None and self.group_cancel_events.get(gid) is owned_event:
+                self.group_cancel_events.pop(gid, None)
+            return gid not in self.group_cancel_events and gid not in self._running_group_sessions
+
     def request_skip_current_zone(self, group_id: int) -> str:
         """Mark the currently running zone in this group's sequencer as 'skip me'.
 
@@ -2994,33 +3333,20 @@ class IrrigationScheduler:
         ev.set()
         return "ok"
 
-    def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False) -> dict[str, Any]:
-        """Отменяет все активные задачи планировщика для указанной группы.
-
-        master_close_immediately: при True мастер-клапан закрывается без задержки.
-        Используется emergency_stop, чтобы внутренний _stop_all не перезаписал
-        уже выполненный синхронный master close таймером с delay=60.
-
-        Returns a structured physical outcome.  Safety timers are removed only
-        for confirmed/idempotent OFF zones; unresolved relays retain (or gain)
-        an activation-bound hard retry.
-        """
+    def _stop_group_under_admission_barrier(
+        self,
+        group_id: int,
+        *,
+        master_close_immediately: bool,
+    ) -> tuple[threading.Event | None, list[dict[str, Any]], object, bool]:
+        """Set the cancel fence and complete bulk OFF under one start barrier."""
         gid = int(group_id)
-        result: dict[str, Any] = {"success": False, "stopped": [], "unresolved": [], "group_id": gid}
-        try:
-            # Ставим флаг отмены немедленно
+        with self._group_start_lock_for(gid):
             with self._group_session_lock:
                 owned_event = self.group_cancel_events.get(gid)
                 if owned_event is not None:
                     owned_event.set()
-
-            zones = self.db.get_zones() or []
-            group_zones = [z for z in zones if int(z.get("group_id") or 0) == gid]
-            group_zone_ids = {int(z["id"]) for z in group_zones}
-
-            # Немедленный OFF всем зонам группы через централизованный контроллер
-            stop_result: object = None
-            stop_call_failed = False
+            group_zones = self._read_group_zones_strict(gid)
             try:
                 from services.zone_control import stop_all_in_group as _stop_all
 
@@ -3033,87 +3359,128 @@ class IrrigationScheduler:
                     stop_kwargs["require_observed_confirmation"] = True
                 else:
                     logger.warning("Confirmed group OFF API unavailable; treating legacy aggregate defensively")
-                stop_result = _stop_all(gid, **stop_kwargs)
-            except (sqlite3.Error, OSError, ValueError, TypeError):
-                stop_call_failed = True
+                return owned_event, group_zones, _stop_all(gid, **stop_kwargs), False
+            except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError):
                 logger.exception("cancel_group_jobs: stop_all_in_group failed")
+                return owned_event, group_zones, None, True
 
-            explicit_unresolved: set[int] = set()
-            explicit_stopped: set[int] = set()
-            if isinstance(stop_result, dict):
-                raw_unresolved = stop_result.get("unresolved")
-                raw_stopped = stop_result.get("stopped")
-                if (
-                    stop_result.get("success") is not True
-                    or not isinstance(raw_unresolved, (list, tuple, set))
-                    or not isinstance(raw_stopped, (list, tuple, set))
-                ):
-                    stop_call_failed = True
-                else:
-                    for value in raw_unresolved:
-                        try:
-                            explicit_unresolved.add(int(value))
-                        except (TypeError, ValueError):
-                            stop_call_failed = True
-                    for value in raw_stopped:
-                        try:
-                            explicit_stopped.add(int(value))
-                        except (TypeError, ValueError):
-                            stop_call_failed = True
-            elif stop_result is False:
-                stop_call_failed = True
+    @staticmethod
+    def _parse_core_group_stop_aggregate(
+        group_id: int,
+        expected_zone_ids: set[int],
+        outcome: object,
+    ) -> tuple[bool, set[int], set[int]]:
+        """Validate the exact core-owned physical OFF evidence contract."""
+        required_keys = {"success", "group_id", "stopped", "unresolved", "retry_scheduled"}
+        if not isinstance(outcome, dict) or set(outcome) != required_keys:
+            return False, set(), set()
+        if (
+            not isinstance(outcome.get("success"), bool)
+            or type(outcome.get("group_id")) is not int
+            or outcome.get("group_id") != int(group_id)
+            or outcome.get("retry_scheduled") is not False
+            or not isinstance(outcome.get("stopped"), list)
+            or not isinstance(outcome.get("unresolved"), list)
+        ):
+            return False, set(), set()
+        raw_stopped = outcome["stopped"]
+        raw_unresolved = outcome["unresolved"]
+        if any(type(value) is not int or value <= 0 for value in raw_stopped + raw_unresolved):
+            return False, set(), set()
+        stopped = set(raw_stopped)
+        unresolved = set(raw_unresolved)
+        if (
+            len(stopped) != len(raw_stopped)
+            or len(unresolved) != len(raw_unresolved)
+            or bool(stopped & unresolved)
+            or stopped | unresolved != set(expected_zone_ids)
+            or outcome["success"] != (not unresolved)
+        ):
+            return False, set(), set()
+        return True, stopped, unresolved
 
-            unexpected_reported = (explicit_unresolved | explicit_stopped) - group_zone_ids
-            if unexpected_reported:
-                # Never let a malformed aggregate cancel safety ownership for
-                # a zone outside the requested group.
-                logger.error("Group %s bulk OFF reported foreign zones %s", gid, sorted(unexpected_reported))
-                stop_call_failed = True
-                explicit_unresolved.intersection_update(group_zone_ids)
-                explicit_stopped.intersection_update(group_zone_ids)
+    def _wait_group_runner_ack(self, group_id: int, timeout_seconds: float = 2.0) -> bool:
+        """Wait bounded time for the executor-owned group session to exit."""
+        gid = int(group_id)
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            with self._group_session_lock:
+                if gid not in self._running_group_sessions:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
 
-            refreshed = {
-                int(zone["id"]): zone for zone in (self.db.get_zones() or []) if int(zone.get("group_id") or 0) == gid
-            }
-            unresolved = (
-                explicit_unresolved
-                | (group_zone_ids if stop_call_failed else set())
-                | {
-                    zone_id
-                    for zone_id in group_zone_ids
-                    if str((refreshed.get(zone_id) or {}).get("state") or "").lower() != "off"
-                }
+    def cancel_group_jobs(self, group_id: int, master_close_immediately: bool = False) -> dict[str, Any]:
+        """Отменяет все активные задачи планировщика для указанной группы.
+
+        master_close_immediately: при True мастер-клапан закрывается без задержки.
+        Используется emergency_stop, чтобы внутренний _stop_all не перезаписал
+        уже выполненный синхронный master close таймером с delay=60.
+
+        Returns a structured physical outcome.  Safety timers are removed only
+        for confirmed/idempotent OFF zones; unresolved relays retain (or gain)
+        an activation-bound hard retry.
+        """
+        gid = int(group_id)
+        result: dict[str, Any] = {
+            "success": False,
+            "group_id": gid,
+            "aggregate_valid": False,
+            "stopped": [],
+            "unresolved": [],
+            "unverified_zone_ids": [],
+            "retry_scheduled": False,
+        }
+        try:
+            owned_event, group_zones, stop_result, stop_call_failed = self._stop_group_under_admission_barrier(
+                gid,
+                master_close_immediately=bool(master_close_immediately),
             )
-            stopped = (group_zone_ids | explicit_stopped) - unresolved
+            group_zone_ids = {int(z["id"]) for z in group_zones}
+            runner_quiesced = self._wait_group_runner_ack(gid)
 
-            for zone_id in sorted(group_zone_ids | explicit_unresolved | explicit_stopped):
-                if zone_id in unresolved:
+            contract_valid, explicit_stopped, explicit_unresolved = self._parse_core_group_stop_aggregate(
+                gid,
+                group_zone_ids,
+                stop_result,
+            )
+
+            try:
+                refreshed_rows = self._read_group_zones_strict(gid)
+                refreshed = {int(zone["id"]): zone for zone in refreshed_rows}
+                if set(refreshed) != group_zone_ids:
+                    contract_valid = False
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                logger.exception("Group %s strict OFF confirmation read failed", gid)
+                refreshed = {}
+                contract_valid = False
+
+            if not runner_quiesced:
+                logger.error("Group %s runner did not acknowledge cancellation before timeout", gid)
+                contract_valid = False
+
+            stop_call_failed = stop_call_failed or not contract_valid
+            unresolved = set() if stop_call_failed else set(explicit_unresolved)
+            stopped = set() if stop_call_failed else set(explicit_stopped)
+            unverified = set(group_zone_ids) if stop_call_failed else set()
+            unsafe_zone_ids = unresolved | unverified
+            retry_coverage = bool(unsafe_zone_ids)
+
+            for zone_id in sorted(group_zone_ids):
+                if zone_id in unsafe_zone_ids:
                     # Remove ordinary deadlines but preserve hard/cap safety.
                     self.cancel_zone_jobs(zone_id, preserve_safety=True)
-                    if not self._has_zone_safety_job(zone_id):
-                        self.schedule_zone_hard_stop(
-                            zone_id,
-                            self._controller_now() + timedelta(seconds=30),
-                            activation_token=self._current_activation_token(zone_id),
-                        )
+                    replanted = self.schedule_zone_hard_stop(
+                        zone_id,
+                        self._controller_now() + timedelta(seconds=30),
+                        activation_token=self._current_activation_token(zone_id),
+                    )
+                    if replanted is not True:
+                        retry_coverage = False
+                        logger.critical("Group %s zone %s has no verified short OFF retry", gid, zone_id)
                 else:
-                    if not self._zone_requires_observed_off(zone_id):
-                        self.cancel_zone_jobs(zone_id, include_cap=True)
-                    else:
-                        # A broker ACK is not a physical OFF observation. Keep
-                        # every surviving activation-bound safety retry until
-                        # verifier/SSE confirmation, and replace a firing/absent
-                        # last job before reporting a safe command outcome.
-                        self.cancel_zone_jobs(zone_id, preserve_safety=True)
-                        if not self._has_zone_safety_job(zone_id):
-                            replanted = self.schedule_zone_hard_stop(
-                                zone_id,
-                                self._controller_now() + timedelta(seconds=30),
-                                activation_token=self._current_activation_token(zone_id),
-                            )
-                            if replanted is False:
-                                unresolved.add(zone_id)
-                                stopped.discard(zone_id)
+                    self.cancel_zone_jobs(zone_id, include_cap=True)
 
             # Отменяем задачи последовательного полива группы
             job_ids_to_remove = []
@@ -3150,36 +3517,84 @@ class IrrigationScheduler:
 
             result.update(
                 {
-                    "success": not stop_call_failed and not unresolved,
+                    "success": contract_valid and not unresolved,
+                    "aggregate_valid": contract_valid,
                     "stopped": sorted(stopped),
                     "unresolved": sorted(unresolved),
+                    "unverified_zone_ids": sorted(unverified),
+                    "retry_scheduled": bool(contract_valid and unresolved and retry_coverage),
                 }
             )
-            if stop_call_failed or unresolved:
+            if not contract_valid or unresolved:
                 logger.error(
-                    "Группа %s: OFF не подтверждён для зон %s; safety retries сохранены",
+                    "Группа %s: OFF не подтверждён (unresolved=%s, unverified=%s)",
                     gid,
                     sorted(unresolved),
+                    sorted(unverified),
                 )
             else:
                 logger.info("Отменены все задачи планировщика для группы %s", gid)
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e:
             logger.error("Ошибка отмены задач группы %s: %s", gid, e)
-            if not result["unresolved"]:
+            if not result["unverified_zone_ids"]:
                 try:
-                    result["unresolved"] = sorted(
-                        int(zone["id"]) for zone in (self.db.get_zones() or []) if int(zone.get("group_id") or 0) == gid
+                    result["unverified_zone_ids"] = sorted(
+                        int(zone["id"]) for zone in self._read_group_zones_strict(gid)
                     )
                 except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
-                    logger.exception("Could not enumerate unresolved zones for failed group cancel %s", gid)
+                    logger.exception("Could not enumerate unverified zones for failed group cancel %s", gid)
         return result
 
-    def _has_zone_safety_job(self, zone_id: int) -> bool:
-        hard_id = f"zone_hard_stop:{int(zone_id)}"
-        cap_id = f"zone_cap_stop:{int(zone_id)}"
+    def _has_zone_safety_job(
+        self,
+        zone_id: int,
+        *,
+        activation_token: str | None = None,
+        roles: set[str] | None = None,
+        deadline: datetime | None = None,
+    ) -> bool:
+        """Validate a safety job's role, activation and optional deadline.
+
+        Merely finding a hard/cap-shaped id is insufficient: stale callbacks
+        and long caps must never satisfy a caller that needs a short retry for
+        the current activation.
+        """
+        zid = int(zone_id)
+        expected_token = activation_token
+        allowed_roles = set(roles or {"hard", "cap"})
+        role_ids = {
+            "hard": f"zone_hard_stop:{zid}",
+            "cap": f"zone_cap_stop:{zid}",
+        }
+        if not allowed_roles or not allowed_roles <= set(role_ids):
+            return False
+        normalised_deadline = self._normalise_caller_run_at(deadline) if deadline is not None else None
+        now = self._controller_now()
         try:
-            return any(str(job.id) in {hard_id, cap_id} for job in self.scheduler.get_jobs())
-        except (AttributeError, RuntimeError, ValueError, TypeError):
+            for job in self.scheduler.get_jobs():
+                role = next((name for name in allowed_roles if str(job.id) == role_ids[name]), None)
+                if role is None:
+                    continue
+                if not str(getattr(job, "func_ref", "")).endswith(":job_stop_zone_if_activation"):
+                    continue
+                args = list(getattr(job, "args", ()) or ())
+                if args != [zid, expected_token, True]:
+                    continue
+                trigger = getattr(job, "trigger", None)
+                run_date = getattr(trigger, "run_date", None)
+                if not isinstance(trigger, DateTrigger) or not isinstance(run_date, datetime):
+                    continue
+                if run_date.tzinfo is None:
+                    run_date = self._normalise_caller_run_at(run_date)
+                elif self._controller_timezone() is not None:
+                    run_date = run_date.astimezone(self._controller_timezone())
+                if run_date <= now:
+                    continue
+                if normalised_deadline is not None and run_date > normalised_deadline:
+                    continue
+                return True
+            return False
+        except (AttributeError, RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error, OSError):
             return False
 
     def cancel_zone_jobs(
@@ -3219,6 +3634,18 @@ class IrrigationScheduler:
             logger.info(f"Отменены задачи автоостановки для зоны {zone_id}")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"Ошибка отмены задач зоны {zone_id}: {e}")
+
+    def _read_program_strict(self, program_id: int) -> dict[str, Any] | None:
+        """Return one program or ``None`` only for a confirmed absent row.
+
+        Repository getters intentionally fail soft for many HTTP reads.  At a
+        scheduler revision boundary that ambiguity is unsafe, so callers use
+        this direct read and handle exceptions without mutating live jobs.
+        """
+        with sqlite3.connect(self.db.db_path, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM programs WHERE id = ?", (int(program_id),)).fetchone()
+        return None if row is None else self._decode_recovery_program_row(row)
 
     def _read_programs_for_reconcile(self) -> list[dict[str, Any]] | None:
         """Read programs strictly while isolating corrupt JSON per row.
@@ -3367,6 +3794,7 @@ class IrrigationScheduler:
             "zones": [int(zone_id) for zone_id in zones],
             "scheduled_start": scheduled_start,
             "window_end": window_end,
+            "completed": bool(raw.get("completed", False)),
         }
 
     def _read_boot_recovery_intents_from_connection(self, conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
@@ -3436,15 +3864,70 @@ class IrrigationScheduler:
             logger.exception("Could not clear boot recovery intent %s", intent_id)
             return False
 
+    def _mark_boot_recovery_intent_completed(self, intent: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a terminal marker before attempting destructive cleanup."""
+        intent_id = str(intent["id"])
+        expected = self._normalise_boot_recovery_intent(intent_id, intent)
+        terminal = {**expected, "completed": True}
+        if expected.get("completed") is True:
+            return expected
+        try:
+            with self._boot_recovery_intent_lock, sqlite3.connect(self.db.db_path, timeout=5) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                intents = self._read_boot_recovery_intents_from_connection(conn)
+                if intents.get(intent_id) != expected:
+                    conn.rollback()
+                    return None
+                intents[intent_id] = terminal
+                self._write_boot_recovery_intents(conn, intents)
+                conn.commit()
+            return terminal if self._read_boot_recovery_intents_strict().get(intent_id) == terminal else None
+        except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+            logger.exception("Could not mark boot recovery intent %s completed", intent_id)
+            return None
+
+    def _finalize_boot_recovery_intent(self, intent: dict[str, Any]) -> bool:
+        """Clear a terminal intent or retain a persistent clear-only retry."""
+        terminal = self._mark_boot_recovery_intent_completed(intent)
+        if terminal is None:
+            logger.critical("Boot recovery intent %s completed without durable terminal marker", intent.get("id"))
+            return False
+        if self._clear_boot_recovery_intent(terminal):
+            return True
+        retry_at = self._controller_now() + timedelta(seconds=30)
+        if not self._ensure_boot_recovery_job(terminal, run_at=retry_at, retry_generation=True):
+            logger.critical("Boot recovery terminal intent %s has no live clear retry", intent.get("id"))
+        return False
+
     @staticmethod
     def _boot_recovery_job_id(intent_id: str) -> str:
         return f"boot_recovery:{intent_id}"
+
+    @classmethod
+    def _boot_recovery_retry_job_id(cls, intent_id: str) -> str:
+        base = cls._boot_recovery_job_id(intent_id)
+        return f"{base}:retry:{time.time_ns():x}"
+
+    @staticmethod
+    def _boot_recovery_job_matches(job: object, intent_id: str) -> bool:
+        try:
+            return bool(
+                str(job.id).startswith(f"boot_recovery:{intent_id}")
+                and str(getattr(job, "func_ref", "")).endswith(":job_run_boot_recovery")
+                and list(job.args) == [intent_id]
+                and isinstance(job.trigger, DateTrigger)
+                and getattr(job, "misfire_grace_time", 0) is None
+                and getattr(job, "_jobstore_alias", None) == "default"
+            )
+        except (AttributeError, TypeError, ValueError, KeyError):
+            return False
 
     def _ensure_boot_recovery_job(
         self,
         intent: dict[str, Any],
         *,
         run_at: datetime | None = None,
+        retry_generation: bool = False,
     ) -> bool:
         """Persist and strictly re-read one APS job for a durable intent."""
         if (
@@ -3455,12 +3938,24 @@ class IrrigationScheduler:
             logger.critical("Durable boot recovery requires the running SQLAlchemy jobstore")
             return False
         intent_id = str(intent["id"])
-        job_id = self._boot_recovery_job_id(intent_id)
+        job_id = (
+            self._boot_recovery_retry_job_id(intent_id)
+            if retry_generation
+            else self._boot_recovery_job_id(intent_id)
+        )
         run_at = run_at or self._controller_now()
         if run_at.tzinfo is None:
             timezone = self._controller_timezone()
             run_at = run_at.replace(tzinfo=timezone) if timezone is not None else run_at.astimezone()
         try:
+            if not retry_generation:
+                existing = [
+                    job
+                    for job in self.scheduler.get_jobs(jobstore="default")
+                    if self._boot_recovery_job_matches(job, intent_id)
+                ]
+                if existing:
+                    return True
             self.scheduler.add_job(
                 job_run_boot_recovery,
                 DateTrigger(run_date=run_at, timezone=self._controller_timezone()),
@@ -3473,14 +3968,7 @@ class IrrigationScheduler:
                 max_instances=1,
             )
             persisted = self.scheduler.get_job(job_id, jobstore="default")
-            return bool(
-                persisted is not None
-                and str(persisted.id) == job_id
-                and str(getattr(persisted, "func_ref", "")).endswith(":job_run_boot_recovery")
-                and list(persisted.args) == [intent_id]
-                and getattr(persisted, "misfire_grace_time", 0) is None
-                and getattr(persisted, "_jobstore_alias", None) == "default"
-            )
+            return bool(persisted is not None and self._boot_recovery_job_matches(persisted, intent_id))
         except (RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error, OSError):
             logger.exception("Could not persist boot recovery job %s", job_id)
             return False
@@ -3491,23 +3979,25 @@ class IrrigationScheduler:
             intent = self._read_boot_recovery_intents_strict().get(str(intent_id))
             if intent is None:
                 return True
+            if intent.get("completed") is True:
+                return self._finalize_boot_recovery_intent(intent)
             now = self._controller_now(naive=True)
             window_end = self._parse_dt(intent["window_end"])
             if window_end is None:
                 return False
             if now >= window_end:
                 logger.info("Boot recovery intent %s expired safely", intent_id)
-                return self._clear_boot_recovery_intent(intent)
+                return self._finalize_boot_recovery_intent(intent)
 
             programs, _zones = self._read_recovery_inputs_strict()
             program = next((item for item in programs if int(item["id"]) == int(intent["program_id"])), None)
             if program is None or not program.get("enabled", True):
                 logger.info("Boot recovery intent %s is no longer applicable", intent_id)
-                return self._clear_boot_recovery_intent(intent)
+                return self._finalize_boot_recovery_intent(intent)
             current_program_zones = sorted({int(zone_id) for zone_id in (program.get("zones") or [])})
             if current_program_zones != intent["program_zones"]:
                 logger.info("Boot recovery intent %s superseded by program edit", intent_id)
-                return self._clear_boot_recovery_intent(intent)
+                return self._finalize_boot_recovery_intent(intent)
 
             completed = self._run_program_threaded(
                 int(intent["program_id"]),
@@ -3516,13 +4006,13 @@ class IrrigationScheduler:
                 manual=False,
             )
             if completed is True:
-                return self._clear_boot_recovery_intent(intent)
+                return self._finalize_boot_recovery_intent(intent)
 
             # Keep the intent authoritative after a failed start/stop. Plant a
             # terminal expiry callback so it cannot linger forever in a live
             # process; a crash before then is recovered from the intent itself.
             expiry = window_end.replace(tzinfo=self._controller_timezone())
-            self._ensure_boot_recovery_job(intent, run_at=expiry)
+            self._ensure_boot_recovery_job(intent, run_at=expiry, retry_generation=True)
             return False
         except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             logger.exception("Boot recovery intent execution failed (intent_id=%s)", intent_id)
@@ -3596,7 +4086,7 @@ class IrrigationScheduler:
                         all_ok = False
                         continue
                     if now >= window_end:
-                        all_ok = self._clear_boot_recovery_intent(intent) and all_ok
+                        all_ok = self._finalize_boot_recovery_intent(intent) and all_ok
                     elif not self._ensure_boot_recovery_job(intent):
                         all_ok = False
 
@@ -3623,6 +4113,26 @@ class IrrigationScheduler:
                         # IntervalTrigger anchor, never by service-start time.
                         # Missing metadata fails closed rather than inventing a
                         # new occurrence and watering on the wrong phase.
+                        metadata = self.get_program_trigger_metadata(int(p["id"]))
+                        expected_slots = {"main"} | {
+                            f"extra:{index}" for index, _value in enumerate(p.get("extra_times") or [])
+                        }
+                        slot_metadata = metadata.get("slots") or {}
+                        anchors_valid = set(slot_metadata) == expected_slots
+                        for slot in expected_slots:
+                            entries = slot_metadata.get(slot)
+                            if (
+                                not isinstance(entries, list)
+                                or len(entries) != 1
+                                or entries[0].get("trigger_type") != "IntervalTrigger"
+                                or entries[0].get("anchor") is None
+                                or int(entries[0].get("interval_days") or 0) != int(p.get("interval_days") or 0)
+                            ):
+                                anchors_valid = False
+                        if require_interrupted_evidence and not anchors_valid:
+                            logger.error("Interrupted interval program %s has no authoritative live anchor", p["id"])
+                            all_ok = False
+                            continue
                         occurrence_start = now - timedelta(minutes=max(1, total_min))
                         occurrences = self.get_program_occurrences(
                             int(p["id"]),
@@ -3640,6 +4150,10 @@ class IrrigationScheduler:
                                     )
                                 if fire <= now < fire + timedelta(minutes=total_min):
                                     candidates.append(fire)
+                        if require_interrupted_evidence and not candidates:
+                            logger.error("Interrupted interval program %s has no current preserved occurrence", p["id"])
+                            all_ok = False
+                            continue
                     else:
                         # Include yesterday so windows crossing local midnight
                         # are recoverable. When main/extra windows overlap, the
@@ -3899,3 +4413,15 @@ def init_scheduler(db: IrrigationDB):
 
 def get_scheduler() -> IrrigationScheduler | None:
     return scheduler
+
+
+def quiesce_group_session(group_id: int) -> bool:
+    """Public fail-closed group fence for HTTP/core callers."""
+    current = get_scheduler()
+    if current is None:
+        return False
+    try:
+        return current.quiesce_group_session(int(group_id)) is True
+    except (RuntimeError, ValueError, TypeError, KeyError):
+        logger.exception("Group session quiesce failed for %s", group_id)
+        return False

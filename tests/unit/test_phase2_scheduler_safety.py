@@ -83,17 +83,23 @@ def test_63_group_start_physically_stops_every_peer_before_planting_sequence(saf
     safety_scheduler.scheduler = MagicMock()
     safety_scheduler.scheduler.get_jobs.return_value = []
     safety_scheduler.scheduler.add_job.side_effect = lambda *args, **kwargs: order.append("sequence") or MagicMock()
+
+    def physical_off(*_args, **_kwargs):
+        order.append("physical-off")
+        test_db.update_zone(selected["id"], {"state": "off"})
+        test_db.update_zone(peer["id"], {"state": "off"})
+        return {
+            "success": True,
+            "group_id": group["id"],
+            "stopped": [selected["id"], peer["id"]],
+            "unresolved": [],
+            "retry_scheduled": False,
+        }
+
     with (
         patch.object(scheduler_module, "TESTING", False),
         patch("services.zone_control.db", test_db),
-        patch(
-            "services.zone_control.stop_all_in_group",
-            side_effect=lambda *a, **k: (
-                order.append("physical-off"),
-                test_db.update_zone(selected["id"], {"state": "off"}),
-                test_db.update_zone(peer["id"], {"state": "off"}),
-            ),
-        ) as stop_all,
+        patch("services.zone_control.stop_all_in_group", side_effect=physical_off) as stop_all,
     ):
         assert safety_scheduler.start_group_sequence(group["id"], zone_ids=[selected["id"]]) is True
 
@@ -397,7 +403,10 @@ def test_110_program_honors_failed_central_start(safety_scheduler, test_db):
     ):
         safety_scheduler._run_program_threaded(110, [zone["id"]], "rejected-program")
 
-    start_zone.assert_called_once_with(zone["id"], source="program")
+    assert start_zone.call_count == 1
+    assert start_zone.call_args.args == (zone["id"],)
+    assert start_zone.call_args.kwargs["source"] == "program"
+    assert callable(start_zone.call_args.kwargs["cancel_guard"])
     hard_stop.assert_not_called()
     assert test_db.get_zone(zone["id"])["state"] == "off"
     assert zone["id"] not in safety_scheduler.active_zones
@@ -407,8 +416,9 @@ def test_110_program_does_not_overwrite_fault_reported_during_central_start(safe
     group = test_db.create_group("program-command-fault")
     zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
 
-    def fault_during_start(zone_id, *, source):
+    def fault_during_start(zone_id, *, source, cancel_guard):
         assert source == "program"
+        assert cancel_guard() is False
         test_db.update_zone(zone_id, {"state": "fault", "commanded_state": "on"})
         return True
 
@@ -460,7 +470,10 @@ def test_110_group_sequence_honors_failed_central_start(safety_scheduler, test_d
     ):
         safety_scheduler._run_group_sequence(group["id"], [zone["id"]])
 
-    start_zone.assert_called_once_with(zone["id"], source="program")
+    assert start_zone.call_count == 1
+    assert start_zone.call_args.args == (zone["id"],)
+    assert start_zone.call_args.kwargs["source"] == "program"
+    assert callable(start_zone.call_args.kwargs["cancel_guard"])
     hard_stop.assert_not_called()
     assert test_db.get_zone(zone["id"])["state"] == "off"
     assert group["id"] not in safety_scheduler.group_cancel_events
@@ -472,8 +485,9 @@ def test_110_group_sequence_does_not_overwrite_fault_reported_during_start(safet
     safety_scheduler.group_cancel_events[group["id"]] = threading.Event()
     monkeypatch.setenv("SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ", "1")
 
-    def fault_during_start(zone_id, *, source):
+    def fault_during_start(zone_id, *, source, cancel_guard):
         assert source == "program"
+        assert cancel_guard() is False
         test_db.update_zone(zone_id, {"state": "fault", "commanded_state": "on"})
         return True
 
