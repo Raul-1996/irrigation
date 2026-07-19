@@ -91,8 +91,7 @@ class TestProgramsAPI:
 
     def test_delete_program_not_found(self, admin_client):
         resp = admin_client.delete("/api/programs/99999")
-        # delete_program returns True for nonexistent IDs
-        assert resp.status_code in (204, 404)
+        assert resp.status_code == 404
 
 
 class TestCheckConflicts:

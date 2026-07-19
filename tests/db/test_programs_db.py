@@ -53,8 +53,7 @@ class TestProgramCRUD:
         assert test_db.get_program(prog["id"]) is None
 
     def test_delete_program_not_found(self, test_db):
-        result = test_db.delete_program(9999)
-        assert isinstance(result, bool)
+        assert test_db.delete_program(9999) is False
 
 
 class TestProgramConflicts:

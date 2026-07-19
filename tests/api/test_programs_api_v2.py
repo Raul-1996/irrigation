@@ -26,7 +26,7 @@ class TestCreateProgramWithNewFields:
                     "days": [0, 2, 4],
                     "zones": [1],
                     "color": "#66bb6a",
-                    "enabled": 1,
+                    "enabled": True,
                 }
             ),
             content_type="application/json",
@@ -195,7 +195,7 @@ class TestUpdateProgramWithNewFields:
                     "schedule_type": "interval",
                     "interval_days": 2,
                     "color": "#ffa726",
-                    "enabled": 1,
+                    "enabled": True,
                     "days": [],
                     "zones": [1],
                 }
@@ -311,13 +311,15 @@ class TestToggleProgramEnabled:
         prog = app.db.create_program({"name": "Test", "time": "06:00", "days": [0], "zones": [1], "enabled": 1})
 
         resp = admin_client.patch(
-            f"/api/programs/{prog['id']}/enabled", data=json.dumps({"enabled": 0}), content_type="application/json"
+            f"/api/programs/{prog['id']}/enabled",
+            data=json.dumps({"enabled": False}),
+            content_type="application/json",
         )
 
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
-        assert data["program"]["enabled"] == 0
+        assert data["program"]["enabled"] is False
 
     def test_toggle_program_enabled_to_true(self, admin_client, app):
         """PATCH /api/programs/<id>/enabled переключает enabled на 1."""
@@ -325,18 +327,22 @@ class TestToggleProgramEnabled:
         prog = app.db.create_program({"name": "Test", "time": "06:00", "days": [0], "zones": [1], "enabled": 0})
 
         resp = admin_client.patch(
-            f"/api/programs/{prog['id']}/enabled", data=json.dumps({"enabled": 1}), content_type="application/json"
+            f"/api/programs/{prog['id']}/enabled",
+            data=json.dumps({"enabled": True}),
+            content_type="application/json",
         )
 
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
-        assert data["program"]["enabled"] == 1
+        assert data["program"]["enabled"] is True
 
     def test_toggle_program_enabled_not_found(self, admin_client):
         """PATCH /api/programs/<id>/enabled для несуществующей программы → 404."""
         resp = admin_client.patch(
-            "/api/programs/99999/enabled", data=json.dumps({"enabled": 0}), content_type="application/json"
+            "/api/programs/99999/enabled",
+            data=json.dumps({"enabled": False}),
+            content_type="application/json",
         )
 
         assert resp.status_code == 404
@@ -548,9 +554,8 @@ class TestCheckConflictsWithExtraTimes:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "has_conflicts" in data
-        # Должен обнаружить конфликт
-        # assert data['has_conflicts'] is True
+        assert data["has_conflicts"] is True
+        assert data["conflicts"][0]["program_name"] == "Existing"
 
     def test_check_conflicts_with_own_extra_times(self, admin_client, app):
         """POST /api/programs/check-conflicts проверяет конфликты между своими extra_times."""
@@ -571,7 +576,8 @@ class TestCheckConflictsWithExtraTimes:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "has_conflicts" in data
+        assert data["has_conflicts"] is True
+        assert data["conflicts"][0]["candidate_self_conflict"] is True
 
 
 class TestEvenOddCanonicalization:

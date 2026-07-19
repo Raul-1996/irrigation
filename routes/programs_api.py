@@ -2,7 +2,10 @@
 
 import json
 import logging
+import re
 import sqlite3
+import threading
+from datetime import datetime, timedelta
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -22,36 +25,199 @@ VALID_PROGRAM_TYPES = ("time-based", "smart")
 VALID_SCHEDULE_TYPES = ("weekdays", "interval", "even-odd")
 MIN_INTERVAL_DAYS = 1
 MAX_INTERVAL_DAYS = 30
+_TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
+_PROGRAM_MUTATION_LOCK = threading.RLock()
 
 
-def _validate_program_v2_fields(data: dict) -> str | None:
-    """Проверить v2-поля программы; вернуть текст ошибки или None.
+def _is_hhmm(value: object) -> bool:
+    return isinstance(value, str) and _TIME_RE.fullmatch(value) is not None
 
-    Мутирует data: каноникализирует schedule_type 'even_odd' → 'even-odd'
-    (историческое написание из мастера программ и старых строк БД).
-    """
-    if data.get("schedule_type") == "even_odd":
-        data["schedule_type"] = "even-odd"
-    ptype = data.get("type")
-    if ptype is not None and ptype not in VALID_PROGRAM_TYPES:
-        return f"Invalid type: {ptype!r} (expected one of: {', '.join(VALID_PROGRAM_TYPES)})"
-    schedule_type = data.get("schedule_type")
-    if schedule_type is not None and schedule_type not in VALID_SCHEDULE_TYPES:
-        return f"Invalid schedule_type: {schedule_type!r} (expected one of: {', '.join(VALID_SCHEDULE_TYPES)})"
+
+def _normalize_program_payload(
+    data: dict,
+    *,
+    current: dict | None = None,
+    creating: bool,
+) -> tuple[dict, dict, str | None]:
+    """Validate strict JSON types and return (changes, effective, error)."""
+    if creating:
+        missing = [field for field in ("name", "time", "zones") if field not in data]
+        if missing:
+            return {}, {}, f"Missing required fields: {', '.join(missing)}"
+        effective = {
+            "type": "time-based",
+            "schedule_type": "weekdays",
+            "days": [],
+            "extra_times": [],
+            "enabled": True,
+            **data,
+        }
+    else:
+        effective = {**(current or {}), **data}
+
+    if effective.get("schedule_type") == "even_odd":
+        effective["schedule_type"] = "even-odd"
+
+    name = effective.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return {}, effective, "name must be a non-empty string"
+    if not _is_hhmm(effective.get("time")):
+        return {}, effective, "time must use strict HH:MM format (00:00-23:59)"
+
+    zones = effective.get("zones")
+    if (
+        not isinstance(zones, list)
+        or not zones
+        or any(isinstance(zone_id, bool) or not isinstance(zone_id, int) or zone_id <= 0 for zone_id in zones)
+    ):
+        return {}, effective, "zones must be a non-empty list of positive integers"
+    if len(zones) != len(set(zones)):
+        return {}, effective, "zones must not contain duplicate IDs"
+
+    days = effective.get("days", [])
+    if not isinstance(days, list) or any(
+        isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6 for day in days
+    ):
+        return {}, effective, "days must be a list of integers between 0 and 6"
+    effective["days"] = sorted(set(days))
+
+    extra_times = effective.get("extra_times", [])
+    if not isinstance(extra_times, list) or any(not _is_hhmm(slot) for slot in extra_times):
+        return {}, effective, "extra_times must be a list of strict HH:MM strings"
+    if len(extra_times) != len(set(extra_times)):
+        return {}, effective, "extra_times must not contain duplicates"
+    if effective["time"] in extra_times:
+        return {}, effective, "extra_times must not duplicate the primary time"
+    effective["extra_times"] = list(extra_times)
+
+    enabled = effective.get("enabled", True)
+    if not isinstance(enabled, bool):
+        return {}, effective, "enabled must be a JSON boolean"
+
+    program_type = effective.get("type", "time-based")
+    if not isinstance(program_type, str) or program_type not in VALID_PROGRAM_TYPES:
+        return (
+            {},
+            effective,
+            f"Invalid type: {program_type!r} (expected one of: {', '.join(VALID_PROGRAM_TYPES)})",
+        )
+    schedule_type = effective.get("schedule_type", "weekdays")
+    if not isinstance(schedule_type, str) or schedule_type not in VALID_SCHEDULE_TYPES:
+        return (
+            {},
+            effective,
+            f"Invalid schedule_type: {schedule_type!r} (expected one of: {', '.join(VALID_SCHEDULE_TYPES)})",
+        )
+    if schedule_type == "weekdays" and not effective["days"]:
+        return {}, effective, "schedule_type='weekdays' requires at least one day"
     if schedule_type == "interval":
-        interval_days = data.get("interval_days")
+        interval_days = effective.get("interval_days")
         if (
             isinstance(interval_days, bool)
             or not isinstance(interval_days, int)
             or not MIN_INTERVAL_DAYS <= interval_days <= MAX_INTERVAL_DAYS
         ):
             return (
+                {},
+                effective,
                 "schedule_type='interval' requires interval_days "
-                f"as an integer between {MIN_INTERVAL_DAYS} and {MAX_INTERVAL_DAYS}"
+                f"as an integer between {MIN_INTERVAL_DAYS} and {MAX_INTERVAL_DAYS}",
             )
-    if schedule_type == "even-odd" and data.get("even_odd") not in ("even", "odd"):
-        return "schedule_type='even-odd' requires even_odd ('even' or 'odd')"
-    return None
+    elif effective.get("interval_days") is not None:
+        interval_days = effective["interval_days"]
+        if (
+            isinstance(interval_days, bool)
+            or not isinstance(interval_days, int)
+            or not MIN_INTERVAL_DAYS <= interval_days <= MAX_INTERVAL_DAYS
+        ):
+            return {}, effective, "interval_days must be null or an integer between 1 and 30"
+    if schedule_type == "even-odd" and effective.get("even_odd") not in ("even", "odd"):
+        return {}, effective, "schedule_type='even-odd' requires even_odd ('even' or 'odd')"
+    if effective.get("even_odd") not in (None, "even", "odd"):
+        return {}, effective, "even_odd must be null, 'even' or 'odd'"
+
+    normalized = dict(data)
+    for field in (
+        "name",
+        "time",
+        "zones",
+        "days",
+        "extra_times",
+        "enabled",
+        "type",
+        "schedule_type",
+        "interval_days",
+        "even_odd",
+    ):
+        if creating or field in data:
+            if field in effective:
+                normalized[field] = effective[field]
+    return normalized, effective, None
+
+
+def _validate_program_v2_fields(data: dict) -> str | None:
+    """Backward-compatible validator used by older callers/tests."""
+    normalized, _effective, error = _normalize_program_payload(data, creating=True)
+    if error is None:
+        data.update(normalized)
+    return error
+
+
+def _slot_anchor_map(program: dict, scheduler_anchors: dict[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    main_time = program.get("time")
+    if _is_hhmm(main_time) and "main" in scheduler_anchors:
+        result[main_time] = scheduler_anchors["main"]
+    for index, slot in enumerate(program.get("extra_times") or []):
+        key = f"extra:{index}"
+        if _is_hhmm(slot) and key in scheduler_anchors:
+            result[slot] = scheduler_anchors[key]
+    return result
+
+
+def _next_candidate_interval_anchors(program: dict, scheduler: object | None) -> dict[str, object]:
+    timezone = getattr(getattr(scheduler, "scheduler", None), "timezone", None)
+    now = datetime.now(timezone) if timezone is not None else datetime.now()
+    result: dict[str, object] = {}
+    slots = [program["time"], *(program.get("extra_times") or [])]
+    for slot in slots:
+        hours, minutes = (int(part) for part in slot.split(":"))
+        anchor = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        if anchor <= now:
+            anchor += timedelta(days=1)
+        result[slot] = anchor
+    return result
+
+
+def _interval_anchor_context(
+    program_id: int | None,
+    effective: dict,
+    *,
+    preserve_candidate_anchor: bool,
+) -> tuple[dict[str, object], dict[int, dict[str, object]]]:
+    """Read authoritative stored anchors and derive a new candidate anchor."""
+    scheduler = get_scheduler()
+    getter = getattr(scheduler, "get_program_interval_anchors", None)
+    stored: dict[int, dict[str, object]] = {}
+    if callable(getter):
+        for program in db.get_programs():
+            if program.get("schedule_type") != "interval":
+                continue
+            try:
+                anchors = getter(int(program["id"]))
+            except (KeyError, TypeError, ValueError, RuntimeError):
+                logger.debug("Не удалось прочитать interval anchors программы %s", program.get("id"), exc_info=True)
+                continue
+            if isinstance(anchors, dict):
+                stored[int(program["id"])] = _slot_anchor_map(program, anchors)
+
+    candidate: dict[str, object] = {}
+    if effective.get("schedule_type") == "interval":
+        if preserve_candidate_anchor and program_id is not None:
+            candidate = dict(stored.get(program_id, {}))
+        else:
+            candidate = _next_candidate_interval_anchors(effective, scheduler)
+    return candidate, stored
 
 
 def _check_candidate_conflicts(
@@ -60,6 +226,13 @@ def _check_candidate_conflicts(
     zones: list[int],
     days: list[int],
     extra_times: object = None,
+    schedule_type: str = "weekdays",
+    interval_days: int | None = None,
+    even_odd: str | None = None,
+    candidate_interval_anchors: dict[str, object] | None = None,
+    stored_interval_anchors: dict[int, dict[str, object]] | None = None,
+    weather_factor: int | None = None,
+    include_weather: bool = False,
 ) -> list[dict]:
     """Check the primary and every candidate extra start through the facade.
 
@@ -67,10 +240,27 @@ def _check_candidate_conflicts(
     signature. Calling it per candidate remains backward-compatible while the
     repository compares each candidate against stored primary and extra slots.
     """
-    candidate_times = [time_value]
-    if isinstance(extra_times, list):
-        candidate_times.extend(extra_times)
+    repository = getattr(db, "programs", None)
+    repository_checker = getattr(repository, "check_program_conflicts", None)
+    if callable(repository_checker):
+        result = repository_checker(
+            program_id=program_id,
+            time=time_value,
+            zones=zones,
+            days=days,
+            extra_times=extra_times,
+            schedule_type=schedule_type,
+            interval_days=interval_days,
+            even_odd=even_odd,
+            candidate_interval_anchors=candidate_interval_anchors,
+            stored_interval_anchors=stored_interval_anchors,
+            weather_factor=weather_factor,
+            include_weather=include_weather,
+            raise_on_error=True,
+        )
+        return result.get("conflicts", []) if isinstance(result, dict) else list(result or [])
 
+    candidate_times = [time_value, *(extra_times if isinstance(extra_times, list) else [])]
     conflicts = []
     checked_times = []
     for candidate_time in candidate_times:
@@ -88,6 +278,7 @@ def _check_candidate_conflicts(
         for conflict in result or []:
             if conflict not in conflicts:
                 conflicts.append(conflict)
+
     return conflicts
 
 
@@ -110,30 +301,42 @@ def api_program(prog_id):
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "JSON body must be an object"}), 400
 
-        current_program = db.get_program(prog_id)
-        if not current_program:
-            return jsonify({"success": False, "message": "Program not found"}), 404
-
-        effective_data = {**current_program, **data}
-        v2_error = _validate_program_v2_fields(effective_data)
-        if v2_error:
-            return jsonify({"success": False, "message": v2_error}), 400
-        if "schedule_type" in data:
-            data["schedule_type"] = effective_data["schedule_type"]
-        try:
-            if isinstance(data.get("days"), list):
-                data["days"] = [int(d) for d in data["days"]]
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Handled exception in api_program: %s", e)
-        try:
-            effective_data.update(data)
-            conflicts = _check_candidate_conflicts(
-                program_id=prog_id,
-                time_value=effective_data["time"],
-                zones=effective_data["zones"],
-                days=effective_data["days"],
-                extra_times=effective_data.get("extra_times"),
+        with _PROGRAM_MUTATION_LOCK:
+            current_program = db.get_program(prog_id)
+            if not current_program:
+                return jsonify({"success": False, "message": "Program not found"}), 404
+            normalized, effective_data, validation_error = _normalize_program_payload(
+                data,
+                current=current_program,
+                creating=False,
             )
+            if validation_error:
+                return jsonify({"success": False, "message": validation_error}), 400
+            preserve_candidate_anchor = all(
+                current_program.get(field) == effective_data.get(field)
+                for field in ("schedule_type", "time", "extra_times", "interval_days")
+            )
+            candidate_anchors, stored_anchors = _interval_anchor_context(
+                prog_id,
+                effective_data,
+                preserve_candidate_anchor=preserve_candidate_anchor,
+            )
+            try:
+                conflicts = _check_candidate_conflicts(
+                    program_id=prog_id,
+                    time_value=effective_data["time"],
+                    zones=effective_data["zones"],
+                    days=effective_data["days"],
+                    extra_times=effective_data.get("extra_times"),
+                    schedule_type=effective_data["schedule_type"],
+                    interval_days=effective_data.get("interval_days"),
+                    even_odd=effective_data.get("even_odd"),
+                    candidate_interval_anchors=candidate_anchors,
+                    stored_interval_anchors=stored_anchors,
+                )
+            except (sqlite3.Error, OSError) as error:
+                logger.error("Ошибка серверной проверки конфликтов: %s", error)
+                return jsonify({"success": False, "message": "Ошибка проверки конфликтов"}), 503
             if conflicts:
                 return jsonify(
                     {
@@ -143,11 +346,9 @@ def api_program(prog_id):
                         "message": "Обнаружены конфликты программ",
                     }
                 )
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Ошибка серверной проверки конфликтов: {e}")
-        program = db.update_program(prog_id, data)
+            program = db.update_program(prog_id, normalized)
         if program:
-            db.add_log("prog_edit", json.dumps({"prog": prog_id, "changes": data}))
+            db.add_log("prog_edit", json.dumps({"prog": prog_id, "changes": normalized}))
             try:
                 scheduler = get_scheduler()
                 if scheduler:
@@ -177,26 +378,32 @@ def api_create_program():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"success": False, "message": "JSON body must be an object"}), 400
-    # Validate required fields
-    missing = [f for f in ("name", "time", "zones") if f not in data]
-    if missing:
-        return jsonify({"success": False, "message": f"Missing required fields: {', '.join(missing)}"}), 400
-    v2_error = _validate_program_v2_fields(data)
-    if v2_error:
-        return jsonify({"success": False, "message": v2_error}), 400
-    try:
-        if isinstance(data.get("days"), list):
-            data["days"] = [int(d) for d in data["days"]]
-    except (ValueError, TypeError, KeyError) as e:
-        logger.debug("Handled exception in api_create_program: %s", e)
-    try:
-        conflicts = _check_candidate_conflicts(
-            program_id=None,
-            time_value=data["time"],
-            zones=data["zones"],
-            days=data.get("days", []),
-            extra_times=data.get("extra_times"),
+    normalized, effective_data, validation_error = _normalize_program_payload(data, creating=True)
+    if validation_error:
+        return jsonify({"success": False, "message": validation_error}), 400
+
+    with _PROGRAM_MUTATION_LOCK:
+        candidate_anchors, stored_anchors = _interval_anchor_context(
+            None,
+            effective_data,
+            preserve_candidate_anchor=False,
         )
+        try:
+            conflicts = _check_candidate_conflicts(
+                program_id=None,
+                time_value=effective_data["time"],
+                zones=effective_data["zones"],
+                days=effective_data["days"],
+                extra_times=effective_data.get("extra_times"),
+                schedule_type=effective_data["schedule_type"],
+                interval_days=effective_data.get("interval_days"),
+                even_odd=effective_data.get("even_odd"),
+                candidate_interval_anchors=candidate_anchors,
+                stored_interval_anchors=stored_anchors,
+            )
+        except (sqlite3.Error, OSError) as error:
+            logger.error("Ошибка серверной проверки конфликтов (create): %s", error)
+            return jsonify({"success": False, "message": "Ошибка проверки конфликтов"}), 503
         if conflicts:
             return jsonify(
                 {
@@ -206,9 +413,7 @@ def api_create_program():
                     "message": "Обнаружены конфликты программ",
                 }
             )
-    except (sqlite3.Error, OSError) as e:
-        logger.error(f"Ошибка серверной проверки конфликтов (create): {e}")
-    program = db.create_program(data)
+        program = db.create_program(normalized)
     if program:
         db.add_log("prog_create", json.dumps({"prog": program["id"], "name": program["name"]}))
         try:
@@ -229,12 +434,37 @@ def check_program_conflicts():
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "JSON body must be an object"}), 400
         program_id = data.get("program_id")
+        if program_id is not None and (
+            isinstance(program_id, bool) or not isinstance(program_id, int) or program_id <= 0
+        ):
+            return jsonify({"success": False, "message": "program_id must be a positive integer or null"}), 400
         time_val = data.get("time")
         zones = data.get("zones", [])
         days = data.get("days", [])
         extra_times = data.get("extra_times")
+        schedule_type = data.get("schedule_type", "weekdays")
+        weather_factor = data.get("weather_factor")
+        include_weather = data.get("include_weather", False)
+        if weather_factor is not None and (
+            isinstance(weather_factor, bool) or not isinstance(weather_factor, int) or not 100 <= weather_factor <= 1000
+        ):
+            return jsonify({"success": False, "message": "weather_factor must be an integer between 100 and 1000"}), 400
+        if not isinstance(include_weather, bool):
+            return jsonify({"success": False, "message": "include_weather must be a JSON boolean"}), 400
+        candidate = {
+            "name": "Conflict probe",
+            "time": time_val,
+            "zones": zones,
+            "days": days,
+            "extra_times": [] if extra_times is None else extra_times,
+            "schedule_type": schedule_type,
+            "interval_days": data.get("interval_days"),
+            "even_odd": data.get("even_odd"),
+            "enabled": True,
+        }
+        _normalized, effective, validation_error = _normalize_program_payload(candidate, creating=True)
 
-        if not time_val or not zones or not days:
+        if validation_error:
             # Best-effort debug trace of UI intent — only when debug logging is on.
             try:
                 debug_audit(
@@ -245,9 +475,32 @@ def check_program_conflicts():
                 )
             except Exception:
                 logger.debug("check_program_conflicts: debug_audit failed", exc_info=True)
-            return jsonify({"success": False, "message": "Необходимо указать время, дни и зоны"}), 400
+            return jsonify({"success": False, "message": validation_error}), 400
 
-        conflicts = _check_candidate_conflicts(program_id, time_val, zones, days, extra_times)
+        current_program = db.get_program(program_id) if program_id is not None else None
+        preserve_candidate_anchor = bool(current_program) and all(
+            current_program.get(field) == effective.get(field)
+            for field in ("schedule_type", "time", "extra_times", "interval_days")
+        )
+        candidate_anchors, stored_anchors = _interval_anchor_context(
+            program_id,
+            effective,
+            preserve_candidate_anchor=preserve_candidate_anchor,
+        )
+        conflicts = _check_candidate_conflicts(
+            program_id,
+            effective["time"],
+            effective["zones"],
+            effective["days"],
+            effective["extra_times"],
+            effective["schedule_type"],
+            effective.get("interval_days"),
+            effective.get("even_odd"),
+            candidate_anchors,
+            stored_anchors,
+            weather_factor,
+            include_weather,
+        )
         # Debug-level trace — this is read-only intent, useful for triaging
         # "why did the UI block save" without flooding audit_log in prod.
         try:
@@ -299,14 +552,24 @@ def api_duplicate_program(prog_id):
 def api_toggle_program_enabled(prog_id):
     """Toggle program enabled/disabled state."""
     try:
-        data = request.get_json() or {}
+        if str(db.get_setting_value("password_must_change") or "0") == "1":
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "password change required",
+                    "error_code": "PASSWORD_MUST_CHANGE",
+                }
+            ), 403
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "JSON body must be an object"}), 400
         enabled = data.get("enabled")
-        if enabled is None:
-            return jsonify({"success": False, "message": "enabled field is required"}), 400
+        if not isinstance(enabled, bool):
+            return jsonify({"success": False, "message": "enabled must be a JSON boolean"}), 400
 
-        program = db.update_program(prog_id, {"enabled": bool(enabled)})
+        program = db.update_program(prog_id, {"enabled": enabled})
         if program:
-            db.add_log("prog_toggle", json.dumps({"prog": prog_id, "enabled": bool(enabled)}))
+            db.add_log("prog_toggle", json.dumps({"prog": prog_id, "enabled": enabled}))
             try:
                 scheduler = get_scheduler()
                 if scheduler:
@@ -335,6 +598,13 @@ def api_run_program(prog_id):
     program = db.get_program(prog_id)
     if not program:
         return jsonify({"success": False, "message": "Program not found"}), 404
+    if not program.get("enabled", True):
+        return jsonify(
+            {
+                "success": False,
+                "message": "Program is disabled; enable it before manual run",
+            }
+        ), 409
 
     zones = program.get("zones") or []
     if not zones:
