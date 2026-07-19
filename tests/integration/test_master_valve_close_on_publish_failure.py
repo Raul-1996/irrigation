@@ -93,12 +93,8 @@ class TestMasterCloseDesyncIssue38:
                 f"SSE must not broadcast 'closed' on publish failure; got {payload!r}"
             )
 
-    def test_publish_success_writes_closed(self, test_db):
-        """Happy path: publish returns True → DB updated, SSE broadcast emitted.
-
-        Fences the negative test above — without this, a fix that always
-        skipped the write would pass the failure test by accident.
-        """
+    def test_publish_success_still_waits_for_fresh_physical_closed_echo(self, test_db):
+        """Broker ACK is command delivery, never physical observed truth."""
         import services.zone_control as zc
         from services import sse_hub as _sse_hub
 
@@ -117,12 +113,10 @@ class TestMasterCloseDesyncIssue38:
             time.sleep(0.5)
 
         g_after = next(g for g in test_db.get_groups() if int(g["id"]) == gid)
-        assert g_after.get("master_valve_observed") == "closed", (
-            f"master_valve_observed must be 'closed' on successful publish; "
+        assert g_after.get("master_valve_observed") == "open", (
+            f"master_valve_observed must remain 'open' until a fresh base-topic echo; "
             f"got {g_after.get('master_valve_observed')!r}"
         )
 
         closed_broadcasts = [p for p in broadcasts if "closed" in str(p) and str(gid) in str(p)]
-        assert closed_broadcasts, (
-            f"Expected at least one SSE broadcast with 'closed' for gid={gid}; got {broadcasts!r}"
-        )
+        assert closed_broadcasts == []
