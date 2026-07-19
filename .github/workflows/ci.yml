@@ -29,7 +29,10 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       # pytest.ini is the single selection source: the complete local suite runs
       # by default, while hardware-backed e2e/mqtt_real tests remain opt-in.
-      - run: pytest --tb=short -q --cov --cov-report=xml
+      - run: >-
+          pytest --tb=short -q --cov --cov-report=xml
+          -W error::pytest.PytestUnraisableExceptionWarning
+          -W error::pytest.PytestUnhandledThreadExceptionWarning
       - uses: actions/upload-artifact@v4
         if: always()
         with:

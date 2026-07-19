@@ -159,6 +159,8 @@ def test_deploy_requires_telegram_runtime_retirement_before_pii_cleanup():
 
 def test_ci_runs_the_complete_default_selected_suite():
     assert "pytest --tb=short -q --cov --cov-report=xml" in CI
+    assert "-W error::pytest.PytestUnraisableExceptionWarning" in CI
+    assert "-W error::pytest.PytestUnhandledThreadExceptionWarning" in CI
     assert "pytest tests/unit tests/db tests/api" not in CI
     # Selection remains centralized in pytest.ini; production CI must not add
     # Docker or bespoke category lists that silently omit new test folders.
