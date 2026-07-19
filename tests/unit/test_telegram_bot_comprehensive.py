@@ -615,3 +615,41 @@ def test_outgoing_http_logs_never_include_message_or_response_body(caplog) -> No
     assert "SECRET TELEGRAM RESPONSE BODY" not in logged
     assert "SECRET_TOKEN" not in logged
     assert "chat_id=12345" in logged
+
+
+def test_send_text_transport_failure_never_logs_token_url(caplog) -> None:
+    from services import telegram_bot
+
+    token = "123456:SENTINEL_TRANSPORT_TOKEN"
+    failure = telegram_bot.requests.exceptions.ConnectionError(
+        f"request failed for https://api.telegram.org/bot{token}/sendMessage"
+    )
+    notifier = telegram_bot.TelegramNotifier()
+    with (
+        patch("config.TESTING", False),
+        patch.object(telegram_bot, "Bot", None),
+        patch.object(notifier, "_ensure_token", return_value=token),
+        patch.object(telegram_bot.requests, "post", side_effect=failure),
+        caplog.at_level("WARNING", logger="TELEGRAM"),
+    ):
+        assert notifier.send_text(12345, "safe test") is False
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert token not in logged
+    assert "SENTINEL_TRANSPORT_TOKEN" not in logged
+    assert "/bot123456" not in logged
+    assert "TelegramNotifier send_text transport failed" in logged
+
+
+def test_send_text_does_not_swallow_unexpected_programmer_failure() -> None:
+    from services import telegram_bot
+
+    notifier = telegram_bot.TelegramNotifier()
+    with (
+        patch("config.TESTING", False),
+        patch.object(telegram_bot, "Bot", None),
+        patch.object(notifier, "_ensure_token", return_value="123456:TOKEN"),
+        patch.object(telegram_bot.requests, "post", side_effect=AssertionError("programmer bug")),
+        pytest.raises(AssertionError, match="programmer bug"),
+    ):
+        notifier.send_text(12345, "safe test")

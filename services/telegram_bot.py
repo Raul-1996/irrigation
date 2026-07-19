@@ -43,6 +43,13 @@ def _load_routes_module():
 
 logger = logging.getLogger("TELEGRAM")
 
+_TELEGRAM_TRANSPORT_ERRORS = (
+    requests.exceptions.RequestException,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
 try:
     # aiogram v3
     from aiogram import Bot, Dispatcher, F
@@ -121,7 +128,10 @@ class TelegramNotifier:
         except (asyncio.CancelledError, RuntimeError):
             return
         if exc is not None:
-            logger.error("scheduled aiogram coroutine failed: %s", exc)
+            if isinstance(exc, _TELEGRAM_TRANSPORT_ERRORS):
+                logger.warning("scheduled aiogram coroutine transport failed")
+            else:
+                logger.error("scheduled aiogram coroutine failed: %s", exc)
 
     def _submit_aiogram(self, coro) -> bool:
         """Submit from sync callers without ever blocking the target loop.
@@ -153,8 +163,11 @@ class TelegramNotifier:
             try:
                 res = fut.result(timeout=10)
                 return bool(res)
-            except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
-                logger.exception(f"aiogram coroutine failed: {e}")
+            except _TELEGRAM_TRANSPORT_ERRORS:
+                logger.warning("aiogram coroutine transport failed")
+                fut.cancel()
+            except RuntimeError:
+                logger.exception("aiogram coroutine runtime failed")
                 fut.cancel()
         except (RuntimeError, OSError) as e:
             logger.debug("Handled exception in _submit_aiogram: %s", e)
@@ -195,6 +208,9 @@ class TelegramNotifier:
             logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier send_text transport failed")
+            return False
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier send_text failed: {e}")
             return False
@@ -240,6 +256,9 @@ class TelegramNotifier:
             logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier send_message transport failed")
+            return False
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier send_message failed: {e}")
             return False
@@ -282,6 +301,9 @@ class TelegramNotifier:
             logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier edit_message_text transport failed")
+            return False
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier edit_message_text failed: {e}")
             return False
@@ -314,6 +336,8 @@ class TelegramNotifier:
                 payload["text"] = str(text)
                 payload["show_alert"] = bool(show_alert)
             requests.post(url, json=payload, timeout=10)
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier answer_callback transport failed")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier answer_callback failed: {e}")
 

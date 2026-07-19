@@ -129,9 +129,15 @@ def api_test_telegram():
                 return jsonify(
                     {"success": True, "message": "Токен сохранён. Откройте чат с ботом (/start), затем повторите тест."}
                 )
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("Exception in api_test_telegram: %s", e)
-            return jsonify({"success": False, "message": f"Ошибка отправки: {e}"}), 500
-    except (sqlite3.Error, OSError) as e:
-        logger.debug("Exception in api_test_telegram: %s", e)
-        return jsonify({"success": False, "message": str(e)}), 500
+        except (sqlite3.Error, OSError):
+            # Transport exceptions may embed the full /bot<TOKEN>/ URL.  Keep
+            # both the operator response and logs stable and credential-free.
+            logger.warning("Telegram test message transport or storage failure")
+            return jsonify(
+                {"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}
+            ), 500
+    except (sqlite3.Error, OSError):
+        logger.warning("Telegram test message setup failure")
+        return jsonify(
+            {"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}
+        ), 500
