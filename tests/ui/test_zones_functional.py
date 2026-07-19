@@ -208,12 +208,30 @@ class TestGroupOperations:
         resp = admin_client.post(f"/api/groups/{gid}/stop")
         assert resp.status_code in (200, 400, 500)
 
-    def test_postpone_group(self, admin_client):
+    def test_postpone_group(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
         resp = admin_client.get("/api/groups")
         groups = json.loads(resp.data)
         if not groups:
             pytest.skip("No groups")
         gid = groups[0]["id"]
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "stopped": [z["id"] for z in app.db.get_zones_by_group(group_id)],
+                        "unresolved": [],
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         resp = admin_client.post(
             "/api/postpone",
             data=json.dumps({"group_id": gid, "days": 1, "action": "postpone"}),

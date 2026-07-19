@@ -186,6 +186,14 @@ def _do_group_postpone(group_id: int, days: int) -> str:
         from services.postpone import postpone_group
 
         res = postpone_group(int(group_id), int(days), source="telegram")
+        if res.get("success") is not True or res.get("unresolved"):
+            unresolved = ", ".join(str(zone_id) for zone_id in res.get("unresolved", []))
+            suffix = f" Зоны без подтверждения: {unresolved}." if unresolved else ""
+            return (
+                f"⏳ Отсрочка установлена до {res['postpone_until']}, "
+                f"но физическое выключение пока не подтверждено.{suffix} "
+                "Защитные повторы продолжаются."
+            )
         return f"⏰ Полив отложен на {int(days)} дн. до {res['postpone_until']}"
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Exception in _do_group_postpone: %s", e)

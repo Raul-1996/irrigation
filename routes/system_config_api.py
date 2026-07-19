@@ -355,13 +355,23 @@ def api_postpone():
                 jsonify({"success": False, "message": str(exc), "error_code": exc.error_code}),
                 409,
             )
-        return jsonify(
-            {
-                "success": True,
-                "message": f"Полив отложен на {days} дней",
-                "postpone_until": res["postpone_date"].strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        success = res.get("success") is True and not res.get("unresolved")
+        payload = {
+            "success": success,
+            "pending": not success,
+            "message": (
+                f"Полив отложен на {days} дней"
+                if success
+                else "Отсрочка сохранена, физическое выключение ещё не подтверждено"
+            ),
+            "group_id": group_id,
+            "postpone_until": res["postpone_until"],
+            "stopped": res.get("stopped", []),
+            "unresolved": res.get("unresolved", []),
+        }
+        if not success:
+            payload["error_code"] = res.get("error_code") or "POSTPONE_STOP_PENDING"
+        return jsonify(payload), 200 if success else 503
 
     return jsonify({"success": False, "message": "Неверное действие"}), 400
 

@@ -145,7 +145,16 @@ class TestGuestEndpointAccess:
         app.db.set_setting_value("password_must_change", "0")
         try:
             with (
-                patch("services.zone_control.emergency_stop_all", return_value={}),
+                patch(
+                    "services.zone_control.emergency_stop_all",
+                    return_value={
+                        "success": True,
+                        "zones_failed": [],
+                        "errors": [],
+                        "masters_failed_publish": 0,
+                        "zones_still_active_after_wait": 0,
+                    },
+                ),
                 patch("routes.system_emergency_api.get_scheduler", return_value=None),
             ):
                 resp = guest_client.post("/api/emergency-stop", content_type="application/json")

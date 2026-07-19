@@ -178,9 +178,27 @@ class TestHealthDetailsDeep:
 
 
 class TestPostponeDeep:
-    def test_postpone_valid(self, admin_client, app):
+    def test_postpone_valid(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
         g = app.db.create_group("PPG")
-        app.db.create_zone({"name": "PP", "duration": 10, "group_id": g["id"]})
+        zone = app.db.create_zone({"name": "PP", "duration": 10, "group_id": g["id"]})
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "stopped": [zone["id"]],
+                        "unresolved": [],
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         resp = admin_client.post(
             "/api/postpone",
             data=json.dumps(
