@@ -4,6 +4,10 @@ import json
 from unittest.mock import patch
 
 
+def _create_test_server(app):
+    return app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})["id"]
+
+
 class TestZonesCRUD:
     """Tests for /api/zones CRUD."""
 
@@ -60,10 +64,16 @@ class TestZonesWatering:
     """Tests for zone watering start/stop."""
 
     def test_start_zone(self, admin_client, app):
+        server_id = _create_test_server(app)
         app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {
+                "name": "Z1",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/devices/test/K1",
+                "mqtt_server_id": server_id,
+            }
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
         with patch("services.zone_control.exclusive_start_zone"):
@@ -71,10 +81,16 @@ class TestZonesWatering:
         assert resp.status_code == 200
 
     def test_stop_zone(self, admin_client, app):
+        server_id = _create_test_server(app)
         app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {
+                "name": "Z1",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/devices/test/K1",
+                "mqtt_server_id": server_id,
+            }
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
         with patch("services.zone_control.stop_zone"):
@@ -101,8 +117,9 @@ class TestSseHubReloadOnWiringChange:
     """Zone/group MQTT wiring changes must trigger sse_hub.reload_hub."""
 
     def test_zone_put_topic_change_reloads_hub(self, admin_client, app):
+        server_id = _create_test_server(app)
         z = app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
@@ -114,8 +131,9 @@ class TestSseHubReloadOnWiringChange:
         assert mock_reload.called
 
     def test_zone_put_unrelated_change_does_not_reload(self, admin_client, app):
+        server_id = _create_test_server(app)
         z = app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
@@ -127,8 +145,9 @@ class TestSseHubReloadOnWiringChange:
         assert not mock_reload.called
 
     def test_zone_put_same_topic_does_not_reload(self, admin_client, app):
+        server_id = _create_test_server(app)
         z = app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
@@ -140,8 +159,9 @@ class TestSseHubReloadOnWiringChange:
         assert not mock_reload.called
 
     def test_zone_delete_with_topic_reloads_hub(self, admin_client, app):
+        server_id = _create_test_server(app)
         z = app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.delete(f"/api/zones/{z['id']}")

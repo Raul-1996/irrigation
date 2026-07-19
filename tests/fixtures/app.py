@@ -46,6 +46,10 @@ def app(test_db_path):
     from database import IrrigationDB
 
     test_db = IrrigationDB(db_path=test_db_path)
+    # Production intentionally has no public default credential. API tests
+    # that exercise login/password-change flows use an explicit fixture-only
+    # password instead of depending on migration bootstrap side effects.
+    test_db.set_password("1234")
 
     # Monkey-patch the module-level db
     db_mod.db = test_db

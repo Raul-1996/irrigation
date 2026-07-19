@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
+from db.identity import parse_explicit_entity_id
 
 logger = logging.getLogger(__name__)
 
@@ -111,32 +112,37 @@ class ZoneRepository(BaseRepository):
         ``zones_drop_last_watering_time`` migration.
         """
         try:
-            with self._connect() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
-                    SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter,
-                           (
-                               SELECT zr.end_utc
-                               FROM zone_runs zr
-                               WHERE zr.zone_id = z.id
-                                 AND zr.status = 'ok'
-                                 AND zr.end_utc IS NOT NULL
-                               ORDER BY zr.end_utc DESC
-                               LIMIT 1
-                           ) AS last_watering_time
-                    FROM zones z
-                    LEFT JOIN groups g ON z.group_id = g.id
-                    ORDER BY z.id
-                """)
-                zones = []
-                for row in cursor.fetchall():
-                    zone = dict(row)
-                    zone["group"] = zone["group_id"]
-                    zones.append(zone)
-                return zones
+            return self.get_zones_strict()
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон: %s", e)
             return []
+
+    def get_zones_strict(self) -> list[dict[str, Any]]:
+        """Return all zones and propagate database failures to safety callers."""
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter,
+                       (
+                           SELECT zr.end_utc
+                           FROM zone_runs zr
+                           WHERE zr.zone_id = z.id
+                             AND zr.status = 'ok'
+                             AND zr.end_utc IS NOT NULL
+                           ORDER BY zr.end_utc DESC
+                           LIMIT 1
+                       ) AS last_watering_time
+                FROM zones z
+                LEFT JOIN groups g ON z.group_id = g.id
+                ORDER BY z.id
+            """)
+            zones = []
+            for row in cursor.fetchall():
+                zone = dict(row)
+                zone["group"] = zone["group_id"]
+                zones.append(zone)
+            return zones
 
     def get_zone(self, zone_id: int) -> dict[str, Any] | None:
         """Получить зону по ID.
@@ -195,11 +201,12 @@ class ZoneRepository(BaseRepository):
                     except (ConnectionError, TimeoutError, OSError):
                         pass
                 zid_explicit = None
-                try:
-                    zid_explicit = int(zone_data.get("id")) if zone_data.get("id") is not None else None
-                except (TypeError, ValueError) as e:
-                    logger.debug("create_zone explicit id parse: %s", e)
-                    zid_explicit = None
+                if "id" in zone_data:
+                    try:
+                        zid_explicit = parse_explicit_entity_id(zone_data["id"])
+                    except ValueError:
+                        logger.warning("Не удалось создать зону: некорректный явный id")
+                        return None
 
                 if zid_explicit is not None:
                     try:
@@ -409,13 +416,10 @@ class ZoneRepository(BaseRepository):
                     if not isinstance(z, dict):
                         failed_id = None
                         raise TypeError("zone import row must be an object")
+                    id_is_explicit = "id" in z
                     candidate_id = z.get("id")
                     failed_id = candidate_id if isinstance(candidate_id, (str, int, float, bool)) else None
-                    try:
-                        zid = int(z["id"]) if z.get("id") is not None else None
-                    except (TypeError, ValueError) as e:
-                        logger.debug("import_zones id parse: %s", e)
-                        zid = None
+                    zid = parse_explicit_entity_id(candidate_id) if id_is_explicit else None
 
                     if zid is not None:
                         cur = conn.execute("SELECT id FROM zones WHERE id = ?", (zid,))
@@ -425,9 +429,7 @@ class ZoneRepository(BaseRepository):
                             # общий builder, суженный до
                             # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
                             # константы) — state-machine-поля исключены.
-                            assignments, params = self._build_zone_update_fields(
-                                z, z, allowed=_ALLOWED_UPDATE_COLUMNS
-                            )
+                            assignments, params = self._build_zone_update_fields(z, z, allowed=_ALLOWED_UPDATE_COLUMNS)
                             params.append(zid)
                             if assignments:
                                 conn.execute(
@@ -886,7 +888,9 @@ class ZoneRepository(BaseRepository):
         return times
 
     @staticmethod
-    def _first_program_start_after(prog: dict[str, Any], hour: int, minute: int, lower_bound: datetime) -> datetime | None:
+    def _first_program_start_after(
+        prog: dict[str, Any], hour: int, minute: int, lower_bound: datetime
+    ) -> datetime | None:
         """Первый старт программы строго позже ``lower_bound``.
 
         Семантика повторяет планировщик (irrigation_scheduler._schedule_single_time):
