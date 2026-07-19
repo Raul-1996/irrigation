@@ -13,7 +13,9 @@ import pytest
 
 from database import IrrigationDB
 from db.base import BaseRepository, retry_on_busy
+from db.identity import MAX_ENTITY_ID
 from db.migrations import MigrationRunner
+from db.schema import APPLICATION_ID, USER_VERSION
 
 
 def _program_payload(name: str, zones: list[int]) -> dict[str, object]:
@@ -23,6 +25,75 @@ def _program_payload(name: str, zones: list[int]) -> dict[str, object]:
         "days": [0, 1, 2, 3, 4, 5, 6],
         "zones": zones,
     }
+
+
+def _create_legacy_backup_schema(
+    path: Path,
+    *,
+    group_name_unique: bool = True,
+    zone_name_declaration: str = "TEXT NOT NULL",
+    program_name_declaration: str = "TEXT NOT NULL",
+    settings_key_declaration: str = "TEXT PRIMARY KEY",
+) -> None:
+    """Create the oldest core schema that is still a supported backup source."""
+
+    unique = " UNIQUE" if group_name_unique else ""
+    with sqlite3.connect(path) as conn:
+        conn.executescript(f"""
+            CREATE TABLE zones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                state TEXT DEFAULT 'off',
+                name {zone_name_declaration},
+                icon TEXT DEFAULT '🌿',
+                duration INTEGER DEFAULT 10,
+                group_id INTEGER DEFAULT 1,
+                topic TEXT,
+                postpone_until TEXT,
+                postpone_reason TEXT,
+                photo_path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                watering_start_time TEXT,
+                scheduled_start_time TEXT,
+                mqtt_server_id INTEGER
+            );
+            CREATE TABLE groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL{unique},
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE programs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name {program_name_declaration},
+                time TEXT NOT NULL,
+                days TEXT NOT NULL,
+                zones TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE settings (key {settings_key_declaration}, value TEXT);
+            CREATE TABLE migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE mqtt_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER DEFAULT 1883,
+                username TEXT,
+                password TEXT,
+                client_id TEXT,
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.executemany(
+            "INSERT INTO migrations(name) VALUES (?)",
+            [("create_mqtt_servers",), ("zones_add_mqtt_server_id",)],
+        )
 
 
 def test_deleted_zone_identity_is_retired_without_destroying_history(test_db):
@@ -191,6 +262,71 @@ def test_named_migration_failure_aborts_database_initialization(tmp_path, monkey
         assert conn.execute("SELECT 1 FROM migrations WHERE name = 'days_format'").fetchone() is None
 
 
+@pytest.mark.parametrize(
+    ("application_id", "user_version", "error"),
+    [
+        (0x10203040, 0, "unsupported application_id"),
+        (APPLICATION_ID, USER_VERSION + 1, "unsupported application user_version"),
+    ],
+)
+def test_schema_stamp_preflight_rejects_foreign_or_future_database_without_writes(
+    test_db,
+    tmp_path,
+    application_id,
+    user_version,
+    error,
+):
+    source = tmp_path / f"rejected-{application_id}-{user_version}.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute(f"PRAGMA application_id = {application_id}")
+        conn.execute(f"PRAGMA user_version = {user_version}")
+
+    before = source.read_bytes()
+    assert not Path(f"{source}-wal").exists()
+    assert not Path(f"{source}-shm").exists()
+
+    with pytest.raises(sqlite3.DatabaseError, match=error):
+        MigrationRunner(str(source)).init_database()
+
+    assert source.read_bytes() == before
+    assert not Path(f"{source}-wal").exists()
+    assert not Path(f"{source}-shm").exists()
+
+
+def test_schema_stamp_preflight_rejects_unstamped_foreign_schema_without_writes(tmp_path):
+    source = tmp_path / "unstamped-foreign.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE unrelated(id INTEGER PRIMARY KEY, value TEXT)")
+
+    before = source.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError, match="not a recognizable irrigation schema"):
+        MigrationRunner(str(source)).init_database()
+
+    assert source.read_bytes() == before
+
+
+def test_schema_stamp_preflight_rejects_stamped_decoy_without_writes(tmp_path):
+    source = tmp_path / "stamped-foreign.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE foreign_payload(secret TEXT NOT NULL)")
+        conn.execute("INSERT INTO foreign_payload(secret) VALUES ('preserve me')")
+        conn.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+        conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+
+    before = source.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError, match="not a recognizable irrigation schema"):
+        MigrationRunner(str(source)).init_database()
+
+    assert source.read_bytes() == before
+    assert not Path(f"{source}-wal").exists()
+    assert not Path(f"{source}-shm").exists()
+
+
 def test_fresh_schema_has_durable_ids_cascade_and_required_indexes(test_db_path):
     IrrigationDB(test_db_path)
 
@@ -235,6 +371,14 @@ def test_fresh_schema_has_durable_ids_cascade_and_required_indexes(test_db_path)
         "trg_groups_reject_out_of_range_id",
         "trg_mqtt_servers_reject_out_of_range_id",
         "trg_programs_reject_out_of_range_id",
+        "trg_zones_reject_explicit_id_boundary",
+        "trg_groups_reject_explicit_id_boundary",
+        "trg_mqtt_servers_reject_explicit_id_boundary",
+        "trg_programs_reject_explicit_id_boundary",
+        "trg_zones_reject_id_update",
+        "trg_groups_reject_id_update",
+        "trg_mqtt_servers_reject_id_update",
+        "trg_programs_reject_id_update",
         "trg_zones_mqtt_server_insert",
         "trg_zones_mqtt_server_update",
         "trg_groups_mqtt_server_insert",
@@ -242,6 +386,11 @@ def test_fresh_schema_has_durable_ids_cascade_and_required_indexes(test_db_path)
         "trg_settings_mqtt_server_insert",
         "trg_settings_mqtt_server_update",
         "trg_mqtt_servers_restrict_referenced_delete",
+        "trg_zones_group_insert",
+        "trg_zones_group_update",
+        "trg_groups_restrict_referenced_delete",
+        "trg_groups_reject_replacing_name",
+        "trg_groups_reject_replacing_name_update",
     } <= triggers
 
 
@@ -290,6 +439,94 @@ def _remove_cancellation_fk(conn: sqlite3.Connection) -> None:
     )
     conn.execute("DROP TABLE program_cancellations")
     conn.execute("ALTER TABLE program_cancellations__legacy RENAME TO program_cancellations")
+
+
+def test_forward_zone_rebuild_preserves_deleted_autoincrement_high_watermark(test_db):
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute("DROP TRIGGER trg_zones_retire_id")
+        conn.execute("ALTER TABLE zones ADD COLUMN last_watering_time TEXT")
+        conn.execute("INSERT INTO zones(id, name, group_id) VALUES (999, 'High live', 1)")
+        conn.execute("INSERT INTO zones(id, name, group_id) VALUES (1000, 'High deleted', 1)")
+        conn.execute("DELETE FROM zones WHERE id = 1000")
+        assert conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'zones'").fetchone() == (1000,)
+        assert conn.execute("SELECT 1 FROM retired_entity_ids WHERE entity = 'zone' AND id = 1000").fetchone() is None
+        conn.execute("DELETE FROM migrations WHERE name = 'zones_drop_last_watering_time'")
+
+    migrated = IrrigationDB(test_db.db_path)
+    created = migrated.create_zone({"name": "After forward rebuild", "group_id": 1})
+
+    assert created is not None
+    assert created["id"] == 1001
+
+
+def test_forward_program_identity_rebuild_preserves_cancellations_with_foreign_keys(test_db):
+    program = test_db.create_program(_program_payload("Preserved cancellation", []))
+    assert test_db.cancel_program_run_for_group(program["id"], "2026-07-20", 1)
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        before = conn.execute(
+            "SELECT program_id, run_date, group_id, created_at FROM program_cancellations WHERE program_id = ?",
+            (program["id"],),
+        ).fetchone()
+        _strip_autoincrement(conn, "programs")
+        assert before is not None
+        assert (
+            conn.execute(
+                "SELECT program_id, run_date, group_id, created_at FROM program_cancellations WHERE program_id = ?",
+                (program["id"],),
+            ).fetchone()
+            == before
+        )
+        assert conn.execute("PRAGMA foreign_key_list(program_cancellations)").fetchall()
+
+    IrrigationDB(test_db.db_path)
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        program_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'programs'"
+        ).fetchone()[0]
+        assert "AUTOINCREMENT" in program_sql.upper()
+        assert (
+            conn.execute(
+                "SELECT program_id, run_date, group_id, created_at FROM program_cancellations WHERE program_id = ?",
+                (program["id"],),
+            ).fetchone()
+            == before
+        )
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_forward_durable_zone_rebuild_suspends_and_restores_cross_table_guards(test_db):
+    cross_guard_names = (
+        "trg_mqtt_servers_restrict_referenced_delete",
+        "trg_groups_restrict_referenced_delete",
+    )
+    with sqlite3.connect(test_db.db_path) as conn:
+        cross_guard_sql = [
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                (name,),
+            ).fetchone()[0]
+            for name in cross_guard_names
+        ]
+        for name in cross_guard_names:
+            conn.execute(f"DROP TRIGGER {name}")
+        _strip_autoincrement(conn, "zones")
+        for sql in cross_guard_sql:
+            conn.execute(sql)
+        zones_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'zones'").fetchone()[0]
+        assert "AUTOINCREMENT" not in zones_sql.upper()
+        assert {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'").fetchall()
+        } >= set(cross_guard_names)
+
+    IrrigationDB(test_db.db_path)
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        zones_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'zones'").fetchone()[0]
+        triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'").fetchall()}
+        assert "AUTOINCREMENT" in zones_sql.upper()
+        assert set(cross_guard_names) <= triggers
 
 
 def test_existing_database_upgrade_retires_dangling_ids_without_losing_history(test_db_path):
@@ -446,7 +683,7 @@ def test_bulk_zone_import_rolls_back_mid_batch_constraint_failure(test_db):
     assert test_db.get_zone(second["id"])["name"] == "Second before"
 
 
-@pytest.mark.parametrize("bad_id", [None, "", "01", "1.0", 1.0, True, 0, -1, 2_147_483_648])
+@pytest.mark.parametrize("bad_id", [None, "", "01", "1.0", 1.0, True, 0, -1, MAX_ENTITY_ID, 2_147_483_648])
 def test_bulk_zone_import_rejects_explicit_noncanonical_id_and_rolls_back(test_db, bad_id):
     existing = test_db.create_zone({"name": "Before", "duration": 10, "group_id": 1})
 
@@ -469,7 +706,7 @@ def test_bulk_zone_import_rejects_explicit_noncanonical_id_and_rolls_back(test_d
     assert len(test_db.get_zones()) == 1
 
 
-@pytest.mark.parametrize("bad_id", [None, "", "01", 1.0, True, 0, -1, 2_147_483_648])
+@pytest.mark.parametrize("bad_id", [None, "", "01", 1.0, True, 0, -1, MAX_ENTITY_ID, 2_147_483_648])
 def test_create_zone_rejects_invalid_explicit_id_without_poisoning_sequence(test_db, bad_id):
     assert test_db.create_zone({"id": bad_id, "name": "Invalid explicit ID"}) is None
 
@@ -498,6 +735,66 @@ def test_entity_tables_reject_out_of_range_explicit_ids(test_db, table, sql, bad
     assert sequence is None or sequence[0] < 2_147_483_648
 
 
+@pytest.mark.parametrize(
+    ("table", "sql"),
+    [
+        ("zones", "INSERT INTO zones(id, name) VALUES (?, 'boundary')"),
+        ("groups", "INSERT INTO groups(id, name) VALUES (?, 'boundary')"),
+        ("mqtt_servers", "INSERT INTO mqtt_servers(id, name, host) VALUES (?, 'boundary', 'host')"),
+        (
+            "programs",
+            "INSERT INTO programs(id, name, time, days, zones) VALUES (?, 'boundary', '06:00', '[]', '[]')",
+        ),
+    ],
+)
+def test_entity_boundary_rejection_preserves_next_auto_allocation(test_db, table, sql):
+    with sqlite3.connect(test_db.db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="entity identifier out of range"):
+            conn.execute(sql, (MAX_ENTITY_ID,))
+
+    if table == "zones":
+        created = test_db.create_zone({"name": "Auto zone"})
+    elif table == "groups":
+        created = test_db.create_group("Auto group")
+    elif table == "mqtt_servers":
+        created = test_db.create_mqtt_server({"name": "Auto broker", "host": "localhost"})
+    else:
+        created = test_db.create_program(_program_payload("Auto program", []))
+
+    assert created is not None
+    assert 0 < created["id"] < MAX_ENTITY_ID
+
+
+@pytest.mark.parametrize(
+    ("table", "sql"),
+    [
+        ("zones", "INSERT INTO zones(id, name) VALUES (?, 'highest explicit')"),
+        ("groups", "INSERT INTO groups(id, name) VALUES (?, 'highest explicit')"),
+        ("mqtt_servers", "INSERT INTO mqtt_servers(id, name, host) VALUES (?, 'highest explicit', 'host')"),
+        (
+            "programs",
+            "INSERT INTO programs(id, name, time, days, zones) VALUES (?, 'highest explicit', '06:00', '[]', '[]')",
+        ),
+    ],
+)
+def test_highest_explicit_entity_id_leaves_one_auto_allocation(test_db, table, sql):
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute(sql, (MAX_ENTITY_ID - 1,))
+        conn.commit()
+
+    if table == "zones":
+        created = test_db.create_zone({"name": "Last auto zone"})
+    elif table == "groups":
+        created = test_db.create_group("Last auto group")
+    elif table == "mqtt_servers":
+        created = test_db.create_mqtt_server({"name": "Last auto broker", "host": "localhost"})
+    else:
+        created = test_db.create_program(_program_payload("Last auto program", []))
+
+    assert created is not None
+    assert created["id"] == MAX_ENTITY_ID
+
+
 def test_all_mqtt_reference_writes_reject_missing_server(test_db):
     zone = test_db.create_zone({"name": "No broker yet"})
 
@@ -522,6 +819,142 @@ def test_direct_mqtt_server_delete_is_restricted_by_database_trigger(test_db):
 
     assert test_db.get_zone(zone["id"])["mqtt_server_id"] == server["id"]
     assert test_db.get_mqtt_server(server["id"]) is not None
+
+
+def test_direct_zone_group_writes_and_referenced_group_delete_are_guarded(test_db):
+    referenced = test_db.create_group("Referenced group")
+    replacement = test_db.create_group("Replacement candidate")
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="missing group reference"):
+            conn.execute("INSERT INTO zones(name, group_id) VALUES ('Missing group', 123456)")
+        conn.execute("INSERT INTO zones(name, group_id) VALUES ('Legacy zero group', 0)")
+        conn.execute("INSERT INTO zones(name, group_id) VALUES ('Legacy null group', NULL)")
+        conn.execute(
+            "INSERT INTO zones(name, group_id) VALUES ('Live group', ?)",
+            (referenced["id"],),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="group is referenced"):
+            conn.execute("DELETE FROM groups WHERE id = ?", (referenced["id"],))
+        with pytest.raises(sqlite3.IntegrityError, match="group name conflict"):
+            conn.execute(
+                "INSERT OR REPLACE INTO groups(id, name) VALUES (?, ?)",
+                (referenced["id"] + 10_000, referenced["name"]),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="group name conflict"):
+            conn.execute(
+                "UPDATE OR REPLACE groups SET name = ? WHERE id = ?",
+                (referenced["name"], replacement["id"]),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="missing group reference"):
+            conn.execute("UPDATE zones SET group_id = 123456 WHERE name = 'Legacy zero group'")
+
+
+def test_forward_integrity_reconciliation_canonicalizes_settings_and_repairs_guards(test_db):
+    server = test_db.create_mqtt_server({"name": "Canonical", "host": "broker", "port": 1883})
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute("DROP TRIGGER trg_settings_mqtt_server_insert")
+        conn.execute("DROP TRIGGER trg_settings_mqtt_server_update")
+        conn.execute("DROP TRIGGER trg_zones_group_update")
+        conn.execute("DROP TRIGGER trg_groups_reject_id_update")
+        conn.execute("DROP TRIGGER trg_mqtt_servers_reject_id_update")
+        conn.execute("DROP TRIGGER trg_groups_reject_replacing_name")
+        conn.execute("DROP TRIGGER trg_groups_reject_replacing_name_update")
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('rain.server_id', ?)",
+            (f"0{server['id']}",),
+        )
+
+    IrrigationDB(test_db.db_path)
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        assert conn.execute("SELECT value FROM settings WHERE key = 'rain.server_id'").fetchone() == (
+            str(server["id"]),
+        )
+        trigger_names = {
+            str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'").fetchall()
+        }
+        assert {
+            "trg_settings_mqtt_server_insert",
+            "trg_settings_mqtt_server_update",
+            "trg_zones_group_update",
+            "trg_groups_reject_id_update",
+            "trg_mqtt_servers_reject_id_update",
+            "trg_groups_reject_replacing_name",
+            "trg_groups_reject_replacing_name_update",
+        } <= trigger_names
+        with pytest.raises(sqlite3.IntegrityError, match="mqtt server is referenced"):
+            conn.execute("DELETE FROM mqtt_servers WHERE id = ?", (server["id"],))
+
+
+def test_durable_entity_primary_keys_are_immutable_for_direct_writes(test_db):
+    zone = test_db.create_zone({"name": "Immutable zone", "group_id": 1})
+    group = test_db.create_group("Immutable group")
+    server = test_db.create_mqtt_server({"name": "Immutable broker", "host": "broker"})
+    program = test_db.create_program(_program_payload("Immutable program", []))
+    rows = (
+        ("zones", zone["id"]),
+        ("groups", group["id"]),
+        ("mqtt_servers", server["id"]),
+        ("programs", program["id"]),
+    )
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        for table, row_id in rows:
+            with pytest.raises(sqlite3.IntegrityError, match="entity identifier is immutable"):
+                conn.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (row_id + 10_000, row_id))
+
+
+def test_trusted_group_and_mqtt_snapshot_restore_can_recover_final_auto_id(test_db):
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute("INSERT INTO groups(id, name) VALUES (?, 'Group before final')", (MAX_ENTITY_ID - 1,))
+        conn.execute(
+            "INSERT INTO mqtt_servers(id, name, host) VALUES (?, 'Broker before final', 'broker')",
+            (MAX_ENTITY_ID - 1,),
+        )
+
+    final_group = test_db.create_group("Final automatic group")
+    final_server = test_db.create_mqtt_server({"name": "Final automatic broker", "host": "broker"})
+    assert final_group["id"] == MAX_ENTITY_ID
+    assert final_server["id"] == MAX_ENTITY_ID
+
+    group_snapshot = test_db.get_group_storage_snapshot(MAX_ENTITY_ID)
+    server_snapshot = test_db.get_mqtt_server_storage_snapshot(MAX_ENTITY_ID)
+    assert group_snapshot is not None
+    assert server_snapshot is not None
+    assert test_db.delete_group(MAX_ENTITY_ID) is True
+    assert test_db.delete_mqtt_server(MAX_ENTITY_ID) is True
+
+    assert test_db.restore_group_snapshot(group_snapshot) is True
+    assert test_db.restore_mqtt_server_snapshot(server_snapshot) is True
+    assert test_db.get_group_storage_snapshot(MAX_ENTITY_ID) == group_snapshot
+    assert test_db.get_mqtt_server_storage_snapshot(MAX_ENTITY_ID) == server_snapshot
+
+
+@pytest.mark.parametrize("table", ["zones", "groups", "mqtt_servers", "programs"])
+def test_forward_init_fails_fast_on_poisoned_durable_sequence(test_db, table):
+    with sqlite3.connect(test_db.db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE sqlite_sequence SET seq = ? WHERE name = ?",
+            (MAX_ENTITY_ID + 100, table),
+        )
+        assert cursor.rowcount == 1
+
+    with pytest.raises(sqlite3.DatabaseError, match=rf"sqlite_sequence for {table} exceeds"):
+        MigrationRunner(test_db.db_path).init_database()
+
+
+def test_forward_group_reconciliation_rejects_existing_dangling_reference(test_db, tmp_path):
+    source = tmp_path / "dangling-zone-group-init.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute("DROP TRIGGER trg_zones_group_insert")
+        conn.execute("INSERT INTO zones(name, group_id) VALUES ('Dangling', 123456)")
+
+    with pytest.raises(RuntimeError, match="dangling group references"):
+        MigrationRunner(str(source)).init_database()
 
 
 def test_delete_first_update_second_race_cannot_commit_dangling_mqtt_reference(test_db):
@@ -697,6 +1130,181 @@ def test_vacuum_backup_accepts_valid_compaction_far_below_source_size(test_db, t
         assert backup.execute("SELECT COUNT(*) FROM backup_bloat").fetchone() == (0,)
 
 
+def test_backup_rejects_decoy_database_with_only_required_table_names(test_db, tmp_path):
+    source = tmp_path / "decoy.db"
+    with sqlite3.connect(source) as conn:
+        for table in ("zones", "groups", "programs", "settings", "migrations", "mqtt_servers"):
+            conn.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+
+    backup_dir = tmp_path / "decoy-backups"
+    test_db.logs.db_path = str(source)
+    test_db.logs.backup_dir = str(backup_dir)
+
+    assert test_db.create_backup() is None
+    assert not backup_dir.exists()
+
+
+def test_backup_rejects_stamped_decoy_with_wrong_table_contract(tmp_path):
+    from db.logs import LogRepository
+    from db.schema import APPLICATION_ID, USER_VERSION
+
+    source = tmp_path / "stamped-decoy.db"
+    with sqlite3.connect(source) as conn:
+        for table in LogRepository._REQUIRED_BACKUP_TABLES:
+            conn.execute(f'CREATE TABLE "{table}" (id INTEGER)')
+        conn.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+        conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+
+    with pytest.raises(sqlite3.DatabaseError, match="missing columns"):
+        LogRepository._validate_application_database(str(source))
+
+
+@pytest.mark.parametrize(
+    "missing_table",
+    ["retired_entity_ids", "zone_runs", "program_cancellations", "program_queue_log", "float_events"],
+)
+def test_backup_schema_contract_rejects_missing_critical_auxiliary_table(test_db, tmp_path, missing_table):
+    from db.logs import LogRepository
+
+    source = tmp_path / f"missing-{missing_table}.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute(f'DROP TABLE "{missing_table}"')
+
+    with pytest.raises(sqlite3.DatabaseError, match="missing tables"):
+        LogRepository._validate_application_database(str(source))
+
+
+def test_initialized_stamped_database_with_missing_zone_runs_fails_fast(test_db, tmp_path):
+    source = tmp_path / "stamped-missing-zone-runs.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute("DROP TABLE zone_runs")
+
+    with pytest.raises(sqlite3.DatabaseError, match="zone_runs"):
+        IrrigationDB(str(source))
+
+
+def test_backup_schema_contract_rejects_dangling_nonlegacy_zone_group(test_db, tmp_path):
+    from db.logs import LogRepository
+
+    source = tmp_path / "dangling-zone-group.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute("DROP TRIGGER trg_zones_group_insert")
+        conn.execute("INSERT INTO zones(name, group_id) VALUES ('dangling', 123456)")
+
+    with pytest.raises(sqlite3.DatabaseError, match="dangling group references"):
+        LogRepository._validate_application_database(str(source))
+
+
+def test_backup_schema_contract_rejects_missing_zone_runs_runtime_index(test_db, tmp_path):
+    from db.logs import LogRepository
+
+    source = tmp_path / "missing-zone-runs-index.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute("DROP INDEX idx_zone_runs_last_ok")
+
+    with pytest.raises(sqlite3.DatabaseError, match="missing required index 'idx_zone_runs_last_ok'"):
+        LogRepository._validate_application_database(str(source))
+
+
+def test_backup_schema_contract_rejects_counterfeit_integrity_trigger(test_db, tmp_path):
+    from db.logs import LogRepository
+
+    source = tmp_path / "counterfeit-trigger.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute("DROP TRIGGER trg_zones_mqtt_server_insert")
+        conn.execute("CREATE TRIGGER trg_zones_mqtt_server_insert BEFORE INSERT ON zones BEGIN SELECT 1; END")
+
+    with pytest.raises(sqlite3.DatabaseError, match="has an invalid definition"):
+        LogRepository._validate_application_database(str(source))
+
+
+def test_backup_schema_contract_rejects_missing_bot_foreign_key(test_db, tmp_path):
+    from db.logs import LogRepository
+
+    source = tmp_path / "missing-bot-fk.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.executescript("""
+            DROP TABLE bot_audit;
+            CREATE TABLE bot_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                payload_json TEXT,
+                ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+    with pytest.raises(sqlite3.DatabaseError, match=r"bot_audit.*missing foreign keys"):
+        LogRepository._validate_application_database(str(source))
+
+
+def test_backup_schema_contract_accepts_legacy_compatible_core(tmp_path):
+    source = tmp_path / "legacy-compatible.db"
+    _create_legacy_backup_schema(source)
+    IrrigationDB(str(source))
+
+    from db.logs import LogRepository
+
+    LogRepository._validate_application_database(str(source))
+
+
+def test_backup_schema_contract_rejects_missing_required_constraint(tmp_path):
+    source = tmp_path / "missing-constraint.db"
+    _create_legacy_backup_schema(source, group_name_unique=False)
+
+    with pytest.raises(sqlite3.DatabaseError, match="unique constraint"):
+        IrrigationDB(str(source))
+
+
+@pytest.mark.parametrize(
+    ("schema_options", "error"),
+    [
+        ({"zone_name_declaration": "INTEGER NOT NULL"}, "has affinity INTEGER, expected TEXT"),
+        ({"program_name_declaration": "TEXT"}, "missing NOT NULL constraint"),
+        ({"settings_key_declaration": "TEXT"}, "has primary key"),
+    ],
+)
+def test_backup_schema_contract_rejects_wrong_column_type_nullability_or_primary_key(tmp_path, schema_options, error):
+    source = tmp_path / "invalid-core-contract.db"
+    _create_legacy_backup_schema(source, **schema_options)
+
+    with pytest.raises(sqlite3.DatabaseError, match=error):
+        IrrigationDB(str(source))
+
+
+@pytest.mark.parametrize(
+    ("pragma", "value", "error"),
+    [
+        ("application_id", 0, "unsupported application_id"),
+        ("user_version", 0, "unsupported application user_version"),
+        ("schema_version", 0, "invalid schema_version"),
+    ],
+)
+def test_backup_schema_contract_rejects_invalid_version_metadata(test_db, tmp_path, pragma, value, error):
+    source = tmp_path / f"invalid-{pragma}.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        conn.execute(f"PRAGMA {pragma} = {value}")
+
+    from db.logs import LogRepository
+
+    with pytest.raises(sqlite3.DatabaseError, match=error):
+        LogRepository._validate_application_database(str(source))
+
+
 @pytest.mark.parametrize("source_kind", ["missing", "empty", "corrupt", "wrong-schema"])
 def test_invalid_backup_source_never_publishes_or_rotates_existing_backups(test_db, tmp_path, source_kind):
     backup_dir = tmp_path / "existing-backups"
@@ -757,3 +1365,94 @@ def test_backup_permissions_are_private_even_with_permissive_umask(test_db, tmp_
     assert result is not None
     assert stat.S_IMODE(backup_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(Path(result).stat().st_mode) == 0o600
+
+
+def test_backup_fsync_order_makes_file_durable_before_publication(test_db, tmp_path, monkeypatch):
+    backup_dir = tmp_path / "ordered-backups"
+    test_db.logs.backup_dir = str(backup_dir)
+    events: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def record_file_sync(path: str) -> None:
+        events.append(("file-sync", Path(path).name))
+
+    def record_directory_sync(path: str) -> None:
+        events.append(("directory-sync", str(path)))
+
+    def record_replace(source: str, target: str) -> None:
+        events.append(("replace", f"{Path(source).name}->{Path(target).name}"))
+        real_replace(source, target)
+
+    monkeypatch.setattr(test_db.logs, "_fsync_file", record_file_sync)
+    monkeypatch.setattr(test_db.logs, "_fsync_directory", record_directory_sync)
+    monkeypatch.setattr("db.logs.os.replace", record_replace)
+
+    result = test_db.create_backup()
+
+    assert result is not None
+    assert [event[0] for event in events] == ["file-sync", "directory-sync", "replace", "directory-sync"]
+    assert events[0][1].endswith(".partial")
+
+
+def test_backup_fails_closed_when_directory_cannot_sync_before_publish(test_db, tmp_path, monkeypatch):
+    backup_dir = tmp_path / "unsyncable-backups"
+    test_db.logs.backup_dir = str(backup_dir)
+
+    def fail_directory_sync(_path: str) -> None:
+        raise OSError("directory fsync unsupported")
+
+    monkeypatch.setattr(test_db.logs, "_fsync_directory", fail_directory_sync)
+
+    assert test_db.create_backup() is None
+    assert list(backup_dir.glob("irrigation_backup_*.db")) == []
+    assert list(backup_dir.glob("*.partial")) == []
+
+
+def test_backup_preserves_published_file_when_post_rename_sync_fails(test_db, tmp_path, monkeypatch):
+    from db.logs import LogRepository
+
+    backup_dir = tmp_path / "late-sync-failure"
+    test_db.logs.backup_dir = str(backup_dir)
+    calls = 0
+
+    def fail_second_directory_sync(_path: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("late directory fsync failure")
+
+    monkeypatch.setattr(test_db.logs, "_fsync_directory", fail_second_directory_sync)
+
+    assert test_db.create_backup() is None
+    published = list(backup_dir.glob("irrigation_backup_*.db"))
+    assert len(published) == 1
+    assert list(backup_dir.glob("*.partial")) == []
+    LogRepository._validate_application_database(str(published[0]))
+
+
+def test_backup_rotation_fsyncs_directory_after_deletions(test_db, tmp_path, monkeypatch):
+    backup_dir = tmp_path / "rotation-sync"
+    backup_dir.mkdir()
+    test_db.logs.backup_dir = str(backup_dir)
+    for index in range(9):
+        path = backup_dir / f"irrigation_backup_202001{index + 1:02d}_000000.db"
+        path.write_bytes(b"old backup")
+        os.utime(path, (index + 1, index + 1))
+
+    events: list[str] = []
+    real_remove = os.remove
+
+    def record_remove(path: str) -> None:
+        events.append("remove")
+        real_remove(path)
+
+    def record_directory_sync(_path: str) -> None:
+        events.append("directory-sync")
+
+    monkeypatch.setattr("db.logs.os.remove", record_remove)
+    monkeypatch.setattr(test_db.logs, "_fsync_directory", record_directory_sync)
+
+    test_db.logs._cleanup_old_backups(keep_count=7)
+
+    assert events == ["remove", "remove", "directory-sync"]
+    assert len(list(backup_dir.glob("irrigation_backup_*.db"))) == 7

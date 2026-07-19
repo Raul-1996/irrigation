@@ -1,10 +1,13 @@
 import json
 import logging
+import os
 import re
 import sqlite3
 from datetime import UTC
+from urllib.parse import quote
 
 from db.identity import MAX_ENTITY_ID, parse_explicit_entity_id
+from db.schema import APPLICATION_ID, USER_VERSION
 from utils import encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -19,7 +22,10 @@ class MigrationRunner:
     def init_database(self):
         """Initialize database schema and run all migrations."""
         try:
+            self._validate_schema_file_preflight()
             with sqlite3.connect(self.db_path, timeout=5) as conn:
+                self._validate_schema_stamp_preflight(conn)
+
                 # PRAGMA
                 try:
                     conn.execute("PRAGMA journal_mode=WAL")
@@ -270,12 +276,145 @@ class MigrationRunner:
                     "mqtt_reference_integrity_v1",
                     self._migrate_mqtt_reference_integrity,
                 )
+                self._apply_named_migration(
+                    conn,
+                    "group_reference_integrity_v1",
+                    self._migrate_group_reference_integrity,
+                )
+
+                # Reconcile forward-only safety artifacts even when an older
+                # release already recorded the corresponding marker. This
+                # repairs missing triggers/indexes and advances durable ID
+                # sequences from tombstones without relying on live downgrade.
+                self._migrate_durable_entity_ids(conn)
+                self._migrate_program_cancellations_fk(conn)
+                self._migrate_restore_runtime_indexes(conn)
+                self._migrate_mqtt_reference_integrity(conn)
+                self._migrate_group_reference_integrity(conn)
+
+                # Stamp only after the complete named-migration chain has
+                # succeeded. Backup validation uses these SQLite header values
+                # to reject unrelated or partially initialized databases.
+                conn.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+                conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+                conn.commit()
+
+                # Applied migration markers must never mask a missing runtime
+                # artifact. Fail readiness closed on a torn/manual schema
+                # instead of allowing repositories to degrade into empty data.
+                from db.logs import LogRepository
+
+                LogRepository.validate_application_database(self.db_path)
 
                 logger.info("База данных инициализирована успешно")
 
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.error("Ошибка инициализации базы данных: %s", e)
             raise
+
+    def _validate_schema_file_preflight(self) -> None:
+        """Inspect an existing file without permitting SQLite sidecar writes."""
+
+        if not os.path.exists(self.db_path) or os.path.getsize(self.db_path) == 0:
+            return
+        uri = f"file:{quote(os.path.abspath(self.db_path), safe='/')}?mode=ro&immutable=1"
+        with sqlite3.connect(uri, timeout=5, uri=True) as conn:
+            self._validate_schema_stamp_preflight(conn)
+
+    @staticmethod
+    def _validate_schema_stamp_preflight(conn: sqlite3.Connection) -> None:
+        """Reject foreign/future databases before any migration can write.
+
+        Historical irrigation databases predate the SQLite header stamp, so
+        an unstamped file is adoptable only when its core tables have the
+        recognizable legacy shape. An empty file is a genuinely new database.
+        """
+
+        application_id = int(conn.execute("PRAGMA application_id").fetchone()[0])
+        user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+        if application_id == APPLICATION_ID:
+            if not 0 <= user_version <= USER_VERSION:
+                raise sqlite3.DatabaseError(
+                    f"unsupported application user_version {user_version}; maximum supported is {USER_VERSION}"
+                )
+        elif application_id != 0:
+            raise sqlite3.DatabaseError(f"unsupported application_id {application_id}; expected 0 or {APPLICATION_ID}")
+        elif user_version != 0:
+            raise sqlite3.DatabaseError(f"unstamped database has unsupported user_version {user_version}")
+
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        if not tables:
+            if application_id == 0:
+                return
+            raise sqlite3.DatabaseError("stamped database is missing the irrigation schema")
+
+        legacy_columns = {
+            "zones": {"id": "INTEGER", "name": "TEXT"},
+            "groups": {"id": "INTEGER", "name": "TEXT"},
+            "programs": {
+                "id": "INTEGER",
+                "name": "TEXT",
+                "time": "TEXT",
+                "days": "TEXT",
+                "zones": "TEXT",
+            },
+            "settings": {"key": "TEXT", "value": "TEXT"},
+            "migrations": {"name": "TEXT", "applied_at": "NUMERIC"},
+        }
+        if not legacy_columns.keys() <= tables:
+            raise sqlite3.DatabaseError("unstamped database is not a recognizable irrigation schema")
+
+        primary_keys: dict[str, tuple[str, ...]] = {}
+        for table, required_columns in legacy_columns.items():
+            table_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual_columns = {str(row[1]): row for row in table_info}
+            if not required_columns.keys() <= actual_columns.keys():
+                raise sqlite3.DatabaseError(
+                    f"unstamped database table {table!r} is not a recognizable irrigation schema"
+                )
+            for column, expected_affinity in required_columns.items():
+                declared_type = str(actual_columns[column][2] or "").upper()
+                if "INT" in declared_type:
+                    affinity = "INTEGER"
+                elif any(token in declared_type for token in ("CHAR", "CLOB", "TEXT")):
+                    affinity = "TEXT"
+                elif any(token in declared_type for token in ("REAL", "FLOA", "DOUB")):
+                    affinity = "REAL"
+                elif "BLOB" in declared_type or not declared_type:
+                    affinity = "BLOB"
+                else:
+                    affinity = "NUMERIC"
+                if affinity != expected_affinity:
+                    raise sqlite3.DatabaseError(
+                        f"unstamped database table {table!r} column {column!r} "
+                        f"has affinity {affinity}, expected {expected_affinity}"
+                    )
+            primary_keys[table] = tuple(
+                str(row[1])
+                for row in sorted(
+                    (row for row in table_info if row[5]),
+                    key=lambda row: row[5],
+                )
+            )
+        expected_primary_keys = {
+            "zones": ("id",),
+            "groups": ("id",),
+            "programs": ("id",),
+            "settings": ("key",),
+            "migrations": ("name",),
+        }
+        for table, expected_primary_key in expected_primary_keys.items():
+            if primary_keys[table] != expected_primary_key:
+                raise sqlite3.DatabaseError(
+                    f"unstamped database table {table!r} has primary key "
+                    f"{primary_keys[table]!r}, expected {expected_primary_key!r}"
+                )
 
     def _insert_initial_data(self, conn):
         """Вставить начальные данные."""
@@ -360,13 +499,13 @@ class MigrationRunner:
 
         Reads existing schema, removes specified columns, recreates the table
         and copies data back. Works on all SQLite versions.
-
-        Rebuilding a table implicitly drops its indexes and triggers.  It can
-        also make SQLite reject the rebuild while a trigger on another table
-        still references the temporarily missing table.  Preserve every
-        compatible schema object and temporarily remove cross-table triggers
-        so a downgrade cannot silently disable current integrity guards.
         """
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        original_table_sql = str(schema_row[0]) if schema_row and schema_row[0] else ""
+
         cur = conn.execute(f"PRAGMA table_info({table})")
         columns_info = cur.fetchall()
         # columns_info: (cid, name, type, notnull, dflt_value, pk)
@@ -381,62 +520,45 @@ class MigrationRunner:
             parts = [name, ctype or "TEXT"]
             if pk:
                 parts.append("PRIMARY KEY")
-                # Check if the PK column is AUTOINCREMENT
-                # We need to check the original CREATE TABLE SQL
-                try:
-                    schema_cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,))
-                    schema_row = schema_cur.fetchone()
-                    if (
-                        schema_row
-                        and schema_row[0]
-                        and "AUTOINCREMENT" in schema_row[0].upper()
-                        and name.lower() == "id"
-                    ):
-                        parts.append("AUTOINCREMENT")
-                except sqlite3.Error:
-                    pass
+                if "AUTOINCREMENT" in original_table_sql.upper() and name.lower() == "id":
+                    parts.append("AUTOINCREMENT")
             if notnull and not pk:
                 parts.append("NOT NULL")
             if dflt is not None and not pk:
                 parts.append(f"DEFAULT {dflt}")
             col_defs.append(" ".join(parts))
+
         cols_csv = ", ".join(keep_names)
         defs_csv = ", ".join(col_defs)
         tmp = table + "__down_tmp"
 
-        table_pattern = re.compile(rf"\b{re.escape(table)}\b", re.IGNORECASE)
-        dropped_patterns = [re.compile(rf"\b{re.escape(column)}\b", re.IGNORECASE) for column in drop_columns]
-        schema_objects = []
-        dependent_triggers = []
-        for object_type, name, owner_table, sql in conn.execute(
-            "SELECT type, name, tbl_name, sql FROM sqlite_master "
-            "WHERE type IN ('index', 'trigger') AND sql IS NOT NULL "
-            "ORDER BY type, name"
-        ).fetchall():
-            is_local = owner_table == table
-            references_table = object_type == "trigger" and table_pattern.search(str(sql)) is not None
-            if not is_local and not references_table:
-                continue
-            schema_objects.append((name, str(sql)))
-            if references_table and not is_local:
-                dependent_triggers.append(name)
+        sequence_watermark = None
+        if "AUTOINCREMENT" in original_table_sql.upper() and "id" in keep_names:
+            old_sequence = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = ?",
+                (table,),
+            ).fetchone()
+            live_max = conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()
+            sequence_watermark = max(
+                int(old_sequence[0] or 0) if old_sequence else 0,
+                int(live_max[0] or 0),
+            )
 
         conn.execute(f"DROP TABLE IF EXISTS {tmp}")
         conn.execute(f"CREATE TABLE {tmp} ({defs_csv})")
         conn.execute(f"INSERT INTO {tmp} ({cols_csv}) SELECT {cols_csv} FROM {table}")
-        for trigger_name in dependent_triggers:
-            escaped_name = str(trigger_name).replace('"', '""')
-            conn.execute(f'DROP TRIGGER "{escaped_name}"')
         conn.execute(f"DROP TABLE {table}")
         conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
-        for object_name, object_sql in schema_objects:
-            if any(pattern.search(object_sql) is not None for pattern in dropped_patterns):
-                logger.info(
-                    "Not restoring schema object %s because it references a removed column",
-                    object_name,
+        if sequence_watermark is not None:
+            cursor = conn.execute(
+                "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+                (sequence_watermark, table),
+            )
+            if cursor.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)",
+                    (table, sequence_watermark),
                 )
-                continue
-            conn.execute(object_sql)
         conn.commit()
 
     @staticmethod
@@ -497,6 +619,22 @@ class MigrationRunner:
         if not columns:
             raise RuntimeError(f"required table {table!r} has no columns")
 
+        # DROP TABLE executes ON DELETE CASCADE actions even though the parent
+        # is recreated immediately. Snapshot direct cascade children and put
+        # them back after the replacement parent exists. This notably protects
+        # program_cancellations while upgrading legacy programs.id.
+        cascade_children = []
+        for (child_table,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall():
+            quoted_child = '"' + str(child_table).replace('"', '""') + '"'
+            foreign_keys = conn.execute(f"PRAGMA foreign_key_list({quoted_child})").fetchall()
+            if not any(str(row[2]) == table and str(row[6]).upper() == "CASCADE" for row in foreign_keys):
+                continue
+            child_columns = [str(row[1]) for row in conn.execute(f"PRAGMA table_info({quoted_child})")]
+            child_rows = conn.execute(f"SELECT * FROM {quoted_child}").fetchall()
+            cascade_children.append((str(child_table), child_columns, child_rows))
+
         temp_table = f"{table}__durable_id"
         create_sql = re.sub(
             rf"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"{re.escape(table)}\"|{re.escape(table)})",
@@ -517,6 +655,17 @@ class MigrationRunner:
         conn.execute(f'INSERT INTO "{temp_table}" ({quoted_columns}) SELECT {quoted_columns} FROM "{table}"')
         conn.execute(f'DROP TABLE "{table}"')
         conn.execute(f'ALTER TABLE "{temp_table}" RENAME TO "{table}"')
+        for child_table, child_columns, child_rows in cascade_children:
+            if not child_rows:
+                continue
+            quoted_child = '"' + child_table.replace('"', '""') + '"'
+            quoted_child_columns = ", ".join(f'"{column.replace(chr(34), chr(34) * 2)}"' for column in child_columns)
+            placeholders = ", ".join("?" for _ in child_columns)
+            conn.execute(f"DELETE FROM {quoted_child}")
+            conn.executemany(
+                f"INSERT INTO {quoted_child} ({quoted_child_columns}) VALUES ({placeholders})",
+                child_rows,
+            )
         for schema_sql in schema_objects:
             conn.execute(schema_sql)
 
@@ -681,6 +830,7 @@ class MigrationRunner:
     def _install_retired_id_triggers(conn: sqlite3.Connection, table: str, entity: str) -> None:
         conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_retire_id")
         conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_reject_retired_id")
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_reject_id_update")
         conn.execute(f"""
             CREATE TRIGGER trg_{table}_retire_id
             AFTER DELETE ON {table}
@@ -698,6 +848,23 @@ class MigrationRunner:
                 SELECT RAISE(ABORT, 'entity identifier out of range');
             END
         """)
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_reject_explicit_id_boundary")
+        conn.execute(f"""
+            CREATE TRIGGER trg_{table}_reject_explicit_id_boundary
+            BEFORE INSERT ON {table}
+            WHEN NEW.id != -1 AND NEW.id >= {MAX_ENTITY_ID}
+            BEGIN
+                SELECT RAISE(ABORT, 'entity identifier out of range');
+            END
+        """)
+        conn.execute(f"""
+            CREATE TRIGGER trg_{table}_reject_id_update
+            BEFORE UPDATE OF id ON {table}
+            WHEN NEW.id != OLD.id
+            BEGIN
+                SELECT RAISE(ABORT, 'entity identifier is immutable');
+            END
+        """)
         conn.execute(f"""
             CREATE TRIGGER trg_{table}_reject_retired_id
             BEFORE INSERT ON {table}
@@ -712,6 +879,28 @@ class MigrationRunner:
 
     @staticmethod
     def _advance_autoincrement_sequence(conn: sqlite3.Connection, table: str, entity: str) -> None:
+        invalid_live = conn.execute(
+            f"SELECT id FROM {table} WHERE id <= 0 OR id > ? ORDER BY id LIMIT 1",
+            (MAX_ENTITY_ID,),
+        ).fetchone()
+        if invalid_live is not None:
+            raise sqlite3.DatabaseError(f"{table} contains out-of-range durable identifier {invalid_live[0]!r}")
+        invalid_retired = conn.execute(
+            "SELECT id FROM retired_entity_ids WHERE entity = ? AND (id <= 0 OR id > ?) ORDER BY id LIMIT 1",
+            (entity, MAX_ENTITY_ID),
+        ).fetchone()
+        if invalid_retired is not None:
+            raise sqlite3.DatabaseError(f"retired {entity} identifier {invalid_retired[0]!r} is out of range")
+
+        sequence_row = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?",
+            (table,),
+        ).fetchone()
+        if sequence_row is not None and not 0 <= int(sequence_row[0]) <= MAX_ENTITY_ID:
+            raise sqlite3.DatabaseError(
+                f"sqlite_sequence for {table} exceeds the supported durable identifier range: {sequence_row[0]!r}"
+            )
+
         row = conn.execute(
             f"SELECT MAX(value) FROM ("
             f"SELECT COALESCE(MAX(id), 0) AS value FROM {table} "
@@ -737,7 +926,47 @@ class MigrationRunner:
                 PRIMARY KEY (entity, id)
             )
         """)
-        for table in ("zones", "groups", "mqtt_servers", "programs"):
+        durable_tables = ("zones", "groups", "mqtt_servers", "programs")
+        rebuild_tables = []
+        for table in durable_tables:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if not row or not row[0]:
+                raise RuntimeError(f"required table {table!r} is missing")
+            id_match = re.search(
+                r"\bid\s+INTEGER\s+PRIMARY\s+KEY(?:\s+AUTOINCREMENT)?",
+                str(row[0]),
+                re.IGNORECASE,
+            )
+            if id_match is None:
+                raise RuntimeError(f"{table}.id is not an INTEGER PRIMARY KEY")
+            if "AUTOINCREMENT" not in id_match.group(0).upper():
+                rebuild_tables.append(table)
+
+        # Current reference guards live on other tables and are reparsed while
+        # a durable parent is temporarily absent. Suspend only these known
+        # forward artifacts; canonical definitions are reinstalled below.
+        suspended_reference_guards = bool(rebuild_tables)
+        if suspended_reference_guards:
+            for trigger in (
+                "trg_zones_mqtt_server_insert",
+                "trg_zones_mqtt_server_update",
+                "trg_groups_mqtt_server_insert",
+                "trg_groups_mqtt_server_update",
+                "trg_settings_mqtt_server_insert",
+                "trg_settings_mqtt_server_update",
+                "trg_mqtt_servers_restrict_referenced_delete",
+                "trg_zones_group_insert",
+                "trg_zones_group_update",
+                "trg_groups_restrict_referenced_delete",
+                "trg_groups_reject_replacing_name",
+                "trg_groups_reject_replacing_name_update",
+            ):
+                conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+
+        for table in durable_tables:
             self._ensure_autoincrement_identity(conn, table)
 
         self._backfill_retired_identifiers(conn)
@@ -749,6 +978,9 @@ class MigrationRunner:
         ):
             self._install_retired_id_triggers(conn, table, entity)
             self._advance_autoincrement_sequence(conn, table, entity)
+        if suspended_reference_guards:
+            self._migrate_mqtt_reference_integrity(conn)
+            self._migrate_group_reference_integrity(conn)
         conn.commit()
 
     @staticmethod
@@ -832,93 +1064,164 @@ class MigrationRunner:
         for name in trigger_names:
             conn.execute(f"DROP TRIGGER IF EXISTS {name}")
 
-        conn.execute("""
-            CREATE TRIGGER trg_zones_mqtt_server_insert
-            BEFORE INSERT ON zones
-            WHEN NEW.mqtt_server_id IS NOT NULL
-             AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.mqtt_server_id)
-            BEGIN
-                SELECT RAISE(ABORT, 'missing mqtt server reference');
-            END
-        """)
-        conn.execute("""
-            CREATE TRIGGER trg_zones_mqtt_server_update
-            BEFORE UPDATE ON zones
-            WHEN NEW.mqtt_server_id IS NOT NULL
-             AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.mqtt_server_id)
-            BEGIN
-                SELECT RAISE(ABORT, 'missing mqtt server reference');
-            END
-        """)
+        table_columns = {
+            table: {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for table in ("zones", "groups", "settings", "mqtt_servers")
+        }
+        delete_references: list[str] = []
 
-        missing_group_server = " OR ".join(
-            f"(NEW.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.{column}))"
+        if "mqtt_server_id" in table_columns["zones"]:
+            for operation in ("INSERT", "UPDATE"):
+                conn.execute(f"""
+                    CREATE TRIGGER trg_zones_mqtt_server_{operation.lower()}
+                    BEFORE {operation} ON zones
+                    WHEN NEW.mqtt_server_id IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.mqtt_server_id)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'missing mqtt server reference');
+                    END
+                """)
+            delete_references.append("EXISTS (SELECT 1 FROM zones WHERE mqtt_server_id = OLD.id)")
+
+        group_server_columns = [
+            column
             for column in (
                 "master_mqtt_server_id",
                 "pressure_mqtt_server_id",
                 "water_mqtt_server_id",
                 "float_mqtt_server_id",
             )
-        )
-        conn.execute(f"""
-            CREATE TRIGGER trg_groups_mqtt_server_insert
-            BEFORE INSERT ON groups
-            WHEN {missing_group_server}
-            BEGIN
-                SELECT RAISE(ABORT, 'missing mqtt server reference');
-            END
-        """)
-        conn.execute(f"""
-            CREATE TRIGGER trg_groups_mqtt_server_update
-            BEFORE UPDATE ON groups
-            WHEN {missing_group_server}
-            BEGIN
-                SELECT RAISE(ABORT, 'missing mqtt server reference');
-            END
-        """)
+            if column in table_columns["groups"]
+        ]
+        if group_server_columns:
+            missing_group_server = " OR ".join(
+                f"(NEW.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.{column}))"
+                for column in group_server_columns
+            )
+            for operation in ("INSERT", "UPDATE"):
+                conn.execute(f"""
+                    CREATE TRIGGER trg_groups_mqtt_server_{operation.lower()}
+                    BEFORE {operation} ON groups
+                    WHEN {missing_group_server}
+                    BEGIN
+                        SELECT RAISE(ABORT, 'missing mqtt server reference');
+                    END
+                """)
+            delete_references.extend(
+                f"EXISTS (SELECT 1 FROM groups WHERE {column} = OLD.id)" for column in group_server_columns
+            )
 
         setting_keys = "'rain.server_id', 'master.server_id', 'env.temp.server_id', 'env.hum.server_id'"
-        missing_setting_server = (
-            f"NEW.key IN ({setting_keys}) AND NEW.value IS NOT NULL AND NOT EXISTS "
-            "(SELECT 1 FROM mqtt_servers WHERE CAST(id AS TEXT) = NEW.value)"
-        )
-        conn.execute(f"""
-            CREATE TRIGGER trg_settings_mqtt_server_insert
-            BEFORE INSERT ON settings
-            WHEN {missing_setting_server}
-            BEGIN
-                SELECT RAISE(ABORT, 'missing mqtt server reference');
-            END
-        """)
-        conn.execute(f"""
-            CREATE TRIGGER trg_settings_mqtt_server_update
-            BEFORE UPDATE ON settings
-            WHEN {missing_setting_server}
-            BEGIN
-                SELECT RAISE(ABORT, 'missing mqtt server reference');
-            END
-        """)
+        if {"key", "value"} <= table_columns["settings"]:
+            for key, value in conn.execute(
+                f"SELECT key, value FROM settings WHERE key IN ({setting_keys}) AND value IS NOT NULL"
+            ).fetchall():
+                text_value = str(value)
+                if re.fullmatch(r"[0-9]+", text_value) is None:
+                    continue
+                server_id = int(text_value)
+                if not 1 <= server_id <= MAX_ENTITY_ID:
+                    continue
+                if conn.execute("SELECT 1 FROM mqtt_servers WHERE id = ?", (server_id,)).fetchone():
+                    conn.execute("UPDATE settings SET value = ? WHERE key = ?", (str(server_id), key))
 
-        group_references = " OR ".join(
-            f"EXISTS (SELECT 1 FROM groups WHERE {column} = OLD.id)"
-            for column in (
-                "master_mqtt_server_id",
-                "pressure_mqtt_server_id",
-                "water_mqtt_server_id",
-                "float_mqtt_server_id",
+            missing_setting_server = (
+                f"NEW.key IN ({setting_keys}) AND NEW.value IS NOT NULL AND NOT EXISTS "
+                "(SELECT 1 FROM mqtt_servers WHERE CAST(id AS TEXT) = NEW.value)"
             )
+            for operation in ("INSERT", "UPDATE"):
+                conn.execute(f"""
+                    CREATE TRIGGER trg_settings_mqtt_server_{operation.lower()}
+                    BEFORE {operation} ON settings
+                    WHEN {missing_setting_server}
+                    BEGIN
+                        SELECT RAISE(ABORT, 'missing mqtt server reference');
+                    END
+                """)
+            delete_references.append(
+                "EXISTS (SELECT 1 FROM settings "
+                f"WHERE key IN ({setting_keys}) AND ("
+                "value = CAST(OLD.id AS TEXT) OR ("
+                "value GLOB '[0-9]*' AND value NOT GLOB '*[^0-9]*' "
+                "AND CAST(value AS INTEGER) = OLD.id)))"
+            )
+
+        if delete_references:
+            delete_condition = " OR ".join(delete_references)
+            conn.execute(f"""
+                CREATE TRIGGER trg_mqtt_servers_restrict_referenced_delete
+                BEFORE DELETE ON mqtt_servers
+                WHEN {delete_condition}
+                BEGIN
+                    SELECT RAISE(ABORT, 'mqtt server is referenced');
+                END
+            """)
+        conn.commit()
+
+    @staticmethod
+    def _migrate_group_reference_integrity(conn: sqlite3.Connection) -> None:
+        """Require every non-legacy zone group reference to stay live."""
+
+        dangling = conn.execute(
+            "SELECT zones.id, zones.group_id FROM zones "
+            "LEFT JOIN groups ON groups.id = zones.group_id "
+            "WHERE zones.group_id IS NOT NULL AND zones.group_id != 0 AND groups.id IS NULL "
+            "ORDER BY zones.id LIMIT 20"
+        ).fetchall()
+        if dangling:
+            raise RuntimeError(f"zones contain dangling group references: {dangling!r}")
+
+        trigger_names = (
+            "trg_zones_group_insert",
+            "trg_zones_group_update",
+            "trg_groups_restrict_referenced_delete",
+            "trg_groups_reject_replacing_name",
+            "trg_groups_reject_replacing_name_update",
         )
-        conn.execute(f"""
-            CREATE TRIGGER trg_mqtt_servers_restrict_referenced_delete
-            BEFORE DELETE ON mqtt_servers
-            WHEN EXISTS (SELECT 1 FROM zones WHERE mqtt_server_id = OLD.id)
-              OR {group_references}
-              OR EXISTS (
-                    SELECT 1 FROM settings
-                    WHERE key IN ({setting_keys}) AND value = CAST(OLD.id AS TEXT)
-              )
+        for name in trigger_names:
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+        missing_group = (
+            "NEW.group_id IS NOT NULL AND NEW.group_id != 0 "
+            "AND NOT EXISTS (SELECT 1 FROM groups WHERE id = NEW.group_id)"
+        )
+        for operation in ("INSERT", "UPDATE"):
+            conn.execute(f"""
+                CREATE TRIGGER trg_zones_group_{operation.lower()}
+                BEFORE {operation} ON zones
+                WHEN {missing_group}
+                BEGIN
+                    SELECT RAISE(ABORT, 'missing group reference');
+                END
+            """)
+        conn.execute("""
+            CREATE TRIGGER trg_groups_restrict_referenced_delete
+            BEFORE DELETE ON groups
+            WHEN EXISTS (SELECT 1 FROM zones WHERE group_id = OLD.id)
             BEGIN
-                SELECT RAISE(ABORT, 'mqtt server is referenced');
+                SELECT RAISE(ABORT, 'group is referenced');
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER trg_groups_reject_replacing_name
+            BEFORE INSERT ON groups
+            WHEN EXISTS (
+                SELECT 1 FROM groups
+                WHERE name = NEW.name AND id != NEW.id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'group name conflict cannot replace existing group');
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER trg_groups_reject_replacing_name_update
+            BEFORE UPDATE OF name ON groups
+            WHEN EXISTS (
+                SELECT 1 FROM groups
+                WHERE name = NEW.name AND id != OLD.id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'group name conflict cannot replace existing group');
             END
         """)
         conn.commit()
@@ -1615,6 +1918,16 @@ class MigrationRunner:
         cols = [c[1] for c in cur.fetchall()]
         if "last_watering_time" not in cols:
             return
+        # Current forward guards on parent tables reference ``zones``. SQLite
+        # reparses those triggers while the rebuilt table is being renamed and
+        # otherwise fails because the old table has just been dropped. This is
+        # intentionally limited to the known forward guards; the generic table
+        # rebuild/downgrade contract remains unchanged.
+        for trigger in (
+            "trg_mqtt_servers_restrict_referenced_delete",
+            "trg_groups_restrict_referenced_delete",
+        ):
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         self._recreate_table_without_columns(conn, "zones", ["last_watering_time"])
         # Table rebuild drops all indexes — reissue ours.
         # (Mirror of _migrate_add_zones_indexes; IF NOT EXISTS so the

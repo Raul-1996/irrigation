@@ -98,6 +98,13 @@ class ZoneRepository(BaseRepository):
         ):
             if column in payload:
                 add(column, payload[column])
+        for column in ("command_id", "sequence_id"):
+            if column not in payload:
+                continue
+            value = payload[column]
+            if value is not None and (not isinstance(value, str) or not value or len(value) > 128):
+                raise ValueError(f"{column} must be a non-empty string of at most 128 characters or null")
+            add(column, value)
 
         # updated_at is always set but uses SQL CURRENT_TIMESTAMP — not a
         # parameter, and not user-controllable.

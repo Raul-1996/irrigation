@@ -5,6 +5,8 @@ import time
 from contextvars import ContextVar
 from typing import Any, Callable, NoReturn, TypeVar
 
+from db.identity import MAX_ENTITY_ID
+
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -239,12 +241,33 @@ class BaseRepository:
                         "DELETE FROM retired_entity_ids WHERE entity = ? AND id = ?",
                         (entity, row_id),
                     )
-                    names = ", ".join(f'"{column}"' for column in columns)
-                    placeholders = ", ".join("?" for _ in columns)
-                    conn.execute(
-                        f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})',
-                        before_values,
-                    )
+                    if row_id == MAX_ENTITY_ID:
+                        # Public explicit MAX inserts stay forbidden, while a
+                        # trusted compensation can recover the final ID by
+                        # making SQLite allocate it normally under the writer
+                        # lock. Rollback restores the tombstone/sequence if the
+                        # exact auto-allocation cannot be completed.
+                        conn.execute(
+                            "UPDATE sqlite_sequence SET seq = ? WHERE name = ?",
+                            (MAX_ENTITY_ID - 1, table),
+                        )
+                        insert_columns = tuple(column for column in columns if column != "id")
+                        names = ", ".join(f'"{column}"' for column in insert_columns)
+                        placeholders = ", ".join("?" for _ in insert_columns)
+                        cursor = conn.execute(
+                            f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})',
+                            tuple(before[column] for column in insert_columns),
+                        )
+                        if cursor.lastrowid != row_id:
+                            conn.rollback()
+                            return False
+                    else:
+                        names = ", ".join(f'"{column}"' for column in columns)
+                        placeholders = ", ".join("?" for _ in columns)
+                        conn.execute(
+                            f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})',
+                            before_values,
+                        )
                 else:
                     if expected_current is None or not self._snapshot_matches(current, expected_current, columns):
                         conn.rollback()

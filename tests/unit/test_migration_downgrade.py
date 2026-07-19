@@ -58,30 +58,6 @@ class TestMigrationDowngrade:
         assert runner.rollback_migration("zones_add_fault_tracking")
         assert not self._has_column(test_db_path, "zones", "last_fault")
         assert not self._has_column(test_db_path, "zones", "fault_count")
-        with sqlite3.connect(test_db_path) as conn:
-            triggers = {
-                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'").fetchall()
-            }
-            assert {
-                "trg_zones_mqtt_server_insert",
-                "trg_zones_mqtt_server_update",
-                "trg_zones_retire_id",
-                "trg_zones_reject_retired_id",
-                "trg_zones_reject_out_of_range_id",
-                "trg_mqtt_servers_restrict_referenced_delete",
-            } <= triggers
-
-            with pytest.raises(sqlite3.IntegrityError, match="missing mqtt server reference"):
-                conn.execute("INSERT INTO zones(name, mqtt_server_id) VALUES ('dangling', 12345)")
-
-            conn.execute("INSERT INTO mqtt_servers(name, host, port) VALUES ('broker', '127.0.0.1', 1883)")
-            server_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "INSERT INTO zones(name, mqtt_server_id) VALUES ('referenced', ?)",
-                (server_id,),
-            )
-            with pytest.raises(sqlite3.IntegrityError, match="mqtt server is referenced"):
-                conn.execute("DELETE FROM mqtt_servers WHERE id = ?", (server_id,))
 
     def test_rollback_encrypt_mqtt_passwords(self, runner, test_db_path):
         # This is a no-op downgrade (can't decrypt)

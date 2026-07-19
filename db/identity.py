@@ -7,6 +7,8 @@ from typing import Any
 # configuration. Keep them in the conventional signed 32-bit positive range,
 # far below SQLite's 64-bit ROWID limit, so a malicious import cannot poison
 # sqlite_sequence with an effectively unallocatable high watermark.
+# Highest automatic ID.  Explicit/imported IDs must stay below this value so
+# one final signed 32-bit identifier remains available to AUTOINCREMENT.
 MAX_ENTITY_ID = 2_147_483_647
 _CANONICAL_DECIMAL_ID = re.compile(r"[1-9][0-9]*\Z")
 
@@ -27,6 +29,6 @@ def parse_explicit_entity_id(value: Any) -> int:
         normalized = int(value)
     else:
         raise ValueError("entity id must be a canonical positive integer")
-    if not 1 <= normalized <= MAX_ENTITY_ID:
+    if not 1 <= normalized < MAX_ENTITY_ID:
         raise ValueError("entity id is outside the supported range")
     return normalized
