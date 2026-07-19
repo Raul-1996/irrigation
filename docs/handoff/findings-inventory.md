@@ -274,6 +274,7 @@
 - **Репродукция/сценарий:** Сломать restart/readyz на target: workflow завершает deploy step зелёным, хотя supported update_server gates не выполнялись.
 - **Evidence:** Workflow использует divergent git/pip path без authoritative backup/rollback и применяет command || echo, поэтому inactive service/failed readyz не делает job красным.
 - **Owner packages:** `p4-deploy`.
+- **Решение оркестратора:** Frozen .github/** exception is limited to PR-024: deploy must stage update_server.sh from the exact target revision and invoke that staged artifact. Running the old/current target updater, retaining divergent inline deploy logic or performing unrelated workflow refactors is outside the authorization.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #177 / PR-025 [high] `services/mqtt_pub.py:137-175; services/observed_state.py:264-276` — MQTT publisher после TLS setup error продолжает plaintext connect
@@ -477,6 +478,7 @@
 - **Репродукция/сценарий:** При umask 022 unprivileged local user читает repo_snapshot/.env/app.log, получает signing/decryption/bootstrap secrets; SESSION_COOKIE_SECURE=1 оставляет app.config False.
 - **Evidence:** Backup tar и .env становятся 0644/0755 и включают secret files; initial admin password пишется в app.log 0644; SESSION_COOKIE_SECURE env не применяется из-за prepopulated Flask key, native transport остаётся HTTP.
 - **Owner packages:** `p4-deploy`, `p4-auth-http`, `p4-status-api`.
+- **Решение оркестратора:** Forward-only db/migrations.py exception is authorized solely to remove the known default 1234 bootstrap seed while preserving every existing password hash and the integrated private recovery flow. Credential reset/rotation, #73 downgrade handling and c019 rollback-specific work are excluded.
 - **Partial remediation `p4-security-secrets`:** Secret keys, SQLite files and runtime logs now use fail-closed owner-only storage; bootstrap credentials are written to a private recovery file instead of logs, and bootstrap log messages are redacted.
   - Fix commits: `d0fb6f1b1e481581ea05da0ba79fd94fde2cab95`, `85ec3c60d977b3de49c244e4696f9733850843b6`; merge: `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
   - Regression tests: `tests/unit/test_phase4_security_secrets.py`.
@@ -578,6 +580,7 @@
 - **Репродукция/сценарий:** Удаление viewer guard/extended conflict behavior остаётся green; strict PytestUnraisableExceptionWarning ломает SSE tests; недоступный opt-in target даёт skipped/green run.
 - **Evidence:** CI исключает 77 integration + 69 UI; viewer test принимает 200/401/403 при TESTING bypass; weather asserts условны/xfail; SSE close warning не failure; explicit E2E opt-in connection failure превращается в skip/all([]).
 - **Owner packages:** `p4-deploy`, `p4-test-quality`.
+- **Решение оркестратора:** Frozen .github/** exception is limited to PR-052: CI must run the default pytest suite and promote PytestUnraisableExceptionWarning plus PytestUnhandledThreadExceptionWarning to fatal failures. Other workflow refactors, action upgrades, matrices, caching, triggers or permissions changes are excluded.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #205 / PR-053 [medium] `routes/health_api.py:250-320,415-432; services/app_init.py:115-125; services/systemd_notify.py:1-120` — Health/metrics классифицируют paused/fault/wedged service как healthy
@@ -694,6 +697,7 @@
 - **Репродукция/сценарий:** Удалить группу 1, оставить группу 999 и выполнить POST зоны без group_id: API возвращает 201, а строка получает group_id=1. CSV/bulk row без group_id воспроизводит тот же orphan.
 - **Evidence:** Route валидирует group_id до data.setdefault(group_id, 1), а group 1 удаляема. Обычный и bulk create без явной группы поэтому обходят reference validation и сохраняют orphan group_id=1.
 - **Owner packages:** `p4-topology-api`, `p4-db-integrity`.
+- **Решение оркестратора:** Forward-only db/migrations.py exception is authorized only for positive group-reference guards and default-group repair on fresh/existing DB. It does not permit a broad group-schema redesign, #73 downgrade work or c019 rollback-specific changes.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #221 / PR-065 [medium] `routes/groups_api.py:636-655; routes/zones_crud_api.py:198-245; services/zone_control.py:1008-1078` — Проверка принадлежности зоны группе перед start остаётся TOCTOU и позволяет запустить её уже в другой группе

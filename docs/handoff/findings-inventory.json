@@ -5472,6 +5472,7 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "reopens": [],
+    "decision_notes": "Frozen .github/** exception is limited to PR-024: deploy must stage update_server.sh from the exact target revision and invoke that staged artifact. Running the old/current target updater, retaining divergent inline deploy logic or performing unrelated workflow refactors is outside the authorization.",
     "implementation": {
       "disposition": "pending",
       "reason": null,
@@ -6078,6 +6079,7 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "reopens": [],
+    "decision_notes": "Forward-only db/migrations.py exception is authorized solely to remove the known default 1234 bootstrap seed while preserving every existing password hash and the integrated private recovery flow. Credential reset/rotation, #73 downgrade handling and c019 rollback-specific work are excluded.",
     "partial_remediations": [
       {
         "package": "p4-security-secrets",
@@ -6389,6 +6391,7 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "reopens": [],
+    "decision_notes": "Frozen .github/** exception is limited to PR-052: CI must run the default pytest suite and promote PytestUnraisableExceptionWarning plus PytestUnhandledThreadExceptionWarning to fatal failures. Other workflow refactors, action upgrades, matrices, caching, triggers or permissions changes are excluded.",
     "implementation": {
       "disposition": "pending",
       "reason": null,
@@ -6892,6 +6895,7 @@
     "verified_reason": "Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.",
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
+    "decision_notes": "Forward-only db/migrations.py exception is authorized only for positive group-reference guards and default-group repair on fresh/existing DB. It does not permit a broad group-schema redesign, #73 downgrade work or c019 rollback-specific changes.",
     "implementation": {
       "disposition": "pending",
       "reason": null,

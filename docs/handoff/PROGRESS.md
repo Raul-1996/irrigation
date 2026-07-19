@@ -116,19 +116,41 @@ main checkpoint `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
 ### Решение оркестратора по `db/migrations.py`
 
 Прежний blanket-freeze снят **только** для узких изменений, необходимых для
-`PR-007`, `PR-008`, `PR-030`, `PR-032` и `PR-057`:
+`PR-007`, `PR-008`, `PR-030`, `PR-032`, `PR-043`, `PR-057` и `PR-064`:
 
 - запрещение повторного использования identity зон, MQTT-серверов и программ;
 - transactional referential-integrity policy: zone program references очищаются
   без удаления retained `zone_runs`, MQTT hardware references дают RESTRICT/409,
   program cancellations удаляются вместе с программой;
-- fail-closed named migrations и восстановление обязательных индексов.
+- fail-closed named migrations и восстановление обязательных индексов;
+- только forward-remediation `PR-043`: удалить известный default seed `1234`,
+  сохранив без изменения все существующие password hashes и уже интегрированный
+  private recovery flow; reset/rotation существующих credentials запрещены;
+- только forward-remediation `PR-064`: positive group-reference guards и repair
+  отсутствующей default group для existing/fresh DB до разрешения zone POST/bulk;
+  общий redesign group schema не разрешён.
 
 Каждое такое изменение обязательно получает migration regression tests на
 existing DB, повторный startup/idempotency, сохранность history, отсутствие
 переназначения hardware и корректный forward upgrade. Разрешение не охватывает
 общий рефакторинг migrations, live downgrade `#73` или неоднозначный historical
-backfill `#99`: они остаются индивидуально deferred.
+backfill `#99`: они остаются индивидуально deferred. Любая rollback-specific
+работа `c019` также явно исключена; исключения разрешают только forward path.
+
+### Решение оркестратора по frozen `.github/**`
+
+Freeze снят **только** для минимальных workflow-изменений `PR-024` и `PR-052`:
+
+- deploy workflow обязан сначала stage-ить updater ровно из target revision и
+  затем запускать именно этот staged artifact; текущий/старый updater на target и
+  divergent inline deploy path использовать нельзя;
+- CI обязан запускать default pytest suite без ручного урезания collection и
+  считать `PytestUnraisableExceptionWarning` и
+  `PytestUnhandledThreadExceptionWarning` fatal failures.
+
+Другие workflow refactors, action/version upgrades, matrix/caching/trigger/
+permissions changes и новые deploy semantics этим решением не разрешены. До
+интеграционного commit и serial evidence `PR-024`/`PR-052` остаются `pending`.
 
 ### Intentional и rejected решения post-review
 
