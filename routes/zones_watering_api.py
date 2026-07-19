@@ -67,36 +67,87 @@ def _signal_group_session_cancel(scheduler, group_id: int) -> None:
         logger.exception("group session cancel signal failed group=%s", group_id)
 
 
-def _abort_group_session_after_off(scheduler, group_id: int) -> bool:
-    """Cancel scheduler retries only after every group OFF command succeeds."""
-    _signal_group_session_cancel(scheduler, int(group_id))
+def _abort_group_session_after_off(scheduler, group_id: int) -> dict:
+    """Abort a session while preserving safety retries for unresolved OFFs."""
+    gid = int(group_id)
+    result = {"success": False, "stopped": [], "unresolved": [], "group_id": gid}
+    _signal_group_session_cancel(scheduler, gid)
     try:
-        zones = db.get_zones_by_group(int(group_id)) or []
+        zones = db.get_zones_by_group(gid) or []
     except (sqlite3.Error, OSError, TypeError, ValueError):
-        logger.exception("session abort: unable to load group zones group=%s", group_id)
-        return False
+        logger.exception("session abort: unable to load group zones group=%s", gid)
+        result["error_code"] = "SESSION_INVENTORY_UNAVAILABLE"
+        return result
 
     from services.zone_control import stop_zone as _stop_central
 
-    all_stopped = True
+    stopped: set[int] = set()
+    unresolved: set[int] = set()
     for member in zones:
+        zone_id = None
         try:
-            stopped = _stop_central(int(member["id"]), reason="manual_session_abort", force=True)
-        except (ValueError, TypeError, KeyError, RuntimeError):
+            zone_id = int(member["id"])
+            physically_stopped = _stop_central(zone_id, reason="manual_session_abort", force=True)
+        except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeError):
             logger.exception("session abort OFF failed zone=%s", member.get("id"))
-            stopped = False
-        if not stopped:
-            all_stopped = False
-    if not all_stopped:
+            physically_stopped = False
+        if zone_id is None:
+            continue
+        (stopped if physically_stopped else unresolved).add(zone_id)
+
+    if unresolved:
         # Keep zone_stop / hard_stop jobs planted.  They are the remaining
         # recovery path when the immediate physical OFF command failed.
-        return False
+        result.update({"stopped": sorted(stopped), "unresolved": sorted(unresolved)})
+        return result
+
     try:
-        scheduler.cancel_group_jobs(int(group_id))
-        return True
-    except (ValueError, TypeError, KeyError, RuntimeError):
-        logger.exception("session abort cleanup failed group=%s", group_id)
-        return False
+        cancel_result = scheduler.cancel_group_jobs(gid)
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeError):
+        logger.exception("session abort cleanup failed group=%s", gid)
+        result.update(
+            {
+                "stopped": sorted(stopped),
+                "unresolved": [],
+                "error_code": "SESSION_CLEANUP_FAILED",
+            }
+        )
+        return result
+
+    # New scheduler versions return the authoritative structured physical
+    # outcome and preserve hard/cap retry jobs for unresolved zones.  ``None``
+    # remains compatible with the legacy scheduler during rolling integration.
+    if isinstance(cancel_result, dict):
+        scheduler_stopped: set[int] = set()
+        scheduler_unresolved: set[int] = set()
+        for value in cancel_result.get("stopped") or []:
+            try:
+                scheduler_stopped.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        for value in cancel_result.get("unresolved") or []:
+            try:
+                scheduler_unresolved.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        unresolved.update(scheduler_unresolved)
+        stopped.update(scheduler_stopped)
+        stopped.difference_update(unresolved)
+        result.update(
+            {
+                "success": cancel_result.get("success") is True and not unresolved,
+                "stopped": sorted(stopped),
+                "unresolved": sorted(unresolved),
+            }
+        )
+        if result["success"] is not True:
+            result["error_code"] = cancel_result.get("error_code") or (
+                "SESSION_OFF_UNRESOLVED" if unresolved else "SESSION_CLEANUP_FAILED"
+            )
+        return result
+
+    result.update({"success": True, "stopped": sorted(stopped), "unresolved": []})
+    return result
 
 
 # ---- Zone start/stop ----
@@ -165,9 +216,21 @@ def stop_zone(zone_id):
             except Exception:
                 logger.exception("session_aborted_by_user audit failed")
             try:
-                session_stopped = _abort_group_session_after_off(sched, int(gid))
-                if not session_stopped:
-                    return jsonify({"success": False, "message": "Не удалось остановить сессию группы"}), 500
+                session_result = _abort_group_session_after_off(sched, int(gid))
+                if session_result.get("success") is not True:
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "message": "Не все зоны подтвердили состояние OFF",
+                                "session_aborted": True,
+                                "stopped": session_result.get("stopped") or [],
+                                "unresolved": session_result.get("unresolved") or [],
+                                "error_code": session_result.get("error_code") or "SESSION_OFF_UNRESOLVED",
+                            }
+                        ),
+                        503,
+                    )
                 return jsonify(
                     {
                         "success": True,
@@ -175,10 +238,25 @@ def stop_zone(zone_id):
                         "session_aborted": True,
                         "zone_id": zone_id,
                         "state": "off",
+                        "stopped": session_result.get("stopped") or [],
+                        "unresolved": [],
                     }
                 )
             except (ValueError, TypeError, KeyError, RuntimeError):
-                logger.exception("stop_zone: cancel_group_jobs failed, falling back to solo stop")
+                logger.exception("stop_zone: session abort failed")
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "message": "Не удалось подтвердить остановку сессии группы",
+                            "session_aborted": True,
+                            "stopped": [],
+                            "unresolved": [int(zone_id)],
+                            "error_code": "SESSION_ABORT_FAILED",
+                        }
+                    ),
+                    503,
+                )
 
         try:
             from services.zone_control import stop_zone as _stop_central
@@ -535,15 +613,45 @@ def api_zone_mqtt_stop(zone_id: int):
         except Exception:
             logger.exception("session_aborted_by_user audit failed")
         try:
-            session_stopped = _abort_group_session_after_off(sched, int(gid))
-            if not session_stopped:
-                return jsonify({"success": False, "message": "Не удалось остановить сессию группы"}), 500
-            return jsonify({"success": True, "message": "Сессия группы остановлена", "session_aborted": True})
+            session_result = _abort_group_session_after_off(sched, int(gid))
+            if session_result.get("success") is not True:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "message": "Не все зоны подтвердили состояние OFF",
+                            "session_aborted": True,
+                            "stopped": session_result.get("stopped") or [],
+                            "unresolved": session_result.get("unresolved") or [],
+                            "error_code": session_result.get("error_code") or "SESSION_OFF_UNRESOLVED",
+                        }
+                    ),
+                    503,
+                )
+            return jsonify(
+                {
+                    "success": True,
+                    "message": "Сессия группы остановлена",
+                    "session_aborted": True,
+                    "stopped": session_result.get("stopped") or [],
+                    "unresolved": [],
+                }
+            )
         except (ValueError, TypeError, KeyError, RuntimeError):
-            # Best-effort safety net: fall through to the legacy single-zone
-            # stop path so the valve definitely goes off even if the abort
-            # plumbing fails.
-            logger.exception("api_zone_mqtt_stop: cancel_group_jobs failed, falling back to solo stop")
+            logger.exception("api_zone_mqtt_stop: session abort failed")
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "Не удалось подтвердить остановку сессии группы",
+                        "session_aborted": True,
+                        "stopped": [],
+                        "unresolved": [int(zone_id)],
+                        "error_code": "SESSION_ABORT_FAILED",
+                    }
+                ),
+                503,
+            )
 
     try:
         from services.zone_control import stop_zone as _stop_central

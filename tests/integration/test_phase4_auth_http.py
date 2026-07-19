@@ -391,13 +391,51 @@ def test_session_stop_keeps_retry_jobs_when_any_physical_off_fails(admin_client,
     ):
         response = admin_client.post(path, content_type="application/json")
 
-    assert response.status_code == 500
+    assert response.status_code == 503
     body = response.get_json()
     assert body["success"] is False
+    assert body["unresolved"] == [zone["id"]]
     assert body.get("state") != "off"
     assert cancel_event.is_set(), "the sequencer must not advance to another zone"
     physical_stop.assert_called()
     scheduler.cancel_group_jobs.assert_not_called()
+
+
+@pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
+def test_session_stop_propagates_scheduler_unresolved_aggregate(admin_client, app, endpoint):
+    import routes.zones_watering_api as route
+
+    group = app.db.create_group(f"scheduler unresolved {endpoint}")
+    zone = app.db.create_zone({"name": "unconfirmed", "duration": 5, "group_id": group["id"]})
+    cancel_event = threading.Event()
+    scheduler = SimpleNamespace(
+        group_cancel_events={group["id"]: cancel_event},
+        is_group_session_active=Mock(return_value=True),
+        cancel_group_jobs=Mock(
+            return_value={
+                "success": False,
+                "stopped": [],
+                "unresolved": [zone["id"]],
+                "group_id": group["id"],
+            }
+        ),
+    )
+    path = f"/api/zones/{zone['id']}/{'stop' if endpoint == 'legacy' else 'mqtt/stop'}"
+
+    with (
+        patch.object(route, "get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_zone", return_value=True),
+    ):
+        response = admin_client.post(path, content_type="application/json")
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["success"] is False
+    assert body["session_aborted"] is True
+    assert body["stopped"] == []
+    assert body["unresolved"] == [zone["id"]]
+    assert cancel_event.is_set()
+    scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
 
 
 def test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false(admin_client, app):
