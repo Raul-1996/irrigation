@@ -1,7 +1,12 @@
+import hashlib
+import hmac
+import json
 import logging
+import secrets
 import threading
 import time
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +33,10 @@ _MQTT_CLIENTS_LOCK = threading.RLock()
 _MQTT_CLIENT_CREATE_LOCKS: dict[int, threading.Lock] = {}
 _MQTT_CLIENT_USERS: dict[int, int] = {}
 _RETIRED_MQTT_CLIENTS: dict[int, tuple[int, object]] = {}
+_MQTT_CONFIG_FINGERPRINT_KEY = secrets.token_bytes(32)
+_MQTT_CLIENT_GENERATION = 0
 _TOPIC_LAST_SEND: dict[tuple[int, str], tuple[str, float]] = {}
+_TOPIC_INFLIGHT: dict[tuple[int, str, str], "_InflightPublish"] = {}
 _TOPIC_LOCK = threading.Lock()
 _SERVER_CACHE: dict[int, tuple[dict, float]] = {}
 _SERVER_CACHE_LOCK = threading.Lock()
@@ -37,11 +45,97 @@ from constants import MQTT_CACHE_TTL_SEC
 _SERVER_CACHE_TTL = float(MQTT_CACHE_TTL_SEC)
 
 
+@dataclass(frozen=True, slots=True)
+class MqttClientSnapshot:
+    """Immutable point-in-time attribution for one cached publisher client."""
+
+    server_id: int
+    client: Any
+    config_fingerprint: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MqttClientProvenance:
+    client: Any
+    config_fingerprint: str
+    generation: int
+
+
+@dataclass(slots=True)
+class _InflightPublish:
+    completed: threading.Event = field(default_factory=threading.Event)
+    result: bool | None = None
+
+
+_MQTT_CLIENT_PROVENANCE: dict[int, _MqttClientProvenance] = {}
+
+
 def _server_key(server_id: Any) -> int:
     try:
         return int(server_id) if server_id is not None else 0
     except (ValueError, TypeError):
         return 0
+
+
+def _effective_mqtt_config(server: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze exactly the connection settings used to construct a client."""
+    return {
+        "host": str(server.get("host") or "127.0.0.1"),
+        "port": int(server.get("port") or 1883),
+        "username": str(server.get("username") or ""),
+        "password": str(server.get("password") or ""),
+        "client_id": str(server.get("client_id") or ""),
+        "enabled": int(server.get("enabled", 1) or 0) == 1,
+        "tls_enabled": int(server.get("tls_enabled") or 0) == 1,
+        "tls_ca_path": str(server.get("tls_ca_path") or ""),
+        "tls_cert_path": str(server.get("tls_cert_path") or ""),
+        "tls_key_path": str(server.get("tls_key_path") or ""),
+        "tls_insecure": int(server.get("tls_insecure") or 0) == 1,
+        "tls_version": str(server.get("tls_version") or "").upper().strip(),
+    }
+
+
+def _fingerprint_effective_mqtt_config(config: Mapping[str, Any]) -> str:
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return hmac.new(_MQTT_CONFIG_FINGERPRINT_KEY, canonical, hashlib.sha256).hexdigest()
+
+
+def mqtt_server_config_fingerprint(server: Mapping[str, Any]) -> str:
+    """Return an opaque process-local fingerprint of effective connection config.
+
+    A keyed digest lets status code compare current DB configuration with the
+    immutable origin of a cached client without exposing a password digest
+    that could be attacked offline.
+    """
+    return _fingerprint_effective_mqtt_config(_effective_mqtt_config(server))
+
+
+def snapshot_mqtt_clients() -> dict[int, MqttClientSnapshot]:
+    """Return a detached, internally consistent snapshot of publisher clients."""
+    with _MQTT_CLIENTS_LOCK:
+        snapshots: dict[int, MqttClientSnapshot] = {}
+        for sid, client in _MQTT_CLIENTS.items():
+            provenance = _MQTT_CLIENT_PROVENANCE.get(sid)
+            if provenance is None or provenance.client is not client:
+                # Never infer origin from the independently mutable server TTL
+                # cache. A client without matching creation metadata is not
+                # attributable and therefore cannot be reported as current.
+                continue
+            snapshots[sid] = MqttClientSnapshot(
+                server_id=sid,
+                client=client,
+                config_fingerprint=provenance.config_fingerprint,
+                generation=provenance.generation,
+            )
+        return snapshots
+
+
+def _drop_mqtt_client_provenance(sid: int, client: Any | None = None) -> None:
+    """Remove provenance only when it still belongs to ``client``."""
+    provenance = _MQTT_CLIENT_PROVENANCE.get(sid)
+    if provenance is not None and (client is None or provenance.client is client):
+        _MQTT_CLIENT_PROVENANCE.pop(sid, None)
 
 
 def _teardown_mqtt_client(client: Any, sid: int) -> None:
@@ -98,6 +192,7 @@ def _cached_client(sid: int, *, acquire: bool) -> tuple[Any | None, Any | None]:
         if not connected:
             if _MQTT_CLIENTS.get(sid) is client:
                 _MQTT_CLIENTS.pop(sid, None)
+                _drop_mqtt_client_provenance(sid, client)
             return None, client
         if acquire:
             client_key = id(client)
@@ -106,6 +201,8 @@ def _cached_client(sid: int, *, acquire: bool) -> tuple[Any | None, Any | None]:
 
 
 def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) -> Any | None:
+    global _MQTT_CLIENT_GENERATION
+
     if mqtt is None:
         return None
     sid = _server_key(server.get("id"))
@@ -131,28 +228,33 @@ def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) 
 
         client = None
         try:
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-            if server.get("username"):
-                client.username_pw_set(server.get("username"), server.get("password") or None)
-            if int(server.get("tls_enabled") or 0) == 1:
+            config = _effective_mqtt_config(server)
+            config_fingerprint = _fingerprint_effective_mqtt_config(config)
+            client = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                client_id=config["client_id"],
+            )
+            if config["username"]:
+                client.username_pw_set(config["username"], config["password"] or None)
+            if config["tls_enabled"]:
                 try:
                     import ssl
 
-                    ca = server.get("tls_ca_path") or None
-                    cert = server.get("tls_cert_path") or None
-                    key = server.get("tls_key_path") or None
-                    tls_ver = (server.get("tls_version") or "").upper().strip()
+                    ca = config["tls_ca_path"] or None
+                    cert = config["tls_cert_path"] or None
+                    key = config["tls_key_path"] or None
+                    tls_ver = config["tls_version"]
                     version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ("", "TLS", "TLS_CLIENT") else ssl.PROTOCOL_TLS
                     client.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
-                    if int(server.get("tls_insecure") or 0) == 1:
+                    if config["tls_insecure"]:
                         client.tls_insecure_set(True)
                 except (ImportError, OSError, ValueError, RuntimeError):
                     logger.exception("MQTT TLS setup failed for publisher; refusing plaintext fallback")
                     _teardown_mqtt_client(client, sid)
                     return None
 
-            host = server.get("host") or "127.0.0.1"
-            port = int(server.get("port") or 1883)
+            host = config["host"]
+            port = config["port"]
 
             def _on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties):
                 try:
@@ -182,7 +284,13 @@ def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) 
             return None
 
         with _MQTT_CLIENTS_LOCK:
+            _MQTT_CLIENT_GENERATION += 1
             _MQTT_CLIENTS[sid] = client
+            _MQTT_CLIENT_PROVENANCE[sid] = _MqttClientProvenance(
+                client=client,
+                config_fingerprint=config_fingerprint,
+                generation=_MQTT_CLIENT_GENERATION,
+            )
             if acquire:
                 client_key = id(client)
                 _MQTT_CLIENT_USERS[client_key] = _MQTT_CLIENT_USERS.get(client_key, 0) + 1
@@ -321,6 +429,7 @@ def _invalidate_client(sid: Any, *, expected_client: Any | None = None) -> None:
             return
         if cl is not None:
             _MQTT_CLIENTS.pop(key, None)
+        _drop_mqtt_client_provenance(key, cl)
     if cl is not None:
         _retire_mqtt_client(cl, key)
         logger.info("MQTT client invalidated sid=%s (recreate on next publish)", key)
@@ -420,22 +529,41 @@ def publish_mqtt_value(
         # subscribers and can falsely complete runs/cancel safety jobs.
         t_command = t if t.endswith("/on") else t + "/on"
         key = (sid or 0, t_command)
+        inflight_key = (sid or 0, t_command, value)
         now = time.time()
-        pending_send = (value, now)
+        wait_for: _InflightPublish | None = None
+        pending: _InflightPublish | None = None
         with _TOPIC_LOCK:
-            last = _TOPIC_LAST_SEND.get(key)
-            if last and last[0] == value and (now - last[1]) < min_interval_sec:
-                logger.debug(f"MQTT skip duplicate topic={t_command} value={value}")
-                return True
-            _TOPIC_LAST_SEND[key] = pending_send
+            wait_for = _TOPIC_INFLIGHT.get(inflight_key)
+            if wait_for is None:
+                last = _TOPIC_LAST_SEND.get(key)
+                if last and last[0] == value and (now - last[1]) < min_interval_sec:
+                    logger.debug(f"MQTT skip delivered duplicate topic={t_command} value={value}")
+                    return True
+                pending = _InflightPublish()
+                _TOPIC_INFLIGHT[inflight_key] = pending
+        if wait_for is not None:
+            # The first caller owns the physical publish. A concurrent duplicate
+            # must observe that same delivery result instead of treating an
+            # unconfirmed cache reservation as success.
+            wait_for.completed.wait()
+            return bool(wait_for.result)
+
         logger.debug(f"MQTT publish command topic={t_command} value={value}")
         effective_qos = max(0, min(2, int(qos or 0)))
-        if not _publish_one(server, sid, t_command, value, effective_qos, retain):
-            # A failed attempt is not a delivered value and must not suppress
-            # the immediate safety retry as a "duplicate".
+        delivered = False
+        try:
+            delivered = bool(_publish_one(server, sid, t_command, value, effective_qos, retain))
+        finally:
             with _TOPIC_LOCK:
-                if _TOPIC_LAST_SEND.get(key) == pending_send:
-                    _TOPIC_LAST_SEND.pop(key, None)
+                if delivered:
+                    _TOPIC_LAST_SEND[key] = (value, time.time())
+                if _TOPIC_INFLIGHT.get(inflight_key) is pending:
+                    _TOPIC_INFLIGHT.pop(inflight_key, None)
+                if pending is not None:
+                    pending.result = delivered
+                    pending.completed.set()
+        if not delivered:
             return False
 
         # Debug-level audit: every successful publish. Volume is high
@@ -488,6 +616,7 @@ def _shutdown_mqtt_clients() -> None:
     with _MQTT_CLIENTS_LOCK:
         clients = list(_MQTT_CLIENTS.items())
         _MQTT_CLIENTS.clear()
+        _MQTT_CLIENT_PROVENANCE.clear()
     for sid, cl in clients:
         _teardown_mqtt_client(cl, sid)
         logger.info("MQTT client disconnected for server %s", sid)

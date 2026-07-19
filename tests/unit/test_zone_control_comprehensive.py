@@ -217,7 +217,8 @@ class TestStopZone:
         assert result is True
         zone = mock_deps["db"].get_zone(z["id"])
         assert zone["state"] == "off"
-        assert zone["watering_start_time"] is None
+        assert zone["observed_state"] == "unconfirmed"
+        assert zone["watering_start_time"] == "2026-01-01 10:00:00"
 
     def test_stop_force(self, mock_deps):
         z = mock_deps["db"].create_zone(

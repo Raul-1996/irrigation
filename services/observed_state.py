@@ -10,7 +10,9 @@ import contextlib
 import logging
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Callable
 
 from constants import OBSERVED_STATE_MAX_RETRIES, OBSERVED_STATE_TIMEOUT_SEC
 
@@ -18,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 RELAY_ON_PAYLOADS = frozenset({"1", "on", "true"})
 RELAY_OFF_PAYLOADS = frozenset({"0", "off", "false"})
+
+
+@dataclass(slots=True)
+class _PreparedVerification:
+    zone_id: int
+    expected: str
+    generation: int
+    server: dict
+    topic: str
+    expected_payloads: set[str]
+    client: Any
+    result: threading.Event
 
 
 def canonical_relay_state(value: object) -> str | None:
@@ -112,11 +126,199 @@ class StateVerifier:
         wanted = self._canonical_state(expected)
         return commanded is None or commanded == wanted
 
-    def verify_async(self, zone_id: int, expected: str) -> None:
+    @staticmethod
+    def _close_client(client: Any) -> None:
+        with contextlib.suppress(ConnectionError, TimeoutError, OSError, RuntimeError, AttributeError):
+            client.loop_stop()
+        with contextlib.suppress(ConnectionError, TimeoutError, OSError, RuntimeError, AttributeError):
+            client.disconnect()
+
+    @classmethod
+    def _close_prepared(cls, prepared: _PreparedVerification) -> None:
+        cls._close_client(prepared.client)
+
+    def cancel_verification(self, prepared: _PreparedVerification | None) -> None:
+        """Close a prepared verifier when the associated publish failed."""
+        if isinstance(prepared, _PreparedVerification):
+            self._close_prepared(prepared)
+
+    def _prepare_report_subscription(
+        self,
+        server: dict,
+        topic: str,
+        expected_payloads: set[str],
+        timeout: float,
+        *,
+        log_target: str,
+    ) -> tuple[Any, threading.Event] | None:
+        """Open one fresh-report subscription and wait until SUBACK."""
+        if mqtt is None:
+            return None
+        result = threading.Event()
+        subscribed = threading.Event()
+        import uuid
+
+        client_id = f"verifier_{uuid.uuid4().hex[:8]}"
+        try:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+        except (ConnectionError, TimeoutError, OSError):
+            client = mqtt.Client(client_id=client_id)
+        if server.get("username"):
+            client.username_pw_set(server.get("username"), server.get("password") or None)
+        if int(server.get("tls_enabled") or 0) == 1:
+            try:
+                ca = server.get("tls_ca_path") or None
+                cert = server.get("tls_cert_path") or None
+                key = server.get("tls_key_path") or None
+                client.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
+                if int(server.get("tls_insecure") or 0) == 1:
+                    client.tls_insecure_set(True)
+            except (ImportError, OSError, ValueError, RuntimeError):
+                logger.exception("StateVerifier: prepared TLS setup failed; refusing plaintext fallback")
+                self._close_client(client)
+                return None
+
+        def on_connect(cl, _userdata, _flags, _reason_code, _properties=None):
+            try:
+                subscribe_result = cl.subscribe(topic, qos=1)
+                if isinstance(subscribe_result, (tuple, list)) and subscribe_result and subscribe_result[0] != 0:
+                    logger.error("StateVerifier: prepared subscribe rejected topic=%s", topic)
+            except (ConnectionError, TimeoutError, OSError, RuntimeError):
+                logger.exception("StateVerifier: prepared subscribe failed topic=%s", topic)
+
+        def on_subscribe(_cl, _userdata, _mid, _reason_codes, _properties=None):
+            subscribed.set()
+
+        def on_message(_cl, _userdata, msg):
+            try:
+                payload = msg.payload.decode("utf-8", errors="replace").strip()
+                if is_command_confirmation_message(msg) and payload in expected_payloads:
+                    result.set()
+            except (ValueError, TypeError, KeyError, AttributeError) as e:
+                logger.debug("StateVerifier: prepared message parse failed: %s", e)
+
+        client.on_connect = on_connect
+        client.on_subscribe = on_subscribe
+        client.on_message = on_message
+        try:
+            client.connect(
+                server.get("host") or "127.0.0.1",
+                int(server.get("port") or 1883),
+                keepalive=max(5, int(timeout) + 5),
+            )
+            client.loop_start()
+            if not subscribed.wait(timeout=max(0.001, float(timeout))):
+                logger.error("StateVerifier: SUBACK timeout target=%s topic=%s", log_target, topic)
+                self._close_client(client)
+                return None
+            return client, result
+        except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError):
+            logger.exception("StateVerifier: prepared MQTT connection failed target=%s", log_target)
+            self._close_client(client)
+            return None
+
+    def prepare_verification(
+        self,
+        zone_id: int,
+        expected: str,
+        *,
+        generation: int | None = None,
+        timeout: float = OBSERVED_STATE_TIMEOUT_SEC,
+    ) -> _PreparedVerification | None:
+        """Subscribe and receive SUBACK before the actuator command is sent."""
+        if mqtt is None or self.db is None:
+            return None
+        zid = int(zone_id)
+        if generation is None:
+            generation = self.register_command(zid, expected)
+        if not self._is_current(zid, expected, generation):
+            return None
+        zone = self.db.get_zone(zid)
+        if not zone:
+            return None
+        topic = (zone.get("topic") or "").strip()
+        server_id = zone.get("mqtt_server_id")
+        if not topic or not server_id:
+            return None
+        server = self.db.get_mqtt_server(int(server_id))
+        if not server:
+            return None
+
+        from utils import normalize_topic
+
+        norm_topic = normalize_topic(topic)
+        expected_payloads = self._expected_payloads(expected)
+        if not norm_topic or not expected_payloads:
+            return None
+        opened = self._prepare_report_subscription(
+            server,
+            norm_topic,
+            expected_payloads,
+            timeout,
+            log_target=f"zone:{zid}",
+        )
+        if opened is None:
+            return None
+        client, result = opened
+        return _PreparedVerification(
+            zone_id=zid,
+            expected=str(expected),
+            generation=int(generation),
+            server=server,
+            topic=norm_topic,
+            expected_payloads=expected_payloads,
+            client=client,
+            result=result,
+        )
+
+    def verify_master_command(
+        self,
+        server_id: int,
+        topic: str,
+        expected_payload: str,
+        publish_command: Callable[[], bool],
+        timeout: float = OBSERVED_STATE_TIMEOUT_SEC,
+    ) -> bool:
+        """Subscribe first, publish a master command, then await fresh echo."""
+        db = self.db
+        if mqtt is None or db is None:
+            return False
+        try:
+            server = db.get_mqtt_server(int(server_id))
+            if not server:
+                return False
+            from utils import normalize_topic
+
+            norm_topic = normalize_topic(topic)
+            expected_payloads = self._expected_payloads(expected_payload)
+            if not norm_topic or not expected_payloads:
+                return False
+            opened = self._prepare_report_subscription(
+                server,
+                norm_topic,
+                expected_payloads,
+                timeout,
+                log_target=f"master:{int(server_id)}",
+            )
+            if opened is None:
+                return False
+            client, result = opened
+            try:
+                if not bool(publish_command()):
+                    return False
+                return bool(result.wait(timeout=max(0.001, float(timeout))))
+            finally:
+                self._close_client(client)
+        except Exception:  # External DB/MQTT/callback boundary: fail closed.
+            logger.exception("StateVerifier: master command verification failed server=%s topic=%s", server_id, topic)
+            return False
+
+    def verify_async(self, zone_id: int, expected: str, *, generation: int | None = None) -> None:
         """Fire-and-forget: launch verification in a background thread."""
         from config import TESTING
 
-        generation = self.register_command(zone_id, expected)
+        if generation is None:
+            generation = self.register_command(zone_id, expected)
         if TESTING:
             return  # Skip async verification in tests
         t = threading.Thread(
@@ -134,6 +336,53 @@ class StateVerifier:
         except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError):  # catch-all: intentional
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
+    def _apply_confirmation(self, zone_id: int, expected: str) -> None:
+        """Persist fresh physical truth and disarm OFF safety jobs in order."""
+        db = self.db
+        if db is None:
+            return
+        state = self._canonical_state(expected)
+        if state is None:
+            return
+        fields: dict[str, object] = {"observed_state": state}
+        cleanup_ok = True
+        if state == "off":
+            fields["planned_end_time"] = None
+            try:
+                from irrigation_scheduler import get_scheduler
+
+                scheduler = get_scheduler()
+                if scheduler is not None:
+                    try:
+                        scheduler.cancel_zone_jobs(int(zone_id), include_cap=True)
+                    except TypeError:
+                        scheduler.cancel_zone_jobs(int(zone_id))
+                        scheduler.cancel_zone_cap(int(zone_id))
+            except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
+                cleanup_ok = False
+                logger.exception("StateVerifier: cancel confirmed OFF safety jobs failed zone=%s", zone_id)
+            if cleanup_ok:
+                fields["watering_start_time"] = None
+        try:
+            from services.zones_state import update_zone_state
+
+            update_zone_state(
+                int(zone_id),
+                fields,
+                audit_reason=f"mqtt_verified_{state}",
+                db=db,
+            )
+        except (sqlite3.Error, OSError, ImportError):
+            logger.exception("StateVerifier: audited confirmation persist failed zone=%s", zone_id)
+            with contextlib.suppress(sqlite3.Error, OSError, AttributeError):
+                db.update_zone(int(zone_id), fields)
+
+        if state == "on":
+            try:
+                db.mark_zone_run_confirmed(zone_id)
+            except (sqlite3.Error, OSError, AttributeError):
+                logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
+
     # ------------------------------------------------------------------
     def verify(
         self,
@@ -143,6 +392,7 @@ class StateVerifier:
         retries: int = OBSERVED_STATE_MAX_RETRIES,
         *,
         generation: int | None = None,
+        prepared: _PreparedVerification | None = None,
     ) -> bool:
         """Subscribe to the zone MQTT topic, wait for observed_state == expected.
 
@@ -152,7 +402,7 @@ class StateVerifier:
         Returns True if state confirmed, False otherwise.
         """
         if generation is None:
-            generation = self.register_command(zone_id, expected)
+            generation = prepared.generation if prepared is not None else self.register_command(zone_id, expected)
 
         if mqtt is None:
             logger.warning("StateVerifier: paho-mqtt not available, skipping")
@@ -186,78 +436,80 @@ class StateVerifier:
             return True
 
         expected_payloads = self._expected_payloads(expected)
-
-        for attempt in range(1, retries + 1):
-            if not self._is_current(zone_id, expected, generation):
-                logger.info(
-                    "StateVerifier: stale generation abandoned zone=%s expected=%s generation=%s",
-                    zone_id,
-                    expected,
-                    generation,
-                )
+        if prepared is not None:
+            prepared_matches = (
+                prepared.zone_id == int(zone_id)
+                and prepared.generation == int(generation)
+                and self._canonical_state(prepared.expected) == self._canonical_state(expected)
+                and prepared.topic == norm_topic
+            )
+            if not prepared_matches:
+                self._close_prepared(prepared)
                 return False
-            confirmed = self._subscribe_and_wait(server, norm_topic, expected_payloads, timeout)
-            if confirmed:
+
+        try:
+            for attempt in range(1, retries + 1):
                 if not self._is_current(zone_id, expected, generation):
                     logger.info(
-                        "StateVerifier: stale confirmation ignored zone=%s expected=%s generation=%s",
+                        "StateVerifier: stale generation abandoned zone=%s expected=%s generation=%s",
                         zone_id,
                         expected,
                         generation,
                     )
                     return False
-                logger.info("StateVerifier: zone %s confirmed '%s' on attempt %d", zone_id, expected, attempt)
-                # Second, independent source of run-confirmation. The verifier
-                # actively waits for a fresh relay report, so it confirms even
-                # when the SSE hub's subscription is down. Retained state is
-                # intentionally ineligible because the app writes it itself.
-                # Only an 'on' confirmation means the zone physically watered.
-                if str(expected).lower() in ("on", "1"):
-                    try:
-                        db.mark_zone_run_confirmed(zone_id)
-                    except (sqlite3.Error, OSError, AttributeError):
-                        logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
-                else:
-                    # Broker ACK is not physical OFF.  Keep the activation cap
-                    # armed until this fresh relay report arrives; only now is
-                    # it safe to disarm the activation-bound retry.
-                    try:
-                        from irrigation_scheduler import get_scheduler
+                confirmed = (
+                    prepared.result.wait(timeout=timeout)
+                    if prepared is not None
+                    else self._subscribe_and_wait(server, norm_topic, expected_payloads, timeout)
+                )
+                if confirmed:
+                    if not self._is_current(zone_id, expected, generation):
+                        logger.info(
+                            "StateVerifier: stale confirmation ignored zone=%s expected=%s generation=%s",
+                            zone_id,
+                            expected,
+                            generation,
+                        )
+                        return False
+                    logger.info("StateVerifier: zone %s confirmed '%s' on attempt %d", zone_id, expected, attempt)
+                    self._apply_confirmation(zone_id, expected)
+                    return True
 
-                        scheduler = get_scheduler()
-                        if scheduler is not None:
-                            scheduler.cancel_zone_cap(int(zone_id))
-                    except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
-                        logger.exception("StateVerifier: cancel confirmed OFF cap failed zone=%s", zone_id)
-                return True
+                if not self._is_current(zone_id, expected, generation):
+                    logger.info(
+                        "StateVerifier: newer command superseded retry zone=%s expected=%s generation=%s",
+                        zone_id,
+                        expected,
+                        generation,
+                    )
+                    return False
 
-            if not self._is_current(zone_id, expected, generation):
-                logger.info(
-                    "StateVerifier: newer command superseded retry zone=%s expected=%s generation=%s",
+                logger.warning(
+                    "StateVerifier: zone %s timeout waiting for '%s' (attempt %d/%d)",
                     zone_id,
                     expected,
-                    generation,
+                    attempt,
+                    retries,
                 )
-                return False
 
-            logger.warning(
-                "StateVerifier: zone %s timeout waiting for '%s' (attempt %d/%d)", zone_id, expected, attempt, retries
-            )
+                # Retry on the publisher connection while a prepared verifier
+                # keeps its one report subscription alive across all attempts.
+                if attempt < retries:
+                    try:
+                        from services.mqtt_pub import publish_mqtt_value
 
-            # Retry publish (except on last attempt)
-            if attempt < retries:
-                try:
-                    from services.mqtt_pub import publish_mqtt_value
+                        value = "1" if expected.lower() in ("on", "1") else "0"
+                        publish_mqtt_value(server, norm_topic, value, min_interval_sec=0.0, qos=2, retain=True)
+                    except ImportError:
+                        logger.exception("StateVerifier: retry publish failed zone=%s", zone_id)
 
-                    value = "1" if expected.lower() in ("on", "1") else "0"
-                    publish_mqtt_value(server, norm_topic, value, min_interval_sec=0.0, qos=2, retain=True)
-                except ImportError:
-                    logger.exception("StateVerifier: retry publish failed zone=%s", zone_id)
-
-        # All retries exhausted → record fault
-        if self._is_current(zone_id, expected, generation):
-            self._record_fault(zone_id, zone, expected, generation=generation)
-        return False
+            # All retries exhausted → record fault
+            if self._is_current(zone_id, expected, generation):
+                self._record_fault(zone_id, zone, expected, generation=generation)
+            return False
+        finally:
+            if prepared is not None:
+                self._close_prepared(prepared)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -469,3 +721,20 @@ def is_command_confirmation_message(message: object) -> bool:
 
 # Module-level singleton
 state_verifier = StateVerifier()
+
+
+def verify_master_command(
+    server_id: int,
+    topic: str,
+    expected_payload: str,
+    publish_command: Callable[[], bool],
+    timeout: float = OBSERVED_STATE_TIMEOUT_SEC,
+) -> bool:
+    """Public broker-aware master verification boundary; all failures are False."""
+    return state_verifier.verify_master_command(
+        server_id,
+        topic,
+        expected_payload,
+        publish_command,
+        timeout,
+    )

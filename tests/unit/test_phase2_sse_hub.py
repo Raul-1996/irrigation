@@ -260,9 +260,11 @@ def test_emergency_counter_off_is_reliable_and_observation_stays_truthful_on_fai
     )
     update = db.zone_updates[-1][1]
     assert update["state"] == "on"
-    assert update["observed_state"] == "on"
-    assert "watering_start_time" not in update
+    assert update["observed_state"] == "unconfirmed"
+    assert update["watering_start_time"]
     scheduler.schedule_zone_stop.assert_not_called()
+    scheduler.schedule_zone_hard_stop.assert_called_once()
+    scheduler.schedule_zone_cap.assert_called_once()
 
 
 def test_recent_commanded_stop_blocks_late_on_without_external_marker_call():
@@ -284,7 +286,8 @@ def test_recent_commanded_stop_blocks_late_on_without_external_marker_call():
     _wait_for(lambda: bool(db.zone_updates))
 
     assert publisher.call_args.kwargs == {"min_interval_sec": 0.0, "qos": 2, "retain": True}
-    assert db.zone_updates[-1][1]["observed_state"] == "on"
+    assert db.zone_updates[-1][1]["observed_state"] == "unconfirmed"
+    assert db.zone_updates[-1][1]["watering_start_time"]
 
 
 def test_master_only_tls_server_subscribes_with_safe_keepalive_and_no_mode():
