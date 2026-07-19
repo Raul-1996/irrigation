@@ -174,22 +174,23 @@ class WeatherService:
         from services.weather.adjustment import WeatherAdjustment
 
         adj = WeatherAdjustment(self.db_path)
-        coefficient = adj.get_coefficient()
-        skip_info = adj.should_skip()
+        effective_weather = adj._select_input_source(weather)
+        coefficient = adj.get_coefficient(weather=effective_weather)
+        skip_info = adj.should_skip(weather=effective_weather)
 
         return {
             "available": True,
-            "temperature": weather.temperature,
-            "humidity": weather.humidity,
-            "precipitation": weather.precipitation,
-            "wind_speed": weather.wind_speed,
-            "precipitation_24h": weather.precipitation_24h,
-            "precipitation_forecast_6h": weather.precipitation_forecast_6h,
-            "daily_et0": weather.daily_et0,
+            "temperature": effective_weather.temperature,
+            "humidity": effective_weather.humidity,
+            "precipitation": effective_weather.precipitation,
+            "wind_speed": effective_weather.wind_speed,
+            "precipitation_24h": effective_weather.precipitation_24h,
+            "precipitation_forecast_6h": effective_weather.precipitation_forecast_6h,
+            "daily_et0": effective_weather.daily_et0,
             "coefficient": coefficient,
             "skip": skip_info.get("skip", False),
             "skip_reason": skip_info.get("reason", ""),
-            "timestamp": weather.timestamp,
+            "timestamp": effective_weather.timestamp,
         }
 
     def get_weather_extended(self) -> dict[str, Any]:
@@ -202,9 +203,9 @@ class WeatherService:
         from services.weather_codes import get_weather_desc, get_weather_icon
 
         adj = WeatherAdjustment(self.db_path)
-        coefficient = adj.get_coefficient()
-        skip_info = adj.should_skip()
         effective_weather = adj._select_input_source(weather)
+        coefficient = adj.get_coefficient(weather=effective_weather)
+        skip_info = adj.should_skip(weather=effective_weather)
         factors = adj.get_factors_detail(effective_weather)
 
         current = {
@@ -219,17 +220,17 @@ class WeatherService:
                 "unit": "%",
             },
             "rain": {"value": False, "source": "api"},
-            "precipitation_mm": {"value": weather.precipitation, "source": "api", "unit": "мм"},
-            "wind_speed": {"value": weather.wind_speed, "source": "api", "unit": "м/с"},
-            "weather_code": weather.weather_code,
-            "weather_icon": get_weather_icon(weather.weather_code),
-            "weather_desc": get_weather_desc(weather.weather_code),
+            "precipitation_mm": {"value": effective_weather.precipitation, "source": "api", "unit": "мм"},
+            "wind_speed": {"value": effective_weather.wind_speed, "source": "api", "unit": "м/с"},
+            "weather_code": effective_weather.weather_code,
+            "weather_icon": get_weather_icon(effective_weather.weather_code),
+            "weather_desc": get_weather_desc(effective_weather.weather_code),
         }
 
         stats = {
-            "precipitation_24h": weather.precipitation_24h,
-            "precipitation_forecast_6h": weather.precipitation_forecast_6h,
-            "daily_et0": weather.daily_et0,
+            "precipitation_24h": effective_weather.precipitation_24h,
+            "precipitation_forecast_6h": effective_weather.precipitation_forecast_6h,
+            "daily_et0": effective_weather.daily_et0,
         }
 
         # H2 is intentionally shadow-only (PR-060): expose its cached diagnostic
@@ -286,13 +287,13 @@ class WeatherService:
 
         result = {
             "available": True,
-            "temperature": weather.temperature,
-            "humidity": weather.humidity,
-            "precipitation": weather.precipitation,
-            "wind_speed": weather.wind_speed,
-            "precipitation_24h": weather.precipitation_24h,
-            "precipitation_forecast_6h": weather.precipitation_forecast_6h,
-            "daily_et0": weather.daily_et0,
+            "temperature": effective_weather.temperature,
+            "humidity": effective_weather.humidity,
+            "precipitation": effective_weather.precipitation,
+            "wind_speed": effective_weather.wind_speed,
+            "precipitation_24h": effective_weather.precipitation_24h,
+            "precipitation_forecast_6h": effective_weather.precipitation_forecast_6h,
+            "daily_et0": effective_weather.daily_et0,
             "coefficient": coefficient,
             "skip": skip_info.get("skip", False),
             "skip_reason": skip_info.get("reason", ""),

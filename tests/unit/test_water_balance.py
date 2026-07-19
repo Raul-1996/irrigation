@@ -335,8 +335,42 @@ class TestIdempotencyAndDays:
         assert result is None
 
     def test_recalc_empty_history_keeps_previous(self, bal_db):
+        conn = sqlite3.connect(bal_db)
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES "
+            "('weather.balance.coef_cached', '123'), "
+            "('weather.balance.last_recalc_date', '2001-01-01')"
+        )
+        conn.commit()
+        conn.close()
         with patch("services.weather.client.fetch_history", return_value=None):
             result = wb.recalc_balance(bal_db)
         assert result is None
-        # previous coef untouched
-        assert wb.read_cached_coef(bal_db) == 100
+        assert wb.read_cached_coef(bal_db) == 123
+        assert _get_setting(bal_db, "weather.balance.last_recalc_date") == "2001-01-01"
+
+    def test_recalc_publish_failure_preserves_previous_coefficient_and_date(self, bal_db):
+        conn = sqlite3.connect(bal_db)
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES "
+            "('weather.balance.coef_cached', '123'), "
+            "('weather.balance.last_recalc_date', '2001-01-01')"
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER reject_balance_coefficient
+            BEFORE INSERT ON settings
+            WHEN NEW.key = 'weather.balance.coef_cached'
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated publish failure');
+            END
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        result = _run_recalc(bal_db, _history_payload(_days_back(30, 6.0, 0.0)))
+
+        assert result is None
+        assert _get_setting(bal_db, "weather.balance.coef_cached") == "123"
+        assert _get_setting(bal_db, "weather.balance.last_recalc_date") == "2001-01-01"

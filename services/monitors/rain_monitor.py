@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 
 _MQTT_READY_TIMEOUT_SECONDS = 5.0
 _RAIN_POSTPONE_FALLBACK_LOCK = threading.Lock()
+_RAIN_CONFIG_TRANSACTION_LOCK = threading.RLock()
+
+
+def rain_config_transaction_lock() -> threading.RLock:
+    """Return the process-wide DB+runtime serialization lock for rain config.
+
+    Every writer must hold this reentrant lock across its database mutation,
+    effective rain-config snapshot, runtime reconfigure, and exact CAS rollback.
+    ``RainMonitor.reconfigure`` also acquires it defensively so direct callers
+    cannot publish concurrently with a route/topology transaction.
+    """
+    return _RAIN_CONFIG_TRANSACTION_LOCK
 
 
 def _db_path() -> str | None:
@@ -66,6 +78,124 @@ def _strict_setting_value(key: str) -> str | None:
     return value if isinstance(value, str) or value is None else None
 
 
+def _rain_config_fingerprint(config: dict[str, Any]) -> tuple[bool, str, str, int | None]:
+    enabled = config.get("enabled") is True
+    topic = config.get("topic", "")
+    sensor_type = config.get("type", "NO")
+    server_id = config.get("server_id")
+    if not isinstance(topic, str) or not isinstance(sensor_type, str) or isinstance(server_id, bool):
+        raise ValueError("invalid rain config fingerprint")
+    topic = topic.strip()
+    sensor_type = sensor_type.upper()
+    if sensor_type not in {"NO", "NC"}:
+        raise ValueError("invalid rain sensor type")
+    if server_id is not None:
+        server_id = int(server_id)
+    return enabled, topic, sensor_type, server_id
+
+
+def _strict_persisted_rain_fingerprint() -> tuple[bool, str, str, int | None] | None:
+    """Read the authoritative rain settings, bypassing fail-soft repositories."""
+    path = _db_path()
+    if path is None:
+        config = db.get_rain_config()
+        return _rain_config_fingerprint(config) if isinstance(config, dict) else None
+
+    with sqlite3.connect(path, timeout=5) as conn:
+        rows = dict(
+            conn.execute(
+                "SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?)",
+                ("rain.enabled", "rain.topic", "rain.type", "rain.server_id"),
+            ).fetchall()
+        )
+    raw_server_id = rows.get("rain.server_id")
+    server_id = int(raw_server_id) if raw_server_id and str(raw_server_id).isdigit() else None
+    return _rain_config_fingerprint(
+        {
+            "enabled": str(rows.get("rain.enabled") or "0") in {"1", "true", "True"},
+            "topic": rows.get("rain.topic") or "",
+            "type": rows.get("rain.type") if rows.get("rain.type") in {"NO", "NC"} else "NO",
+            "server_id": server_id,
+        }
+    )
+
+
+def _broker_fingerprint(server: dict[str, Any]) -> tuple[Any, ...]:
+    """Canonicalize every persisted broker field that affects this client."""
+    return (
+        int(server.get("id")),
+        str(server.get("host") or "127.0.0.1"),
+        int(server.get("port") or 1883),
+        str(server.get("username") or ""),
+        str(server.get("password") or ""),
+        str(server.get("client_id") or ""),
+        int(server.get("enabled", 1) or 0),
+        int(server.get("tls_enabled") or 0),
+        str(server.get("tls_ca_path") or ""),
+        str(server.get("tls_cert_path") or ""),
+        str(server.get("tls_key_path") or ""),
+        int(server.get("tls_insecure") or 0),
+        str(server.get("tls_version") or "TLS_CLIENT").upper().replace("_", ".").strip(),
+    )
+
+
+def _structured_stop_succeeded(result: Any) -> bool:
+    """Accept only the scheduler's complete, explicit stop acknowledgement."""
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return False
+    unresolved = result.get("unresolved")
+    return isinstance(unresolved, list) and unresolved == []
+
+
+def _rain_postpone_mutation_lock():
+    """Share the postpone service lock when its provenance helpers are present."""
+    try:
+        from services import postpone as postpone_service
+
+        lock = getattr(postpone_service, "_POSTPONE_MUTATION_LOCK", None)
+        if lock is not None and hasattr(lock, "__enter__") and hasattr(lock, "__exit__"):
+            return lock
+    except ImportError:
+        pass
+    return _RAIN_POSTPONE_FALLBACK_LOCK
+
+
+def _clear_disabled_rain_state_transaction() -> bool:
+    """Atomically clear persisted rain truth and every rain-owned postpone."""
+    path = _db_path()
+    if path is None:
+        # Compatibility for isolated facade tests. Production always takes the
+        # single SQLite transaction below.
+        try:
+            groups = _strict_target_groups()
+            for group_id in groups:
+                if not _clear_rain_postpone(group_id):
+                    return False
+            return db.set_setting_value("rain.active", "0") is True
+        except (sqlite3.Error, OSError, AttributeError, RuntimeError, TypeError, ValueError):
+            logger.exception("RainMonitor: disabled-state compatibility cleanup failed")
+            return False
+
+    try:
+        with _rain_postpone_mutation_lock(), sqlite3.connect(path, timeout=5) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE zones
+                SET postpone_until = NULL,
+                    postpone_reason = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE postpone_reason = 'rain'
+                """
+            )
+            conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('rain.active', '0')")
+            conn.commit()
+        return True
+    except (sqlite3.Error, OSError, RuntimeError):
+        logger.exception("RainMonitor: atomic disabled-state cleanup failed")
+        return False
+
+
 def _strict_group_zones(group_id: int) -> list[dict[str, Any]]:
     path = _db_path()
     if path is not None:
@@ -101,11 +231,7 @@ def _apply_rain_postpone_compat(group_id: int, postpone_until: str) -> bool:
                     "SELECT id, postpone_until, postpone_reason FROM zones WHERE group_id = ? ORDER BY id",
                     (int(group_id),),
                 ).fetchall()
-                unset_ids = [
-                    int(zone_id)
-                    for zone_id, current, reason in rows
-                    if current is None and reason is None
-                ]
+                unset_ids = [int(zone_id) for zone_id, current, reason in rows if current is None and reason is None]
                 for zone_id in unset_ids:
                     cursor = conn.execute(
                         """
@@ -121,11 +247,7 @@ def _apply_rain_postpone_compat(group_id: int, postpone_until: str) -> bool:
             return True
 
         zones = _strict_group_zones(group_id)
-        unset = [
-            zone
-            for zone in zones
-            if zone.get("postpone_until") is None and zone.get("postpone_reason") is None
-        ]
+        unset = [zone for zone in zones if zone.get("postpone_until") is None and zone.get("postpone_reason") is None]
         for zone in unset:
             if db.update_zone_postpone(int(zone["id"]), serialized, "rain") is not True:
                 return False
@@ -222,10 +344,13 @@ class RainMonitor:
         self.topic: str | None = None
         self.server_id: int | None = None
         self.is_rain: bool | None = None
+        self.sensor_online = False
         self._cfg: dict | None = None
         self._generation = 0
         self._blocked_groups: set[int] = set()
         self._block_all = False
+        self._gate_unknown = False
+        self._awaiting_fresh_payload = False
         self._persisted_state_loaded = False
         self._last_sensor_value: bool | None = None
         self._lifecycle_lock = threading.RLock()
@@ -245,6 +370,55 @@ class RainMonitor:
         except (ConnectionError, TimeoutError, OSError, RuntimeError):
             logger.exception("RainMonitor loop stop failed")
 
+    @staticmethod
+    def _gate_targets() -> tuple[set[int], bool]:
+        try:
+            return set(_strict_target_groups()), False
+        except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+            logger.exception("RainMonitor: strict rain-group snapshot failed; blocking all groups")
+            return set(), True
+
+    def _enter_unknown_state(self, *, online: bool) -> None:
+        """Close admission until this subscription yields a valid fresh value."""
+        targets, block_all = self._gate_targets()
+        with self._state_lock:
+            self.sensor_online = bool(online)
+            self.is_rain = None
+            self._gate_unknown = True
+            self._awaiting_fresh_payload = True
+            self._last_sensor_value = None
+            self._blocked_groups.update(targets)
+            self._block_all = self._block_all or block_all
+        # Fail-closed applies to in-flight irrigation too: once sensor truth is
+        # unknown, protected groups are cancelled/stopped immediately. Failed
+        # acknowledgements leave the gate closed and are retried on reconnect,
+        # SUBACK, admission checks, or the next payload.
+        for group_id in sorted(targets):
+            self.enforce_group(group_id)
+
+    def get_sensor_state(self) -> str:
+        """Return a stable public state for status/API consumers."""
+        with self._state_lock:
+            runtime_config = self._cfg
+            enabled = bool((runtime_config or {}).get("enabled"))
+            online = self.sensor_online
+            value = self.is_rain
+        if runtime_config is None:
+            try:
+                fingerprint = _strict_persisted_rain_fingerprint()
+                enabled = bool(fingerprint and fingerprint[0])
+            except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+                # A config read failure is itself not evidence that the sensor
+                # was intentionally disabled. Keep the public state offline.
+                return "offline"
+        if not enabled:
+            return "disabled"
+        if not online:
+            return "offline"
+        if value is None:
+            return "unknown"
+        return "rain" if value else "dry"
+
     def _load_persisted_state(self) -> None:
         with self._state_lock:
             if self._persisted_state_loaded:
@@ -253,12 +427,11 @@ class RainMonitor:
         try:
             persisted = _strict_setting_value("rain.active")
         except (sqlite3.Error, OSError, AttributeError, RuntimeError):
-            logger.exception("RainMonitor: persisted rain state read failed; blocking all groups")
-            with self._state_lock:
-                self.is_rain = True
-                self._block_all = True
+            logger.exception("RainMonitor: persisted rain state read failed; state is unknown")
+            self._enter_unknown_state(online=False)
             return
-        if str(persisted).strip().lower() in {"1", "true"}:
+        normalized = None if persisted is None else str(persisted).strip().lower()
+        if normalized in {"1", "true"}:
             with self._state_lock:
                 self.is_rain = True
                 self._block_all = True
@@ -270,6 +443,28 @@ class RainMonitor:
                 with self._state_lock:
                     self._blocked_groups = set(groups)
                     self._block_all = False
+            return
+        if normalized not in {None, "0", "false"}:
+            logger.error("RainMonitor: corrupt persisted rain.active=%r; state is unknown", persisted)
+            self._enter_unknown_state(online=False)
+            return
+
+        # A clean persisted dry bit is not proof of current dryness while an
+        # enabled monitor has not yet subscribed and received a new payload.
+        try:
+            fingerprint = _strict_persisted_rain_fingerprint()
+        except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+            logger.exception("RainMonitor: rain config read failed during persisted-state load")
+            self._enter_unknown_state(online=False)
+            return
+        if fingerprint is not None and fingerprint[0]:
+            self._enter_unknown_state(online=False)
+        else:
+            with self._state_lock:
+                self.is_rain = None
+                self.sensor_online = False
+                self._gate_unknown = False
+                self._awaiting_fresh_payload = False
 
     def stop(self):
         with self._lifecycle_lock:
@@ -277,6 +472,12 @@ class RainMonitor:
                 old_client = self.client
                 self.client = None
                 self._generation += 1
+                if bool((self._cfg or {}).get("enabled")):
+                    self.sensor_online = False
+                    self.is_rain = None
+                    self._gate_unknown = True
+                    self._awaiting_fresh_payload = True
+                    self._last_sensor_value = None
             self._retire_client(old_client)
 
     def start(self, cfg: dict) -> bool:
@@ -284,6 +485,11 @@ class RainMonitor:
         return self.reconfigure(cfg)
 
     def reconfigure(self, config: dict) -> bool:
+        """Serialize direct callers with rain-config database transactions."""
+        with rain_config_transaction_lock():
+            return self._reconfigure_locked(config)
+
+    def _reconfigure_locked(self, config: dict) -> bool:
         """Stage MQTT and swap only after CONNACK plus matching SUBACK.
 
         ``False`` is a hard no-op for the active generation: the previous
@@ -310,17 +516,48 @@ class RainMonitor:
             return False
         sensor_type = sensor_type.upper()
         cfg.update({"enabled": enabled, "topic": topic, "server_id": server_id, "type": sensor_type})
+        requested_fingerprint = _rain_config_fingerprint(cfg)
 
         with self._lifecycle_lock:
             self._load_persisted_state()
+            try:
+                persisted_fingerprint = _strict_persisted_rain_fingerprint()
+            except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+                logger.exception("RainMonitor: authoritative rain config read failed")
+                return False
+            if persisted_fingerprint is not None and persisted_fingerprint != requested_fingerprint:
+                logger.warning("RainMonitor: rejecting stale rain reconfigure before staging")
+                return False
             if not enabled:
-                with self._callback_lock, self._state_lock:
-                    old_client = self.client
-                    self.client = None
-                    self._generation += 1
-                    self._cfg = cfg
-                    self.topic = None
-                    self.server_id = None
+                try:
+                    final_fingerprint = _strict_persisted_rain_fingerprint()
+                except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+                    logger.exception("RainMonitor: final disabled-config fingerprint read failed")
+                    return False
+                if final_fingerprint is not None and final_fingerprint != requested_fingerprint:
+                    logger.warning("RainMonitor: disabled config became stale before runtime swap")
+                    return False
+                # Do not publish a disabled runtime until persisted rain truth
+                # and every rain-owned postpone have been cleared together.
+                # A failure leaves the old client and fail-closed gate intact so
+                # the route can truthfully CAS-rollback its config transaction.
+                with self._callback_lock:
+                    if not _clear_disabled_rain_state_transaction():
+                        return False
+                    with self._state_lock:
+                        old_client = self.client
+                        self.client = None
+                        self._generation += 1
+                        self._cfg = cfg
+                        self.topic = None
+                        self.server_id = None
+                        self.sensor_online = False
+                        self.is_rain = None
+                        self._gate_unknown = False
+                        self._awaiting_fresh_payload = False
+                        self._last_sensor_value = None
+                        self._blocked_groups.clear()
+                        self._block_all = False
                 self._retire_client(old_client)
                 return True
 
@@ -341,9 +578,16 @@ class RainMonitor:
                     return False
             except (TypeError, ValueError):
                 return False
+            try:
+                staged_broker_fingerprint = _broker_fingerprint(server)
+            except (TypeError, ValueError):
+                return False
 
             try:
-                staged_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                staged_client = mqtt.Client(
+                    mqtt.CallbackAPIVersion.VERSION2,
+                    client_id=str(server.get("client_id") or ""),
+                )
             except (AttributeError, TypeError, ValueError, RuntimeError):
                 logger.exception("RainMonitor: MQTT client creation failed")
                 return False
@@ -357,6 +601,7 @@ class RainMonitor:
                 "early_subacks": {},
                 "latest_payload": None,
                 "connected": False,
+                "subscribed": False,
                 "activated": False,
             }
             candidate_generation = self._generation + 1
@@ -391,6 +636,15 @@ class RainMonitor:
                 try:
                     with stage_lock:
                         stage["connected"] = True
+                        stage["subscribed"] = False
+                        stage["expected_mid"] = None
+                        active_reconnect = bool(stage["activated"])
+                        if active_reconnect:
+                            failed.clear()
+                    if active_reconnect and _is_active():
+                        # Every reconnect requires a matching SUBACK and then a
+                        # fresh valid payload before admission may reopen.
+                        self._enter_unknown_state(online=False)
                     subscribe_result = client.subscribe(topic, qos=0)
                     result_code, message_id = subscribe_result
                     if int(result_code) != 0:
@@ -401,7 +655,14 @@ class RainMonitor:
                         stage["expected_mid"] = message_id
                         early_result = stage["early_subacks"].pop(message_id, None)
                     if early_result is not None:
-                        (_mark_ready if early_result else _mark_failed)()
+                        if early_result:
+                            with stage_lock:
+                                stage["subscribed"] = True
+                            if _is_active():
+                                self._enter_unknown_state(online=True)
+                            _mark_ready()
+                        else:
+                            _mark_failed()
                 except (AttributeError, TypeError, ValueError, RuntimeError, OSError):
                     logger.exception("RainMonitor: subscribe failed")
                     _mark_failed()
@@ -425,16 +686,26 @@ class RainMonitor:
                         return
                 if message_id != expected_mid:
                     return
-                (_mark_ready if succeeded else _mark_failed)()
+                if not succeeded:
+                    _mark_failed()
+                    return
+                with stage_lock:
+                    stage["subscribed"] = True
+                if _is_active():
+                    self._enter_unknown_state(online=True)
+                _mark_ready()
 
             def _on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
                 del userdata, disconnect_flags, reason_code, properties
                 if client is not staged_client:
                     return
-                active = _is_active()
                 with stage_lock:
                     stage["connected"] = False
-                if not active:
+                    stage["subscribed"] = False
+                    activated = bool(stage["activated"])
+                if activated and _is_active():
+                    self._enter_unknown_state(online=False)
+                else:
                     _mark_failed()
 
             def _on_message(client, userdata, message):
@@ -446,11 +717,15 @@ class RainMonitor:
                     payload = payload.decode("utf-8", errors="ignore")
                 else:
                     payload = str(payload)
+                with stage_lock:
+                    subscribed = bool(stage["connected"] and stage["subscribed"])
+                    activated = bool(stage["activated"])
+                    if subscribed and not activated:
+                        stage["latest_payload"] = payload
+                if not subscribed:
+                    return
                 with self._callback_lock:
                     if not _is_active():
-                        with stage_lock:
-                            if not stage.get("activated"):
-                                stage["latest_payload"] = payload
                         return
                     try:
                         self._handle_payload(payload)
@@ -492,23 +767,68 @@ class RainMonitor:
                 self._retire_client(staged_client)
                 return False
 
+            # Database writers outside the public transaction lock are still
+            # contained by this final publish-time CAS. A stale staged client
+            # is retired without changing the live runtime generation.
+            try:
+                current_rain_fingerprint = _strict_persisted_rain_fingerprint()
+                current_server = db.get_mqtt_server(server_id)
+                current_broker_fingerprint = (
+                    _broker_fingerprint(current_server) if isinstance(current_server, dict) else None
+                )
+            except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+                logger.exception("RainMonitor: final config fingerprint read failed")
+                self._retire_client(staged_client)
+                return False
+            if (
+                current_rain_fingerprint is not None and current_rain_fingerprint != requested_fingerprint
+            ) or current_broker_fingerprint != staged_broker_fingerprint:
+                logger.warning("RainMonitor: staged config became stale before runtime swap")
+                self._retire_client(staged_client)
+                return False
+
+            gate_targets, gate_block_all = self._gate_targets()
+            activation_failed = False
             with self._callback_lock:
-                with self._state_lock:
-                    old_client = self.client
-                    self.client = staged_client
-                    self._generation = candidate_generation
-                    self._cfg = cfg
-                    self.topic = topic
-                    self.server_id = server_id
                 with stage_lock:
+                    # The candidate disconnect callback mutates these fields
+                    # under the same lock. Therefore disconnect either happens
+                    # before this check (activation is rejected) or after the
+                    # complete swap/retained-payload transition (it re-closes
+                    # the gate); it cannot disappear between validation/swap.
+                    if not stage["connected"] or not stage["subscribed"] or failed.is_set():
+                        activation_failed = True
+                        old_client = None
+                        retained_payload = None
+                    else:
+                        with self._state_lock:
+                            old_client = self.client
+                            self.client = staged_client
+                            self._generation = candidate_generation
+                            self._cfg = cfg
+                            self.topic = topic
+                            self.server_id = server_id
+                            self.sensor_online = True
+                            self.is_rain = None
+                            self._gate_unknown = True
+                            self._awaiting_fresh_payload = True
+                            self._last_sensor_value = None
+                            self._blocked_groups.update(gate_targets)
+                            self._block_all = gate_block_all
+                        for group_id in sorted(gate_targets):
+                            self.enforce_group(group_id)
                     stage["activated"] = True
                     retained_payload = stage["latest_payload"]
                     stage["latest_payload"] = None
-                if retained_payload is not None:
-                    try:
-                        self._handle_payload(str(retained_payload))
-                    except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
-                        logger.exception("RainMonitor staged retained payload failed")
+                    if not activation_failed and retained_payload is not None:
+                        try:
+                            self._handle_payload(str(retained_payload))
+                        except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+                            logger.exception("RainMonitor staged retained payload failed")
+            if activation_failed:
+                logger.error("RainMonitor: staged MQTT disconnected during final activation")
+                self._retire_client(staged_client)
+                return False
             self._retire_client(old_client)
             return True
 
@@ -547,7 +867,7 @@ class RainMonitor:
         if int(server.get("tls_insecure") or 0) == 1:
             client.tls_insecure_set(True)
 
-    def _handle_payload(self, payload: str):
+    def _handle_payload(self, payload: str) -> bool:
         normalized = (payload or "").strip().lower()
         value = (
             True
@@ -557,7 +877,7 @@ class RainMonitor:
             else None
         )
         if value is None:
-            return
+            return False
         try:
             sensor_type = str((self._cfg or {}).get("type") or db.get_rain_config().get("type") or "NO").upper()
         except (sqlite3.Error, OSError, AttributeError):
@@ -566,22 +886,29 @@ class RainMonitor:
         logical_rain = not value if sensor_type == "NC" else value
 
         with self._state_lock:
+            self.sensor_online = True
             repeated = self._last_sensor_value is logical_rain
         if repeated:
-            return
+            return True
         if logical_rain:
-            with self._state_lock:
-                self.is_rain = True
             applied = self._on_rain_start()
-            if applied is not False:
+            if applied is True:
                 with self._state_lock:
+                    self.is_rain = True
+                    self._gate_unknown = False
+                    self._awaiting_fresh_payload = False
                     self._last_sensor_value = True
+                return True
         else:
             cleared = self._on_rain_stop()
-            if cleared is not False:
+            if cleared is True:
                 with self._state_lock:
                     self.is_rain = False
+                    self._gate_unknown = False
+                    self._awaiting_fresh_payload = False
                     self._last_sensor_value = False
+                return True
+        return False
 
     @staticmethod
     def _cancel_and_stop_group(group_id: int) -> bool:
@@ -592,11 +919,7 @@ class RainMonitor:
             scheduler = get_scheduler()
             if scheduler is not None:
                 result = scheduler.cancel_group_jobs(int(group_id), master_close_immediately=True)
-                cancellation_ok = (
-                    isinstance(result, dict)
-                    and result.get("success") is True
-                    and not (result.get("unresolved") or [])
-                )
+                cancellation_ok = _structured_stop_succeeded(result)
         except (ImportError, sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
             logger.exception("RainMonitor: structured scheduler cancellation failed group=%s", group_id)
 
@@ -611,8 +934,17 @@ class RainMonitor:
                 force=True,
                 master_close_immediately=True,
             )
-            return result is not False
-        except (ImportError, ConnectionError, TimeoutError, OSError, RuntimeError, sqlite3.Error):
+            return _structured_stop_succeeded(result)
+        except (
+            ImportError,
+            ConnectionError,
+            TimeoutError,
+            OSError,
+            RuntimeError,
+            sqlite3.Error,
+            TypeError,
+            ValueError,
+        ):
             logger.exception("RainMonitor: fallback group stop failed group=%s", group_id)
             return False
 
@@ -631,33 +963,40 @@ class RainMonitor:
         except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
             logger.exception("RainMonitor: strict group read failed; blocking all groups")
             with self._state_lock:
+                self.sensor_online = True
                 self.is_rain = True
+                self._gate_unknown = False
+                self._awaiting_fresh_payload = False
+                self._persisted_state_loaded = True
                 self._block_all = True
             self._persist_rain_active(True)
             return False
 
         with self._state_lock:
+            self.sensor_online = True
             self.is_rain = True
+            self._gate_unknown = False
+            self._awaiting_fresh_payload = False
+            self._persisted_state_loaded = True
             self._blocked_groups = set(target_groups)
             self._block_all = False
         persisted = self._persist_rain_active(True)
 
-        postpone_until = datetime.now().strftime("%Y-%m-%d 23:59:59")
         all_safe = persisted
         for group_id in target_groups:
-            all_safe = self._cancel_and_stop_group(group_id) and all_safe
-            try:
-                all_safe = _apply_rain_postpone_deadline(group_id, postpone_until) and all_safe
-            except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
-                logger.exception("RainMonitor: postpone failed group=%s", group_id)
-                all_safe = False
+            all_safe = self.enforce_group(group_id) and all_safe
 
         with contextlib.suppress(sqlite3.Error, OSError, AttributeError):
-            db.add_log("rain_postpone", str({"groups": target_groups, "until": postpone_until}))
+            db.add_log("rain_postpone", str({"groups": target_groups}))
         return all_safe
 
     def _on_rain_stop(self) -> bool:
         """Clear rain-owned rows under CAS; open the gate only after success."""
+        with self._state_lock:
+            self.sensor_online = True
+            self.is_rain = None
+            self._gate_unknown = True
+            self._awaiting_fresh_payload = False
         try:
             current_targets = set(_strict_target_groups())
         except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
@@ -674,12 +1013,46 @@ class RainMonitor:
             return False
 
         with self._state_lock:
+            self.sensor_online = True
             self.is_rain = False
+            self._gate_unknown = False
+            self._awaiting_fresh_payload = False
+            self._persisted_state_loaded = True
             self._blocked_groups.clear()
             self._block_all = False
         with contextlib.suppress(sqlite3.Error, OSError, AttributeError):
             db.add_log("rain_resume", str({"groups": target_groups}))
         return True
+
+    def enforce_group(self, group_id: int) -> bool:
+        """Immediately enforce the current fail-closed rain gate for one group.
+
+        Group/topology routes call this after a persisted ``use_rain_sensor``
+        0→1 transition and before reporting success. The group is inserted into
+        the admission gate before any stop/postpone side effect is attempted.
+        """
+        group_id = int(group_id)
+        if group_id == 999:
+            return True
+        self._load_persisted_state()
+        with self._state_lock:
+            gate_active = self.is_rain is True or self._gate_unknown
+            known_rain = self.is_rain is True
+            if not gate_active:
+                return True
+            self._blocked_groups.add(group_id)
+
+        stopped = self._cancel_and_stop_group(group_id)
+        if not known_rain:
+            return stopped
+
+        postpone_until = datetime.now().strftime("%Y-%m-%d 23:59:59")
+        try:
+            postponed = _apply_rain_postpone_deadline(group_id, postpone_until)
+        except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+            logger.exception("RainMonitor: postpone enforcement failed group=%s", group_id)
+            postponed = False
+        return stopped and postponed
 
     def is_group_blocked(self, group_id: int) -> bool:
         group_id = int(group_id)
@@ -687,7 +1060,7 @@ class RainMonitor:
             return False
         self._load_persisted_state()
         with self._state_lock:
-            if self.is_rain is not True:
+            if self.is_rain is not True and not self._gate_unknown:
                 return False
             if self._block_all or group_id in self._blocked_groups:
                 return True
@@ -712,6 +1085,11 @@ rain_monitor = RainMonitor()
 def is_group_blocked(group_id: int) -> bool:
     """Scheduler admission contract: strict/fail-closed while rain is active."""
     return rain_monitor.is_group_blocked(group_id)
+
+
+def enforce_group(group_id: int) -> bool:
+    """Public route hook for immediate rain-safety enforcement."""
+    return rain_monitor.enforce_group(group_id)
 
 
 def start_rain_monitor():

@@ -340,6 +340,23 @@ def test_h2_diagnostic_date_reports_stale_and_future_truthfully(
     assert status["stale"] is expected_stale
 
 
+@pytest.mark.parametrize("invalid", ["nan", "inf", "-inf", "1e999"])
+def test_h2_diagnostic_rejects_nonfinite_or_overflow_stale_days(test_db, invalid) -> None:
+    adj = _enable_weather(test_db)
+    assert test_db.set_setting_value("weather.balance.last_recalc_date", datetime.now().date().isoformat())
+    assert test_db.set_setting_value("weather.balance.stale_fallback_days", invalid)
+
+    status = adj.get_balance_diagnostic_status()
+
+    assert status == {
+        "status": "unavailable",
+        "last_recalc_date": None,
+        "age_days": None,
+        "stale": False,
+        "fresh": False,
+    }
+
+
 def test_hard_freeze_safety_ignores_the_factor_toggle(test_db) -> None:
     adj = _enable_weather(test_db)
     assert test_db.set_setting_value("weather.factor.freeze", "0")
@@ -418,9 +435,7 @@ def test_decision_history_preserves_per_field_source_provenance(test_db) -> None
     adj.log_decision(selected, 0, True, "freeze")
 
     with sqlite3.connect(test_db.db_path) as conn:
-        raw_sources = conn.execute(
-            "SELECT data_sources FROM weather_decisions ORDER BY id DESC LIMIT 1"
-        ).fetchone()[0]
+        raw_sources = conn.execute("SELECT data_sources FROM weather_decisions ORDER BY id DESC LIMIT 1").fetchone()[0]
     sources = json.loads(raw_sources)
     assert sources["temperature"] == "local"
     assert sources["humidity"] == "api_fallback"
@@ -443,8 +458,7 @@ def test_missing_weather_snapshot_is_logged_as_unknown_and_skip_safe(test_db) ->
     assert coefficient == 0
     with sqlite3.connect(test_db.db_path) as conn:
         decision, coefficient, reason, raw_sources = conn.execute(
-            "SELECT decision, coefficient, reason, data_sources "
-            "FROM weather_decisions ORDER BY id DESC LIMIT 1"
+            "SELECT decision, coefficient, reason, data_sources FROM weather_decisions ORDER BY id DESC LIMIT 1"
         ).fetchone()
     assert decision == "skip"
     assert coefficient == 0
@@ -549,7 +563,9 @@ def test_rain_monitor_swaps_only_after_successful_connack_and_suback() -> None:
     staged_client.subscribe.assert_called_once_with("/rain", qos=0)
     old_client.loop_stop.assert_called_once_with()
     old_client.disconnect.assert_called_once_with()
-    assert monitor.is_rain is True
+    assert monitor.sensor_online is True
+    assert monitor.is_rain is None
+    assert monitor.is_group_blocked(1) is True
 
 
 def test_failed_suback_preserves_previous_rain_generation() -> None:
@@ -801,3 +817,330 @@ def test_rain_monitor_rejects_unknown_tls_version_before_connect() -> None:
     client.tls_set.assert_not_called()
     client.connect_async.assert_not_called()
     client.connect.assert_not_called()
+
+
+def test_candidate_disconnect_between_final_validation_and_swap_preserves_live_generation() -> None:
+    monitor = RainMonitor()
+    monitor._persisted_state_loaded = True
+    old_client = MagicMock()
+    monitor.client = old_client
+    monitor._cfg = {"enabled": True, "topic": "/old", "server_id": 1, "type": "NO"}
+    monitor.topic = "/old"
+    monitor.server_id = 1
+    monitor._generation = 4
+    candidate = _ready_mqtt_client()
+    server = _tls_server(tls_enabled=0, port=1883)
+    fake_db = MagicMock()
+    fake_db.get_mqtt_server.return_value = server
+    requested = (True, "/new", "NO", 1)
+
+    def disconnect_before_swap():
+        candidate.on_disconnect(candidate, None, None, 0, None)
+        return [1]
+
+    with (
+        patch("services.monitors.rain_monitor.db", fake_db),
+        patch("services.monitors.rain_monitor.mqtt", _mqtt_module(candidate)),
+        patch("services.monitors.rain_monitor._strict_persisted_rain_fingerprint", return_value=requested),
+        patch("services.monitors.rain_monitor._strict_target_groups", side_effect=disconnect_before_swap),
+    ):
+        assert monitor.reconfigure({"enabled": True, "topic": "/new", "server_id": 1, "type": "NO"}) is False
+
+    assert monitor.client is old_client
+    assert monitor.topic == "/old"
+    assert monitor._generation == 4
+    old_client.disconnect.assert_not_called()
+    candidate.disconnect.assert_called_once_with()
+
+
+def test_rain_reconfigure_final_persisted_cas_rejects_stale_candidate() -> None:
+    monitor = RainMonitor()
+    monitor._persisted_state_loaded = True
+    old_client = MagicMock()
+    monitor.client = old_client
+    monitor._cfg = {"enabled": True, "topic": "/old", "server_id": 1, "type": "NO"}
+    monitor.topic = "/old"
+    monitor.server_id = 1
+    candidate = _ready_mqtt_client()
+    server = _tls_server(tls_enabled=0, port=1883)
+    fake_db = MagicMock()
+    fake_db.get_mqtt_server.return_value = server
+    requested = (True, "/new", "NO", 1)
+    superseding = (True, "/newer", "NO", 1)
+
+    with (
+        patch("services.monitors.rain_monitor.db", fake_db),
+        patch("services.monitors.rain_monitor.mqtt", _mqtt_module(candidate)),
+        patch(
+            "services.monitors.rain_monitor._strict_persisted_rain_fingerprint",
+            side_effect=[requested, superseding],
+        ),
+    ):
+        assert monitor.reconfigure({"enabled": True, "topic": "/new", "server_id": 1, "type": "NO"}) is False
+
+    assert monitor.client is old_client
+    assert monitor.topic == "/old"
+    old_client.disconnect.assert_not_called()
+    candidate.disconnect.assert_called_once_with()
+
+
+def test_public_rain_config_lock_is_process_wide_and_reentrant() -> None:
+    from services.monitors import rain_config_transaction_lock
+
+    first = rain_config_transaction_lock()
+    second = rain_config_transaction_lock()
+    assert first is second
+    assert first.acquire(blocking=False) is True
+    try:
+        assert first.acquire(blocking=False) is True
+        first.release()
+    finally:
+        first.release()
+
+
+def test_rain_gate_requires_suback_and_fresh_payload_after_reconnect(test_db) -> None:
+    server = test_db.create_mqtt_server({"name": "rain", "host": "127.0.0.1", "port": 1883, "enabled": 1})
+    assert server is not None
+    config = {"enabled": True, "topic": "/rain", "server_id": int(server["id"]), "type": "NO"}
+    assert test_db.set_rain_config(config)
+    assert test_db.set_group_use_rain(1, True)
+    client = _ready_mqtt_client()
+    monitor = RainMonitor()
+
+    with (
+        patch("services.monitors.rain_monitor.db", test_db),
+        patch("services.monitors.rain_monitor.mqtt", _mqtt_module(client)),
+    ):
+        assert monitor.reconfigure(config) is True
+        assert monitor.sensor_online is True
+        assert monitor.is_rain is None
+        assert monitor.is_group_blocked(1) is True
+
+        client.on_disconnect(client, None, None, 0, None)
+        assert monitor.sensor_online is False
+        assert monitor.is_rain is None
+        assert monitor.is_group_blocked(1) is True
+
+        client.on_connect(client, None, None, 0, None)
+        assert monitor.sensor_online is True
+        assert monitor.is_rain is None
+        assert monitor.is_group_blocked(1) is True
+
+        client.on_message(client, None, SimpleNamespace(payload=b"0"))
+        assert monitor.sensor_online is True
+        assert monitor.is_rain is False
+        assert monitor.is_group_blocked(1) is False
+
+
+def test_explicit_rain_disable_atomically_clears_gate_truth_and_owned_postpone(test_db) -> None:
+    rain_zone = test_db.create_zone({"name": "rain", "duration": 10, "group_id": 1})
+    manual_zone = test_db.create_zone({"name": "manual", "duration": 10, "group_id": 1})
+    assert test_db.update_zone_postpone(rain_zone["id"], "2099-12-31 23:59:59", "rain")
+    assert test_db.update_zone_postpone(manual_zone["id"], "2099-12-31 23:59:59", "manual")
+    assert test_db.set_setting_value("rain.active", "1")
+    disabled = {"enabled": False, "topic": "", "server_id": None, "type": "NO"}
+    assert test_db.set_rain_config(disabled)
+    monitor = RainMonitor()
+    monitor.client = MagicMock()
+    monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
+    monitor.is_rain = True
+    monitor._blocked_groups = {1}
+
+    with patch("services.monitors.rain_monitor.db", test_db):
+        assert monitor.reconfigure(disabled) is True
+
+    assert test_db.get_setting_value("rain.active") == "0"
+    assert test_db.get_zone(rain_zone["id"])["postpone_reason"] is None
+    assert test_db.get_zone(manual_zone["id"])["postpone_reason"] == "manual"
+    assert monitor.client is None
+    assert monitor.is_rain is None
+    assert monitor.sensor_online is False
+    assert monitor.is_group_blocked(1) is False
+
+
+def test_failed_atomic_disable_cleanup_preserves_old_runtime_and_gate(test_db) -> None:
+    zone = test_db.create_zone({"name": "rain", "duration": 10, "group_id": 1})
+    assert test_db.update_zone_postpone(zone["id"], "2099-12-31 23:59:59", "rain")
+    assert test_db.set_setting_value("rain.active", "1")
+    disabled = {"enabled": False, "topic": "", "server_id": None, "type": "NO"}
+    assert test_db.set_rain_config(disabled)
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER reject_rain_cleanup
+            BEFORE UPDATE ON zones
+            WHEN OLD.postpone_reason = 'rain'
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated cleanup failure');
+            END
+            """
+        )
+        conn.commit()
+
+    monitor = RainMonitor()
+    old_client = MagicMock()
+    monitor.client = old_client
+    monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
+    monitor.is_rain = True
+    monitor._blocked_groups = {1}
+
+    with patch("services.monitors.rain_monitor.db", test_db):
+        assert monitor.reconfigure(disabled) is False
+
+    assert monitor.client is old_client
+    assert monitor.is_rain is True
+    assert test_db.get_setting_value("rain.active") == "1"
+    assert test_db.get_zone(zone["id"])["postpone_reason"] == "rain"
+    old_client.disconnect.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "invalid_result",
+    [None, True, {}, {"success": True}, {"success": True, "unresolved": [7]}],
+)
+def test_rain_stop_rejects_non_structured_or_incomplete_acknowledgement(invalid_result) -> None:
+    monitor = RainMonitor()
+    scheduler = MagicMock()
+    scheduler.cancel_group_jobs.return_value = invalid_result
+
+    with (
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_all_in_group", return_value=invalid_result),
+    ):
+        assert monitor._cancel_and_stop_group(1) is False
+
+
+def test_failed_rain_enforcement_does_not_deduplicate_same_payload() -> None:
+    monitor = RainMonitor()
+    monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
+
+    with patch.object(monitor, "_on_rain_start", return_value=False) as start:
+        assert monitor._handle_payload("1") is False
+        assert monitor._handle_payload("1") is False
+
+    assert start.call_count == 2
+    assert monitor._last_sensor_value is None
+
+
+def test_corrupt_persisted_rain_state_is_unknown_and_recovers_on_fresh_dry(test_db) -> None:
+    assert test_db.set_group_use_rain(1, True)
+    assert test_db.set_rain_config({"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"})
+    assert test_db.set_setting_value("rain.active", "corrupt")
+    monitor = RainMonitor()
+
+    with patch("services.monitors.rain_monitor.db", test_db):
+        assert monitor.is_group_blocked(1) is True
+        assert monitor.is_rain is None
+        assert monitor._handle_payload("0") is True
+
+    assert test_db.get_setting_value("rain.active") == "0"
+    assert monitor.is_rain is False
+    assert monitor.is_group_blocked(1) is False
+
+
+def test_enforce_group_claims_rain_postpone_and_stops_immediately(test_db) -> None:
+    zone = test_db.create_zone({"name": "newly-protected", "duration": 10, "group_id": 1})
+    assert test_db.set_group_use_rain(1, True)
+    monitor = RainMonitor()
+    monitor._persisted_state_loaded = True
+    monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
+    monitor.is_rain = True
+    scheduler = MagicMock()
+    scheduler.cancel_group_jobs.return_value = {"success": True, "unresolved": []}
+
+    with (
+        patch("services.monitors.rain_monitor.db", test_db),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert monitor.enforce_group(1) is True
+
+    assert monitor.is_group_blocked(1) is True
+    assert test_db.get_zone(zone["id"])["postpone_reason"] == "rain"
+    scheduler.cancel_group_jobs.assert_called_once_with(1, master_close_immediately=True)
+
+
+def test_unknown_rain_state_stops_protected_group_and_keeps_gate_closed(test_db) -> None:
+    assert test_db.set_group_use_rain(1, True)
+    monitor = RainMonitor()
+    monitor._persisted_state_loaded = True
+    monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
+    monitor.sensor_online = True
+    monitor.is_rain = False
+    scheduler = MagicMock()
+    scheduler.cancel_group_jobs.return_value = {"success": True, "unresolved": []}
+
+    with (
+        patch("services.monitors.rain_monitor.db", test_db),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        monitor._enter_unknown_state(online=False)
+
+    assert monitor.sensor_online is False
+    assert monitor.is_rain is None
+    assert monitor.is_group_blocked(1) is True
+    scheduler.cancel_group_jobs.assert_called_once_with(1, master_close_immediately=True)
+
+
+@pytest.mark.parametrize(
+    ("factor_key", "weather", "factor_name"),
+    [
+        ("weather.factor.rain", _weather(precipitation_24h=9.0), "rain"),
+        ("weather.factor.freeze", _weather(temperature=-3.0), "freeze"),
+        ("weather.factor.wind", _weather(wind_speed=8.0), "wind"),
+    ],
+)
+def test_hard_safety_is_not_disableable_by_soft_factor_toggle(test_db, factor_key, weather, factor_name) -> None:
+    adj = _enable_weather(test_db)
+    assert test_db.set_setting_value(factor_key, "0")
+
+    skip = adj.should_skip(weather=weather)
+    coefficient = adj.get_coefficient(weather=weather)
+    factor = adj.get_factors_detail(weather)[factor_name]
+
+    assert skip["skip"] is True
+    assert coefficient == 0
+    assert factor["enabled"] is False
+    assert factor["status"] == "danger"
+
+
+def test_extended_weather_decisions_share_one_effective_snapshot(test_db) -> None:
+    raw = _weather()
+    raw.timestamp = datetime.now(tz=UTC).timestamp()
+    raw.weather_code = 0
+    raw.hourly_forecast_24h = []
+    raw.daily_forecast = []
+    raw.sunrise = None
+    raw.sunset = None
+    effective = _weather(temperature=-4.0)
+    effective.timestamp = raw.timestamp
+    effective.weather_code = raw.weather_code
+    effective.hourly_forecast_24h = raw.hourly_forecast_24h
+    effective.daily_forecast = raw.daily_forecast
+    effective.sunrise = raw.sunrise
+    effective.sunset = raw.sunset
+    effective.temperature_source = "local"
+    effective.humidity_source = "api"
+    service = WeatherService(test_db.db_path)
+
+    with (
+        patch.object(service, "get_weather", return_value=raw) as get_weather,
+        patch.object(WeatherAdjustment, "_select_input_source", autospec=True, return_value=effective) as select,
+        patch.object(WeatherAdjustment, "get_coefficient", autospec=True, return_value=0) as coefficient,
+        patch.object(
+            WeatherAdjustment,
+            "should_skip",
+            autospec=True,
+            return_value={"skip": True, "reason": "freeze", "details": {"type": "freeze"}},
+        ) as should_skip,
+        patch.object(WeatherAdjustment, "get_factors_detail", autospec=True, return_value={}) as factors,
+    ):
+        payload = service.get_weather_extended()
+
+    get_weather.assert_called_once_with()
+    select.assert_called_once()
+    assert coefficient.call_args.kwargs["weather"] is effective
+    assert should_skip.call_args.kwargs["weather"] is effective
+    assert factors.call_args.args[1] is effective
+    assert payload["temperature"] == -4.0
+    assert payload["adjustment"]["coefficient"] == 0
+    assert payload["adjustment"]["skip"] is True
