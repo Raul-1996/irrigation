@@ -6,9 +6,33 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
+
+import pytest
+from sqlalchemy.exc import SQLAlchemyError
+
+
+@pytest.fixture(autouse=True)
+def _isolate_history_timezone():
+    previous_wb_tz = os.environ.get("WB_TZ")
+    previous_process_tz = os.environ.get("TZ")
+    os.environ["WB_TZ"] = "UTC"
+    os.environ["TZ"] = "UTC"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous_wb_tz is None:
+            os.environ.pop("WB_TZ", None)
+        else:
+            os.environ["WB_TZ"] = previous_wb_tz
+        if previous_process_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_process_tz
+        time.tzset()
 
 
 @contextmanager
@@ -28,11 +52,13 @@ def _system_timezone(name: str):
 
 
 def _insert_local_run(app, zone_id: int, start: str, end: str) -> None:
+    created_at = datetime.now(UTC).isoformat()
     with sqlite3.connect(app.db.db_path) as conn:
         conn.execute(
             "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
-            "start_monotonic, status, source) VALUES (?, 1, ?, ?, 0.0, 'ok', 'manual')",
-            (zone_id, start, end),
+            "start_monotonic, status, source, created_at) "
+            "VALUES (?, 1, ?, ?, 0.0, 'ok', 'manual', ?)",
+            (zone_id, start, end, created_at),
         )
         conn.commit()
 
@@ -64,8 +90,10 @@ def test_first_local_day_is_not_dropped_by_sql_window(app, client):
         assert first_bucket["actual_minutes"] == 15
 
 
-def test_api_adds_controller_offset_for_remote_browser_rendering(app, client):
+def test_api_adds_controller_offset_for_remote_browser_rendering(app, client, monkeypatch):
     """Naive storage becomes RFC 3339 without changing its controller wall time."""
+    monkeypatch.setenv("WB_TZ", "Asia/Bishkek")
+    monkeypatch.setenv("TZ", "Asia/Bishkek")
     with _system_timezone("Asia/Bishkek"):
         zone = _create_zone(app, "history-explicit-offset")
         today: date = datetime.now().date()
@@ -212,6 +240,57 @@ def test_interval_occurrences_fail_closed_without_a_valid_slot(monkeypatch):
     assert result == {}
 
 
+@pytest.mark.parametrize(
+    ("failure_stage", "backend_error"),
+    [
+        ("anchors", sqlite3.OperationalError("database is locked")),
+        ("occurrences", SQLAlchemyError("job store unavailable")),
+    ],
+)
+def test_interval_metadata_backend_errors_fail_closed(
+    app,
+    client,
+    monkeypatch,
+    failure_stage,
+    backend_error,
+):
+    controller_now = datetime(2030, 5, 4, 12, 0, tzinfo=ZoneInfo("UTC"))
+    zone = _create_zone(app, f"history-interval-{failure_stage}")
+    app.db.create_program(
+        {
+            "name": f"Interval {failure_stage} failure",
+            "time": "07:00",
+            "days": [],
+            "zones": [zone["id"]],
+            "schedule_type": "interval",
+            "interval_days": 3,
+            "enabled": True,
+        }
+    )
+
+    class FailingScheduler:
+        def get_program_interval_anchors(self, _program_id):
+            if failure_stage == "anchors":
+                raise backend_error
+            return {"main": controller_now}
+
+        def get_program_occurrences(self, _program_id, _start, _end, *, limit):
+            assert limit == 512
+            if failure_stage == "occurrences":
+                raise backend_error
+            return {"main": []}
+
+    monkeypatch.setattr("irrigation_scheduler.get_scheduler", lambda: FailingScheduler())
+
+    with patch("routes.zones_history_api._controller_now", return_value=controller_now):
+        response = client.get(f"/api/zones/{zone['id']}/history?days=7")
+
+    assert response.status_code == 200
+    summary = response.get_json()["summary"]
+    assert summary["plan_available"] is False
+    assert summary["saved_minutes"] is None
+
+
 def test_dst_fold_runs_sort_and_measure_on_utc_timeline(app, client, monkeypatch):
     controller_tz = ZoneInfo("America/New_York")
     controller_now = datetime(2026, 11, 1, 12, 0, tzinfo=controller_tz)
@@ -268,3 +347,7 @@ def test_naive_dst_fold_rows_sort_by_utc_creation_timeline(app, client, monkeypa
         payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
 
     assert [run["id"] for run in payload["runs"]] == [second, first]
+    assert [run["start_utc"] for run in payload["runs"]] == [
+        "2026-11-01T01:15:00-05:00",
+        "2026-11-01T01:45:00-04:00",
+    ]

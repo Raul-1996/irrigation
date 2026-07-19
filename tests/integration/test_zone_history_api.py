@@ -12,6 +12,12 @@ import pytest
 os.environ["TESTING"] = "1"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_history_timezone(monkeypatch):
+    monkeypatch.setenv("WB_TZ", "UTC")
+    monkeypatch.setenv("TZ", "UTC")
+
+
 def _utc_iso_now_minus(minutes: int, now_utc: datetime | None = None) -> str:
     """ISO-8601 UTC string for ``now - minutes``."""
     t = (now_utc or datetime.now(UTC)) - timedelta(minutes=minutes)
@@ -36,9 +42,19 @@ def _create_run(
     with sqlite3.connect(app.db.db_path) as conn:
         cur = conn.execute(
             "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
-            "start_monotonic, total_liters, status, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (zone_id, group_id, start, end, 0.0, liters, status, source),
+            "start_monotonic, total_liters, status, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                zone_id,
+                group_id,
+                start,
+                end,
+                0.0,
+                liters,
+                status,
+                source,
+                now_utc.isoformat(),
+            ),
         )
         conn.commit()
         return cur.lastrowid
@@ -111,7 +127,7 @@ class TestPerZoneJson:
         data = resp.get_json()
         # Runs are bucketed by their local start date, which may be yesterday
         # when this test executes shortly after local midnight.
-        run_date_iso = (now_utc - timedelta(minutes=45)).astimezone().date().isoformat()
+        run_date_iso = (now_utc - timedelta(minutes=45)).date().isoformat()
         run_day = next(d for d in data["daily"] if d["date"] == run_date_iso)
         assert run_day["actual_minutes"] >= 14
         assert run_day["runs"] == 1
@@ -140,22 +156,24 @@ class TestPerZoneJson:
         with sqlite3.connect(app.db.db_path) as conn:
             conn.execute(
                 "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
-                "start_monotonic, total_liters, status, source, confirmed) "
-                "VALUES (?, 1, ?, ?, 0.0, 20.0, 'aborted', 'manual', 0)",
+                "start_monotonic, total_liters, status, source, confirmed, created_at) "
+                "VALUES (?, 1, ?, ?, 0.0, 20.0, 'aborted', 'manual', 0, ?)",
                 (
                     seeded_zone["id"],
                     _utc_iso_now_minus(30, now),
                     _utc_iso_now_minus(20, now),
+                    now.isoformat(),
                 ),
             )
             conn.execute(
                 "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
-                "start_monotonic, total_liters, status, source, confirmed) "
-                "VALUES (?, 1, ?, ?, 0.0, 5.0, 'aborted', 'manual', 1)",
+                "start_monotonic, total_liters, status, source, confirmed, created_at) "
+                "VALUES (?, 1, ?, ?, 0.0, 5.0, 'aborted', 'manual', 1, ?)",
                 (
                     seeded_zone["id"],
                     _utc_iso_now_minus(15, now),
                     _utc_iso_now_minus(10, now),
+                    now.isoformat(),
                 ),
             )
             conn.commit()
@@ -177,9 +195,9 @@ class TestPerZoneJson:
         with sqlite3.connect(app.db.db_path) as conn:
             conn.execute(
                 "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
-                "start_monotonic, total_liters, status, source, confirmed) "
-                "VALUES (?, 1, ?, NULL, 0.0, 12.0, NULL, 'manual', 0)",
-                (seeded_zone["id"], _utc_iso_now_minus(10, now)),
+                "start_monotonic, total_liters, status, source, confirmed, created_at) "
+                "VALUES (?, 1, ?, NULL, 0.0, 12.0, NULL, 'manual', 0, ?)",
+                (seeded_zone["id"], _utc_iso_now_minus(10, now), now.isoformat()),
             )
             conn.commit()
 
@@ -190,6 +208,40 @@ class TestPerZoneJson:
         assert data["summary"]["total_runs"] == 0
         assert data["summary"]["total_minutes"] == 0
         assert data["summary"]["total_liters"] is None
+
+    def test_confirmed_open_run_suppresses_savings_until_it_closes(self, app, client, seeded_zone):
+        fixed_now = datetime(2030, 5, 4, 12, 0, tzinfo=UTC)
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, total_liters, status, source, confirmed, created_at) "
+                "VALUES (?, 1, ?, NULL, 100.0, 12.0, NULL, 'manual', 1, ?)",
+                (
+                    seeded_zone["id"],
+                    _utc_iso_now_minus(10, fixed_now),
+                    fixed_now.isoformat(),
+                ),
+            )
+            conn.commit()
+        app.db.create_program(
+            {
+                "name": "Completed morning slot",
+                "time": "07:00",
+                "days": [fixed_now.weekday()],
+                "zones": [seeded_zone["id"]],
+                "schedule_type": "weekdays",
+                "enabled": True,
+            }
+        )
+
+        with patch("routes.zones_history_api._controller_now", return_value=fixed_now):
+            data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
+
+        assert data["runs"][0]["counts_as_actual"] is True
+        assert data["summary"]["total_runs"] == 1
+        assert data["summary"]["savings_available"] is False
+        assert data["summary"]["saved_minutes"] is None
+        assert data["summary"]["savings_unavailable_reason"] == "actual_run_open"
 
     def test_has_plan_false_when_no_active_program(self, app, client, seeded_zone):
         data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
@@ -326,6 +378,30 @@ class TestGlobalJson:
         assert new_group["summary"]["total_runs"] == 0
         assert new_group["runs"] == []
 
+    def test_group_cohort_detects_selected_zone_run_from_another_group(self, app, client):
+        fixed_now = datetime(2030, 5, 4, 12, 0, tzinfo=UTC)
+        zone = app.db.create_zone({"name": "Moved in", "duration": 10, "group_id": 1, "topic": "/x/moved-in"})
+        _create_run(app, zone["id"], 2, 60, 50, status="ok", now_utc=fixed_now)
+        app.db.create_program(
+            {
+                "name": "Current group 1 plan",
+                "time": "07:00",
+                "days": [fixed_now.weekday()],
+                "zones": [zone["id"]],
+                "schedule_type": "weekdays",
+                "enabled": True,
+            }
+        )
+
+        with patch("routes.zones_history_api._controller_now", return_value=fixed_now):
+            data = client.get("/api/zones/history?days=7&group_id=1").get_json()
+
+        assert data["runs"] == []
+        assert data["summary"]["cohort_matches_current"] is False
+        assert data["summary"]["savings_available"] is False
+        assert data["summary"]["saved_minutes"] is None
+        assert data["summary"]["savings_unavailable_reason"] == "historical_zone_cohort_changed"
+
     def test_legacy_reused_id_runs_are_not_named_after_current_zone(self, app, client):
         """Seed a pre-durable-ID collision without exercising supported CRUD reuse."""
         current = app.db.create_zone(
@@ -342,8 +418,8 @@ class TestGlobalJson:
             ):
                 conn.execute(
                     "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
-                    "start_monotonic, status, source, confirmed, created_at) "
-                    "VALUES (?, 1, ?, ?, 0.0, 'ok', 'manual', 0, ?)",
+                    "start_monotonic, total_liters, status, source, confirmed, created_at) "
+                    "VALUES (?, 1, ?, ?, 0.0, 6.0, 'ok', 'manual', 0, ?)",
                     (
                         current["id"],
                         _utc_iso_now_minus(start_min, now),
@@ -359,6 +435,9 @@ class TestGlobalJson:
         assert all(run["zone_id"] == current["id"] for run in payload["runs"])
         assert all(run["zone_name"] == "Удалённая зона" for run in payload["runs"])
         assert all(run["zone_deleted"] is True for run in payload["runs"])
+        assert payload["summary"]["total_runs"] == 0
+        assert payload["summary"]["total_minutes"] == 0
+        assert payload["summary"]["total_liters"] is None
 
 
 class TestCsv:
@@ -382,7 +461,15 @@ class TestCsv:
 
     @pytest.mark.parametrize(
         "dangerous_name",
-        ["=1+1", "+1+1", "-1+1", "@SUM(A1)", "\t=1+1", "\r=1+1"],
+        [
+            '=WEBSERVICE("https://example.invalid")',
+            "+1+1",
+            "-1+1",
+            "@SUM(A1)",
+            "\t=1+1",
+            "\r=1+1",
+            " \t=1+1",
+        ],
     )
     def test_csv_neutralizes_spreadsheet_formula_prefixes(self, app, client, dangerous_name):
         zone = app.db.create_zone(

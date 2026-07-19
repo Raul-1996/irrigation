@@ -3,6 +3,8 @@
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import services.history_calc as history_calc
 from services.history_calc import (
     _program_runs_on,
@@ -18,6 +20,12 @@ MON = date(2026, 5, 4)
 TUE = date(2026, 5, 5)
 WED = date(2026, 5, 6)
 SUN = date(2026, 5, 10)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_history_timezone(monkeypatch):
+    monkeypatch.setenv("WB_TZ", "UTC")
+    monkeypatch.setenv("TZ", "UTC")
 
 
 def _prog(**kw):
@@ -213,27 +221,26 @@ class TestCalculateActual:
     def test_one_run_one_day(self):
         # Run from 2026-05-04 07:00 to 07:15 UTC (15 min)
         runs = [self._run("2026-05-04T07:00:00Z", "2026-05-04T07:15:00Z")]
-        # Use the local date that 07:00 UTC falls into for cross-TZ safety:
-        local_d = datetime.fromisoformat("2026-05-04T07:00:00+00:00").astimezone().date()
-        minutes, counts = calculate_actual_for_zone(runs, [local_d, local_d + timedelta(days=1)])
-        assert minutes[local_d] == 15
-        assert counts[local_d] == 1
+        minutes, counts = calculate_actual_for_zone(
+            runs,
+            [MON, TUE],
+            controller_tz=ZoneInfo("UTC"),
+        )
+        assert minutes[MON] == 15
+        assert counts[MON] == 1
 
     def test_multiple_runs_same_day(self):
         runs = [
             self._run("2026-05-04T07:00:00Z", "2026-05-04T07:10:00Z"),
             self._run("2026-05-04T18:00:00Z", "2026-05-04T18:20:00Z"),
         ]
-        local_d = datetime.fromisoformat("2026-05-04T07:00:00+00:00").astimezone().date()
-        # Second run might roll over to next day in some TZs; pick both.
-        local_d2 = datetime.fromisoformat("2026-05-04T18:00:00+00:00").astimezone().date()
-        minutes, counts = calculate_actual_for_zone(runs, [local_d, local_d2])
-        if local_d == local_d2:
-            assert minutes[local_d] == 30
-            assert counts[local_d] == 2
-        else:
-            assert minutes[local_d] == 10
-            assert minutes[local_d2] == 20
+        minutes, counts = calculate_actual_for_zone(
+            runs,
+            [MON],
+            controller_tz=ZoneInfo("UTC"),
+        )
+        assert minutes[MON] == 30
+        assert counts[MON] == 2
 
     def test_cross_midnight_actual_minutes_split_by_controller_date(self):
         runs = [
@@ -262,10 +269,13 @@ class TestCalculateActual:
                 "confirmed": 0,
             }
         ]
-        local_d = datetime.fromisoformat("2026-05-04T07:00:00+00:00").astimezone().date()
-        minutes, counts = calculate_actual_for_zone(runs, [local_d])
-        assert minutes[local_d] == 0
-        assert counts[local_d] == 0
+        minutes, counts = calculate_actual_for_zone(
+            runs,
+            [MON],
+            controller_tz=ZoneInfo("UTC"),
+        )
+        assert minutes[MON] == 0
+        assert counts[MON] == 0
 
     def test_elapsed_duration_uses_utc_timeline_across_dst_fold(self):
         controller_tz = ZoneInfo("America/New_York")

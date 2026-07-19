@@ -41,7 +41,8 @@ from services.history_calc import (
 zones_history_api_bp = Blueprint("zones_history_api", __name__)
 
 ALLOWED_DAYS = {7, 30}
-CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+CSV_FORMULA_SIGILS = frozenset("=+-@")
+CSV_FORMULA_LEADING_CHARS = "".join(chr(codepoint) for codepoint in range(0x21))
 
 
 # ---- helpers ----
@@ -78,8 +79,10 @@ def _iso_local(d: date) -> str:
 
 def _csv_safe_cell(value: Any) -> Any:
     """Prevent spreadsheet applications from executing persisted text."""
-    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
-        return f"'{value}"
+    if isinstance(value, str):
+        normalized = value.lstrip(CSV_FORMULA_LEADING_CHARS)
+        if normalized and normalized[0] in CSV_FORMULA_SIGILS:
+            return f"'{value}"
     return value
 
 
@@ -93,21 +96,78 @@ def _sqlite_utc_datetime(raw: Any) -> datetime | None:
     return value.astimezone(UTC) if value is not None else None
 
 
-def _run_sort_instant(run: dict[str, Any], controller_tz: tzinfo, start_local: datetime) -> datetime:
-    """Choose an unambiguous UTC sort instant for a persisted run."""
+def _raw_run_datetime(raw: Any) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(str(run.get("start_utc")).replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if raw else None
     except (TypeError, ValueError):
-        parsed = None
-    if parsed is not None and parsed.tzinfo is not None:
-        return parsed.astimezone(UTC)
-    if parsed is not None:
-        fold_zero = parsed.replace(tzinfo=controller_tz, fold=0)
-        fold_one = parsed.replace(tzinfo=controller_tz, fold=1)
-        if fold_zero.utcoffset() != fold_one.utcoffset():
-            created_at = _sqlite_utc_datetime(run.get("created_at"))
-            if created_at is not None:
-                return created_at
+        return None
+
+
+def _ambiguous_local_candidates(parsed: datetime, controller_tz: tzinfo) -> tuple[datetime, datetime] | None:
+    if parsed.tzinfo is not None:
+        return None
+    fold_zero = parsed.replace(tzinfo=controller_tz, fold=0)
+    fold_one = parsed.replace(tzinfo=controller_tz, fold=1)
+    if fold_zero.utcoffset() == fold_one.utcoffset():
+        return None
+    return fold_zero, fold_one
+
+
+def _run_start_local(run: dict[str, Any], controller_tz: tzinfo) -> datetime | None:
+    """Resolve an ambiguous naive start with its UTC row-creation instant."""
+    parsed = _raw_run_datetime(run.get("start_utc"))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(controller_tz)
+    candidates = _ambiguous_local_candidates(parsed, controller_tz)
+    created_at = _sqlite_utc_datetime(run.get("created_at"))
+    if candidates is None or created_at is None:
+        return parsed.replace(tzinfo=controller_tz)
+    return min(
+        candidates,
+        key=lambda candidate: abs((candidate.astimezone(UTC) - created_at).total_seconds()),
+    )
+
+
+def _run_end_local(
+    run: dict[str, Any],
+    controller_tz: tzinfo,
+    start_local: datetime | None,
+) -> datetime | None:
+    parsed = _raw_run_datetime(run.get("end_utc"))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(controller_tz)
+    candidates = _ambiguous_local_candidates(parsed, controller_tz)
+    if candidates is None:
+        return parsed.replace(tzinfo=controller_tz)
+
+    target_utc = None
+    if start_local is not None:
+        try:
+            monotonic_delta = float(run.get("end_monotonic")) - float(run.get("start_monotonic"))
+        except (TypeError, ValueError):
+            monotonic_delta = 0.0
+        if monotonic_delta > 0:
+            target_utc = start_local.astimezone(UTC) + timedelta(seconds=monotonic_delta)
+    if target_utc is not None:
+        return min(
+            candidates,
+            key=lambda candidate: abs((candidate.astimezone(UTC) - target_utc).total_seconds()),
+        )
+    if start_local is not None:
+        later_candidates = [
+            candidate for candidate in candidates if candidate.astimezone(UTC) > start_local.astimezone(UTC)
+        ]
+        if later_candidates:
+            return min(later_candidates, key=lambda candidate: candidate.astimezone(UTC))
+    return candidates[0]
+
+
+def _run_sort_instant(start_local: datetime) -> datetime:
+    """Sort by the same unambiguous instant exposed by serialization."""
     return start_local.astimezone(UTC)
 
 
@@ -166,15 +226,15 @@ def _fetch_runs(
         ).astimezone(UTC)
         for row in rows:
             run = dict(row)
-            start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
-            end_local = parse_controller_datetime(run.get("end_utc"), controller_tz)
+            start_local = _run_start_local(run, controller_tz)
+            end_local = _run_end_local(run, controller_tz, start_local)
             overlaps = (
                 start_local is not None
                 and start_local.astimezone(UTC) < range_end
                 and (end_local is None or end_local.astimezone(UTC) > range_start)
             )
             if overlaps:
-                dated_rows.append((_run_sort_instant(run, controller_tz, start_local), run))
+                dated_rows.append((_run_sort_instant(start_local), run))
         dated_rows.sort(key=lambda item: item[0], reverse=True)
         return [run for _, run in dated_rows]
     except sqlite3.Error:
@@ -258,7 +318,9 @@ def _load_interval_occurrences(
         occurrences_getter = getattr(scheduler, "get_program_occurrences", None)
         if not callable(anchors_getter) or not callable(occurrences_getter):
             return {}
-    except (ImportError, RuntimeError, AttributeError):
+    except Exception:
+        # History is informational. A missing/unhealthy scheduler backend must
+        # make its interval plan unavailable, never fail the HTTP request.
         return {}
 
     result: dict[int, list[datetime]] = {}
@@ -279,7 +341,10 @@ def _load_interval_occurrences(
                     if occurrence is not None:
                         occurrences.append(occurrence)
             result[program_id] = sorted(set(occurrences), key=lambda value: value.astimezone(UTC))
-        except (KeyError, OSError, RuntimeError, TypeError, ValueError, AttributeError):
+        except Exception:
+            # APScheduler job stores may surface sqlite3, SQLAlchemy, or
+            # backend-specific errors. Absence of trustworthy metadata is an
+            # unavailable plan, not permission to invent an anchor.
             continue
     return result
 
@@ -305,16 +370,44 @@ def _cohort_matches_current(runs: list[dict[str, Any]], current_zone_ids: set[in
     return all(not run.get("zone_deleted") and int(run.get("zone_id") or 0) in current_zone_ids for run in runs)
 
 
+def _cohort_matches_group_filter(
+    selected_zone_runs: list[dict[str, Any]],
+    *,
+    group_id: int | None = None,
+    exclude_group_id: int | None = None,
+) -> bool:
+    for run in selected_zone_runs:
+        run_group_id = int(run.get("group_id") or 0)
+        if group_id is not None and run_group_id != int(group_id):
+            return False
+        if exclude_group_id is not None and run_group_id == int(exclude_group_id):
+            return False
+    return True
+
+
+def _actuals_are_complete(runs: list[dict[str, Any]], controller_tz: tzinfo) -> bool:
+    for run in runs:
+        if not run_counts_as_actual(run):
+            continue
+        start_local = _run_start_local(run, controller_tz)
+        end_local = _run_end_local(run, controller_tz, start_local)
+        if start_local is None or end_local is None or end_local.astimezone(UTC) <= start_local.astimezone(UTC):
+            return False
+    return True
+
+
 def _apply_summary_availability(
     summary: dict[str, Any],
     *,
     has_plan: bool,
     plan_available: bool,
     cohort_matches_current: bool,
+    actuals_complete: bool,
 ) -> None:
-    savings_available = bool(has_plan and plan_available and cohort_matches_current)
+    savings_available = bool(has_plan and plan_available and cohort_matches_current and actuals_complete)
     summary["plan_available"] = bool(plan_available)
     summary["cohort_matches_current"] = bool(cohort_matches_current)
+    summary["actuals_complete"] = bool(actuals_complete)
     summary["savings_available"] = savings_available
     summary["savings_unavailable_reason"] = None
     if has_plan and not plan_available:
@@ -324,6 +417,9 @@ def _apply_summary_availability(
     elif has_plan and not cohort_matches_current:
         summary["saved_minutes"] = None
         summary["savings_unavailable_reason"] = "historical_zone_cohort_changed"
+    elif has_plan and not actuals_complete:
+        summary["saved_minutes"] = None
+        summary["savings_unavailable_reason"] = "actual_run_open"
 
 
 def _zone_identity_for_run(
@@ -346,10 +442,19 @@ def _zone_identity_for_run(
 
     # SQLite timestamps have one-second precision. Resolve equal timestamps
     # with the physical start invariant: a run cannot predate its own zone.
-    start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
+    start_local = _run_start_local(run, controller_tz)
     if start_local is not None and zone_created is not None and start_local.astimezone(UTC) < zone_created:
         return {}, True
     return zone, False
+
+
+def _current_identity_runs(
+    runs: list[dict[str, Any]],
+    zone_lookup: dict[int, dict[str, Any]],
+    controller_tz: tzinfo,
+) -> list[dict[str, Any]]:
+    """Exclude deleted/legacy predecessors from current-zone aggregates."""
+    return [run for run in runs if not _zone_identity_for_run(run, zone_lookup, controller_tz)[1]]
 
 
 def _serialize_run(
@@ -358,8 +463,8 @@ def _serialize_run(
     controller_tz: tzinfo,
 ) -> dict[str, Any]:
     zone, zone_deleted = _zone_identity_for_run(run, zone_lookup, controller_tz)
-    start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
-    end_local = parse_controller_datetime(run.get("end_utc"), controller_tz)
+    start_local = _run_start_local(run, controller_tz)
+    end_local = _run_end_local(run, controller_tz, start_local)
     return {
         "id": int(run.get("id")) if run.get("id") is not None else None,
         "zone_id": int(run.get("zone_id") or 0),
@@ -447,13 +552,15 @@ def get_zone_history(zone_id: int):
     )
 
     raw_runs = _fetch_runs(from_d, to_d, controller_tz, zone_ids=[zone_id])
-    actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates, controller_tz=controller_tz)
+    zone_lookup = {int(zone["id"]): zone}
+    current_identity_runs = _current_identity_runs(raw_runs, zone_lookup, controller_tz)
+    actual_min, runs_count = calculate_actual_for_zone(current_identity_runs, dates, controller_tz=controller_tz)
 
     daily = _build_daily(dates, actual_min, runs_count, plan_by_date, has_plan, plan_available)
 
-    zone_lookup = {int(zone["id"]): zone}
     runs_out = [_serialize_run(r, zone_lookup, controller_tz) for r in raw_runs]
     cohort_matches_current = _cohort_matches_current(runs_out, {int(zone_id)})
+    actuals_complete = _actuals_are_complete(current_identity_runs, controller_tz)
 
     total_actual = sum(actual_min.values())
     total_plan = sum(plan_by_date.values()) if has_plan and plan_available else 0
@@ -463,8 +570,11 @@ def get_zone_history(zone_id: int):
         has_plan=has_plan,
         plan_available=plan_available,
         cohort_matches_current=cohort_matches_current,
+        actuals_complete=actuals_complete,
     )
-    total_liters, liters_partial, has_liters = _aggregate_liters([r for r in raw_runs if run_counts_as_actual(r)])
+    total_liters, liters_partial, has_liters = _aggregate_liters(
+        [r for r in current_identity_runs if run_counts_as_actual(r)]
+    )
     summary.update(
         {
             "total_minutes": int(total_actual),
@@ -572,13 +682,30 @@ def get_global_history():
         for d in dates:
             plan_agg[d] += int(zplan.get(d, 0))
 
+    current_zone_ids = {int(zone["id"]) for zone in zones}
+    selected_zone_runs: list[dict[str, Any]] = []
     if zone_filter_id is not None:
         raw_runs = _fetch_runs(from_d, to_d, controller_tz, zone_ids=[zone_filter_id])
     elif group_filter_id is not None:
         raw_runs = [] if group_filter_id == 999 else _fetch_runs(from_d, to_d, controller_tz, group_id=group_filter_id)
+        selected_zone_runs = _fetch_runs(
+            from_d,
+            to_d,
+            controller_tz,
+            zone_ids=sorted(current_zone_ids),
+        )
     else:
         raw_runs = _fetch_runs(from_d, to_d, controller_tz, exclude_group_id=999)
-    actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates, controller_tz=controller_tz)
+        selected_zone_runs = _fetch_runs(
+            from_d,
+            to_d,
+            controller_tz,
+            zone_ids=sorted(current_zone_ids),
+        )
+
+    zone_lookup = {int(z["id"]): z for z in all_zones}
+    current_identity_runs = _current_identity_runs(raw_runs, zone_lookup, controller_tz)
+    actual_min, runs_count = calculate_actual_for_zone(current_identity_runs, dates, controller_tz=controller_tz)
 
     daily = _build_daily(
         dates,
@@ -589,10 +716,19 @@ def get_global_history():
         plan_available_all,
     )
 
-    zone_lookup = {int(z["id"]): z for z in all_zones}
     runs_out = [_serialize_run(r, zone_lookup, controller_tz) for r in raw_runs]
-    current_zone_ids = {int(zone["id"]) for zone in zones}
     cohort_matches_current = _cohort_matches_current(runs_out, current_zone_ids)
+    if group_filter_id is not None and group_filter_id != 999:
+        cohort_matches_current = cohort_matches_current and _cohort_matches_group_filter(
+            selected_zone_runs,
+            group_id=group_filter_id,
+        )
+    elif zone_filter_id is None and group_filter_id is None:
+        cohort_matches_current = cohort_matches_current and _cohort_matches_group_filter(
+            selected_zone_runs,
+            exclude_group_id=999,
+        )
+    actuals_complete = _actuals_are_complete(current_identity_runs, controller_tz)
 
     total_actual = sum(actual_min.values())
     total_plan = sum(plan_agg.values()) if has_plan_any and plan_available_all else 0
@@ -602,8 +738,11 @@ def get_global_history():
         has_plan=has_plan_any,
         plan_available=plan_available_all,
         cohort_matches_current=cohort_matches_current,
+        actuals_complete=actuals_complete,
     )
-    total_liters, liters_partial, has_liters = _aggregate_liters([r for r in raw_runs if run_counts_as_actual(r)])
+    total_liters, liters_partial, has_liters = _aggregate_liters(
+        [r for r in current_identity_runs if run_counts_as_actual(r)]
+    )
     summary.update(
         {
             "total_minutes": int(total_actual),
@@ -673,8 +812,8 @@ def get_zone_history_csv(zone_id: int):
     zone_lookup = {int(zone["id"]): zone}
     for r in raw_runs:
         serialized = _serialize_run(r, zone_lookup, controller_tz)
-        sdt = parse_controller_datetime(r.get("start_utc"), controller_tz)
-        edt = parse_controller_datetime(r.get("end_utc"), controller_tz)
+        sdt = _run_start_local(r, controller_tz)
+        edt = _run_end_local(r, controller_tz, sdt)
         date_str = sdt.date().isoformat() if sdt else ""
         start_str = sdt.strftime("%H:%M:%S") if sdt else ""
         end_str = edt.strftime("%H:%M:%S") if edt else ""
