@@ -298,8 +298,14 @@ def compute_next_watering(
     all_zones: list | None = None,
     programs: list | None = None,
     skip_today: bool | None = None,
+    enforce_limit: bool = True,
 ) -> dict[int, dict]:
-    """Calculate the nearest real scheduler candidate for each requested zone."""
+    """Calculate the nearest real scheduler candidate for each requested zone.
+
+    Public/request-derived explicit ID lists keep the default work bound.
+    Trusted internal snapshots that already bound their database read may pass
+    ``enforce_limit=False`` (for example the all-zones status projection).
+    """
     if all_zones is None:
         all_zones = db.get_zones() or []
     if programs is None:
@@ -311,7 +317,10 @@ def compute_next_watering(
             for z in all_zones
             if int(z.get("group_id") or z.get("group") or 0) != 999
         ]
-    zone_ids = normalize_requested_zone_ids(zone_ids, enforce_limit=explicit_zone_ids)
+    zone_ids = normalize_requested_zone_ids(
+        zone_ids,
+        enforce_limit=explicit_zone_ids and enforce_limit,
+    )
     zone_by_id = {int(z["id"]): z for z in all_zones}
     base_duration = {int(z["id"]): int(z.get("duration") or 0) for z in all_zones}
 
