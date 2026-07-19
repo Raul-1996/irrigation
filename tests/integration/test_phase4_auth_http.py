@@ -6,6 +6,7 @@ import asyncio
 import os
 import queue
 import re
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -337,6 +338,115 @@ def test_apply_and_expired_clear_share_one_postpone_lock(app, monkeypatch):
     persisted = app.db.get_zone(zone["id"])
     assert persisted["postpone_until"] == expected
     assert persisted["postpone_reason"] == "manual"
+
+
+def test_rain_postpone_claims_only_completely_unowned_zones(app):
+    from services.postpone import apply_group_rain_postpone
+
+    group = app.db.create_group("rain ownership apply")
+    unowned = app.db.create_zone({"name": "unowned", "duration": 5, "group_id": group["id"]})
+    manual = app.db.create_zone({"name": "manual", "duration": 5, "group_id": group["id"]})
+    existing_rain = app.db.create_zone({"name": "rain", "duration": 5, "group_id": group["id"]})
+    reason_only = app.db.create_zone({"name": "reason only", "duration": 5, "group_id": group["id"]})
+    manual_deadline = "2099-12-31 23:59:59"
+    rain_deadline = "2026-07-20 23:59:59"
+    requested = "2026-07-21 23:59:59"
+    app.db.update_zone_postpone(manual["id"], manual_deadline, "manual")
+    app.db.update_zone_postpone(existing_rain["id"], rain_deadline, "rain")
+    app.db.update_zone_postpone(reason_only["id"], None, "foreign")
+
+    result = apply_group_rain_postpone(group["id"], requested, db_facade=app.db)
+
+    assert result is not False
+    assert result["updated_zone_ids"] == [unowned["id"]]
+    assert app.db.get_zone(unowned["id"])["postpone_until"] == requested
+    assert app.db.get_zone(unowned["id"])["postpone_reason"] == "rain"
+    assert app.db.get_zone(manual["id"])["postpone_until"] == manual_deadline
+    assert app.db.get_zone(manual["id"])["postpone_reason"] == "manual"
+    assert app.db.get_zone(existing_rain["id"])["postpone_until"] == rain_deadline
+    assert app.db.get_zone(existing_rain["id"])["postpone_reason"] == "rain"
+    assert app.db.get_zone(reason_only["id"])["postpone_until"] is None
+    assert app.db.get_zone(reason_only["id"])["postpone_reason"] == "foreign"
+
+
+def test_rain_postpone_apply_rolls_back_complete_group_on_write_failure(app):
+    from services.postpone import apply_group_rain_postpone
+
+    group = app.db.create_group("rain ownership apply rollback")
+    first = app.db.create_zone({"name": "first", "duration": 5, "group_id": group["id"]})
+    second = app.db.create_zone({"name": "second", "duration": 5, "group_id": group["id"]})
+    requested = "2026-07-21 23:59:59"
+    with sqlite3.connect(app.db.db_path) as conn:
+        conn.execute(
+            f"""
+            CREATE TRIGGER reject_second_rain_postpone
+            BEFORE UPDATE OF postpone_until ON zones
+            WHEN OLD.id = {int(second['id'])} AND NEW.postpone_reason = 'rain'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced rain apply failure');
+            END
+            """
+        )
+
+    result = apply_group_rain_postpone(group["id"], requested, db_facade=app.db)
+
+    assert result is False
+    assert app.db.get_zone(first["id"])["postpone_until"] is None
+    assert app.db.get_zone(first["id"])["postpone_reason"] is None
+    assert app.db.get_zone(second["id"])["postpone_until"] is None
+    assert app.db.get_zone(second["id"])["postpone_reason"] is None
+
+
+def test_clear_group_rain_postpone_clears_only_current_rain_owners(app):
+    from services.postpone import clear_group_rain_postpone
+
+    group = app.db.create_group("rain ownership clear")
+    rain = app.db.create_zone({"name": "rain", "duration": 5, "group_id": group["id"]})
+    manual = app.db.create_zone({"name": "manual", "duration": 5, "group_id": group["id"]})
+    foreign = app.db.create_zone({"name": "foreign", "duration": 5, "group_id": group["id"]})
+    deadline = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(rain["id"], deadline, "rain")
+    app.db.update_zone_postpone(manual["id"], deadline, "manual")
+    app.db.update_zone_postpone(foreign["id"], deadline, "weather-v2")
+
+    assert clear_group_rain_postpone(group["id"], db_facade=app.db) is True
+
+    assert app.db.get_zone(rain["id"])["postpone_until"] is None
+    assert app.db.get_zone(rain["id"])["postpone_reason"] is None
+    assert app.db.get_zone(manual["id"])["postpone_until"] == deadline
+    assert app.db.get_zone(manual["id"])["postpone_reason"] == "manual"
+    assert app.db.get_zone(foreign["id"])["postpone_until"] == deadline
+    assert app.db.get_zone(foreign["id"])["postpone_reason"] == "weather-v2"
+
+
+def test_clear_group_rain_postpone_rolls_back_on_write_failure(app):
+    from services.postpone import clear_group_rain_postpone
+
+    group = app.db.create_group("rain ownership clear rollback")
+    first = app.db.create_zone({"name": "first", "duration": 5, "group_id": group["id"]})
+    second = app.db.create_zone({"name": "second", "duration": 5, "group_id": group["id"]})
+    deadline = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(first["id"], deadline, "rain")
+    app.db.update_zone_postpone(second["id"], deadline, "rain")
+    with sqlite3.connect(app.db.db_path) as conn:
+        conn.execute(
+            f"""
+            CREATE TRIGGER reject_second_rain_clear
+            BEFORE UPDATE OF postpone_until ON zones
+            WHEN OLD.id = {int(second['id'])} AND OLD.postpone_reason = 'rain'
+                 AND NEW.postpone_until IS NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'forced rain clear failure');
+            END
+            """
+        )
+
+    assert clear_group_rain_postpone(group["id"], db_facade=app.db) is False
+
+    assert app.db.get_zone(first["id"])["postpone_until"] == deadline
+    assert app.db.get_zone(first["id"])["postpone_reason"] == "rain"
+    assert app.db.get_zone(second["id"])["postpone_until"] == deadline
+    assert app.db.get_zone(second["id"])["postpone_reason"] == "rain"
 
 
 def test_public_postpone_can_extend_existing_safety_deadline(guest_client, app):

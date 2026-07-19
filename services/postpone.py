@@ -130,6 +130,76 @@ def apply_group_postpone_deadline(
         }
 
 
+def apply_group_rain_postpone(
+    group_id: int,
+    postpone_until: datetime | str,
+    *,
+    db_facade=None,
+) -> dict | bool:
+    """Apply a rain-owned deadline without touching any existing ownership.
+
+    The service lock serializes this operation with manual postpone and expiry
+    CAS helpers.  The repository then takes a complete group snapshot inside a
+    single ``BEGIN IMMEDIATE`` transaction and writes only rows whose deadline
+    *and* reason are SQL ``NULL``.  Existing manual, foreign, and earlier rain
+    postpones are never extended or rewritten.
+
+    Returns a result dict on success (including a successful no-op), otherwise
+    ``False``.  ``db_facade`` keeps monitor/test instances on their injected DB.
+    """
+    facade = db if db_facade is None else db_facade
+    try:
+        group_id = int(group_id)
+        requested = _parse_naive_deadline(postpone_until)
+    except (TypeError, ValueError):
+        return False
+    serialized = requested.strftime("%Y-%m-%d %H:%M:%S")
+
+    with _POSTPONE_MUTATION_LOCK:
+        apply_atomic = getattr(facade, "apply_group_rain_postpone_atomic", None)
+        if not callable(apply_atomic):
+            logger.error("База данных не поддерживает атомарную установку дождевой отсрочки")
+            return False
+        try:
+            result = apply_atomic(group_id, serialized)
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            logger.exception("Ошибка атомарной установки дождевой отсрочки группы %s", group_id)
+            return False
+        if result is None or result is False or not isinstance(result, dict):
+            return False
+        return {
+            "postpone_until": serialized,
+            "group_zones": list(result.get("group_zones") or []),
+            "updated_zone_ids": [int(zone_id) for zone_id in result.get("updated_zone_ids") or []],
+        }
+
+
+def clear_group_rain_postpone(group_id: int, *, db_facade=None) -> bool:
+    """Clear current rain ownership without erasing a concurrent/manual value.
+
+    The complete group is re-read and all exact ``postpone_reason == 'rain'``
+    rows are cleared in one repository transaction under the shared postpone
+    lock.  Any read/write failure is reported as ``False`` and rolls back the
+    whole group mutation.
+    """
+    facade = db if db_facade is None else db_facade
+    try:
+        group_id = int(group_id)
+    except (TypeError, ValueError):
+        return False
+
+    with _POSTPONE_MUTATION_LOCK:
+        clear_atomic = getattr(facade, "clear_group_rain_postpone_atomic", None)
+        if not callable(clear_atomic):
+            logger.error("База данных не поддерживает атомарную очистку дождевой отсрочки")
+            return False
+        try:
+            return clear_atomic(group_id) is True
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            logger.exception("Ошибка атомарной очистки дождевой отсрочки группы %s", group_id)
+            return False
+
+
 def clear_zone_postpone_if_expired(
     zone_id: int,
     observed_deadline: datetime | str | None,
