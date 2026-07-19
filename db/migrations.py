@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
+from contextlib import closing
 from datetime import UTC
 from urllib.parse import quote
 
@@ -585,9 +588,35 @@ class MigrationRunner:
 
         if not os.path.exists(self.db_path) or os.path.getsize(self.db_path) == 0:
             return
-        uri = f"file:{quote(os.path.abspath(self.db_path), safe='/')}?mode=ro&immutable=1"
-        with sqlite3.connect(uri, timeout=5, uri=True) as conn:
-            self._validate_schema_stamp_preflight(conn)
+
+        sidecar_suffixes = tuple(suffix for suffix in ("-wal", "-journal") if os.path.exists(f"{self.db_path}{suffix}"))
+        if not sidecar_suffixes:
+            uri = f"file:{quote(os.path.abspath(self.db_path), safe='/')}?mode=ro&immutable=1"
+            with closing(sqlite3.connect(uri, timeout=5, uri=True)) as conn:
+                self._validate_schema_stamp_preflight(conn)
+            return
+
+        # ``immutable=1`` deliberately ignores WAL. A durable marker can live
+        # only in WAL while its migration artifact has already reached the
+        # main file, so immutable inspection can reject a coherent crash
+        # state. Reconstruct that exact view in a private temporary directory;
+        # SQLite may recover/create sidecars there but never touches the
+        # original database or its WAL/SHM. A copied ``-shm`` would contain
+        # process-local locks, so the temporary connection rebuilds it.
+        with tempfile.TemporaryDirectory(prefix="wb-irrigation-preflight-") as temporary_directory:
+            snapshot_path = os.path.join(temporary_directory, "snapshot.db")
+            shutil.copyfile(self.db_path, snapshot_path)
+            for suffix in sidecar_suffixes:
+                try:
+                    shutil.copyfile(f"{self.db_path}{suffix}", f"{snapshot_path}{suffix}")
+                except FileNotFoundError:
+                    # A completed checkpoint may remove a sidecar between the
+                    # existence probe and the copy. The copied main file is
+                    # still safe to inspect and the original remains untouched.
+                    continue
+            with closing(sqlite3.connect(snapshot_path, timeout=5)) as conn:
+                conn.execute("PRAGMA query_only=ON")
+                self._validate_schema_stamp_preflight(conn)
 
     @staticmethod
     def _validate_schema_stamp_preflight(conn: sqlite3.Connection) -> None:
@@ -614,7 +643,7 @@ class MigrationRunner:
         tables = {
             str(row[0])
             for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(substr(name, 1, 7)) != 'sqlite_'"
             ).fetchall()
         }
         if not tables:
@@ -656,7 +685,8 @@ class MigrationRunner:
             MigrationRunner._raise_unsupported_pre_named_schema(tables, set())
 
         schema_rows = conn.execute(
-            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE lower(substr(name, 1, 7)) != 'sqlite_' ORDER BY type, name"
         ).fetchall()
         unexpected_objects = [
             (str(kind), str(name)) for kind, name, _table_name, _sql in schema_rows if kind not in {"table", "index"}
@@ -801,7 +831,8 @@ class MigrationRunner:
             )
 
         schema_rows = conn.execute(
-            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE lower(substr(name, 1, 7)) != 'sqlite_' ORDER BY type, name"
         ).fetchall()
         unexpected_objects = [
             (str(kind), str(name))
@@ -876,14 +907,18 @@ class MigrationRunner:
             minimum_columns = (
                 set(tracked_base_tables[table][0]) if table in tracked_base_tables else optional_minimum_columns[table]
             )
-            if table == "zones" and last_watering_was_dropped:
+            if table == "zones" and "last_watering_time" not in actual_columns:
+                # The forward rebuild was committed before its marker in
+                # historical releases. Missing marker + missing artifact is
+                # therefore a recoverable crash boundary: the idempotent
+                # migration records the marker on restart.
                 minimum_columns.remove("last_watering_time")
             allowed_columns = canonical_columns[table]
             if not minimum_columns <= set(actual_columns) or not set(actual_columns) <= set(allowed_columns):
                 MigrationRunner._raise_unsupported_tracked_schema(
                     f"table {table!r} has missing floor columns or unknown additions"
                 )
-            if table == "zones" and ("last_watering_time" in actual_columns) == last_watering_was_dropped:
+            if table == "zones" and last_watering_was_dropped and "last_watering_time" in actual_columns:
                 MigrationRunner._raise_unsupported_tracked_schema(
                     "zones_drop_last_watering_time marker disagrees with the zones.last_watering_time artifact"
                 )
@@ -1283,7 +1318,6 @@ class MigrationRunner:
                     "INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)",
                     (table, sequence_watermark),
                 )
-        conn.commit()
 
     @staticmethod
     def _add_column_if_missing(conn, table: str, column: str, decl: str) -> bool:
@@ -1349,7 +1383,8 @@ class MigrationRunner:
         # program_cancellations while upgrading legacy programs.id.
         cascade_children = []
         for (child_table,) in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND lower(substr(name, 1, 7)) != 'sqlite_' ORDER BY name"
         ).fetchall():
             quoted_child = '"' + str(child_table).replace('"', '""') + '"'
             foreign_keys = conn.execute(f"PRAGMA foreign_key_list({quoted_child})").fetchall()
@@ -2747,7 +2782,6 @@ class MigrationRunner:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_mqtt_server ON zones(mqtt_server_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_topic ON zones(topic)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_group ON zones(group_id)")
-        conn.commit()
         logger.info("Dropped zones.last_watering_time (single source of truth = zone_runs)")
 
     def _migrate_add_photo_thumb(self, conn):

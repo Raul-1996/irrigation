@@ -27,6 +27,14 @@ def _program_payload(name: str, zones: list[int]) -> dict[str, object]:
     }
 
 
+def _sqlite_artifact_snapshot(path: Path) -> dict[str, bytes | None]:
+    return {
+        suffix: candidate.read_bytes() if candidate.exists() else None
+        for suffix in ("", "-wal", "-shm", "-journal")
+        for candidate in (Path(f"{path}{suffix}"),)
+    }
+
+
 def _create_legacy_backup_schema(
     path: Path,
     *,
@@ -743,6 +751,114 @@ def test_schema_preflight_rejects_corrupt_stamped_tracked_schema_without_writes(
     assert source.read_bytes() == before
     assert not Path(f"{source}-wal").exists()
     assert not Path(f"{source}-shm").exists()
+
+
+def test_schema_preflight_rejects_sqlitex_hidden_trigger_before_reserved_group_repair(test_db, tmp_path):
+    source = tmp_path / "hidden-trigger-stamped.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("PRAGMA journal_mode = DELETE").fetchone() == ("delete",)
+        conn.execute("INSERT INTO zones(name, group_id) VALUES ('Keeps bootstrap from reseeding', 1)")
+        conn.execute("INSERT INTO programs(name, time, days, zones) VALUES ('preserve me', '06:00', '[0]', '[1]')")
+        reserved_guard_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_groups_restrict_reserved_delete'"
+        ).fetchone()[0]
+        conn.execute("DROP TRIGGER trg_groups_restrict_reserved_delete")
+        conn.execute("DELETE FROM groups WHERE id = 999")
+        conn.execute(reserved_guard_sql)
+        assert conn.execute("SELECT 1 FROM retired_entity_ids WHERE entity = 'group' AND id = 999").fetchone() == (1,)
+        conn.execute("""
+            CREATE TRIGGER sqliteXevil
+            AFTER DELETE ON retired_entity_ids
+            BEGIN
+                DELETE FROM programs;
+            END
+        """)
+
+    before = _sqlite_artifact_snapshot(source)
+
+    with pytest.raises(sqlite3.DatabaseError, match=r"unexpected triggers.*sqliteXevil"):
+        MigrationRunner(str(source)).init_database()
+
+    assert _sqlite_artifact_snapshot(source) == before
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("SELECT name FROM programs").fetchall() == [("preserve me",)]
+        assert conn.execute("SELECT 1 FROM groups WHERE id = 999").fetchone() is None
+
+
+def test_schema_preflight_accepts_markerless_completed_drop_and_init_repairs_marker(test_db, tmp_path):
+    source = tmp_path / "markerless-completed-drop.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("PRAGMA journal_mode = DELETE").fetchone() == ("delete",)
+        conn.execute("DELETE FROM migrations WHERE name = 'zones_drop_last_watering_time'")
+        assert "last_watering_time" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(zones)").fetchall()}
+
+    runner = MigrationRunner(str(source))
+    before = _sqlite_artifact_snapshot(source)
+    runner._validate_schema_file_preflight()
+    assert _sqlite_artifact_snapshot(source) == before
+
+    runner.init_database()
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("SELECT 1 FROM migrations WHERE name = 'zones_drop_last_watering_time'").fetchone() == (1,)
+
+
+def test_schema_preflight_reads_marker_from_wal_without_touching_original(test_db, tmp_path):
+    source = tmp_path / "marker-only-in-wal.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        conn.execute("DELETE FROM migrations WHERE name = 'zones_drop_last_watering_time'")
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        conn.execute("INSERT INTO migrations(name) VALUES ('zones_drop_last_watering_time')")
+        conn.commit()
+        assert Path(f"{source}-wal").stat().st_size > 0
+        assert conn.execute("SELECT 1 FROM migrations WHERE name = 'zones_drop_last_watering_time'").fetchone() == (1,)
+
+        before = _sqlite_artifact_snapshot(source)
+        MigrationRunner(str(source))._validate_schema_file_preflight()
+        assert _sqlite_artifact_snapshot(source) == before
+
+
+@pytest.mark.parametrize(
+    ("corruption", "error"),
+    [
+        ("future_user_version", "unsupported application user_version"),
+        ("foreign_table", r"tracked irrigation schema.*foreign_payload"),
+    ],
+)
+def test_schema_preflight_rejects_wal_only_corruption_without_creating_shm(
+    test_db,
+    tmp_path,
+    corruption,
+    error,
+):
+    source = tmp_path / f"wal-only-{corruption}.db"
+    with sqlite3.connect(test_db.db_path) as live, sqlite3.connect(source) as copied:
+        live.backup(copied)
+    with sqlite3.connect(source) as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if corruption == "future_user_version":
+            conn.execute(f"PRAGMA user_version = {USER_VERSION + 1}")
+        else:
+            conn.execute("CREATE TABLE foreign_payload(secret TEXT NOT NULL)")
+        conn.commit()
+        assert Path(f"{source}-wal").stat().st_size > 0
+        Path(f"{source}-shm").unlink()
+
+        before = _sqlite_artifact_snapshot(source)
+        assert before["-shm"] is None
+        with pytest.raises(sqlite3.DatabaseError, match=error):
+            MigrationRunner(str(source)).init_database()
+        assert _sqlite_artifact_snapshot(source) == before
 
 
 def test_schema_preflight_accepts_unstamped_current_tracked_superset_without_writes(test_db, tmp_path):
@@ -1604,8 +1720,7 @@ def test_backup_uses_wal_consistent_vacuum_fallback(test_db, tmp_path, monkeypat
     with sqlite3.connect(test_db.db_path) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA wal_autocheckpoint = 0")
-        conn.execute("CREATE TABLE backup_probe(value TEXT NOT NULL)")
-        conn.execute("INSERT INTO backup_probe VALUES ('committed-in-wal')")
+        conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('backup_probe', 'committed-in-wal')")
         conn.commit()
 
     fallback_called = False
@@ -1627,7 +1742,9 @@ def test_backup_uses_wal_consistent_vacuum_fallback(test_db, tmp_path, monkeypat
     assert fallback_called is True
     assert result is not None
     with sqlite3.connect(result) as backup:
-        assert backup.execute("SELECT value FROM backup_probe").fetchone() == ("committed-in-wal",)
+        assert backup.execute("SELECT value FROM settings WHERE key = 'backup_probe'").fetchone() == (
+            "committed-in-wal",
+        )
         assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     assert not Path(result + ".partial-wal").exists()
     assert not Path(result + ".partial-shm").exists()
@@ -1637,10 +1754,9 @@ def test_vacuum_backup_accepts_valid_compaction_far_below_source_size(test_db, t
     backup_dir = tmp_path / "compact-backups"
     test_db.logs.backup_dir = str(backup_dir)
     with sqlite3.connect(test_db.db_path) as conn:
-        conn.execute("CREATE TABLE backup_bloat(payload BLOB NOT NULL)")
-        conn.execute("INSERT INTO backup_bloat(payload) VALUES (zeroblob(5 * 1024 * 1024))")
+        conn.execute("INSERT INTO logs(type, details) VALUES ('backup_bloat', zeroblob(5 * 1024 * 1024))")
         conn.commit()
-        conn.execute("DELETE FROM backup_bloat")
+        conn.execute("DELETE FROM logs WHERE type = 'backup_bloat'")
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     source_size = Path(test_db.db_path).stat().st_size
@@ -1655,7 +1771,7 @@ def test_vacuum_backup_accepts_valid_compaction_far_below_source_size(test_db, t
     assert Path(result).stat().st_size < source_size * 0.5
     with sqlite3.connect(result) as backup:
         assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert backup.execute("SELECT COUNT(*) FROM backup_bloat").fetchone() == (0,)
+        assert backup.execute("SELECT COUNT(*) FROM logs WHERE type = 'backup_bloat'").fetchone() == (0,)
 
 
 def test_backup_rejects_decoy_database_with_only_required_table_names(test_db, tmp_path):

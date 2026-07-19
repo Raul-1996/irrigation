@@ -1541,18 +1541,21 @@ class LogRepository(BaseRepository):
         persisted_tables = {
             str(row[0])
             for row in conn.execute(
-                "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                "SELECT name FROM main.sqlite_master WHERE type = 'table' AND lower(substr(name, 1, 7)) != 'sqlite_'"
             ).fetchall()
         }
-        for table in sorted(persisted_tables - cls._REQUIRED_BACKUP_TABLES):
-            quoted_table = cls._quoted_identifier(table)
-            incoming_app_references = [
-                tuple(row)
-                for row in conn.execute(f"PRAGMA main.foreign_key_list({quoted_table})").fetchall()
-                if str(row[2]).casefold() in cls._REQUIRED_BACKUP_TABLES
-            ]
-            if incoming_app_references:
-                raise sqlite3.DatabaseError(f"extra table {table!r} has unsupported references to application tables")
+        unexpected_tables = sorted(persisted_tables - cls._REQUIRED_BACKUP_TABLES)
+        if unexpected_tables:
+            raise sqlite3.DatabaseError(f"application schema has unexpected tables: {unexpected_tables!r}")
+
+        unexpected_views = sorted(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM main.sqlite_master WHERE type = 'view' AND lower(substr(name, 1, 7)) != 'sqlite_'"
+            ).fetchall()
+        )
+        if unexpected_views:
+            raise sqlite3.DatabaseError(f"application schema has unexpected views: {unexpected_views!r}")
 
         triggers = {
             str(row[0]): (str(row[1]), row[2])
@@ -1574,15 +1577,13 @@ class LogRepository(BaseRepository):
             raise sqlite3.DatabaseError(f"application schema has unexpected triggers: {unexpected_triggers!r}")
 
         indexes = {
-            str(row[0]): (str(row[1]), row[2])
+            str(row[0]): (str(row[1]).casefold(), row[2])
             for row in conn.execute(
                 "SELECT name, tbl_name, sql FROM main.sqlite_master WHERE type = 'index'"
             ).fetchall()
         }
         unexpected_indexes = sorted(
-            name
-            for name, (table, sql) in indexes.items()
-            if table in cls._REQUIRED_BACKUP_TABLES and sql and name not in cls._REQUIRED_INDEXES
+            name for name, (_table, sql) in indexes.items() if sql and name not in cls._REQUIRED_INDEXES
         )
         if unexpected_indexes:
             raise sqlite3.DatabaseError(f"application schema has unexpected indexes: {unexpected_indexes!r}")

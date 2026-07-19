@@ -247,6 +247,25 @@ def test_validator_rejects_unexpected_app_table_index(test_db, tmp_path):
         LogRepository.validate_application_database(str(source))
 
 
+def test_validator_rejects_unexpected_index_with_case_changed_catalog_owner(test_db, tmp_path):
+    source = _copy_database(test_db, tmp_path, "uppercase-index-owner.db")
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE INDEX evil_zone_name_json ON zones(json_extract(name, '$.x'))")
+        schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+        conn.execute("PRAGMA writable_schema = ON")
+        try:
+            conn.execute(
+                "UPDATE sqlite_master SET tbl_name = 'ZONES' WHERE type = 'index' AND name = 'evil_zone_name_json'"
+            )
+        finally:
+            conn.execute("PRAGMA writable_schema = OFF")
+        conn.execute(f"PRAGMA schema_version = {schema_version + 1}")
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    with pytest.raises(sqlite3.DatabaseError, match=r"unexpected indexes.*evil_zone_name_json"):
+        LogRepository.validate_application_database(str(source))
+
+
 def test_validator_rejects_extra_table_that_can_block_app_deletes(test_db, tmp_path):
     source = _copy_database(test_db, tmp_path, "extra-incoming-foreign-key.db")
     with sqlite3.connect(source) as conn:
@@ -254,8 +273,36 @@ def test_validator_rejects_extra_table_that_can_block_app_deletes(test_db, tmp_p
         conn.execute("CREATE TABLE delete_blocker(zone_id INTEGER REFERENCES zones(id) ON DELETE RESTRICT)")
         conn.execute("INSERT INTO delete_blocker(zone_id) VALUES (?)", (zone_id,))
 
-    with pytest.raises(sqlite3.DatabaseError, match=r"extra table 'delete_blocker'.*application tables"):
+    with pytest.raises(sqlite3.DatabaseError, match=r"unexpected tables.*delete_blocker"):
         LogRepository.validate_application_database(str(source))
+
+
+@pytest.mark.parametrize(
+    ("artifact", "ddl", "error"),
+    [
+        ("table", "CREATE TABLE local_probe(value TEXT)", r"unexpected tables.*local_probe"),
+        ("view", "CREATE VIEW local_probe AS SELECT id FROM zones", r"unexpected views.*local_probe"),
+    ],
+)
+def test_validator_and_backup_reject_artifact_that_startup_would_reject(
+    test_db,
+    tmp_path,
+    artifact,
+    ddl,
+    error,
+):
+    source = _copy_database(test_db, tmp_path, f"extra-{artifact}.db")
+    with sqlite3.connect(source) as conn:
+        conn.execute(ddl)
+
+    with pytest.raises(sqlite3.DatabaseError, match=error):
+        LogRepository.validate_application_database(str(source))
+
+    backup_dir = tmp_path / f"extra-{artifact}-backups"
+    test_db.logs.db_path = str(source)
+    test_db.logs.backup_dir = str(backup_dir)
+    assert test_db.create_backup() is None
+    assert not list(backup_dir.glob("*.db"))
 
 
 @pytest.mark.parametrize(
