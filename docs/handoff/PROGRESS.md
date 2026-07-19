@@ -1,8 +1,81 @@
 # Прогресс аудита и исправлений wb-irrigation
 
-Дата checkpoint: 2026-07-18. Ветка: `refactor/audit-2026-07`.
+Текущий checkpoint: 2026-07-19. Ветка: `refactor/audit-2026-07`, review HEAD
+`84f0b3df9712234a504ecbaff2e10b909c6e5975`.
 
-## Текущее состояние
+## Текущее состояние после полного post-review
+
+- Полный read-only review всего текущего проекта завершён; P0 не найдено.
+- Исторический префикс `#1–#152` не переупорядочен и не переименован.
+- Добавлены стабильные post-review ID `PR-001…PR-060`: `PR-001…PR-059` —
+  подтверждённые новые либо переоткрытые root causes, `PR-060` — намеренный
+  H2 shadow-mode, не дефект.
+- Финальный реестр сейчас содержит **216 записей**: `VERIFIED_REAL` — 207,
+  `VERIFIED_FALSE` — 7, `INTENTIONAL_LIMITATION` — 2, `UNVERIFIED` — 0.
+- Remediation disposition: **141 fixed · 7 deferred · 59 pending ·
+  9 not_applicable**. Все 59 post-review дефектов пока намеренно `pending`:
+  commit из изолированного owner worktree не считается интегрированным fix до
+  merge, regression evidence и полного serial gate.
+- Reopened evidence связано с историческими `#38`, `#45`, `#50`, `#53`, `#81`,
+  `#89`, `#93`, `#94`, `#100`, `#127`, `#129`, `#132`, `#149` и `#152` через
+  поле `reopens`; старые записи остаются историей прежнего решения, а новые PR-ID
+  являются отдельными remediation roots.
+- Источник истины — `findings-inventory.json`; `findings-inventory.md` полностью
+  генерируется renderer-ом и показывает evidence, reproduction, owner packages,
+  reopen links и disposition.
+
+### Owner packages post-review
+
+- `p4-auth-http`: auth/CSRF, SSE executor, correlation teardown, cookie/TZ boundary.
+- `p4-topology-api`: mutation barriers зон/групп/MQTT и строгие API contracts.
+- `p4-db-integrity`: identity, referential integrity, migrations, backup fallback,
+  retry/index/query integrity.
+- `p4-mqtt-core`: physical echo, OFF truth, master identity/interlocks, TLS.
+- `p4-lifecycle`: boot/readiness/shutdown/systemd health truth.
+- `p4-scheduler`: persisted jobs, safety caps/claims, program execution lifecycle.
+- `p4-programs`: program validation, conflicts, transactional CRUD semantics.
+- `p4-weather`: freeze/rain/cache/settings semantics; H2 не включается.
+- `p4-deploy`: updater/backup/workflows/permissions/production gates.
+- `p4-telegram`: loop, stop truth, subscriptions, token/polling lifecycle.
+- `p4-frontend`: stale responses, duration/bulk/CSV, status panels, browser storage.
+- Cross-owner очереди явно записаны как `p4-monitors`, `p4-status-api`,
+  `p4-history`, `p4-performance` и `p4-test-quality`; они не считаются закрытыми
+  через соседний пакет.
+
+### Решение оркестратора по `db/migrations.py`
+
+Прежний blanket-freeze снят **только** для узких изменений, необходимых для
+`PR-007`, `PR-008`, `PR-030`, `PR-032` и `PR-057`:
+
+- запрещение повторного использования identity зон, MQTT-серверов и программ;
+- transactional referential-integrity policy: zone program references очищаются
+  без удаления retained `zone_runs`, MQTT hardware references дают RESTRICT/409,
+  program cancellations удаляются вместе с программой;
+- fail-closed named migrations и восстановление обязательных индексов.
+
+Каждое такое изменение обязательно получает migration regression tests на
+existing DB, повторный startup/idempotency, сохранность history, отсутствие
+переназначения hardware и корректный forward upgrade. Разрешение не охватывает
+общий рефакторинг migrations, live downgrade `#73` или неоднозначный historical
+backfill `#99`: они остаются индивидуально deferred.
+
+### Intentional и rejected решения post-review
+
+- `PR-060`: H2 water-balance остаётся намеренным shadow-mode. Его нельзя
+  подключать к physical scheduler без отдельного product decision и доказанного
+  сохранения freeze/rain/wind hard-safety gates.
+- `KD-001`: запуск native WB unit от root подтверждён и индивидуально deferred;
+  сначала нужна privilege/device/path/capability model и migration plan.
+- `IL-001`: Docker остаётся только local-development target; production parity
+  с native WB systemd не требуется.
+- `RD-001`: гипотеза о false-positive total-duration conflict отклонена — runtime
+  последовательно выполняет все зоны и удерживает group claims на весь invocation.
+- `RD-002`: архивные legacy/Docker runbooks не являются автоматическим production
+  path и не создают отдельный runtime defect.
+
+## Исторический checkpoint до post-review
+
+Дата исходного checkpoint: 2026-07-18.
 
 - Фаза 1 (read-only verification) завершена.
 - Исходные 138 находок: `VERIFIED_REAL` — 133, `VERIFIED_FALSE` — 5, `UNVERIFIED` — 0.
@@ -60,7 +133,8 @@
   `implementation` с disposition, причиной, пакетом, fix commit и regression tests;
 - `PHASE2-PACKAGES.json` хранит интеграционный ledger пакетов и полных проверок;
 - `render_findings_inventory.py` применяет ledger, наследует disposition точным
-  дублям, валидирует 152 неизменяемых позиционных ID и целиком регенерирует Markdown.
+  дублям, защищает исторический префикс `#1–#152`, валидирует append-only PR/decision
+  ID и целиком регенерирует Markdown.
 
 ### Интегрированные пакеты
 
@@ -420,7 +494,7 @@ contract), #99 (неразличимая historical provenance), #140 (program-r
 распил scheduler/status.js, изменение semantics группы 999, включение H2,
 Docker как production target, e2e и `mqtt_real` без физического WB/брокера.
 
-## Локальное завершение Фаз 2–3
+## Предыдущая локальная точка Фаз 2–3 — снята post-review
 
 - финальный serial gate: 2072 passed, 2 skipped, 17 deselected; две известные
   SSE teardown warnings не изменились;
@@ -433,7 +507,11 @@ Docker как production target, e2e и `mqtt_real` без физическог�
 - все 27 изолированных worktrees удалены, остался один основной workspace;
   пользовательский untracked `AGENTS.md` сохранён и не индексировался.
 
-Локальная точка передачи готова. `git push` не выполнялся и запрещён без
-отдельного подтверждения: `PHASE1-RAW-REPORTS-2026-07-18.md` и inventory
-содержат подробные данные внутреннего аудита и будут экспортированы во внешний
-настроенный `origin`.
+Этот блок фиксирует доказательства прежнего HEAD, но больше не является текущим
+completion claim: полный post-review добавил 59 pending root causes. Новая локальная
+точка передачи будет готова только после индивидуального fixed/deferred disposition
+для каждого `PR-001…PR-059`, интеграции owner packages и повторного полного serial
+pytest, Ruff, inventory renderer `--check` и `git diff --check`.
+
+`git push` не выполнялся и по-прежнему запрещён без отдельного подтверждения:
+inventory и raw reports содержат подробные данные внутреннего аудита.
