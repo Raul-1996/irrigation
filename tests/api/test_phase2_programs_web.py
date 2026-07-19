@@ -229,3 +229,11 @@ class TestProgramsWizardResponseHandling:
 
         assert "${escapeHtml(z.name)}" in zone_step
         assert "<div>${z.name}</div>" not in zone_step
+
+    def test_manual_run_ui_reports_accepted_request_without_claiming_watering_started(self):
+        run_program = _between(_template_source(), "async function runProgram", "async function deleteProgram")
+
+        assert "const data = await readResponseJson(resp)" in run_program
+        assert "!resp.ok || data.success === false" in run_program
+        assert "data.message || '⏳ Запрос на полив принят'" in run_program
+        assert "Полив запущен" not in run_program

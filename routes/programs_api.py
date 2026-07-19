@@ -930,7 +930,7 @@ def api_toggle_program_enabled(prog_id):
 @rate_limit("programs", max_requests=10, window_sec=60)
 @audit_log("program_manual_run", target_extractor=lambda *a, **kw: f"program:{kw.get('prog_id', a[0] if a else '?')}")
 def api_run_program(prog_id):
-    """Manual ad-hoc run of a program — start all its zones sequentially."""
+    """Accept a manual ad-hoc run for asynchronous scheduler processing."""
     if current_app.config.get("EMERGENCY_STOP"):
         return jsonify(
             {"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}
@@ -950,28 +950,75 @@ def api_run_program(prog_id):
     if not zones:
         return jsonify({"success": False, "message": "Program has no zones"}), 400
 
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return jsonify(
+            {
+                "success": False,
+                "message": "Scheduler unavailable",
+                "error_code": "SCHEDULER_UNAVAILABLE",
+            }
+        ), 503
+
+    try:
+        zone_ids = [int(zone_id) for zone_id in zones]
+        runnable_zones = [
+            zone_id
+            for zone_id in zone_ids
+            if (zone := db.get_zone(zone_id)) is not None
+            and str(zone.get("state") or "").lower() != "fault"
+        ]
+    except (OSError, TypeError, ValueError) as e:
+        logger.error("Ошибка проверки зон программы %s: %s", prog_id, e)
+        return jsonify({"success": False, "message": "Ошибка запуска программы"}), 500
+    if not runnable_zones:
+        return jsonify(
+            {
+                "success": False,
+                "message": "Program has no runnable zones",
+                "error_code": "PROGRAM_NO_RUNNABLE_ZONES",
+            }
+        ), 409
+
     name = program.get("name") or f"Program {prog_id}"
     try:
-        import threading
-
         from irrigation_scheduler import job_run_program
 
         # Issue #31: manual=True — bypass weather skip / coefficient for user-initiated runs.
         threading.Thread(
             target=job_run_program,
-            args=(int(prog_id), [int(z) for z in zones], str(name)),
+            args=(int(prog_id), zone_ids, str(name)),
             kwargs={"manual": True},
             daemon=True,
         ).start()
-    except (ImportError, RuntimeError, ValueError, TypeError) as e:
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError) as e:
         logger.error(f"Ошибка ручного запуска программы {prog_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка запуска программы"}), 500
 
     try:
-        db.add_log("prog_manual_run", json.dumps({"prog": prog_id, "name": name, "zones": list(zones)}))
+        db.add_log(
+            "prog_manual_run",
+            json.dumps(
+                {
+                    "prog": prog_id,
+                    "name": name,
+                    "zones": list(zones),
+                    "status": "accepted",
+                    "started": False,
+                }
+            ),
+        )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.debug("Handled exception logging manual program run: %s", e)
-    return jsonify({"success": True, "message": f"Программа {name}: запущена"}), 200
+    return jsonify(
+        {
+            "success": True,
+            "accepted": True,
+            "started": False,
+            "status": "accepted",
+            "message": f"Программа {name}: запрос на запуск принят",
+        }
+    ), 202
 
 
 @programs_api_bp.route("/api/programs/<int:prog_id>/log", methods=["GET"])

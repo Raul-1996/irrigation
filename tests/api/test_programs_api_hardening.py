@@ -301,6 +301,89 @@ class TestProgramMutationGuards:
         assert response.get_json()["success"] is False
         assert started == []
 
+    def test_manual_run_rejects_when_scheduler_is_unavailable(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        program = app.db.create_program(_payload(zone_id, extra_times=[]))
+        assert program is not None
+        dispatched = []
+
+        class RecordingThread:
+            def __init__(self, *args, **kwargs):
+                dispatched.append((args, kwargs))
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: None)
+        monkeypatch.setattr(programs_api.threading, "Thread", RecordingThread)
+
+        response = admin_client.post(f"/api/programs/{program['id']}/run")
+
+        assert response.status_code == 503
+        assert response.get_json() == {
+            "success": False,
+            "message": "Scheduler unavailable",
+            "error_code": "SCHEDULER_UNAVAILABLE",
+        }
+        assert dispatched == []
+
+    def test_manual_run_rejects_program_with_only_fault_zones(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        assert app.db.update_zone(zone_id, {"state": "fault"}) is not None
+        program = app.db.create_program(_payload(zone_id, extra_times=[]))
+        assert program is not None
+        dispatched = []
+
+        class RecordingThread:
+            def __init__(self, *args, **kwargs):
+                dispatched.append((args, kwargs))
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: object())
+        monkeypatch.setattr(programs_api.threading, "Thread", RecordingThread)
+
+        response = admin_client.post(f"/api/programs/{program['id']}/run")
+
+        assert response.status_code == 409
+        assert response.get_json() == {
+            "success": False,
+            "message": "Program has no runnable zones",
+            "error_code": "PROGRAM_NO_RUNNABLE_ZONES",
+        }
+        assert dispatched == []
+
+    def test_manual_run_dispatch_returns_202_without_claiming_physical_start(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        program = app.db.create_program(_payload(zone_id, extra_times=[]))
+        assert program is not None
+        dispatched = []
+
+        class DeferredThread:
+            def __init__(self, *args, **kwargs):
+                dispatched.append((args, kwargs))
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: object())
+        monkeypatch.setattr(programs_api.threading, "Thread", DeferredThread)
+
+        response = admin_client.post(f"/api/programs/{program['id']}/run")
+
+        assert response.status_code == 202
+        assert response.get_json() == {
+            "success": True,
+            "accepted": True,
+            "started": False,
+            "status": "accepted",
+            "message": "Программа Morning: запрос на запуск принят",
+        }
+        assert len(dispatched) == 1
+        assert dispatched[0][1]["target"].__name__ == "job_run_program"
+        assert dispatched[0][1]["kwargs"] == {"manual": True}
+
     def test_post_serializes_conflict_check_with_insert(self, app, monkeypatch):
         zone_id = _zone(app)
         active_checks = 0
