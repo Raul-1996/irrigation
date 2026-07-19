@@ -86,6 +86,28 @@ class TestZoneCrudOwnership:
         assert response.status_code == 400
         assert not any(zone["name"] == "No default group" for zone in app.db.get_zones())
 
+    @pytest.mark.parametrize("field", ["photo_path", "photo_thumb"])
+    @pytest.mark.parametrize("method", ["create", "update", "import"])
+    def test_photo_metadata_is_rejected_outside_photo_api(self, admin_client, app, field, method):
+        zone = app.db.create_zone({"name": "Photo owner", "group_id": 1, "duration": 10})
+        payload = {field: "media/zones/ZONE_999.webp"}
+
+        if method == "create":
+            response = admin_client.post("/api/zones", json={"name": "Must not exist", **payload})
+        elif method == "update":
+            response = admin_client.put(f"/api/zones/{zone['id']}", json=payload)
+        else:
+            response = admin_client.post(
+                "/api/zones/import",
+                json={"zones": [{"id": zone["id"], **payload}]},
+            )
+
+        assert response.status_code == 400
+        persisted = app.db.get_zone(zone["id"])
+        assert persisted["photo_path"] is None
+        assert persisted["photo_thumb"] is None
+        assert not any(candidate["name"] == "Must not exist" for candidate in app.db.get_zones())
+
     @pytest.mark.parametrize("field", ["command_id", "sequence_id"])
     @pytest.mark.parametrize("method", ["create", "update", "bulk", "csv"])
     def test_internal_command_fields_are_rejected_by_public_crud(self, admin_client, app, field, method):
@@ -352,6 +374,11 @@ class TestZonePhotoMutationSafety:
 
         with (
             patch.object(photo_api, "UPLOAD_FOLDER", str(tmp_path)),
+            patch.object(
+                photo_api,
+                "safe_zone_photo_path",
+                side_effect=lambda rel, **_kwargs: str(tmp_path / rel.rsplit("/", 1)[-1]),
+            ),
             patch.object(photo_api, "_atomic_write", side_effect=fail_second_write),
         ):
             response = admin_client.post(
@@ -362,6 +389,74 @@ class TestZonePhotoMutationSafety:
         assert response.status_code == 500
         assert main_path.read_bytes() == original_main
         assert thumb_path.read_bytes() == original_thumb
+
+    def test_delete_validates_entire_pair_before_mutating_files_or_metadata(self, admin_client, app, tmp_path):
+        import routes.zones_photo_api as photo_api
+
+        zone = app.db.create_zone({"name": "Validate delete pair", "group_id": 1, "duration": 10})
+        main_name = f"ZONE_{zone['id']}.webp"
+        main_rel = f"media/zones/{main_name}"
+        unsafe_thumb = f"media/zones/../ZONE_{zone['id']}_thumb.webp"
+        main_path = tmp_path / main_name
+        main_path.write_bytes(b"main")
+        assert app.db.update_zone_photo(
+            zone["id"],
+            main_rel,
+            photo_thumb=unsafe_thumb,
+            update_thumb=True,
+        )
+
+        real_safe_zone_photo_path = photo_api.safe_zone_photo_path
+
+        def resolve(rel, **kwargs):
+            real_safe_zone_photo_path(rel, **kwargs)
+            return str(tmp_path / rel.rsplit("/", 1)[-1])
+
+        with patch.object(photo_api, "safe_zone_photo_path", side_effect=resolve):
+            response = admin_client.delete(f"/api/zones/{zone['id']}/photo")
+
+        assert response.status_code == 400
+        assert response.get_json()["error_code"] == "INVALID_PHOTO_PATH"
+        assert main_path.read_bytes() == b"main"
+        current = app.db.get_zone(zone["id"])
+        assert current["photo_path"] == main_rel
+        assert current["photo_thumb"] == unsafe_thumb
+
+    def test_delete_metadata_failure_preserves_original_pair(self, admin_client, app, tmp_path):
+        import routes.zones_photo_api as photo_api
+
+        zone = app.db.create_zone({"name": "Delete rollback", "group_id": 1, "duration": 10})
+        main_name = f"ZONE_{zone['id']}.webp"
+        thumb_name = f"ZONE_{zone['id']}_thumb.webp"
+        main_rel = f"media/zones/{main_name}"
+        thumb_rel = f"media/zones/{thumb_name}"
+        main_path = tmp_path / main_name
+        thumb_path = tmp_path / thumb_name
+        main_path.write_bytes(b"main")
+        thumb_path.write_bytes(b"thumb")
+        assert app.db.update_zone_photo(
+            zone["id"],
+            main_rel,
+            photo_thumb=thumb_rel,
+            update_thumb=True,
+        )
+
+        with (
+            patch.object(
+                photo_api,
+                "safe_zone_photo_path",
+                side_effect=lambda rel, **_kwargs: str(tmp_path / rel.rsplit("/", 1)[-1]),
+            ),
+            patch.object(app.db, "update_zone_photo", return_value=False),
+        ):
+            response = admin_client.delete(f"/api/zones/{zone['id']}/photo")
+
+        assert response.status_code == 500
+        assert main_path.read_bytes() == b"main"
+        assert thumb_path.read_bytes() == b"thumb"
+        current = app.db.get_zone(zone["id"])
+        assert current["photo_path"] == main_rel
+        assert current["photo_thumb"] == thumb_rel
 
 
 class TestMapRetention:

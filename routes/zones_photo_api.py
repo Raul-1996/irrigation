@@ -164,7 +164,7 @@ def _archive_old_zone_file(zone_id, old_rel, label):
     if not old_rel:
         return None
     try:
-        old_abs = safe_zone_photo_path(old_rel)
+        old_abs = safe_zone_photo_path(old_rel, expected_zone_id=zone_id)
     except UnsafePathError as e:
         logger.warning(
             "archive_old: refused unsafe %s path for zone %s: %r — %s",
@@ -339,13 +339,15 @@ def delete_zone_photo(zone_id):
         if not photo_path and not photo_thumb:
             return jsonify({"success": False, "message": "Фотография не найдена"}), 404
 
-        bad_path = False
-        # SEC-009: validate each stored path before filesystem delete.
+        targets = []
+        # SEC-009: validate the complete stored pair before either durable
+        # metadata or a filesystem entry is changed. A poisoned thumb must
+        # never cause the independently valid main image to be deleted.
         for label, rel in (("main", photo_path), ("thumb", photo_thumb)):
             if not rel:
                 continue
             try:
-                filepath = safe_zone_photo_path(rel)
+                filepath = safe_zone_photo_path(rel, expected_zone_id=zone_id)
             except UnsafePathError as e:
                 logger.error(
                     "delete_zone_photo: refused unsafe %s path for zone %s: %s",
@@ -353,12 +355,44 @@ def delete_zone_photo(zone_id):
                     zone_id,
                     e,
                 )
-                bad_path = True
-                continue
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Некорректный путь к фото",
+                        "error_code": "INVALID_PHOTO_PATH",
+                    }
+                ), 400
+            targets.append((label, filepath))
+
+        # Clear authoritative references before best-effort cleanup. If this
+        # write fails, every original file remains in place and the request is
+        # safely retryable; deleting first can leave durable dangling paths.
+        try:
+            metadata_cleared = db.update_zone_photo(
+                zone_id,
+                None,
+                photo_thumb=None,
+                update_thumb=True,
+            )
+        except (OSError, sqlite3.Error):
+            logger.exception("delete_zone_photo: metadata clear failed for zone %s", zone_id)
+            metadata_cleared = False
+        if metadata_cleared is not True:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не удалось удалить фотографию",
+                    "error_code": "PHOTO_METADATA_UPDATE_FAILED",
+                }
+            ), 500
+
+        cleanup_pending = False
+        for label, filepath in targets:
             try:
                 if os.path.exists(filepath):
                     os.remove(filepath)
             except OSError as e:
+                cleanup_pending = True
                 logger.warning(
                     "delete_zone_photo: %s remove failed for zone %s: %s",
                     label,
@@ -366,20 +400,14 @@ def delete_zone_photo(zone_id):
                     e,
                 )
 
-        # Always clear both DB columns so admin UI stops pointing at them.
-        db.update_zone_photo(zone_id, None, photo_thumb=None, update_thumb=True)
-
-        if bad_path:
-            return jsonify(
-                {
-                    "success": False,
-                    "message": "Некорректный путь к фото",
-                    "error_code": "INVALID_PHOTO_PATH",
-                }
-            ), 400
-
         db.add_log("photo_delete", json.dumps({"zone": zone_id}))
-        return jsonify({"success": True, "message": "Фотография удалена"})
+        return jsonify(
+            {
+                "success": True,
+                "message": "Фотография удалена",
+                "cleanup_pending": cleanup_pending,
+            }
+        )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка удаления фото: {e}")
         return jsonify({"success": False, "message": "Ошибка удаления"}), 500
@@ -421,7 +449,7 @@ def rotate_zone_photo(zone_id):
         prepared = []
         for label, rel in targets:
             try:
-                filepath = safe_zone_photo_path(rel)
+                filepath = safe_zone_photo_path(rel, expected_zone_id=zone_id)
             except UnsafePathError as e:
                 logger.error(
                     "rotate_zone_photo: refused unsafe %s path for zone %s: %s",
@@ -517,7 +545,7 @@ def get_zone_photo(zone_id):
             # a corrupted `photo_path` like `../../etc/passwd` would be
             # returned to the client).
             try:
-                filepath = safe_zone_photo_path(photo_path)
+                filepath = safe_zone_photo_path(photo_path, expected_zone_id=zone_id)
             except UnsafePathError as e:
                 logger.error(
                     "get_zone_photo: refused unsafe photo_path for zone %s: %s",

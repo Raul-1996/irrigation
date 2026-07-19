@@ -40,6 +40,9 @@ _POSTPONE_FIELDS = {"postpone_until", "postpone_reason"}
 # by the state machine only; accepting them from generic CRUD/import would let
 # a caller invalidate (or impersonate) activation-bound safety callbacks.
 _INTERNAL_COMMAND_FIELDS = {"command_id", "sequence_id"}
+# Photo paths are filesystem-owned metadata. Only the serialized photo API may
+# write them; generic CRUD/import must not bind one zone to another zone's file.
+_PHOTO_METADATA_FIELDS = {"photo_path", "photo_thumb"}
 
 
 # MQTT wiring of a zone: when these change, the SSE hub must resubscribe —
@@ -159,6 +162,10 @@ def _normalise_zone_payload(
     forbidden_postpone = sorted(set(data) & _POSTPONE_FIELDS)
     if forbidden_postpone:
         return None, f"postpone fields not allowed via zone CRUD: {forbidden_postpone}"
+
+    forbidden_photo_metadata = sorted(set(data) & _PHOTO_METADATA_FIELDS)
+    if forbidden_photo_metadata:
+        return None, f"photo metadata fields not allowed via zone CRUD: {forbidden_photo_metadata}"
 
     if "duration" in data:
         raw_duration = data["duration"]
