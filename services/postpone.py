@@ -10,9 +10,8 @@ postpone_until всем зонам группы, аудируемая остан
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timedelta
-
-from werkzeug.exceptions import BadRequest
 
 from database import db
 from services.mqtt_pub import publish_mqtt_value
@@ -25,6 +24,111 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+MIN_POSTPONE_DAYS = 1
+MAX_POSTPONE_DAYS = 3
+_POSTPONE_MUTATION_LOCK = threading.Lock()
+
+
+class InvalidPostponeDaysError(ValueError):
+    """The requested relative postpone interval is outside the service contract."""
+
+    error_code = "INVALID_POSTPONE_DAYS"
+
+
+class PostponeConflictError(RuntimeError):
+    """A persisted deadline prevents a monotonic group postpone mutation."""
+
+    error_code = "POSTPONE_CONFLICT"
+
+    def __init__(self, message: str, *, zone_id: int | None = None):
+        super().__init__(message)
+        self.zone_id = zone_id
+
+
+class PostponeWouldShortenError(PostponeConflictError):
+    """The requested deadline is earlier than an existing deadline."""
+
+    error_code = "POSTPONE_WOULD_SHORTEN"
+
+
+class InvalidExistingPostponeError(PostponeConflictError):
+    """A persisted non-null deadline cannot be safely interpreted."""
+
+    error_code = "POSTPONE_INVALID_EXISTING"
+
+
+def _parse_naive_deadline(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        if not value or value != value.strip():
+            raise ValueError("empty or padded deadline")
+        parsed = datetime.fromisoformat(value)
+    else:
+        raise TypeError("deadline must be datetime or string")
+    if parsed.tzinfo is not None:
+        raise ValueError("timezone-aware deadline is not supported")
+    return parsed.replace(microsecond=0)
+
+
+def apply_group_postpone_deadline(
+    group_id: int,
+    postpone_until: datetime | str,
+    *,
+    reason: str,
+) -> dict:
+    """Atomically-at-service-level apply a monotonic deadline to one group.
+
+    All callers share one lock around the snapshot, validation, and writes.
+    Only SQL ``NULL`` is considered unset.  Any malformed non-null value or a
+    deadline that would be shortened fails before the first write.  Equal
+    deadlines are left untouched so their original reason/provenance survives.
+
+    This lower-level helper is suitable for absolute-deadline producers such as
+    the rain monitor; channel-level stop/audit side effects remain the caller's
+    responsibility.
+    """
+    group_id = int(group_id)
+    requested = _parse_naive_deadline(postpone_until)
+    serialized = requested.strftime("%Y-%m-%d %H:%M:%S")
+
+    with _POSTPONE_MUTATION_LOCK:
+        zones = db.get_zones() or []
+        group_zones = [z for z in zones if int(z.get("group_id") or 0) == group_id]
+        zones_to_update: list[dict] = []
+
+        # Validate the complete snapshot before the first mutation so a single
+        # conflicting zone cannot leave the rest of the group partially changed.
+        for zone in group_zones:
+            current_raw = zone.get("postpone_until")
+            if current_raw is None:
+                zones_to_update.append(zone)
+                continue
+            try:
+                current = _parse_naive_deadline(current_raw)
+            except (TypeError, ValueError) as exc:
+                raise InvalidExistingPostponeError(
+                    "Сохранённый срок отсрочки повреждён; изменение отклонено",
+                    zone_id=int(zone["id"]),
+                ) from exc
+            if requested < current:
+                raise PostponeWouldShortenError(
+                    "Новый срок не может сокращать действующую отсрочку",
+                    zone_id=int(zone["id"]),
+                )
+            if requested > current:
+                zones_to_update.append(zone)
+
+        for zone in zones_to_update:
+            if not db.update_zone_postpone(int(zone["id"]), serialized, reason):
+                raise RuntimeError(f"Не удалось сохранить отсрочку зоны {zone['id']}")
+
+        return {
+            "postpone_until": serialized,
+            "group_zones": group_zones,
+            "updated_zone_ids": [int(zone["id"]) for zone in zones_to_update],
+        }
+
 
 def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     """Отложить полив всех зон группы на ``days`` дней (до конца дня).
@@ -32,20 +136,15 @@ def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     Возвращает {"postpone_until": str-до-конца-дня, "postpone_date": datetime}.
     """
     group_id = int(group_id)
-    try:
-        days = int(days)
-        postpone_date = datetime.now() + timedelta(days=days)
-    except (TypeError, ValueError, OverflowError) as exc:
-        # Validate the entire date calculation before the first DB write.  The
-        # HTTP caller has no route-level exception translation, so use the
-        # framework's client-error type instead of leaking conversion errors
-        # as a 500 response.
-        raise BadRequest("Некорректное количество дней") from exc
-    postpone_until = postpone_date.strftime("%Y-%m-%d 23:59:59")
-    zones = db.get_zones() or []
-    group_zones = [z for z in zones if int(z.get("group_id") or 0) == group_id]
-    for zone in group_zones:
-        db.update_zone_postpone(zone["id"], postpone_until, "manual")
+    if isinstance(days, bool) or not isinstance(days, int) or not MIN_POSTPONE_DAYS <= days <= MAX_POSTPONE_DAYS:
+        raise InvalidPostponeDaysError(
+            f"Количество дней должно быть целым числом от {MIN_POSTPONE_DAYS} до {MAX_POSTPONE_DAYS}"
+        )
+    postpone_date = datetime.now() + timedelta(days=days)
+    requested_until = postpone_date.replace(hour=23, minute=59, second=59, microsecond=0)
+    applied = apply_group_postpone_deadline(group_id, requested_until, reason="manual")
+    postpone_until = applied["postpone_until"]
+    group_zones = applied["group_zones"]
     try:
         for zone in group_zones:
             try:

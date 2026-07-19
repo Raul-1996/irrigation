@@ -111,7 +111,7 @@ def test_public_postpone_never_shortens_existing_safety_deadline(guest_client, a
     zone = app.db.create_zone({"name": "already protected", "duration": 5, "group_id": group["id"]})
     unpostponed_zone = app.db.create_zone({"name": "must remain unchanged", "duration": 5, "group_id": group["id"]})
     postpone_until = "2099-12-31 23:59:59"
-    app.db.update_zone_postpone(zone["id"], postpone_until, "manual")
+    app.db.update_zone_postpone(zone["id"], postpone_until, "rain")
     app.db.set_setting_value("password_must_change", "0")
     app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
     reset_all()
@@ -123,6 +123,7 @@ def test_public_postpone_never_shortens_existing_safety_deadline(guest_client, a
         assert response.status_code == 409
         assert response.get_json()["error_code"] == "POSTPONE_WOULD_SHORTEN"
         assert app.db.get_zone(zone["id"])["postpone_until"] == postpone_until
+        assert app.db.get_zone(zone["id"])["postpone_reason"] == "rain"
         assert app.db.get_zone(unpostponed_zone["id"])["postpone_until"] is None
     finally:
         app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
@@ -149,6 +150,98 @@ def test_public_postpone_requires_bounded_positive_integer_days(guest_client, ap
     finally:
         app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
         reset_all()
+
+
+@pytest.mark.parametrize("stored_deadline", ["", "   ", "not-a-date"])
+def test_public_postpone_fails_closed_on_malformed_stored_deadline(guest_client, app, stored_deadline):
+    from services.api_rate_limiter import reset_all
+
+    group = app.db.create_group(f"malformed postpone {stored_deadline!r}")
+    malformed_zone = app.db.create_zone({"name": "malformed", "duration": 5, "group_id": group["id"]})
+    unset_zone = app.db.create_zone({"name": "unset", "duration": 5, "group_id": group["id"]})
+    app.db.update_zone_postpone(malformed_zone["id"], stored_deadline, "rain")
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "days": 3, "action": "postpone"},
+        )
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "POSTPONE_INVALID_EXISTING"
+        assert app.db.get_zone(malformed_zone["id"])["postpone_until"] == stored_deadline
+        assert app.db.get_zone(malformed_zone["id"])["postpone_reason"] == "rain"
+        assert app.db.get_zone(unset_zone["id"])["postpone_until"] is None
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
+
+
+def test_concurrent_public_and_telegram_postpone_is_monotonic(app, monkeypatch):
+    import services.postpone as postpone_service
+
+    group = app.db.create_group("concurrent channel postpone")
+    zone = app.db.create_zone({"name": "serialized", "duration": 5, "group_id": group["id"]})
+    original_get_zones = postpone_service.db.get_zones
+    original_update = postpone_service.db.update_zone_postpone
+    public_snapshot = threading.Event()
+    telegram_calling = threading.Event()
+    telegram_snapshot = threading.Event()
+    public_written = threading.Event()
+    results: dict[str, dict] = {}
+    errors: dict[str, BaseException] = {}
+
+    def controlled_get_zones(*args, **kwargs):
+        snapshot = original_get_zones(*args, **kwargs)
+        thread_name = threading.current_thread().name
+        if thread_name == "public-postpone":
+            public_snapshot.set()
+            assert telegram_calling.wait(1.0)
+        elif thread_name == "telegram-postpone":
+            telegram_snapshot.set()
+        return snapshot
+
+    def controlled_update(zone_id, postpone_until=None, reason=None):
+        thread_name = threading.current_thread().name
+        if thread_name == "public-postpone":
+            # Without one shared service lock, Telegram takes the same stale
+            # snapshot and then writes its shorter deadline last.
+            telegram_snapshot.wait(0.25)
+            result = original_update(zone_id, postpone_until, reason)
+            public_written.set()
+            return result
+        if thread_name == "telegram-postpone":
+            assert public_written.wait(1.0)
+        return original_update(zone_id, postpone_until, reason)
+
+    monkeypatch.setattr(postpone_service.db, "get_zones", controlled_get_zones)
+    monkeypatch.setattr(postpone_service.db, "update_zone_postpone", controlled_update)
+
+    def invoke(channel: str, days: int):
+        if channel == "telegram":
+            telegram_calling.set()
+        try:
+            results[channel] = postpone_service.postpone_group(group["id"], days, source=channel)
+        except BaseException as exc:  # captured for deterministic thread assertions
+            errors[channel] = exc
+
+    public_thread = threading.Thread(target=invoke, args=("public", 3), name="public-postpone")
+    public_thread.start()
+    assert public_snapshot.wait(1.0)
+    telegram_thread = threading.Thread(target=invoke, args=("telegram", 1), name="telegram-postpone")
+    telegram_thread.start()
+    public_thread.join(timeout=2.0)
+    telegram_thread.join(timeout=2.0)
+
+    assert not public_thread.is_alive()
+    assert not telegram_thread.is_alive()
+    assert "public" in results
+    assert isinstance(errors.get("telegram"), postpone_service.PostponeWouldShortenError)
+    expected = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d 23:59:59")
+    persisted = app.db.get_zone(zone["id"])
+    assert persisted["postpone_until"] == expected
+    assert persisted["postpone_reason"] == "manual"
 
 
 def test_public_postpone_can_extend_existing_safety_deadline(guest_client, app):
