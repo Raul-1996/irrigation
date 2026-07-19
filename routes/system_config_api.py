@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import time
+import uuid
 from datetime import datetime, timedelta
 
 from flask import Blueprint, current_app, jsonify, redirect, request, session, url_for
@@ -35,6 +37,64 @@ system_config_api_bp = Blueprint("system_config_api", __name__)
 # Password blocklist (TASK-013)
 _PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
 _RAIN_SETTING_KEYS = ("rain.enabled", "rain.topic", "rain.type", "rain.server_id")
+MAX_MAP_FILES = 20
+_MAP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def _map_file_entries() -> list[dict]:
+    """Return newest-first regular image files, never following symlinks."""
+    entries = []
+    with os.scandir(MAP_DIR) as directory:
+        for entry in directory:
+            try:
+                ext = os.path.splitext(entry.name)[1].lower()
+                metadata = entry.stat(follow_symlinks=False)
+                if ext in _MAP_EXTENSIONS and stat.S_ISREG(metadata.st_mode):
+                    entries.append(
+                        {
+                            "name": entry.name,
+                            "path": f"media/maps/{entry.name}",
+                            "mtime": metadata.st_mtime,
+                            "absolute_path": entry.path,
+                        }
+                    )
+            except (OSError, PermissionError):
+                logger.debug("map listing skipped unreadable entry %s", entry.name, exc_info=True)
+    entries.sort(key=lambda item: (item["mtime"], item["name"]), reverse=True)
+    return entries
+
+
+def _atomic_write_map(path: str, data: bytes) -> None:
+    temp_path = f"{path}.tmp-{uuid.uuid4().hex}"
+    try:
+        with open(temp_path, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            logger.warning("could not remove temporary map file %s", temp_path)
+
+
+def _prune_old_maps(current_path: str) -> None:
+    """Keep a bounded history without ever deleting the just-written map."""
+    entries = _map_file_entries()
+    current_real = os.path.realpath(current_path)
+    remaining_to_prune = max(0, len(entries) - MAX_MAP_FILES)
+    for victim in reversed(entries):
+        if remaining_to_prune <= 0:
+            break
+        if os.path.realpath(victim["absolute_path"]) == current_real:
+            continue
+        try:
+            os.remove(victim["absolute_path"])
+            remaining_to_prune -= 1
+        except (OSError, PermissionError):
+            logger.warning("map retention could not prune %s", victim["name"], exc_info=True)
 
 # ===== Auth / Password =====
 
@@ -124,18 +184,10 @@ def api_change_password():
 def api_map():
     try:
         if request.method == "GET":
-            allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-            items = []
-            for f in os.listdir(MAP_DIR):
-                p = os.path.join(MAP_DIR, f)
-                try:
-                    ext = os.path.splitext(f)[1].lower()
-                    if os.path.isfile(p) and ext in allowed_ext:
-                        items.append({"name": f, "path": f"media/maps/{f}", "mtime": os.path.getmtime(p)})
-                except (OSError, PermissionError) as e:
-                    logger.debug("Exception in api_map: %s", e)
-                    continue
-            items.sort(key=lambda x: x["mtime"], reverse=True)
+            items = [
+                {key: value for key, value in item.items() if key != "absolute_path"}
+                for item in _map_file_entries()[:MAX_MAP_FILES]
+            ]
             return jsonify({"success": True, "items": items})
         else:
             if not (current_app.config.get("TESTING") or session.get("role") == "admin"):
@@ -174,10 +226,10 @@ def api_map():
                         "error_code": "IMAGE_PROCESSING_FAILED",
                     }
                 ), 400
-            filename = f"zones_map_{int(time.time())}{out_ext}"
+            filename = f"zones_map_{time.time_ns()}_{uuid.uuid4().hex}{out_ext}"
             save_path = os.path.join(MAP_DIR, filename)
-            with open(save_path, "wb") as f:
-                f.write(out_bytes)
+            _atomic_write_map(save_path, out_bytes)
+            _prune_old_maps(save_path)
             return jsonify({"success": True, "message": "Карта загружена", "path": f"media/maps/{filename}"})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка работы с картой зон: {e}")

@@ -92,6 +92,19 @@ class TestSafeZonePhotoPath:
         with pytest.raises(UnsafePathError):
             safe_zone_photo_path("../../ZONE_1.webp")
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "media/zones/../ZONE_1.webp",
+            "media/maps/ZONE_1.webp",
+            "ZONE_1.webp",
+            "media/zones/nested/ZONE_1.webp",
+        ],
+    )
+    def test_rejects_zone_named_file_outside_exact_zone_media_directory(self, path):
+        with pytest.raises(UnsafePathError):
+            safe_zone_photo_path(path)
+
     def test_rejects_filename_without_zone_prefix(self):
         # photo_path must use the ZONE_<id> naming — arbitrary names
         # (e.g. left over from admin CRUD that set raw user input) fail.
@@ -118,6 +131,15 @@ class TestSafeZonePhotoPath:
     def test_thumb_filename_accepted(self):
         result = safe_zone_photo_path("media/zones/ZONE_5_thumb.webp")
         assert result.endswith(os.path.join("static", "media", "zones", "ZONE_5_thumb.webp"))
+
+    @pytest.mark.parametrize("suffix", [".webp", "_thumb.webp"])
+    def test_expected_zone_id_rejects_another_zones_file(self, suffix):
+        with pytest.raises(UnsafePathError):
+            safe_zone_photo_path(f"media/zones/ZONE_6{suffix}", expected_zone_id=5)
+
+    @pytest.mark.parametrize("suffix", [".webp", "_thumb.webp"])
+    def test_expected_zone_id_accepts_own_variants(self, suffix):
+        safe_zone_photo_path(f"media/zones/ZONE_5{suffix}", expected_zone_id=5)
 
     def test_evil_thumb_suffix_rejected(self):
         # Typo + extra-suffix variants must not pass.

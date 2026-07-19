@@ -65,6 +65,16 @@ class TestResponseTimes:
         assert resp.status_code == 200
         assert ms < 500, f"GET /api/env/values took {ms:.0f}ms"
 
+    def test_next_watering_bulk_at_public_limit_under_500ms(self, admin_client):
+        resp, ms = self._measure(
+            admin_client,
+            "POST",
+            "/api/zones/next-watering-bulk",
+            json={"zone_ids": list(range(1, 513))},
+        )
+        assert resp.status_code == 200
+        assert ms < 500, f"POST /api/zones/next-watering-bulk at 512 IDs took {ms:.0f}ms"
+
     def test_auth_status_under_500ms(self, admin_client):
         resp, ms = self._measure(admin_client, "GET", "/api/auth/status")
         assert resp.status_code == 200
