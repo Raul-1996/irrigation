@@ -136,6 +136,19 @@ def test_install_and_update_purge_retired_telegram_file_logs_before_activation()
     assert 'retire_telegram_file_logs "$APP_DIR"' in INSTALL
 
 
+def test_deploy_requires_telegram_runtime_retirement_before_pii_cleanup():
+    update_guard = 'require_retired_telegram_runtime_commit "$REPO_DIR_REAL" "$RESOLVED_TARGET"'
+    install_guard = 'require_retired_telegram_runtime_tree "$APP_DIR"'
+    assert update_guard in UPDATE
+    assert install_guard in INSTALL
+    assert UPDATE.index(update_guard) < UPDATE.index("UPDATE_SUCCEEDED=0")
+    assert INSTALL.index(install_guard) < INSTALL.index('retire_telegram_file_logs "$APP_DIR"')
+    assert INSTALL.index(install_guard) < INSTALL.index('systemctl restart "$SERVICE_NAME"')
+    for script in (INSTALL, UPDATE):
+        assert "logging[.]FileHandler" in script
+        assert "telegram[.]txt" in script
+
+
 def test_ci_runs_the_complete_default_selected_suite():
     assert "pytest --tb=short -q --cov --cov-report=xml" in CI
     assert "pytest tests/unit tests/db tests/api" not in CI

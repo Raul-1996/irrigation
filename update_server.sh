@@ -179,11 +179,36 @@ ensure_logrotate_ready() {
   fi
 }
 
+require_retired_telegram_runtime_commit() {
+  local repository=$1
+  local target_commit=$2
+  local matches
+  local grep_status
+
+  if matches=$(git -C "$repository" grep -n -E \
+    -e 'logging[.]FileHandler' -e 'telegram[.]txt' \
+    "$target_commit" -- services/telegram_bot.py); then
+    err "Target commit still creates the retired Telegram file log"
+    err "$matches"
+    return 1
+  else
+    grep_status=$?
+  fi
+  if [[ "$grep_status" != "1" ]]; then
+    err "Could not verify Telegram logging in target commit $target_commit"
+    return 1
+  fi
+}
+
 retire_telegram_file_logs() {
   local application_root=$1
   local application_root_real
   local expected_logs_dir
   local logs_dir_real
+  local listing_file
+  local enumeration_sentinel
+  local enumeration_complete=0
+  local iteration_failed=0
   local candidate
   local candidate_name
 
@@ -202,19 +227,60 @@ retire_telegram_file_logs() {
     return 1
   fi
 
-  while IFS= read -r -d '' candidate; do
+  if ! listing_file=$(mktemp /tmp/wb-irrigation-telegram-logs.XXXXXX); then
+    err "Could not create a private Telegram log enumeration file"
+    return 1
+  fi
+  if ! chmod 600 "$listing_file"; then
+    rm -f -- "$listing_file" || err "Could not remove insecure enumeration file: $listing_file"
+    err "Could not make the Telegram log enumeration file private"
+    return 1
+  fi
+  enumeration_sentinel="WB_IRRIGATION_ENUMERATION_COMPLETE_${listing_file##*/}"
+  if ! find -P "$logs_dir_real" -mindepth 1 -maxdepth 1 -print0 >"$listing_file"; then
+    rm -f -- "$listing_file" || err "Could not remove failed enumeration file: $listing_file"
+    err "Could not enumerate retired Telegram file logs"
+    return 1
+  fi
+  if ! printf '%s\0' "$enumeration_sentinel" >>"$listing_file"; then
+    rm -f -- "$listing_file" || err "Could not remove incomplete enumeration file: $listing_file"
+    err "Could not finalize retired Telegram log enumeration"
+    return 1
+  fi
+
+  if ! while IFS= read -r -d '' candidate; do
+    if [[ "$candidate" == "$enumeration_sentinel" ]]; then
+      enumeration_complete=1
+      continue
+    fi
     candidate_name=${candidate##*/}
     if [[ "$candidate_name" == "telegram.txt" \
       || "$candidate_name" =~ ^telegram[.]txt([.][0-9]+|-[0-9]{8})([.]gz)?$ ]]; then
       if [[ -f "$candidate" || -L "$candidate" ]]; then
-        rm -f -- "$candidate"
+        if ! rm -f -- "$candidate"; then
+          err "Could not remove retired Telegram file log: $candidate"
+          iteration_failed=1
+          break
+        fi
         info "Removed retired Telegram file log: $candidate"
       elif [[ -e "$candidate" ]]; then
         err "Refusing to remove non-file historical log path: $candidate"
-        return 1
+        iteration_failed=1
+        break
       fi
     fi
-  done < <(find -P "$logs_dir_real" -mindepth 1 -maxdepth 1 -print0)
+  done <"$listing_file"; then
+    iteration_failed=1
+  fi
+
+  if ! rm -f -- "$listing_file"; then
+    err "Could not remove Telegram log enumeration file: $listing_file"
+    return 1
+  fi
+  if [[ "$iteration_failed" == "1" || "$enumeration_complete" != "1" ]]; then
+    err "Retired Telegram log enumeration was not processed completely"
+    return 1
+  fi
 }
 
 prune_old_backups() {
@@ -419,6 +485,9 @@ if [[ -n "$TARGET_COMMIT" && "$RESOLVED_TARGET" != "$TARGET_COMMIT" ]]; then
   err "Fetched target does not match requested TARGET_COMMIT=$TARGET_COMMIT"
   exit 1
 fi
+# Integration ordering contract: the Telegram runtime must stop creating the
+# legacy file before this deploy migration is allowed to purge it.
+require_retired_telegram_runtime_commit "$REPO_DIR_REAL" "$RESOLVED_TARGET"
 
 UPDATE_SUCCEEDED=0
 SERVICE_WAS_ACTIVE=0

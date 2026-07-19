@@ -4,3 +4,5 @@
 # in-process rotating handler; the retired Telegram file log is purged by the
 # native install/update migration. Keeping this managed marker replaces the
 # historical stanza on existing controllers and prevents double rotation.
+# Deploy scripts refuse activation unless the target Telegram runtime has
+# already removed its FileHandler, enforcing that integration order.

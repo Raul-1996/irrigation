@@ -242,3 +242,93 @@ def test_retired_log_cleanup_refuses_symlinked_logs_directory(tmp_path):
         )
 
     assert outside_log.read_text(encoding="utf-8") == "PII must not be traversed\n"
+
+
+def test_retired_log_cleanup_fails_closed_on_enumeration_io_error(tmp_path):
+    for script_name, deploy_script in (("update", UPDATE), ("install", INSTALL)):
+        application_root = tmp_path / script_name / "app"
+        logs_dir = application_root / "services" / "logs"
+        logs_dir.mkdir(parents=True)
+        retired_log = logs_dir / "telegram.txt"
+        retired_log.write_text("PII must survive a failed enumeration\n", encoding="utf-8")
+        retired_log.chmod(0o644)
+        controlled_listing = tmp_path / f"{script_name}-enumeration.bin"
+
+        _bash(
+            f"""
+            source {shlex.quote(str(deploy_script))}
+            CONTROLLED_LISTING={shlex.quote(str(controlled_listing))}
+            RETIRED_LOG={shlex.quote(str(retired_log))}
+            mktemp() {{
+              : > "$CONTROLLED_LISTING"
+              printf '%s\n' "$CONTROLLED_LISTING"
+            }}
+            find() {{
+              printf '%s\\0' "$RETIRED_LOG"
+              return 42
+            }}
+            if retire_telegram_file_logs {shlex.quote(str(application_root))}; then
+              exit 96
+            fi
+            [[ -f "$RETIRED_LOG" ]]
+            [[ ! -e "$CONTROLLED_LISTING" ]]
+            """
+        )
+
+        assert retired_log.read_text(encoding="utf-8") == "PII must survive a failed enumeration\n"
+
+
+def test_deploy_guards_require_runtime_file_handler_removal(tmp_path):
+    repository = tmp_path / "repo"
+    telegram_source = repository / "services" / "telegram_bot.py"
+    telegram_source.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.email", "deploy-test@example.invalid"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Deploy Test"], cwd=repository, check=True)
+
+    telegram_source.write_text(
+        'import logging\nlogging.FileHandler("services/logs/telegram.txt")\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "services/telegram_bot.py"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "legacy file log"], cwd=repository, check=True)
+    legacy_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+
+    telegram_source.write_text(
+        'import logging\nlogger = logging.getLogger("telegram")\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "services/telegram_bot.py"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "retire file log"], cwd=repository, check=True)
+    retired_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+
+    legacy_tree = tmp_path / "legacy-tree"
+    retired_tree = tmp_path / "retired-tree"
+    for tree, source in (
+        (legacy_tree, 'import logging\nlogging.FileHandler("services/logs/telegram.txt")\n'),
+        (retired_tree, 'import logging\nlogger = logging.getLogger("telegram")\n'),
+    ):
+        tree_source = tree / "services" / "telegram_bot.py"
+        tree_source.parent.mkdir(parents=True)
+        tree_source.write_text(source, encoding="utf-8")
+
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        if require_retired_telegram_runtime_commit \
+          {shlex.quote(str(repository))} {shlex.quote(legacy_commit)}; then
+          exit 97
+        fi
+        require_retired_telegram_runtime_commit \
+          {shlex.quote(str(repository))} {shlex.quote(retired_commit)}
+        """
+    )
+    _bash(
+        f"""
+        source {shlex.quote(str(INSTALL))}
+        if require_retired_telegram_runtime_tree {shlex.quote(str(legacy_tree))}; then
+          exit 98
+        fi
+        require_retired_telegram_runtime_tree {shlex.quote(str(retired_tree))}
+        """
+    )

@@ -142,11 +142,41 @@ ensure_logrotate_ready() {
   fi
 }
 
+require_retired_telegram_runtime_tree() {
+  local application_root=$1
+  local application_root_real
+  local telegram_source
+  local matches
+  local grep_status
+
+  application_root_real=$(cd "$application_root" && pwd -P) || return 1
+  telegram_source="$application_root_real/services/telegram_bot.py"
+  if [[ ! -f "$telegram_source" || -L "$telegram_source" ]]; then
+    err "Не найден канонический Telegram runtime: $telegram_source"
+    return 1
+  fi
+  if matches=$(grep -n -E -e 'logging[.]FileHandler' -e 'telegram[.]txt' "$telegram_source"); then
+    err "Telegram runtime всё ещё создаёт устаревший файловый лог"
+    err "$matches"
+    return 1
+  else
+    grep_status=$?
+  fi
+  if [[ "$grep_status" != "1" ]]; then
+    err "Не удалось проверить Telegram runtime: $telegram_source"
+    return 1
+  fi
+}
+
 retire_telegram_file_logs() {
   local application_root=$1
   local application_root_real
   local expected_logs_dir
   local logs_dir_real
+  local listing_file
+  local enumeration_sentinel
+  local enumeration_complete=0
+  local iteration_failed=0
   local candidate
   local candidate_name
 
@@ -165,19 +195,60 @@ retire_telegram_file_logs() {
     return 1
   fi
 
-  while IFS= read -r -d '' candidate; do
+  if ! listing_file=$(mktemp /tmp/wb-irrigation-telegram-logs.XXXXXX); then
+    err "Не удалось создать приватный файл перечисления Telegram-логов"
+    return 1
+  fi
+  if ! chmod 600 "$listing_file"; then
+    rm -f -- "$listing_file" || err "Не удалось удалить небезопасное перечисление: $listing_file"
+    err "Не удалось закрыть права на файл перечисления Telegram-логов"
+    return 1
+  fi
+  enumeration_sentinel="WB_IRRIGATION_ENUMERATION_COMPLETE_${listing_file##*/}"
+  if ! find -P "$logs_dir_real" -mindepth 1 -maxdepth 1 -print0 >"$listing_file"; then
+    rm -f -- "$listing_file" || err "Не удалось удалить файл сбойного перечисления: $listing_file"
+    err "Не удалось перечислить устаревшие файловые Telegram-логи"
+    return 1
+  fi
+  if ! printf '%s\0' "$enumeration_sentinel" >>"$listing_file"; then
+    rm -f -- "$listing_file" || err "Не удалось удалить незавершённое перечисление: $listing_file"
+    err "Не удалось завершить перечисление устаревших Telegram-логов"
+    return 1
+  fi
+
+  if ! while IFS= read -r -d '' candidate; do
+    if [[ "$candidate" == "$enumeration_sentinel" ]]; then
+      enumeration_complete=1
+      continue
+    fi
     candidate_name=${candidate##*/}
     if [[ "$candidate_name" == "telegram.txt" \
       || "$candidate_name" =~ ^telegram[.]txt([.][0-9]+|-[0-9]{8})([.]gz)?$ ]]; then
       if [[ -f "$candidate" || -L "$candidate" ]]; then
-        rm -f -- "$candidate"
+        if ! rm -f -- "$candidate"; then
+          err "Не удалось удалить устаревший Telegram-лог: $candidate"
+          iteration_failed=1
+          break
+        fi
         info "Удалён устаревший файловый Telegram-лог: $candidate"
       elif [[ -e "$candidate" ]]; then
         err "Отказываюсь удалять не-файл по пути исторического лога: $candidate"
-        return 1
+        iteration_failed=1
+        break
       fi
     fi
-  done < <(find -P "$logs_dir_real" -mindepth 1 -maxdepth 1 -print0)
+  done <"$listing_file"; then
+    iteration_failed=1
+  fi
+
+  if ! rm -f -- "$listing_file"; then
+    err "Не удалось удалить файл перечисления Telegram-логов: $listing_file"
+    return 1
+  fi
+  if [[ "$iteration_failed" == "1" || "$enumeration_complete" != "1" ]]; then
+    err "Перечисление устаревших Telegram-логов обработано не полностью"
+    return 1
+  fi
 }
 
 atomic_switch_app_link() {
@@ -416,6 +487,8 @@ else
   fi
   APP_DIR=$(readlink -f "$APP_LINK")
 fi
+# The runtime removal must be integrated before the destructive PII cleanup.
+require_retired_telegram_runtime_tree "$APP_DIR"
 retire_telegram_file_logs "$APP_DIR"
 for secret_file in "$APP_DIR/.secret_key" "$APP_DIR/.irrig_secret_key" "$APP_DIR/.env"; do
   if [[ -f "$secret_file" ]]; then
