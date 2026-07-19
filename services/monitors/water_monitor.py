@@ -2,6 +2,7 @@ import logging
 import sqlite3
 import ssl
 import threading
+import time
 from collections import deque
 from datetime import datetime
 
@@ -13,6 +14,38 @@ except ImportError:
     mqtt = None
 
 logger = logging.getLogger(__name__)
+
+_CONNECT_READY_TIMEOUT_SECONDS = 5.0
+
+
+def _reason_code_value(reason_code) -> int:
+    value = getattr(reason_code, "value", reason_code)
+    return int(value)
+
+
+def _connack_succeeded(reason_code) -> bool:
+    is_failure = getattr(reason_code, "is_failure", None)
+    if is_failure is not None and bool(is_failure):
+        return False
+    try:
+        return _reason_code_value(reason_code) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _suback_succeeded(reason_code_list) -> bool:
+    if not reason_code_list:
+        return False
+    for reason_code in reason_code_list:
+        is_failure = getattr(reason_code, "is_failure", None)
+        if is_failure is not None and bool(is_failure):
+            return False
+        try:
+            if _reason_code_value(reason_code) >= 128:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def _configure_tls(client, server: dict) -> None:
@@ -117,12 +150,23 @@ class WaterMonitor:
 
             staged_clients: dict[int, mqtt.Client] = {}
             try:
+                deadline = time.monotonic() + _CONNECT_READY_TIMEOUT_SECONDS
                 for group_id, server_id, topic, liters, server in bindings:
                     staged_clients[group_id] = self._build_group_client(
                         group_id,
                         topic,
                         server,
                     )
+                for group_id, client in staged_clients.items():
+                    remaining = max(0.0, deadline - time.monotonic())
+                    ready_event = client._water_monitor_ready_event
+                    if not ready_event.wait(remaining):
+                        raise TimeoutError(f"WaterMonitor group {group_id} MQTT readiness timed out")
+                    connect_error = client._water_monitor_connect_error
+                    if connect_error is not None:
+                        raise connect_error
+                    if not client._water_monitor_connected:
+                        raise ConnectionError(f"WaterMonitor group {group_id} disconnected before readiness")
             except Exception:  # Transaction boundary: retire every staged client before returning.
                 logger.exception("WaterMonitor generation build failed; keeping current subscriptions")
                 for client in staged_clients.values():
@@ -221,6 +265,10 @@ class WaterMonitor:
             client._water_monitor_retired = False
             client._water_monitor_staged = True
             client._water_monitor_pending_samples = deque(maxlen=256)
+            client._water_monitor_ready_event = threading.Event()
+            client._water_monitor_connect_error = None
+            client._water_monitor_connected = False
+            client._water_monitor_expected_mid = None
             if server.get("username"):
                 client.username_pw_set(server.get("username"), server.get("password") or None)
             _configure_tls(client, server)
@@ -240,24 +288,64 @@ class WaterMonitor:
                     logger.exception("WaterMonitor on_message failed for group %s", group_id)
 
             def _on_connect(client, userdata, connect_flags, reason_code, properties):
+                if getattr(client, "_water_monitor_retired", False):
+                    return
+                if not _connack_succeeded(reason_code):
+                    client._water_monitor_connected = False
+                    client._water_monitor_connect_error = ConnectionError(
+                        f"WaterMonitor group {group_id} MQTT CONNACK rejected: {reason_code}"
+                    )
+                    client._water_monitor_ready_event.set()
+                    return
                 try:
-                    if getattr(client, "_water_monitor_retired", False):
-                        return
-                    client.subscribe(topic, qos=0)
+                    client._water_monitor_connected = True
+                    result = client.subscribe(topic, qos=0)
+                    if not isinstance(result, (tuple, list)) or len(result) < 2 or int(result[0]) != 0:
+                        raise ConnectionError(f"WaterMonitor group {group_id} MQTT subscribe was rejected locally")
+                    client._water_monitor_expected_mid = int(result[1])
+                    logger.info("WaterMonitor group %s subscription requested for %s", group_id, topic)
+                except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
+                    client._water_monitor_connect_error = exc
+                    client._water_monitor_ready_event.set()
+
+            def _on_subscribe(client, userdata, mid, reason_code_list, properties):
+                if getattr(client, "_water_monitor_retired", False):
+                    return
+                if int(mid) != getattr(client, "_water_monitor_expected_mid", None):
+                    return
+                if not _suback_succeeded(reason_code_list):
+                    client._water_monitor_connect_error = ConnectionError(
+                        f"WaterMonitor group {group_id} MQTT SUBACK rejected: {reason_code_list}"
+                    )
+                else:
+                    client._water_monitor_connect_error = None
                     logger.info("WaterMonitor group %s subscribed %s", group_id, topic)
-                except (ConnectionError, TimeoutError, OSError):
-                    logger.exception("WaterMonitor subscribe failed for group %s", group_id)
+                client._water_monitor_ready_event.set()
 
             def _on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
                 # Preserve the tracked handle across transient disconnects so
                 # Paho can reconnect it and disable/reconfigure can retire it.
+                client._water_monitor_connected = False
+                if getattr(client, "_water_monitor_staged", False) and not getattr(
+                    client, "_water_monitor_retired", False
+                ):
+                    client._water_monitor_connect_error = ConnectionError(
+                        f"WaterMonitor group {group_id} disconnected before readiness: {reason_code}"
+                    )
+                    client._water_monitor_ready_event.set()
                 logger.info("WaterMonitor group %s disconnected: rc=%s", group_id, reason_code)
 
             client.on_message = _on_message
             client.on_connect = _on_connect
+            client.on_subscribe = _on_subscribe
             client.on_disconnect = _on_disconnect
-            client.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 10)
-            client.subscribe(topic, qos=0)
+            host = server.get("host") or "127.0.0.1"
+            port = int(server.get("port") or 1883)
+            connect_async = getattr(client, "connect_async", None)
+            if callable(connect_async):
+                connect_async(host, port, 10)
+            else:
+                client.connect(host, port, 10)
             client.loop_start()
             return client
         except Exception:  # The caller rolls back the rest of the staged generation.

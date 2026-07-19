@@ -9,6 +9,8 @@ import ssl
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 
 class _Message:
     def __init__(self, payload: str, topic: str = "sensor/value"):
@@ -17,13 +19,30 @@ class _Message:
 
 
 class _FakeClient:
-    def __init__(self, api_version, client_id=None, *, tls_error: Exception | None = None):
+    def __init__(
+        self,
+        api_version,
+        client_id=None,
+        *,
+        tls_error: Exception | None = None,
+        connect_reason=0,
+        emit_connect: bool = True,
+        suback_reasons: list | None = None,
+        emit_suback: bool = True,
+        disconnect_before_suback: bool = False,
+    ):
         self.api_version = api_version
         self.client_id = client_id
         self.tls_error = tls_error
+        self.connect_reason = connect_reason
+        self.emit_connect = emit_connect
+        self.suback_reasons = [0] if suback_reasons is None else suback_reasons
+        self.emit_suback = emit_suback
+        self.disconnect_before_suback = disconnect_before_suback
         self.on_connect = None
         self.on_disconnect = None
         self.on_message = None
+        self.on_subscribe = None
         self.username = None
         self.password = None
         self.tls = None
@@ -55,6 +74,13 @@ class _FakeClient:
 
     def loop_start(self):
         self.loop_start_calls += 1
+        if not self.emit_connect or self.on_connect is None:
+            return
+        self.on_connect(self, None, {}, self.connect_reason, None)
+        if self.disconnect_before_suback:
+            self.on_disconnect(self, None, {}, 128, None)
+        elif self.emit_suback and self.subscribe_calls and self.on_subscribe is not None:
+            self.on_subscribe(self, None, len(self.subscribe_calls), self.suback_reasons, None)
 
     def disconnect(self):
         self.disconnect_calls += 1
@@ -68,15 +94,39 @@ class _FakeClient:
 class _FakeMQTT:
     CallbackAPIVersion = SimpleNamespace(VERSION2="v2")
 
-    def __init__(self, *, tls_error: Exception | None = None, tls_error_at: int | None = None):
+    def __init__(
+        self,
+        *,
+        tls_error: Exception | None = None,
+        tls_error_at: int | None = None,
+        connect_reason=0,
+        emit_connect: bool = True,
+        suback_reasons: list | None = None,
+        emit_suback: bool = True,
+        disconnect_before_suback: bool = False,
+    ):
         self.clients: list[_FakeClient] = []
         self._tls_error = tls_error
         self._tls_error_at = tls_error_at
+        self._connect_reason = connect_reason
+        self._emit_connect = emit_connect
+        self._suback_reasons = suback_reasons
+        self._emit_suback = emit_suback
+        self._disconnect_before_suback = disconnect_before_suback
 
     def Client(self, api_version, client_id=None):
         client_number = len(self.clients) + 1
         tls_error = self._tls_error if self._tls_error_at in (None, client_number) else None
-        client = _FakeClient(api_version, client_id, tls_error=tls_error)
+        client = _FakeClient(
+            api_version,
+            client_id,
+            tls_error=tls_error,
+            connect_reason=self._connect_reason,
+            emit_connect=self._emit_connect,
+            suback_reasons=self._suback_reasons,
+            emit_suback=self._emit_suback,
+            disconnect_before_suback=self._disconnect_before_suback,
+        )
         self.clients.append(client)
         return client
 
@@ -339,3 +389,85 @@ def test_water_invalid_config_is_rejected_before_live_generation_is_swapped() ->
     assert monitor._topics[3] == "water/valid"
     assert client.disconnect_calls == 0
     assert client.loop_stop_calls == 0
+
+
+def test_water_successful_generation_waits_for_connack_and_suback() -> None:
+    mod = importlib.import_module("services.monitors.water_monitor")
+    fake_mqtt = _FakeMQTT()
+    groups = [
+        {
+            "id": 8,
+            "use_water_meter": 1,
+            "water_mqtt_topic": "water/ready",
+            "water_mqtt_server_id": 1,
+            "water_pulse_size": "1l",
+        }
+    ]
+    monitor = mod.WaterMonitor()
+
+    with patch.object(mod, "mqtt", fake_mqtt), patch.object(mod, "db", _FakeDB({1: _tls_server()}, groups)):
+        assert monitor.reconfigure()
+
+    client = fake_mqtt.clients[0]
+    assert list(inspect.signature(client.on_subscribe).parameters) == [
+        "client",
+        "userdata",
+        "mid",
+        "reason_code_list",
+        "properties",
+    ]
+    assert client.subscribe_calls == [("water/ready", 0)]
+    assert monitor._clients[8] is client
+
+
+@pytest.mark.parametrize(
+    ("mqtt_options", "expected_subscribe_count"),
+    [
+        ({"connect_reason": 135}, 0),
+        ({"suback_reasons": [135]}, 1),
+        ({"disconnect_before_suback": True, "emit_suback": False}, 1),
+        ({"emit_suback": False}, 1),
+    ],
+    ids=["connack-not-authorized", "suback-rejected", "disconnect-before-suback", "suback-timeout"],
+)
+def test_water_unready_generation_rolls_back_and_preserves_live_client(
+    mqtt_options: dict,
+    expected_subscribe_count: int,
+) -> None:
+    mod = importlib.import_module("services.monitors.water_monitor")
+    groups = [
+        {
+            "id": 4,
+            "use_water_meter": 1,
+            "water_mqtt_topic": "water/live",
+            "water_mqtt_server_id": 1,
+            "water_pulse_size": "1l",
+        }
+    ]
+    fake_db = _FakeDB({1: _tls_server()}, groups)
+    monitor = mod.WaterMonitor()
+    live_mqtt = _FakeMQTT()
+
+    with patch.object(mod, "mqtt", live_mqtt), patch.object(mod, "db", fake_db):
+        assert monitor.reconfigure()
+        live_client = monitor._clients[4]
+        live_client.on_message(live_client, None, _Message("17", "water/live"))
+
+    groups[0]["water_mqtt_topic"] = "water/replacement"
+    unready_mqtt = _FakeMQTT(**mqtt_options)
+    with (
+        patch.object(mod, "mqtt", unready_mqtt),
+        patch.object(mod, "db", fake_db),
+        patch.object(mod, "_CONNECT_READY_TIMEOUT_SECONDS", 0.01),
+    ):
+        assert not monitor.reconfigure()
+
+    staged_client = unready_mqtt.clients[0]
+    assert monitor._clients[4] is live_client
+    assert monitor._topics[4] == "water/live"
+    assert monitor.get_raw_pulses(4) == 17
+    assert live_client.disconnect_calls == 0
+    assert live_client.loop_stop_calls == 0
+    assert len(staged_client.subscribe_calls) == expected_subscribe_count
+    assert staged_client.disconnect_calls == 1
+    assert staged_client.loop_stop_calls == 1
