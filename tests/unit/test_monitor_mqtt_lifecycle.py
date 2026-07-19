@@ -18,6 +18,26 @@ class _Message:
         self.topic = topic
 
 
+class _HookEvent:
+    """Delegate to an Event and run a deterministic hook at first wait."""
+
+    def __init__(self, event, hook):
+        self._event = event
+        self._hook = hook
+
+    def set(self):
+        return self._event.set()
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def wait(self, timeout=None):
+        hook, self._hook = self._hook, None
+        if hook is not None:
+            hook()
+        return self._event.wait(timeout)
+
+
 class _FakeClient:
     def __init__(
         self,
@@ -30,6 +50,7 @@ class _FakeClient:
         suback_reasons: list | None = None,
         emit_suback: bool = True,
         disconnect_before_suback: bool = False,
+        ready_wait_hook=None,
     ):
         self.api_version = api_version
         self.client_id = client_id
@@ -39,6 +60,7 @@ class _FakeClient:
         self.suback_reasons = [0] if suback_reasons is None else suback_reasons
         self.emit_suback = emit_suback
         self.disconnect_before_suback = disconnect_before_suback
+        self.ready_wait_hook = ready_wait_hook
         self.on_connect = None
         self.on_disconnect = None
         self.on_message = None
@@ -81,6 +103,8 @@ class _FakeClient:
             self.on_disconnect(self, None, {}, 128, None)
         elif self.emit_suback and self.subscribe_calls and self.on_subscribe is not None:
             self.on_subscribe(self, None, len(self.subscribe_calls), self.suback_reasons, None)
+        if self.ready_wait_hook is not None:
+            self._water_monitor_ready_event = _HookEvent(self._water_monitor_ready_event, self.ready_wait_hook)
 
     def disconnect(self):
         self.disconnect_calls += 1
@@ -104,6 +128,8 @@ class _FakeMQTT:
         suback_reasons: list | None = None,
         emit_suback: bool = True,
         disconnect_before_suback: bool = False,
+        ready_wait_hook_at: int | None = None,
+        ready_wait_hook=None,
     ):
         self.clients: list[_FakeClient] = []
         self._tls_error = tls_error
@@ -113,6 +139,8 @@ class _FakeMQTT:
         self._suback_reasons = suback_reasons
         self._emit_suback = emit_suback
         self._disconnect_before_suback = disconnect_before_suback
+        self._ready_wait_hook_at = ready_wait_hook_at
+        self._ready_wait_hook = ready_wait_hook
 
     def Client(self, api_version, client_id=None):
         client_number = len(self.clients) + 1
@@ -126,6 +154,7 @@ class _FakeMQTT:
             suback_reasons=self._suback_reasons,
             emit_suback=self._emit_suback,
             disconnect_before_suback=self._disconnect_before_suback,
+            ready_wait_hook=self._ready_wait_hook if self._ready_wait_hook_at == client_number else None,
         )
         self.clients.append(client)
         return client
@@ -471,3 +500,54 @@ def test_water_unready_generation_rolls_back_and_preserves_live_client(
     assert len(staged_client.subscribe_calls) == expected_subscribe_count
     assert staged_client.disconnect_calls == 1
     assert staged_client.loop_stop_calls == 1
+
+
+def test_water_disconnect_after_first_wait_but_before_swap_rolls_back_all_staged_clients() -> None:
+    mod = importlib.import_module("services.monitors.water_monitor")
+    groups = [
+        {
+            "id": 9,
+            "use_water_meter": 1,
+            "water_mqtt_topic": "water/live",
+            "water_mqtt_server_id": 1,
+            "water_pulse_size": "1l",
+        }
+    ]
+    fake_db = _FakeDB({1: _tls_server()}, groups)
+    monitor = mod.WaterMonitor()
+    live_mqtt = _FakeMQTT()
+
+    with patch.object(mod, "mqtt", live_mqtt), patch.object(mod, "db", fake_db):
+        assert monitor.reconfigure()
+        live_client = monitor._clients[9]
+        live_client.on_message(live_client, None, _Message("23", "water/live"))
+
+    groups[:] = [
+        {
+            "id": group_id,
+            "use_water_meter": 1,
+            "water_mqtt_topic": f"water/new/{group_id}",
+            "water_mqtt_server_id": 1,
+            "water_pulse_size": "1l",
+        }
+        for group_id in (1, 2)
+    ]
+    staged_mqtt = _FakeMQTT()
+
+    def disconnect_first_staged_client() -> None:
+        first_client = staged_mqtt.clients[0]
+        first_client.on_disconnect(first_client, None, {}, 128, None)
+
+    staged_mqtt._ready_wait_hook_at = 2
+    staged_mqtt._ready_wait_hook = disconnect_first_staged_client
+    with patch.object(mod, "mqtt", staged_mqtt), patch.object(mod, "db", fake_db):
+        assert not monitor.reconfigure()
+
+    assert monitor._clients == {9: live_client}
+    assert monitor._topics == {9: "water/live"}
+    assert monitor.get_raw_pulses(9) == 23
+    assert live_client.disconnect_calls == 0
+    assert live_client.loop_stop_calls == 0
+    assert len(staged_mqtt.clients) == 2
+    assert all(client.disconnect_calls == 1 for client in staged_mqtt.clients)
+    assert all(client.loop_stop_calls == 1 for client in staged_mqtt.clients)
