@@ -65,6 +65,18 @@ def _core_close_without_echo(_server_id, _topic, _mode, publish_command):
 
 
 class TestZoneTopologyMutationSafety:
+    def test_logically_off_virtual_zone_can_move_and_delete_without_physical_echo(self, admin_client, app):
+        source = _group(app, "Virtual source")
+        target = _group(app, "Virtual target")
+        zone = _zone(app, source["id"], server_id=None, topic="")
+
+        moved = admin_client.put(f"/api/zones/{zone['id']}", json={"group_id": target["id"]})
+        deleted = admin_client.delete(f"/api/zones/{zone['id']}")
+
+        assert moved.status_code == 200
+        assert deleted.status_code == 204
+        assert app.db.get_zone(zone["id"]) is None
+
     @pytest.mark.parametrize(
         ("change", "field"),
         [

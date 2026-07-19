@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.safety_contracts import complete_group_stop_scheduler
+
 
 def _make_mqtt_zone(test_db, *, group_id: int = 1, state: str = "off") -> tuple[dict, dict]:
     server = test_db.create_mqtt_server(
@@ -420,7 +422,7 @@ def test_finding_89_manual_start_does_not_cancel_future_extra_slot(test_db):
             "enabled": True,
         }
     )
-    scheduler = MagicMock()
+    scheduler = complete_group_stop_scheduler(test_db)
 
     with (
         patch("services.zone_control.db", test_db),

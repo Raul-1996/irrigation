@@ -7,6 +7,8 @@ Each test hits as many code paths as possible.
 import json
 from unittest.mock import patch
 
+from tests.safety_contracts import confirmed_group_stop
+
 
 class TestAllGetEndpoints:
     """Hit every GET endpoint to maximize route coverage."""
@@ -261,6 +263,7 @@ class TestMQTTOperations:
         zid = zones[0]["id"]
 
         with (
+            confirmed_group_stop(app.db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
             patch("services.zone_control.state_verifier"),
         ):
@@ -425,7 +428,7 @@ class TestZoneStartStopWorkflow:
         zones = app.db.get_zones()
         zid = zones[0]["id"]
 
-        with patch("services.zone_control.exclusive_start_zone"):
+        with confirmed_group_stop(app.db), patch("services.zone_control.exclusive_start_zone"):
             resp = admin_client.post(f"/api/zones/{zid}/start")
             assert resp.status_code == 200
 

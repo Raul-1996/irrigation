@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from services.api_rate_limiter import reset_all as reset_rate_limits
+from tests.safety_contracts import complete_group_stop_scheduler
 
 
 def test_start_limit_never_blocks_explicit_zone_stop(admin_client, app):
@@ -59,13 +60,10 @@ def test_general_mutation_limit_never_blocks_fail_safe_stop(admin_client, app, s
                 stop_response = admin_client.post(f"/api/zones/{zone['id']}/stop")
             controller.assert_called_once_with(zone["id"], reason="manual", force=True)
         else:
-            aggregate = {"success": True, "stopped": [zone["id"]], "unresolved": []}
-            with (
-                patch("routes.groups_api.get_scheduler", return_value=None),
-                patch("services.zone_control.stop_all_in_group", return_value=aggregate) as controller,
-            ):
+            scheduler = complete_group_stop_scheduler(app.db)
+            with patch("routes.groups_api.get_scheduler", return_value=scheduler):
                 stop_response = admin_client.post(f"/api/groups/{group['id']}/stop")
-            controller.assert_called_once_with(group["id"], reason="group_stop", force=True)
+            scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
 
         assert stop_response.status_code == 200
         assert stop_response.get_json()["success"] is True

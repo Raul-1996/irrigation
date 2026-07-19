@@ -3,6 +3,9 @@
 import json
 import os
 from datetime import datetime, timedelta
+from unittest.mock import patch
+
+from tests.safety_contracts import confirmed_group_stop
 
 os.environ["TESTING"] = "1"
 
@@ -17,28 +20,32 @@ class TestGroupsAPIDeep:
     def test_update_group_all_fields(self, admin_client, app):
         g = app.db.create_group("AllFields")
         srv = app.db.create_mqtt_server({"name": "T", "host": "127.0.0.1", "port": 1883})
-        resp = admin_client.put(
-            f"/api/groups/{g['id']}",
-            data=json.dumps(
-                {
-                    "name": "Updated All",
-                    "icon": "💧",
-                    "use_master_valve": 1,
-                    "master_mqtt_topic": "/mv",
-                    "master_mqtt_server_id": srv["id"],
-                    "master_mode": "NO",
-                    "use_water_meter": 1,
-                    "water_mqtt_topic": "/water",
-                    "water_mqtt_server_id": srv["id"],
-                    "water_pulse_size": "10l",
-                    "water_base_value_m3": 100.5,
-                    "water_base_pulses": 1000,
-                    "use_rain": True,
-                }
-            ),
-            content_type="application/json",
-        )
-        assert resp.status_code in (200, 400, 500)
+        with (
+            patch("routes.groups_api._confirm_master_closed", return_value=(True, None)),
+            patch("routes.groups_api._reconfigure_water_monitor", return_value=True),
+        ):
+            resp = admin_client.put(
+                f"/api/groups/{g['id']}",
+                data=json.dumps(
+                    {
+                        "name": "Updated All",
+                        "icon": "💧",
+                        "use_master_valve": 1,
+                        "master_mqtt_topic": "/mv",
+                        "master_mqtt_server_id": srv["id"],
+                        "master_mode": "NO",
+                        "use_water_meter": 1,
+                        "water_mqtt_topic": "/water",
+                        "water_mqtt_server_id": srv["id"],
+                        "water_pulse_size": "10l",
+                        "water_base_value_m3": 100.5,
+                        "water_base_pulses": 1000,
+                        "use_rain": True,
+                    }
+                ),
+                content_type="application/json",
+            )
+        assert resp.status_code == 200
 
     def test_delete_group_with_zones(self, admin_client, app):
         g = app.db.create_group("WithZones")
@@ -50,7 +57,8 @@ class TestGroupsAPIDeep:
         g = app.db.create_group("StopWater")
         z = app.db.create_zone({"name": "Z", "duration": 10, "group_id": g["id"], "topic": "/t/z"})
         app.db.update_zone(z["id"], {"state": "on", "watering_start_time": "2026-01-01 10:00:00"})
-        resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
         assert resp.status_code in (200, 400, 500)
 
 

@@ -5,6 +5,8 @@ import os
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from tests.safety_contracts import confirmed_group_stop
+
 os.environ["TESTING"] = "1"
 
 
@@ -507,7 +509,8 @@ class TestGroupsAdvanced:
     def test_stop_group(self, admin_client, app):
         g = app.db.create_group("SG")
         z = app.db.create_zone({"name": "Z", "duration": 10, "group_id": g["id"]})
-        resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
         assert resp.status_code in (200, 400, 500)
 
     def test_start_zone_exclusive(self, admin_client, app):

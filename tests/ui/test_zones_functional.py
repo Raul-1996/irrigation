@@ -17,6 +17,8 @@ import json
 
 import pytest
 
+from tests.safety_contracts import confirmed_group_stop
+
 
 class TestZoneCRUD:
     """Zone create, read, update, delete."""
@@ -199,13 +201,14 @@ class TestGroupOperations:
         resp = admin_client.post(f"/api/groups/{gid}/start-from-first")
         assert resp.status_code in (200, 400, 500)
 
-    def test_group_stop(self, admin_client):
+    def test_group_stop(self, admin_client, app):
         resp = admin_client.get("/api/groups")
         groups = json.loads(resp.data)
         if not groups:
             pytest.skip("No groups")
         gid = groups[0]["id"]
-        resp = admin_client.post(f"/api/groups/{gid}/stop")
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post(f"/api/groups/{gid}/stop")
         assert resp.status_code in (200, 400, 500)
 
     def test_postpone_group(self, admin_client, app, monkeypatch):

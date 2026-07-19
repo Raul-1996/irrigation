@@ -80,6 +80,12 @@ def _zone_ts_to_iso(zone: dict | None) -> dict | None:
 def _zone_topology_is_safe(zone: dict) -> bool:
     """Whether a zone is confirmed physically OFF and may be rewired/deleted."""
     state = str(zone.get("state") or "").strip().lower()
+    has_physical_channel = bool(zone.get("mqtt_server_id") or (zone.get("topic") or "").strip())
+    if not has_physical_channel:
+        # A complete virtual zone has no relay that could remain energised and
+        # therefore can never acquire a physical observed_state echo.  Its
+        # logical OFF state is the complete safety boundary.
+        return state == "off"
     commanded = str(zone.get("commanded_state") or "").strip().lower()
     observed = str(zone.get("observed_state") or "").strip().lower()
     return state == "off" and commanded == "off" and observed == "off"

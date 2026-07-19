@@ -14,6 +14,10 @@ import json
 import os
 from unittest.mock import patch
 
+import pytest
+
+from tests.safety_contracts import confirmed_group_stop
+
 os.environ["TESTING"] = "1"
 
 
@@ -37,6 +41,11 @@ def _patch_publish():
 
 class TestApiMqttStartWritesZoneRun:
     """The bug: UI start used to skip db.create_zone_run. Fixed by delegating."""
+
+    @pytest.fixture(autouse=True)
+    def _confirmed_group_stop(self, app):
+        with confirmed_group_stop(app.db):
+            yield
 
     def test_mqtt_start_creates_open_zone_run(self, admin_client, app):
         """POST /mqtt/start opens exactly one zone_run row with start_utc set, end_utc NULL."""

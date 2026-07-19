@@ -488,7 +488,7 @@ class TestMapRetention:
         ignored.write_text("keep", encoding="utf-8")
 
         with (
-            patch.object(system_api, "MAP_DIR", str(tmp_path)),
+            patch.object(system_api, "_TRUSTED_MAP_DIR", str(tmp_path.resolve())),
             patch.object(system_api, "optimize_uploaded_image", return_value=(b"new", ".webp")),
         ):
             response = admin_client.post(
@@ -520,9 +520,9 @@ class TestMapRetention:
             existing.append(path.name)
 
         with (
-            patch.object(system_api, "MAP_DIR", str(tmp_path)),
+            patch.object(system_api, "_TRUSTED_MAP_DIR", str(tmp_path.resolve())),
             patch.object(system_api, "optimize_uploaded_image", return_value=(b"new", ".webp")),
-            patch.object(system_api, "_atomic_write_map", side_effect=OSError("disk full")),
+            patch.object(system_api.os, "replace", side_effect=OSError("disk full")),
         ):
             response = admin_client.post(
                 "/api/map",
@@ -534,7 +534,7 @@ class TestMapRetention:
         assert sorted(path.name for path in tmp_path.glob("map_*.png")) == sorted(existing)
         assert not list(tmp_path.glob("zones_map_*"))
 
-    def test_pruning_continues_after_one_old_file_cannot_be_removed(self, tmp_path):
+    def test_pruning_fails_closed_when_old_file_cannot_be_removed(self, tmp_path):
         import routes.system_config_api as system_api
 
         for index in range(system_api.MAX_MAP_FILES + 2):
@@ -543,22 +543,23 @@ class TestMapRetention:
             os.utime(path, (index + 1, index + 1))
         current = tmp_path / f"map_{system_api.MAX_MAP_FILES + 1:02d}.png"
         undeletable = tmp_path / "map_00.png"
-        real_remove = os.remove
+        real_unlink = os.unlink
 
-        def fail_only_oldest(path):
-            if os.path.realpath(path) == os.path.realpath(undeletable):
+        def fail_only_oldest(path, *args, **kwargs):
+            if path == undeletable.name:
                 raise PermissionError("read-only map")
-            real_remove(path)
+            return real_unlink(path, *args, **kwargs)
 
         with (
-            patch.object(system_api, "MAP_DIR", str(tmp_path)),
-            patch.object(system_api.os, "remove", side_effect=fail_only_oldest),
+            patch.object(system_api, "_TRUSTED_MAP_DIR", str(tmp_path.resolve())),
+            patch.object(system_api.os, "unlink", side_effect=fail_only_oldest),
         ):
-            system_api._prune_old_maps(str(current))
+            with pytest.raises(PermissionError, match="read-only map"):
+                with system_api._open_map_directory(create=False) as (_, directory_fd):
+                    system_api._prune_map_items_locked(directory_fd, new_filename=current.name)
 
         assert undeletable.exists()
         assert current.exists()
-        assert len(list(tmp_path.glob("*.png"))) == system_api.MAX_MAP_FILES
 
 
 class TestGroupStartDebounceTruth:
