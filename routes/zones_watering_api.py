@@ -183,7 +183,7 @@ def stop_zone(zone_id):
         try:
             from services.zone_control import stop_zone as _stop_central
 
-            if not _stop_central(int(zone_id), reason="manual", force=False):
+            if not _stop_central(int(zone_id), reason="manual", force=True):
                 return jsonify({"success": False, "message": "Не удалось остановить зону"}), 500
         except (ValueError, TypeError, KeyError):
             logger.exception("stop_zone: central stop failed")
@@ -530,7 +530,7 @@ def api_zone_mqtt_stop(zone_id: int):
     try:
         from services.zone_control import stop_zone as _stop_central
 
-        if _stop_central(int(zone_id), reason="manual", force=False):
+        if _stop_central(int(zone_id), reason="manual", force=True):
             return jsonify({"success": True, "message": "Зона остановлена"})
     except (ValueError, TypeError, KeyError):
         logger.exception("api_zone_mqtt_stop: central stop failed, fallback to direct publish")

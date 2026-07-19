@@ -26,7 +26,7 @@ def test_start_limit_never_blocks_explicit_zone_stop(admin_client, app):
 
         assert stop_response.status_code == 200
         assert stop_response.get_json()["success"] is True
-        stop_zone.assert_called_once_with(zone["id"], reason="manual", force=False)
+        stop_zone.assert_called_once_with(zone["id"], reason="manual", force=True)
     finally:
         app.config["TESTING"] = True
         reset_rate_limits()

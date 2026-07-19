@@ -212,7 +212,10 @@ from routes.zones_crud_api import api_zones_next_watering_bulk
 from routes.zones_watering_api import api_zone_mqtt_stop, stop_zone
 
 for _view in (
-    api_postpone,  # /api/postpone
+    # /api/postpone remains view-exempt so guest "postpone" can be a fail-safe
+    # action; `_auth_before_request` manually requires admin + CSRF for
+    # action="cancel", which re-enables future watering.
+    api_postpone,
     api_emergency_stop,  # /api/emergency-stop
     api_status,  # /api/status
     stop_zone,  # /api/zones/<id>/stop
@@ -490,6 +493,14 @@ def _is_status_action(path):
     return False
 
 
+def _is_postpone_cancel_request(path: str) -> bool:
+    """Return whether this request removes a watering postponement."""
+    if path != "/api/postpone" or request.method != "POST":
+        return False
+    payload = request.get_json(silent=True)
+    return isinstance(payload, dict) and payload.get("action") == "cancel"
+
+
 # ── Auth before-request ────────────────────────────────────────────────────
 @app.before_request
 def _auth_before_request():
@@ -511,12 +522,14 @@ def _auth_before_request():
                 if request.method == "GET":
                     return None
                 pth = request.path or ""
+                postpone_cancel = _is_postpone_cancel_request(pth)
                 if session.get("role") == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
                     if pth != "/api/login":
                         return jsonify(
                             {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
                         ), 403
-                if session.get("role") != "admin" and not _is_status_action(pth):
+                is_public_action = _is_status_action(pth) and not postpone_cancel
+                if session.get("role") != "admin" and not is_public_action:
                     return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
                 if session.get("role") == "admin" and request.method in ["POST", "PUT", "DELETE"]:
                     must = db.get_setting_value("password_must_change")
@@ -528,6 +541,11 @@ def _auth_before_request():
                                 "error_code": "PASSWORD_MUST_CHANGE",
                             }
                         ), 403
+                    if postpone_cancel and app.config.get("WTF_CSRF_ENABLED"):
+                        # api_postpone is view-exempt for the fail-safe delay
+                        # action.  Force validation here for cancel, without
+                        # applying the view exemption.
+                        csrf.protect()
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.warning("auth before_request error: %s", e)
 

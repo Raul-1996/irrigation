@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from werkzeug.security import check_password_hash
 
 
 def test_correlation_reset_is_idempotent():
@@ -64,6 +66,120 @@ def test_authenticated_unsafe_physical_actions_require_csrf(admin_client, app, p
         assert "CSRF token is missing" in response.get_data(as_text=True)
     finally:
         app.config["WTF_CSRF_ENABLED"] = False
+
+
+def test_guest_cannot_cancel_postpone_or_clear_database_state(guest_client, app):
+    group = app.db.create_group("protected postpone cancel")
+    zone = app.db.create_zone({"name": "postponed", "duration": 5, "group_id": group["id"]})
+    postpone_until = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(zone["id"], postpone_until, "manual")
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "action": "cancel"},
+        )
+        assert response.status_code == 401
+        assert response.get_json()["error_code"] == "UNAUTHENTICATED"
+        assert app.db.get_zone(zone["id"])["postpone_until"] == postpone_until
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+
+def test_guest_can_still_apply_fail_safe_postpone(guest_client, app):
+    group = app.db.create_group("public fail-safe postpone")
+    zone = app.db.create_zone({"name": "delay me", "duration": 5, "group_id": group["id"]})
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "days": 1, "action": "postpone"},
+        )
+        assert response.status_code == 200
+        assert app.db.get_zone(zone["id"])["postpone_until"] is not None
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+
+def test_admin_postpone_cancel_requires_valid_csrf_before_write(admin_client, app):
+    group = app.db.create_group("csrf postpone cancel")
+    zone = app.db.create_zone({"name": "postponed", "duration": 5, "group_id": group["id"]})
+    postpone_until = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(zone["id"], postpone_until, "manual")
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=True)
+    try:
+        page = admin_client.get("/")
+        token_match = re.search(r'<meta name="csrf-token" content="([^"]+)"', page.get_data(as_text=True))
+        assert token_match is not None
+
+        missing = admin_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "action": "cancel"},
+        )
+        assert missing.status_code == 400
+        assert "CSRF token is missing" in missing.get_data(as_text=True)
+        assert app.db.get_zone(zone["id"])["postpone_until"] == postpone_until
+
+        accepted = admin_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "action": "cancel"},
+            headers={"X-CSRFToken": token_match.group(1)},
+        )
+        assert accepted.status_code == 200
+        assert app.db.get_zone(zone["id"])["postpone_until"] is None
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+
+def test_password_change_normalizes_old_and_new_edge_whitespace(admin_client, app):
+    from services.api_rate_limiter import reset_all
+
+    app.db.set_password("OldSecure123!")
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = admin_client.post(
+            "/api/password",
+            json={
+                "old_password": "  OldSecure123!  ",
+                "new_password": "  NewSecure456!  ",
+            },
+        )
+        assert response.status_code == 200
+        stored_hash = app.db.get_password_hash()
+        assert check_password_hash(stored_hash, "NewSecure456!")
+        assert not check_password_hash(stored_hash, "  NewSecure456!  ")
+
+        login = app.test_client().post("/api/login", json={"password": "  NewSecure456!  "})
+        assert login.status_code == 200
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
+
+
+@pytest.mark.parametrize("new_password", ["   password   ", "       abc       "])
+def test_password_policy_cannot_be_bypassed_with_edge_whitespace(admin_client, app, new_password):
+    from services.api_rate_limiter import reset_all
+
+    app.db.set_password("OldSecure123!")
+    original_hash = app.db.get_password_hash()
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = admin_client.post(
+            "/api/password",
+            json={"old_password": "OldSecure123!", "new_password": new_password},
+        )
+        assert response.status_code == 400
+        assert app.db.get_password_hash() == original_hash
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
 
 
 def test_dotenv_timezone_is_loaded_and_synchronised_before_scheduler(tmp_path):
@@ -146,6 +262,47 @@ def test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false(admin_
     assert response.status_code == 500
     assert response.get_json()["success"] is False
     assert app.db.get_zone(zone["id"])["state"] == "on"
+
+
+@pytest.mark.parametrize("observed_state", ["on", "unknown"])
+@pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
+def test_public_stop_forces_off_retry_when_observed_state_is_not_off(
+    guest_client, app, endpoint, observed_state
+):
+    import routes.zones_watering_api as route
+
+    server = app.db.create_mqtt_server({"name": "observed mismatch", "host": "127.0.0.1", "port": 1883})
+    zone = app.db.create_zone(
+        {
+            "name": "commanded off observed on",
+            "duration": 5,
+            "group_id": 1,
+            "mqtt_server_id": server["id"],
+            "topic": "/devices/test/controls/K2",
+        }
+    )
+    app.db.update_zone(
+        zone["id"],
+        {"state": "off", "commanded_state": "off", "observed_state": observed_state},
+    )
+    path = f"/api/zones/{zone['id']}/{'stop' if endpoint == 'legacy' else 'mqtt/stop'}"
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+
+    try:
+        with (
+            patch.object(route, "get_scheduler", return_value=None),
+            patch("services.zone_control.publish_mqtt_value", return_value=False) as physical_publish,
+            patch.object(route, "_publish_mqtt_value", return_value=False),
+        ):
+            response = guest_client.post(path, content_type="application/json")
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+    assert response.status_code == 500
+    assert response.get_json()["success"] is False
+    physical_publish.assert_called_once()
+    assert physical_publish.call_args.args[2] == "0"
 
 
 def _asgi_scope(path: str, method: str = "GET") -> dict:

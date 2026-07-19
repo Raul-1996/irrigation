@@ -86,16 +86,23 @@ def api_change_password():
         if not session.get("logged_in") and not current_app.config.get("TESTING"):
             return jsonify({"success": False, "message": "Требуется аутентификация"}), 401
         data = request.get_json() or {}
-        old_password = data.get("old_password", "")
-        new_password = data.get("new_password", "")
+        old_password_raw = data.get("old_password", "")
+        new_password_raw = data.get("new_password", "")
+        if not isinstance(old_password_raw, str) or not isinstance(new_password_raw, str):
+            return jsonify({"success": False, "message": "Пароль должен быть строкой"}), 400
+        # Login normalises edge whitespace, and the repository persists the
+        # normalised value.  Apply the same contract before every policy and
+        # hash check so padding cannot bypass min-length/blocklist rules.
+        old_password = old_password_raw.strip()
+        new_password = new_password_raw.strip()
+        if not new_password:
+            return jsonify({"success": False, "message": "Новый пароль обязателен"}), 400
         if len(new_password) < MIN_PASSWORD_LENGTH:
             return jsonify(
                 {"success": False, "message": f"Пароль должен быть не менее {MIN_PASSWORD_LENGTH} символов"}
             ), 400
         if len(new_password) > 32:
             return jsonify({"success": False, "message": "Пароль не может быть длиннее 32 символов"}), 400
-        if not new_password:
-            return jsonify({"success": False, "message": "Новый пароль обязателен"}), 400
         if new_password.lower() in _PASSWORD_BLOCKLIST:
             return jsonify({"success": False, "message": "Этот пароль слишком простой. Выберите другой."}), 400
         stored_hash = db.get_password_hash()
