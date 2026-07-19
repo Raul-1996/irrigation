@@ -453,6 +453,11 @@
 - **Репродукция/сценарий:** При umask 022 unprivileged local user читает repo_snapshot/.env/app.log, получает signing/decryption/bootstrap secrets; SESSION_COOKIE_SECURE=1 оставляет app.config False.
 - **Evidence:** Backup tar и .env становятся 0644/0755 и включают secret files; initial admin password пишется в app.log 0644; SESSION_COOKIE_SECURE env не применяется из-за prepopulated Flask key, native transport остаётся HTTP.
 - **Owner packages:** `p4-deploy`, `p4-auth-http`, `p4-status-api`.
+- **Partial remediation `p4-security-secrets`:** Secret keys, SQLite files and runtime logs now use fail-closed owner-only storage; bootstrap credentials are written to a private recovery file instead of logs, and bootstrap log messages are redacted.
+  - Fix commits: `d0fb6f1b1e481581ea05da0ba79fd94fde2cab95`, `85ec3c60d977b3de49c244e4696f9733850843b6`; merge: `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
+  - Regression tests: `tests/unit/test_phase4_security_secrets.py`.
+  - Verification: Full serial evidence: 2090 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX bind failure passed as an exact rerun outside the sandbox. Ruff and git diff --check were clean.
+  - Осталось: PR-043 remains open until the default 1234 database seed is removed, auth cookie/trim policy is integrated, and deploy cleanup plus runtime file permissions are integrated.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #196 / PR-044 [medium] `app.py:438-464; routes/audit_api.py:113-190; routes/system_status_api.py:176-240,682-760` — Sensitive logs/audit/scheduler GET endpoints доступны анонимно
