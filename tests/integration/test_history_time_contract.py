@@ -145,3 +145,126 @@ def test_summary_does_not_claim_savings_for_future_slot_today(app, client, monke
     assert today["plan_minutes"] == 15
     assert payload["summary"]["plan_minutes"] == 15
     assert payload["summary"]["saved_minutes"] == 15
+
+
+def test_interval_occurrences_use_live_scheduler_slot_contract(monkeypatch):
+    from routes.zones_history_api import _load_interval_occurrences
+
+    controller_tz = ZoneInfo("UTC")
+    range_start = datetime(2026, 5, 1, tzinfo=controller_tz)
+    range_end = datetime(2026, 5, 8, tzinfo=controller_tz)
+    morning = datetime(2026, 5, 4, 7, 0, tzinfo=controller_tz)
+    evening = datetime(2026, 5, 4, 19, 0, tzinfo=controller_tz)
+
+    class FakeScheduler:
+        def get_program_interval_anchors(self, program_id):
+            assert program_id == 17
+            return {"main": morning, "extra:0": evening}
+
+        def get_program_occurrences(self, program_id, start, end, *, limit):
+            assert (program_id, start, end, limit) == (17, range_start, range_end, 512)
+            return {"main": [morning], "extra:0": [evening]}
+
+    monkeypatch.setattr("irrigation_scheduler.get_scheduler", lambda: FakeScheduler())
+    programs = [
+        {
+            "id": 17,
+            "enabled": True,
+            "schedule_type": "interval",
+            "time": "07:00",
+            "extra_times": ["19:00"],
+        }
+    ]
+
+    result = _load_interval_occurrences(programs, range_start, range_end, controller_tz)
+
+    assert result == {17: [morning, evening]}
+
+
+def test_interval_occurrences_fail_closed_without_a_valid_slot(monkeypatch):
+    from routes.zones_history_api import _load_interval_occurrences
+
+    controller_tz = ZoneInfo("UTC")
+    range_start = datetime(2026, 5, 1, tzinfo=controller_tz)
+    range_end = datetime(2026, 5, 8, tzinfo=controller_tz)
+
+    class FakeScheduler:
+        def get_program_interval_anchors(self, _program_id):
+            return {}
+
+        def get_program_occurrences(self, _program_id, _start, _end, *, limit):
+            assert limit == 512
+            return {}
+
+    monkeypatch.setattr("irrigation_scheduler.get_scheduler", lambda: FakeScheduler())
+    programs = [
+        {
+            "id": 18,
+            "enabled": True,
+            "schedule_type": "interval",
+            "time": None,
+            "extra_times": [],
+        }
+    ]
+
+    result = _load_interval_occurrences(programs, range_start, range_end, controller_tz)
+
+    assert result == {}
+
+
+def test_dst_fold_runs_sort_and_measure_on_utc_timeline(app, client, monkeypatch):
+    controller_tz = ZoneInfo("America/New_York")
+    controller_now = datetime(2026, 11, 1, 12, 0, tzinfo=controller_tz)
+    monkeypatch.setenv("WB_TZ", "America/New_York")
+
+    with patch("routes.zones_history_api._controller_now", return_value=controller_now):
+        zone = _create_zone(app, "history-dst-fold")
+        _insert_local_run(
+            app,
+            zone["id"],
+            "2026-11-01T01:45:00-04:00",
+            "2026-11-01T01:55:00-04:00",
+        )
+        _insert_local_run(
+            app,
+            zone["id"],
+            "2026-11-01T01:15:00-05:00",
+            "2026-11-01T01:25:00-05:00",
+        )
+
+        payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
+
+    assert [run["start_utc"] for run in payload["runs"]] == [
+        "2026-11-01T01:15:00-05:00",
+        "2026-11-01T01:45:00-04:00",
+    ]
+    assert payload["summary"]["total_minutes"] == 20
+
+
+def test_naive_dst_fold_rows_sort_by_utc_creation_timeline(app, client, monkeypatch):
+    controller_tz = ZoneInfo("America/New_York")
+    controller_now = datetime(2026, 11, 1, 12, 0, tzinfo=controller_tz)
+    monkeypatch.setenv("WB_TZ", "America/New_York")
+
+    with patch("routes.zones_history_api._controller_now", return_value=controller_now):
+        zone = _create_zone(app, "history-naive-dst-sort")
+        with sqlite3.connect(app.db.db_path) as conn:
+            first = conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, end_monotonic, status, source, created_at) "
+                "VALUES (?, 1, '2026-11-01 01:45:00', '2026-11-01 01:55:00', "
+                "100.0, 700.0, 'ok', 'manual', '2026-11-01 05:45:00')",
+                (zone["id"],),
+            ).lastrowid
+            second = conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, end_monotonic, status, source, created_at) "
+                "VALUES (?, 1, '2026-11-01 01:15:00', '2026-11-01 01:25:00', "
+                "800.0, 1400.0, 'ok', 'manual', '2026-11-01 06:15:00')",
+                (zone["id"],),
+            ).lastrowid
+            conn.commit()
+
+        payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
+
+    assert [run["id"] for run in payload["runs"]] == [second, first]

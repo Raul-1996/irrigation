@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import json
 import sqlite3
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Any
@@ -31,13 +32,16 @@ from services.history_calc import (
     get_controller_timezone,
     parse_controller_datetime,
     run_counts_as_actual,
+    run_duration_minutes,
     run_was_confirmed,
     zone_has_active_program,
+    zone_plan_is_available,
 )
 
 zones_history_api_bp = Blueprint("zones_history_api", __name__)
 
 ALLOWED_DAYS = {7, 30}
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 # ---- helpers ----
@@ -70,6 +74,41 @@ def _history_clock() -> tuple[tzinfo, datetime]:
 
 def _iso_local(d: date) -> str:
     return d.isoformat()
+
+
+def _csv_safe_cell(value: Any) -> Any:
+    """Prevent spreadsheet applications from executing persisted text."""
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
+def _sqlite_utc_datetime(raw: Any) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if raw else None
+    except (TypeError, ValueError):
+        return None
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC) if value is not None else None
+
+
+def _run_sort_instant(run: dict[str, Any], controller_tz: tzinfo, start_local: datetime) -> datetime:
+    """Choose an unambiguous UTC sort instant for a persisted run."""
+    try:
+        parsed = datetime.fromisoformat(str(run.get("start_utc")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is not None and parsed.tzinfo is not None:
+        return parsed.astimezone(UTC)
+    if parsed is not None:
+        fold_zero = parsed.replace(tzinfo=controller_tz, fold=0)
+        fold_one = parsed.replace(tzinfo=controller_tz, fold=1)
+        if fold_zero.utcoffset() != fold_one.utcoffset():
+            created_at = _sqlite_utc_datetime(run.get("created_at"))
+            if created_at is not None:
+                return created_at
+    return start_local.astimezone(UTC)
 
 
 def _fetch_runs(
@@ -110,19 +149,32 @@ def _fetch_runs(
         clauses.append("group_id != ?")
         params.append(int(exclude_group_id))
     sql = (
-        "SELECT id, zone_id, group_id, start_utc, end_utc, total_liters, "
-        "status, source, confirmed, created_at FROM zone_runs WHERE " + " AND ".join(clauses)
+        "SELECT id, zone_id, group_id, start_utc, end_utc, start_monotonic, "
+        "end_monotonic, total_liters, status, source, confirmed, created_at "
+        "FROM zone_runs WHERE " + " AND ".join(clauses)
     )
     try:
         with sqlite3.connect(db.db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
         dated_rows = []
+        range_start = datetime.combine(from_local, datetime.min.time(), tzinfo=controller_tz).astimezone(UTC)
+        range_end = datetime.combine(
+            to_local + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=controller_tz,
+        ).astimezone(UTC)
         for row in rows:
             run = dict(row)
             start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
-            if start_local is not None and from_local <= start_local.date() <= to_local:
-                dated_rows.append((start_local, run))
+            end_local = parse_controller_datetime(run.get("end_utc"), controller_tz)
+            overlaps = (
+                start_local is not None
+                and start_local.astimezone(UTC) < range_end
+                and (end_local is None or end_local.astimezone(UTC) > range_start)
+            )
+            if overlaps:
+                dated_rows.append((_run_sort_instant(run, controller_tz, start_local), run))
         dated_rows.sort(key=lambda item: item[0], reverse=True)
         return [run for _, run in dated_rows]
     except sqlite3.Error:
@@ -135,6 +187,7 @@ def _build_daily(
     runs_count: dict[date, int],
     plan_min: dict[date, int],
     has_plan: bool,
+    plan_available: bool = True,
 ) -> list[dict[str, Any]]:
     out = []
     for d in dates:
@@ -142,10 +195,135 @@ def _build_daily(
             "date": _iso_local(d),
             "actual_minutes": int(actual_min.get(d, 0)),
             "runs": int(runs_count.get(d, 0)),
-            "plan_minutes": int(plan_min.get(d, 0)) if has_plan else None,
+            "plan_minutes": int(plan_min.get(d, 0)) if has_plan and plan_available else None,
         }
         out.append(item)
     return out
+
+
+def _coerce_program_zone_ids(program: dict[str, Any]) -> list[int]:
+    raw = program.get("zones") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    try:
+        return sorted(set(int(zone_id) for zone_id in raw))
+    except (TypeError, ValueError):
+        return []
+
+
+def _expected_interval_slots(program: dict[str, Any]) -> set[str]:
+    raw_extra = program.get("extra_times") or []
+    if isinstance(raw_extra, str):
+        try:
+            raw_extra = json.loads(raw_extra)
+        except (json.JSONDecodeError, TypeError):
+            raw_extra = []
+    if not isinstance(raw_extra, list):
+        raw_extra = []
+
+    slots: set[str] = set()
+    for suffix, value in [("main", program.get("time")), *[(f"extra:{i}", v) for i, v in enumerate(raw_extra)]]:
+        try:
+            parts = str(value).split(":")
+            hour, minute = map(int, parts) if len(parts) == 2 else (-1, -1)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            slots.add(suffix)
+    return slots
+
+
+def _load_interval_occurrences(
+    programs: list[dict[str, Any]],
+    start_local: datetime,
+    end_local: datetime,
+    controller_tz: tzinfo,
+) -> dict[int, list[datetime]]:
+    """Read interval fires from live scheduler metadata, failing closed."""
+    interval_programs = [
+        program
+        for program in programs
+        if bool(program.get("enabled", 1)) and (program.get("schedule_type") or "weekdays") == "interval"
+    ]
+    if not interval_programs:
+        return {}
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        anchors_getter = getattr(scheduler, "get_program_interval_anchors", None)
+        occurrences_getter = getattr(scheduler, "get_program_occurrences", None)
+        if not callable(anchors_getter) or not callable(occurrences_getter):
+            return {}
+    except (ImportError, RuntimeError, AttributeError):
+        return {}
+
+    result: dict[int, list[datetime]] = {}
+    for program in interval_programs:
+        try:
+            program_id = int(program["id"])
+            expected_slots = _expected_interval_slots(program)
+            if not expected_slots:
+                continue
+            anchors = anchors_getter(program_id)
+            if not expected_slots.issubset(set(anchors)):
+                continue
+            by_slot = occurrences_getter(program_id, start_local, end_local, limit=512)
+            occurrences: list[datetime] = []
+            for slot in expected_slots:
+                for raw_occurrence in by_slot.get(slot, []):
+                    occurrence = parse_controller_datetime(raw_occurrence, controller_tz)
+                    if occurrence is not None:
+                        occurrences.append(occurrence)
+            result[program_id] = sorted(set(occurrences), key=lambda value: value.astimezone(UTC))
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError, AttributeError):
+            continue
+    return result
+
+
+def _interval_query_start(
+    from_local: date,
+    programs: list[dict[str, Any]],
+    zone_durations: dict[int, int],
+    controller_tz: tzinfo,
+) -> datetime:
+    max_window_minutes = 0
+    for program in programs:
+        zones = _coerce_program_zone_ids(program)
+        max_window_minutes = max(
+            max_window_minutes,
+            sum(max(0, int(zone_durations.get(zone_id, 0))) for zone_id in zones),
+        )
+    range_start = datetime.combine(from_local, datetime.min.time(), tzinfo=controller_tz)
+    return (range_start.astimezone(UTC) - timedelta(minutes=max_window_minutes)).astimezone(controller_tz)
+
+
+def _cohort_matches_current(runs: list[dict[str, Any]], current_zone_ids: set[int]) -> bool:
+    return all(not run.get("zone_deleted") and int(run.get("zone_id") or 0) in current_zone_ids for run in runs)
+
+
+def _apply_summary_availability(
+    summary: dict[str, Any],
+    *,
+    has_plan: bool,
+    plan_available: bool,
+    cohort_matches_current: bool,
+) -> None:
+    savings_available = bool(has_plan and plan_available and cohort_matches_current)
+    summary["plan_available"] = bool(plan_available)
+    summary["cohort_matches_current"] = bool(cohort_matches_current)
+    summary["savings_available"] = savings_available
+    summary["savings_unavailable_reason"] = None
+    if has_plan and not plan_available:
+        summary["plan_minutes"] = None
+        summary["saved_minutes"] = None
+        summary["savings_unavailable_reason"] = "plan_unavailable"
+    elif has_plan and not cohort_matches_current:
+        summary["saved_minutes"] = None
+        summary["savings_unavailable_reason"] = "historical_zone_cohort_changed"
 
 
 def _zone_identity_for_run(
@@ -158,17 +336,8 @@ def _zone_identity_for_run(
     if not zone:
         return {}, True
 
-    def sqlite_utc(raw: Any) -> datetime | None:
-        try:
-            value = datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if raw else None
-        except (TypeError, ValueError):
-            return None
-        if value is not None and value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        return value.astimezone(UTC) if value is not None else None
-
-    zone_created = sqlite_utc(zone.get("created_at"))
-    run_created = sqlite_utc(run.get("created_at"))
+    zone_created = _sqlite_utc_datetime(zone.get("created_at"))
+    run_created = _sqlite_utc_datetime(run.get("created_at"))
     if zone_created is not None and run_created is not None:
         if run_created < zone_created:
             return {}, True
@@ -189,12 +358,8 @@ def _serialize_run(
     controller_tz: tzinfo,
 ) -> dict[str, Any]:
     zone, zone_deleted = _zone_identity_for_run(run, zone_lookup, controller_tz)
-    duration_min = 0
     start_local = parse_controller_datetime(run.get("start_utc"), controller_tz)
     end_local = parse_controller_datetime(run.get("end_utc"), controller_tz)
-    if start_local is not None and end_local is not None:
-        dsec = (end_local - start_local).total_seconds()
-        duration_min = round(dsec / 60.0) if dsec > 0 else 0
     return {
         "id": int(run.get("id")) if run.get("id") is not None else None,
         "zone_id": int(run.get("zone_id") or 0),
@@ -203,7 +368,7 @@ def _serialize_run(
         "group_id": int(run.get("group_id") or 0),
         "start_utc": start_local.isoformat(timespec="seconds") if start_local is not None else None,
         "end_utc": end_local.isoformat(timespec="seconds") if end_local is not None else None,
-        "duration_min": duration_min,
+        "duration_min": run_duration_minutes(run, controller_tz),
         "liters": run.get("total_liters"),
         "status": run.get("status"),
         "source": run.get("source"),
@@ -252,27 +417,53 @@ def get_zone_history(zone_id: int):
     dates = date_range(today, days)
     from_d, to_d = dates[0], dates[-1]
 
+    all_zones = db.get_zones() or []
+    if not any(int(item.get("id") or 0) == int(zone_id) for item in all_zones):
+        all_zones.append(zone)
+    zone_durations = {int(item["id"]): int(item.get("duration") or 0) for item in all_zones}
     programs = db.get_programs() or []
+    interval_occurrences = _load_interval_occurrences(
+        programs,
+        _interval_query_start(from_d, programs, zone_durations, controller_tz),
+        now_local,
+        controller_tz,
+    )
+    has_plan = zone_has_active_program(zone_id, programs)
+    plan_available = zone_plan_is_available(
+        zone_id,
+        int(zone.get("duration") or 0),
+        programs,
+        zone_durations=zone_durations,
+        interval_occurrences=interval_occurrences,
+    )
     plan_by_date = calculate_plan_for_zone(
         zone_id,
         int(zone.get("duration") or 0),
         dates,
         programs,
+        zone_durations=zone_durations,
+        interval_occurrences=interval_occurrences,
         as_of_local=now_local,
     )
-    has_plan = zone_has_active_program(zone_id, programs)
 
     raw_runs = _fetch_runs(from_d, to_d, controller_tz, zone_ids=[zone_id])
     actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates, controller_tz=controller_tz)
 
-    daily = _build_daily(dates, actual_min, runs_count, plan_by_date, has_plan)
+    daily = _build_daily(dates, actual_min, runs_count, plan_by_date, has_plan, plan_available)
 
     zone_lookup = {int(zone["id"]): zone}
     runs_out = [_serialize_run(r, zone_lookup, controller_tz) for r in raw_runs]
+    cohort_matches_current = _cohort_matches_current(runs_out, {int(zone_id)})
 
     total_actual = sum(actual_min.values())
-    total_plan = sum(plan_by_date.values()) if has_plan else 0
+    total_plan = sum(plan_by_date.values()) if has_plan and plan_available else 0
     summary = calculate_summary(total_actual, total_plan, has_plan)
+    _apply_summary_availability(
+        summary,
+        has_plan=has_plan,
+        plan_available=plan_available,
+        cohort_matches_current=cohort_matches_current,
+    )
     total_liters, liters_partial, has_liters = _aggregate_liters([r for r in raw_runs if run_counts_as_actual(r)])
     summary.update(
         {
@@ -342,15 +533,31 @@ def get_global_history():
     from_d, to_d = dates[0], dates[-1]
 
     programs = db.get_programs() or []
+    zone_durations = {int(zone["id"]): int(zone.get("duration") or 0) for zone in all_zones}
+    interval_occurrences = _load_interval_occurrences(
+        programs,
+        _interval_query_start(from_d, programs, zone_durations, controller_tz),
+        now_local,
+        controller_tz,
+    )
 
     # Per-zone plan, summed across the selection.
     plan_agg: dict[date, int] = {d: 0 for d in dates}
     has_plan_any = False
+    plan_available_all = True
     for z in zones:
         zid = int(z["id"])
         z_has_plan = zone_has_active_program(zid, programs)
         if z_has_plan:
             has_plan_any = True
+            if not zone_plan_is_available(
+                zid,
+                int(z.get("duration") or 0),
+                programs,
+                zone_durations=zone_durations,
+                interval_occurrences=interval_occurrences,
+            ):
+                plan_available_all = False
         # Decision Q2: zones without programs contribute 0 (not NULL).
         # We use the calc helper either way — it returns {date: 0} when no match.
         zplan = calculate_plan_for_zone(
@@ -358,6 +565,8 @@ def get_global_history():
             int(z.get("duration") or 0),
             dates,
             programs,
+            zone_durations=zone_durations,
+            interval_occurrences=interval_occurrences,
             as_of_local=now_local,
         )
         for d in dates:
@@ -371,14 +580,29 @@ def get_global_history():
         raw_runs = _fetch_runs(from_d, to_d, controller_tz, exclude_group_id=999)
     actual_min, runs_count = calculate_actual_for_zone(raw_runs, dates, controller_tz=controller_tz)
 
-    daily = _build_daily(dates, actual_min, runs_count, plan_agg, has_plan_any)
+    daily = _build_daily(
+        dates,
+        actual_min,
+        runs_count,
+        plan_agg,
+        has_plan_any,
+        plan_available_all,
+    )
 
     zone_lookup = {int(z["id"]): z for z in all_zones}
     runs_out = [_serialize_run(r, zone_lookup, controller_tz) for r in raw_runs]
+    current_zone_ids = {int(zone["id"]) for zone in zones}
+    cohort_matches_current = _cohort_matches_current(runs_out, current_zone_ids)
 
     total_actual = sum(actual_min.values())
-    total_plan = sum(plan_agg.values()) if has_plan_any else 0
+    total_plan = sum(plan_agg.values()) if has_plan_any and plan_available_all else 0
     summary = calculate_summary(total_actual, total_plan, has_plan_any)
+    _apply_summary_availability(
+        summary,
+        has_plan=has_plan_any,
+        plan_available=plan_available_all,
+        cohort_matches_current=cohort_matches_current,
+    )
     total_liters, liters_partial, has_liters = _aggregate_liters([r for r in raw_runs if run_counts_as_actual(r)])
     summary.update(
         {
@@ -433,7 +657,8 @@ def get_zone_history_csv(zone_id: int):
     buf.write("\ufeff")
     writer = csv.writer(buf)
     writer.writerow(
-        [
+        _csv_safe_cell(value)
+        for value in [
             "date",
             "start_time",
             "end_time",
@@ -454,7 +679,8 @@ def get_zone_history_csv(zone_id: int):
         start_str = sdt.strftime("%H:%M:%S") if sdt else ""
         end_str = edt.strftime("%H:%M:%S") if edt else ""
         writer.writerow(
-            [
+            _csv_safe_cell(value)
+            for value in [
                 date_str,
                 start_str,
                 end_str,

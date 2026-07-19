@@ -1,8 +1,11 @@
 """Issue #35: integration tests for /api/zones/.../history endpoints."""
 
+import csv
+import io
 import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -169,30 +172,105 @@ class TestPerZoneJson:
         assert runs_by_liters[5.0]["confirmed"] is True
         assert runs_by_liters[5.0]["counts_as_actual"] is True
 
+    def test_unconfirmed_open_attempt_stays_visible_but_not_actual(self, app, client, seeded_zone):
+        now = datetime.now(UTC)
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, total_liters, status, source, confirmed) "
+                "VALUES (?, 1, ?, NULL, 0.0, 12.0, NULL, 'manual', 0)",
+                (seeded_zone["id"], _utc_iso_now_minus(10, now)),
+            )
+            conn.commit()
+
+        data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
+
+        assert len(data["runs"]) == 1
+        assert data["runs"][0]["counts_as_actual"] is False
+        assert data["summary"]["total_runs"] == 0
+        assert data["summary"]["total_minutes"] == 0
+        assert data["summary"]["total_liters"] is None
+
     def test_has_plan_false_when_no_active_program(self, app, client, seeded_zone):
         data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
         assert data["summary"]["has_plan"] is False
         # plan_minutes per day should be None.
         assert all(d["plan_minutes"] is None for d in data["daily"])
 
-    def test_has_plan_true_with_active_program(self, app, client, seeded_zone):
-        # Program that runs today (every weekday).
-        today_local = datetime.now().astimezone().date()
-        app.db.create_program(
-            {
-                "name": "P",
-                "time": "07:00",
-                "days": [0, 1, 2, 3, 4, 5, 6],  # all weekdays
-                "zones": [seeded_zone["id"]],
-                "schedule_type": "weekdays",
-                "enabled": True,
-            }
-        )
-        data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
+    def test_has_plan_true_with_active_program(self, app, client, seeded_zone, monkeypatch):
+        fixed_now = datetime(2026, 5, 4, 12, 0, tzinfo=UTC)
+        monkeypatch.setenv("WB_TZ", "UTC")
+        with patch("routes.zones_history_api._controller_now", return_value=fixed_now):
+            app.db.create_program(
+                {
+                    "name": "P",
+                    "time": "07:00",
+                    "days": [0, 1, 2, 3, 4, 5, 6],
+                    "zones": [seeded_zone["id"]],
+                    "schedule_type": "weekdays",
+                    "enabled": True,
+                }
+            )
+            data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
         assert data["summary"]["has_plan"] is True
         # plan_minutes per day = 15 (zone duration) * 1 firing/day = 15
         assert all(d["plan_minutes"] == 15 for d in data["daily"])
         assert data["summary"]["plan_minutes"] == 15 * 7
+
+    def test_interval_plan_fails_closed_without_scheduler_metadata(self, app, client, seeded_zone, monkeypatch):
+        fixed_now = datetime(2026, 5, 4, 12, 0, tzinfo=UTC)
+        monkeypatch.setenv("WB_TZ", "UTC")
+        app.db.create_program(
+            {
+                "name": "Interval unavailable",
+                "time": "07:00",
+                "days": [],
+                "zones": [seeded_zone["id"]],
+                "schedule_type": "interval",
+                "interval_days": 3,
+                "enabled": True,
+            }
+        )
+
+        with patch("routes.zones_history_api._controller_now", return_value=fixed_now):
+            data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
+
+        assert data["summary"]["has_plan"] is True
+        assert data["summary"]["plan_available"] is False
+        assert data["summary"]["savings_available"] is False
+        assert data["summary"]["plan_minutes"] is None
+        assert data["summary"]["saved_minutes"] is None
+        assert all(day["plan_minutes"] is None for day in data["daily"])
+
+    def test_interval_plan_uses_scheduler_occurrence(self, app, client, seeded_zone, monkeypatch):
+        fixed_now = datetime(2026, 5, 4, 12, 0, tzinfo=UTC)
+        monkeypatch.setenv("WB_TZ", "UTC")
+        program = app.db.create_program(
+            {
+                "name": "Interval authoritative",
+                "time": "07:00",
+                "days": [],
+                "zones": [seeded_zone["id"]],
+                "schedule_type": "interval",
+                "interval_days": 3,
+                "enabled": True,
+            }
+        )
+        occurrences = {program["id"]: [datetime(2026, 5, 4, 7, 0, tzinfo=UTC)]}
+
+        with (
+            patch("routes.zones_history_api._controller_now", return_value=fixed_now),
+            patch(
+                "routes.zones_history_api._load_interval_occurrences",
+                return_value=occurrences,
+                create=True,
+            ),
+        ):
+            data = client.get(f"/api/zones/{seeded_zone['id']}/history?days=7").get_json()
+
+        assert data["summary"]["plan_available"] is True
+        assert data["summary"]["plan_minutes"] == 15
+        assert data["summary"]["saved_minutes"] == 15
 
 
 class TestGlobalJson:
@@ -218,16 +296,33 @@ class TestGlobalJson:
     def test_400_for_bad_days(self, client):
         assert client.get("/api/zones/history?days=15").status_code == 400
 
-    def test_group_filter_uses_group_stored_on_run(self, app, client):
+    def test_group_filter_uses_group_stored_on_run(self, app, client, monkeypatch):
+        fixed_now = datetime(2030, 5, 4, 12, 0, tzinfo=UTC)
+        monkeypatch.setenv("WB_TZ", "UTC")
         zone = app.db.create_zone({"name": "Moved", "duration": 10, "group_id": 1, "topic": "/x/moved"})
-        _create_run(app, zone["id"], 1, 60, 50, status="ok")
+        cohort_zone = app.db.create_zone({"name": "Still group 1", "duration": 10, "group_id": 1, "topic": "/x/stable"})
+        _create_run(app, zone["id"], 1, 60, 50, status="ok", now_utc=fixed_now)
         assert app.db.update_zone(zone["id"], {"group_id": 2}) is not None
+        app.db.create_program(
+            {
+                "name": "Current group plan",
+                "time": "00:00",
+                "days": [fixed_now.weekday()],
+                "zones": [cohort_zone["id"]],
+                "schedule_type": "weekdays",
+                "enabled": True,
+            }
+        )
 
-        old_group = client.get("/api/zones/history?days=7&group_id=1").get_json()
-        new_group = client.get("/api/zones/history?days=7&group_id=2").get_json()
+        with patch("routes.zones_history_api._controller_now", return_value=fixed_now):
+            old_group = client.get("/api/zones/history?days=7&group_id=1").get_json()
+            new_group = client.get("/api/zones/history?days=7&group_id=2").get_json()
 
         assert old_group["summary"]["total_runs"] == 1
         assert [run["zone_id"] for run in old_group["runs"]] == [zone["id"]]
+        assert old_group["summary"]["cohort_matches_current"] is False
+        assert old_group["summary"]["savings_available"] is False
+        assert old_group["summary"]["saved_minutes"] is None
         assert new_group["summary"]["total_runs"] == 0
         assert new_group["runs"] == []
 
@@ -284,3 +379,29 @@ class TestCsv:
         cd = resp.headers.get("Content-Disposition", "")
         assert f"zone-{seeded_zone['id']}" in cd
         assert ".csv" in cd
+
+    @pytest.mark.parametrize(
+        "dangerous_name",
+        ["=1+1", "+1+1", "-1+1", "@SUM(A1)", "\t=1+1", "\r=1+1"],
+    )
+    def test_csv_neutralizes_spreadsheet_formula_prefixes(self, app, client, dangerous_name):
+        zone = app.db.create_zone(
+            {
+                "name": dangerous_name,
+                "duration": 15,
+                "group_id": 1,
+                "topic": "/x/csv-formula",
+            }
+        )
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute(
+                "UPDATE zones SET created_at = datetime('now', '-2 hours') WHERE id = ?",
+                (zone["id"],),
+            )
+            conn.commit()
+        _create_run(app, zone["id"], 1, 60, 45, status="ok")
+
+        body = client.get(f"/api/zones/{zone['id']}/history.csv?days=7").get_data(as_text=True)
+        rows = list(csv.reader(io.StringIO(body.removeprefix("\ufeff"), newline="")))
+
+        assert rows[1][4] == f"'{dangerous_name}"
