@@ -139,12 +139,102 @@ def _broker_fingerprint(server: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _structured_stop_succeeded(result: Any) -> bool:
-    """Accept only the scheduler's complete, explicit stop acknowledgement."""
-    if not isinstance(result, dict) or result.get("success") is not True:
+_SCHEDULER_STOP_RESULT_KEYS = frozenset(
+    {
+        "success",
+        "group_id",
+        "aggregate_valid",
+        "stopped",
+        "unresolved",
+        "unverified_zone_ids",
+        "retry_scheduled",
+    }
+)
+_CORE_STOP_RESULT_KEYS = frozenset({"success", "group_id", "stopped", "unresolved", "retry_scheduled"})
+
+
+def _structured_stop_succeeded(
+    result: Any,
+    *,
+    group_id: int,
+    expected_zone_ids: set[int],
+    scheduler_result: bool,
+) -> bool:
+    """Validate complete physical-OFF evidence against one strict snapshot."""
+    required_keys = _SCHEDULER_STOP_RESULT_KEYS if scheduler_result else _CORE_STOP_RESULT_KEYS
+    if not isinstance(result, dict) or set(result) != required_keys:
         return False
-    unresolved = result.get("unresolved")
-    return isinstance(unresolved, list) and unresolved == []
+    if (
+        result.get("success") is not True
+        or type(result.get("group_id")) is not int
+        or result["group_id"] != int(group_id)
+        or result.get("retry_scheduled") is not False
+    ):
+        return False
+    if scheduler_result and result.get("aggregate_valid") is not True:
+        return False
+
+    partition_keys = ["stopped", "unresolved"]
+    if scheduler_result:
+        partition_keys.append("unverified_zone_ids")
+    partition: set[int] = set()
+    parsed: dict[str, set[int]] = {}
+    for key in partition_keys:
+        values = result.get(key)
+        if not isinstance(values, list):
+            return False
+        if any(type(value) is not int or value <= 0 for value in values):
+            return False
+        unique_values = set(values)
+        if len(unique_values) != len(values) or partition & unique_values:
+            return False
+        parsed[key] = unique_values
+        partition.update(unique_values)
+
+    if partition != expected_zone_ids:
+        return False
+    return not parsed["unresolved"] and not (scheduler_result and parsed["unverified_zone_ids"])
+
+
+def _strict_group_zone_ids(group_id: int) -> set[int]:
+    """Read and validate the exact positive-ID partition for one group."""
+    normalized_group_id = int(group_id)
+    path = _db_path()
+    if path is not None:
+        with sqlite3.connect(path, timeout=5) as conn:
+            rows: list[Any] = conn.execute(
+                "SELECT id, group_id FROM zones WHERE group_id = ? ORDER BY id",
+                (normalized_group_id,),
+            ).fetchall()
+    else:
+        raw_rows = db.get_zones()
+        if not isinstance(raw_rows, list):
+            raise RuntimeError("invalid zones snapshot")
+        rows = []
+        for row in raw_rows:
+            if not isinstance(row, dict) or "id" not in row or "group_id" not in row:
+                raise RuntimeError("invalid zone row")
+            row_group_id = row["group_id"]
+            if type(row_group_id) is not int or row_group_id <= 0:
+                raise RuntimeError("invalid zone group id")
+            if row_group_id == normalized_group_id:
+                rows.append((row["id"], row_group_id))
+
+    zone_ids: set[int] = set()
+    for row in rows:
+        if not isinstance(row, (tuple, sqlite3.Row)) or len(row) != 2:
+            raise RuntimeError("invalid strict zone row")
+        zone_id, row_group_id = row
+        if (
+            type(zone_id) is not int
+            or zone_id <= 0
+            or type(row_group_id) is not int
+            or row_group_id != normalized_group_id
+            or zone_id in zone_ids
+        ):
+            raise RuntimeError("invalid strict group-zone partition")
+        zone_ids.add(zone_id)
+    return zone_ids
 
 
 def _rain_postpone_mutation_lock():
@@ -912,14 +1002,26 @@ class RainMonitor:
 
     @staticmethod
     def _cancel_and_stop_group(group_id: int) -> bool:
+        group_id = int(group_id)
+        try:
+            expected_zone_ids = _strict_group_zone_ids(group_id)
+        except (AttributeError, sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+            logger.exception("RainMonitor: strict group-zone snapshot failed group=%s", group_id)
+            return False
+
         cancellation_ok = False
         try:
             from irrigation_scheduler import get_scheduler
 
             scheduler = get_scheduler()
             if scheduler is not None:
-                result = scheduler.cancel_group_jobs(int(group_id), master_close_immediately=True)
-                cancellation_ok = _structured_stop_succeeded(result)
+                result = scheduler.cancel_group_jobs(group_id, master_close_immediately=True)
+                cancellation_ok = _structured_stop_succeeded(
+                    result,
+                    group_id=group_id,
+                    expected_zone_ids=expected_zone_ids,
+                    scheduler_result=True,
+                )
         except (ImportError, sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
             logger.exception("RainMonitor: structured scheduler cancellation failed group=%s", group_id)
 
@@ -929,12 +1031,18 @@ class RainMonitor:
             from services.zone_control import stop_all_in_group
 
             result = stop_all_in_group(
-                int(group_id),
+                group_id,
                 reason="rain",
                 force=True,
                 master_close_immediately=True,
+                require_observed_confirmation=True,
             )
-            return _structured_stop_succeeded(result)
+            return _structured_stop_succeeded(
+                result,
+                group_id=group_id,
+                expected_zone_ids=expected_zone_ids,
+                scheduler_result=False,
+            )
         except (
             ImportError,
             ConnectionError,

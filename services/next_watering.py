@@ -155,23 +155,25 @@ def _weather_duration_coefficient() -> int:
     """Return the current legacy (H1) coefficient without network access.
 
     The scheduler currently applies ``WeatherAdjustment.get_coefficient()``;
-    it does not enable the optional H2 balance coefficient.  A small subclass
-    only changes the input acquisition to fresh-cache-only while reusing the
-    exact H1 coefficient algorithm.
+    it does not enable the optional H2 balance coefficient. Missing or invalid
+    display-only cache data is neutral (100%): it must not erase an otherwise
+    visible active run that the live-capable scheduler may still execute.
     """
     try:
         from services.weather.adjustment import WeatherAdjustment
         from services.weather.service import WeatherService
 
-        class _CacheOnlyAdjustment(WeatherAdjustment):
-            def _get_weather(self, cache_only: bool = False):
-                weather = WeatherService(self.db_path).get_weather(cache_only=True)
-                return self._select_input_source(weather) if weather is not None else None
-
-        adjustment = _CacheOnlyAdjustment(db.db_path)
+        adjustment = WeatherAdjustment(db.db_path)
         if not adjustment.is_enabled():
             return 100
-        return max(0, min(200, int(adjustment.get_coefficient())))
+        weather = WeatherService(db.db_path).get_weather(cache_only=True)
+        if weather is None:
+            return 100
+        effective_weather = adjustment._select_input_source(weather)
+        decision = adjustment.should_skip(cache_only=True, weather=effective_weather)
+        if decision.get("details", {}).get("type") == "weather_unavailable":
+            return 100
+        return max(0, min(200, int(adjustment.get_coefficient(weather=effective_weather))))
     except (ImportError, OSError, sqlite3.Error, ValueError, TypeError, AttributeError) as e:
         logger.debug("Weather coefficient unavailable in next-watering: %s", e)
         return 100
@@ -196,7 +198,9 @@ def _first_calendar_start_after(prog: dict[str, Any], hour: int, minute: int, lo
     return None
 
 
-def _latest_calendar_start_not_after(prog: dict[str, Any], hour: int, minute: int, upper_bound: datetime) -> datetime | None:
+def _latest_calendar_start_not_after(
+    prog: dict[str, Any], hour: int, minute: int, upper_bound: datetime
+) -> datetime | None:
     best = None
     for offset in range(-14, 1):
         day = upper_bound + timedelta(days=offset)
@@ -279,11 +283,7 @@ def compute_next_watering(
     if programs is None:
         programs = db.get_programs() or []
     if zone_ids is None:
-        zone_ids = [
-            int(z.get("id"))
-            for z in all_zones
-            if int(z.get("group_id") or z.get("group") or 0) != 999
-        ]
+        zone_ids = [int(z.get("id")) for z in all_zones if int(z.get("group_id") or z.get("group") or 0) != 999]
     zone_ids = [int(zone_id) for zone_id in zone_ids]
     zone_by_id = {int(z["id"]): z for z in all_zones}
     base_duration = {int(z["id"]): int(z.get("duration") or 0) for z in all_zones}

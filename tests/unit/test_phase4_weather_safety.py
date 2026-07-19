@@ -37,6 +37,77 @@ def _enable_weather(test_db) -> WeatherAdjustment:
     return WeatherAdjustment(test_db.db_path)
 
 
+def _scheduler_stop_result(
+    group_id: int,
+    *,
+    stopped: list[int],
+    unresolved: list[int] | None = None,
+    unverified: list[int] | None = None,
+    aggregate_valid: bool = True,
+    retry_scheduled: bool = False,
+) -> dict:
+    unresolved = list(unresolved or [])
+    unverified = list(unverified or [])
+    return {
+        "success": aggregate_valid and not unresolved and not unverified,
+        "group_id": int(group_id),
+        "aggregate_valid": aggregate_valid,
+        "stopped": list(stopped),
+        "unresolved": unresolved,
+        "unverified_zone_ids": unverified,
+        "retry_scheduled": retry_scheduled,
+    }
+
+
+def _core_stop_result(
+    group_id: int,
+    *,
+    stopped: list[int],
+    unresolved: list[int] | None = None,
+    retry_scheduled: bool = False,
+) -> dict:
+    unresolved = list(unresolved or [])
+    return {
+        "success": not unresolved,
+        "group_id": int(group_id),
+        "stopped": list(stopped),
+        "unresolved": unresolved,
+        "retry_scheduled": retry_scheduled,
+    }
+
+
+def _raw_weather_window(
+    now: datetime,
+    *,
+    current_temperature: object = 20.0,
+    future_temperatures: list[object] | None = None,
+    future_precipitation: list[object] | None = None,
+) -> dict:
+    offsets = list(range(-23, 7))
+    times = [(now + timedelta(hours=offset)).strftime("%Y-%m-%dT%H:00") for offset in offsets]
+    temperatures: list[object] = [20.0] * len(offsets)
+    precipitation: list[object] = [0.0] * len(offsets)
+    current_index = 23
+    temperatures[current_index] = current_temperature
+    if future_temperatures is not None:
+        temperatures[current_index + 1 : current_index + 7] = future_temperatures
+    if future_precipitation is not None:
+        precipitation[current_index + 1 : current_index + 7] = future_precipitation
+    return {
+        "_fetched_at": now.timestamp(),
+        "utc_offset_seconds": 0,
+        "hourly": {
+            "time": times,
+            "temperature_2m": temperatures,
+            "relative_humidity_2m": [50.0] * len(offsets),
+            "precipitation": precipitation,
+            "wind_speed_10m": [1.0] * len(offsets),
+            "weather_code": [0] * len(offsets),
+        },
+        "daily": {"time": [now.date().isoformat()], "et0_fao_evapotranspiration": [4.5]},
+    }
+
+
 def test_hard_mismatch_never_discards_the_colder_local_reading(test_db) -> None:
     """A disagreement may flag a sensor, but must not hide a freeze reading."""
     adj = _enable_weather(test_db)
@@ -369,7 +440,7 @@ def test_hard_freeze_safety_ignores_the_factor_toggle(test_db) -> None:
     ("weather", "factor", "expected_text"),
     [
         (_weather(precipitation_forecast_6h=5.0), "rain", "прогноз"),
-        (_weather(temperature=None, min_temp_forecast_6h=2.0), "freeze", "прогноз"),
+        (_weather(temperature=10.0, min_temp_forecast_6h=2.0), "freeze", "прогноз"),
     ],
 )
 def test_factor_detail_matches_forecast_skip_truth(test_db, weather, factor, expected_text) -> None:
@@ -646,7 +717,10 @@ def test_rain_postpone_preserves_manual_owner_and_protects_unset_sibling(test_db
 
     with (
         patch("services.monitors.rain_monitor.db", test_db),
-        patch("services.zone_control.stop_all_in_group", return_value=True),
+        patch(
+            "services.zone_control.stop_all_in_group",
+            return_value=_core_stop_result(1, stopped=[manual["id"], unset["id"]]),
+        ),
         patch("irrigation_scheduler.get_scheduler", return_value=None),
     ):
         monitor._on_rain_start()
@@ -712,8 +786,9 @@ def test_rain_group_read_failure_is_fail_closed() -> None:
 def test_rain_start_uses_structured_scheduler_cancellation_before_fallback_stop(test_db) -> None:
     monitor = RainMonitor()
     scheduler = MagicMock()
-    scheduler.cancel_group_jobs.return_value = {"success": True, "stopped": [1], "unresolved": []}
     assert test_db.set_group_use_rain(1, True)
+    zone = test_db.create_zone({"name": "rain-stop", "duration": 10, "group_id": 1})
+    scheduler.cancel_group_jobs.return_value = _scheduler_stop_result(1, stopped=[zone["id"]])
 
     with (
         patch("services.monitors.rain_monitor.db", test_db),
@@ -1004,10 +1079,199 @@ def test_rain_stop_rejects_non_structured_or_incomplete_acknowledgement(invalid_
     scheduler.cancel_group_jobs.return_value = invalid_result
 
     with (
+        patch("services.monitors.rain_monitor._strict_group_zone_ids", return_value={1}),
         patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
         patch("services.zone_control.stop_all_in_group", return_value=invalid_result),
     ):
         assert monitor._cancel_and_stop_group(1) is False
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "minimal",
+        "wrong_group",
+        "aggregate_false",
+        "unverified",
+        "overlap",
+        "duplicate",
+        "foreign",
+        "missing",
+        "claimed_retry",
+        "bad_id_type",
+        "extra_key",
+    ],
+)
+def test_rain_stop_rejects_malformed_scheduler_aggregate(malformation) -> None:
+    expected_zone_id = 11
+    result = _scheduler_stop_result(1, stopped=[expected_zone_id])
+    if malformation == "minimal":
+        result = {"success": True, "unresolved": []}
+    elif malformation == "wrong_group":
+        result["group_id"] = 2
+    elif malformation == "aggregate_false":
+        result["aggregate_valid"] = False
+    elif malformation == "unverified":
+        result.update({"stopped": [], "unverified_zone_ids": [expected_zone_id]})
+    elif malformation == "overlap":
+        result["unresolved"] = [expected_zone_id]
+    elif malformation == "duplicate":
+        result["stopped"] = [expected_zone_id, expected_zone_id]
+    elif malformation == "foreign":
+        result["stopped"] = [expected_zone_id, 12]
+    elif malformation == "missing":
+        result["stopped"] = []
+    elif malformation == "claimed_retry":
+        result["retry_scheduled"] = True
+    elif malformation == "bad_id_type":
+        result["stopped"] = [str(expected_zone_id)]
+    elif malformation == "extra_key":
+        result["legacy"] = None
+
+    scheduler = MagicMock()
+    scheduler.cancel_group_jobs.return_value = result
+    fallback_result = _core_stop_result(1, stopped=[], unresolved=[expected_zone_id])
+    with (
+        patch("services.monitors.rain_monitor._strict_group_zone_ids", return_value={expected_zone_id}),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_all_in_group", return_value=fallback_result) as fallback,
+    ):
+        assert RainMonitor._cancel_and_stop_group(1) is False
+
+    fallback.assert_called_once_with(
+        1,
+        reason="rain",
+        force=True,
+        master_close_immediately=True,
+        require_observed_confirmation=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "minimal",
+        "wrong_group",
+        "overlap",
+        "duplicate",
+        "foreign",
+        "missing",
+        "claimed_retry",
+        "bad_success_type",
+        "bad_partition_type",
+        "extra_key",
+    ],
+)
+def test_rain_stop_rejects_malformed_core_fallback_aggregate(malformation) -> None:
+    expected_zone_id = 11
+    result = _core_stop_result(1, stopped=[expected_zone_id])
+    if malformation == "minimal":
+        result = {"success": True, "unresolved": []}
+    elif malformation == "wrong_group":
+        result["group_id"] = 2
+    elif malformation == "overlap":
+        result["unresolved"] = [expected_zone_id]
+    elif malformation == "duplicate":
+        result["stopped"] = [expected_zone_id, expected_zone_id]
+    elif malformation == "foreign":
+        result["stopped"] = [expected_zone_id, 12]
+    elif malformation == "missing":
+        result["stopped"] = []
+    elif malformation == "claimed_retry":
+        result["retry_scheduled"] = True
+    elif malformation == "bad_success_type":
+        result["success"] = 1
+    elif malformation == "bad_partition_type":
+        result["stopped"] = (expected_zone_id,)
+    elif malformation == "extra_key":
+        result["legacy"] = None
+
+    with (
+        patch("services.monitors.rain_monitor._strict_group_zone_ids", return_value={expected_zone_id}),
+        patch("irrigation_scheduler.get_scheduler", return_value=None),
+        patch("services.zone_control.stop_all_in_group", return_value=result),
+    ):
+        assert RainMonitor._cancel_and_stop_group(1) is False
+
+
+def test_rain_stop_accepts_exact_core_fallback_with_observed_confirmation() -> None:
+    expected_zone_id = 11
+    with (
+        patch("services.monitors.rain_monitor._strict_group_zone_ids", return_value={expected_zone_id}),
+        patch("irrigation_scheduler.get_scheduler", return_value=None),
+        patch(
+            "services.zone_control.stop_all_in_group",
+            return_value=_core_stop_result(1, stopped=[expected_zone_id]),
+        ) as fallback,
+    ):
+        assert RainMonitor._cancel_and_stop_group(1) is True
+
+    fallback.assert_called_once_with(
+        1,
+        reason="rain",
+        force=True,
+        master_close_immediately=True,
+        require_observed_confirmation=True,
+    )
+
+
+def test_rain_stop_does_not_accept_broker_ack_without_fresh_observed_off() -> None:
+    expected_zone_id = 11
+    unresolved = _core_stop_result(1, stopped=[], unresolved=[expected_zone_id])
+    with (
+        patch("services.monitors.rain_monitor._strict_group_zone_ids", return_value={expected_zone_id}),
+        patch("irrigation_scheduler.get_scheduler", return_value=None),
+        patch("services.zone_control.stop_all_in_group", return_value=unresolved) as fallback,
+    ):
+        assert RainMonitor._cancel_and_stop_group(1) is False
+
+    assert fallback.call_args.kwargs["require_observed_confirmation"] is True
+
+
+def test_rain_stop_snapshot_failure_is_fail_closed_before_any_attempt() -> None:
+    scheduler = MagicMock()
+    with (
+        patch(
+            "services.monitors.rain_monitor._strict_group_zone_ids",
+            side_effect=sqlite3.OperationalError("snapshot failed"),
+        ),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_all_in_group") as fallback,
+    ):
+        assert RainMonitor._cancel_and_stop_group(1) is False
+
+    scheduler.cancel_group_jobs.assert_not_called()
+    fallback.assert_not_called()
+
+
+def test_failed_physical_rain_stop_is_retried_on_repeated_payload() -> None:
+    expected_zone_id = 11
+    monitor = RainMonitor()
+    monitor._persisted_state_loaded = True
+    monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
+    scheduler = MagicMock()
+    scheduler.cancel_group_jobs.return_value = _scheduler_stop_result(
+        1,
+        stopped=[],
+        unresolved=[expected_zone_id],
+        retry_scheduled=True,
+    )
+    fallback_result = _core_stop_result(1, stopped=[], unresolved=[expected_zone_id])
+
+    with (
+        patch("services.monitors.rain_monitor._strict_target_groups", return_value=[1]),
+        patch("services.monitors.rain_monitor._strict_group_zone_ids", return_value={expected_zone_id}),
+        patch.object(monitor, "_persist_rain_active", return_value=True),
+        patch("services.monitors.rain_monitor._apply_rain_postpone_deadline", return_value=True),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_all_in_group", return_value=fallback_result) as fallback,
+    ):
+        assert monitor._handle_payload("1") is False
+        assert monitor._handle_payload("1") is False
+
+    assert scheduler.cancel_group_jobs.call_count == 2
+    assert fallback.call_count == 2
+    assert monitor._last_sensor_value is None
 
 
 def test_failed_rain_enforcement_does_not_deduplicate_same_payload() -> None:
@@ -1024,7 +1288,9 @@ def test_failed_rain_enforcement_does_not_deduplicate_same_payload() -> None:
 
 def test_corrupt_persisted_rain_state_is_unknown_and_recovers_on_fresh_dry(test_db) -> None:
     assert test_db.set_group_use_rain(1, True)
-    assert test_db.set_rain_config({"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"})
+    server = test_db.create_mqtt_server({"name": "rain-corrupt-state", "host": "127.0.0.1", "port": 1883, "enabled": 1})
+    assert server is not None
+    assert test_db.set_rain_config({"enabled": True, "topic": "/rain", "server_id": int(server["id"]), "type": "NO"})
     assert test_db.set_setting_value("rain.active", "corrupt")
     monitor = RainMonitor()
 
@@ -1046,7 +1312,7 @@ def test_enforce_group_claims_rain_postpone_and_stops_immediately(test_db) -> No
     monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
     monitor.is_rain = True
     scheduler = MagicMock()
-    scheduler.cancel_group_jobs.return_value = {"success": True, "unresolved": []}
+    scheduler.cancel_group_jobs.return_value = _scheduler_stop_result(1, stopped=[zone["id"]])
 
     with (
         patch("services.monitors.rain_monitor.db", test_db),
@@ -1061,13 +1327,14 @@ def test_enforce_group_claims_rain_postpone_and_stops_immediately(test_db) -> No
 
 def test_unknown_rain_state_stops_protected_group_and_keeps_gate_closed(test_db) -> None:
     assert test_db.set_group_use_rain(1, True)
+    zone = test_db.create_zone({"name": "unknown-rain", "duration": 10, "group_id": 1})
     monitor = RainMonitor()
     monitor._persisted_state_loaded = True
     monitor._cfg = {"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}
     monitor.sensor_online = True
     monitor.is_rain = False
     scheduler = MagicMock()
-    scheduler.cancel_group_jobs.return_value = {"success": True, "unresolved": []}
+    scheduler.cancel_group_jobs.return_value = _scheduler_stop_result(1, stopped=[zone["id"]])
 
     with (
         patch("services.monitors.rain_monitor.db", test_db),
@@ -1101,6 +1368,156 @@ def test_hard_safety_is_not_disableable_by_soft_factor_toggle(test_db, factor_ke
     assert coefficient == 0
     assert factor["enabled"] is False
     assert factor["status"] == "danger"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("temperature", float("nan")),
+        ("temperature", float("inf")),
+        ("temperature", "1e999"),
+        ("precipitation_24h", float("nan")),
+        ("precipitation_24h", float("inf")),
+        ("precipitation_24h", -0.1),
+        ("precipitation_forecast_6h", float("nan")),
+        ("precipitation_forecast_6h", float("inf")),
+        ("precipitation_forecast_6h", -0.1),
+        ("min_temp_forecast_6h", float("nan")),
+        ("min_temp_forecast_6h", float("inf")),
+        ("wind_speed", float("nan")),
+        ("wind_speed", float("inf")),
+        ("wind_speed", -0.1),
+    ],
+)
+def test_nonfinite_or_negative_safety_input_is_fail_closed_unavailable(test_db, field, invalid) -> None:
+    adj = _enable_weather(test_db)
+    weather = _weather(**{field: invalid})
+
+    decision = adj.should_skip(weather=weather)
+
+    assert decision["skip"] is True
+    assert decision["details"]["type"] == "weather_unavailable"
+    assert decision["details"]["field"] == field
+    assert adj.get_coefficient(weather=weather) == 0
+
+
+@pytest.mark.parametrize(
+    ("setting", "invalid", "weather"),
+    [
+        ("weather.rain_threshold_mm", "nan", _weather(precipitation_24h=50.0)),
+        ("weather.rain_threshold_mm", "inf", _weather(precipitation_24h=50.0)),
+        ("weather.freeze_threshold_c", "-inf", _weather(temperature=-5.0)),
+        ("weather.wind_threshold_ms", "1e999", _weather(wind_speed=50.0)),
+    ],
+)
+def test_nonfinite_database_safety_threshold_cannot_bypass_skip(test_db, setting, invalid, weather) -> None:
+    adj = _enable_weather(test_db)
+    assert test_db.set_setting_value(setting, invalid)
+
+    decision = adj.should_skip(weather=weather)
+
+    assert decision["skip"] is True
+    assert decision["details"]["type"] == "weather_unavailable"
+    assert adj.get_coefficient(weather=weather) == 0
+
+
+@pytest.mark.parametrize(
+    ("soft", "hard", "expected_field"),
+    [("nan", "10", "sensor_mismatch_soft_c"), ("10", "5", "sensor_mismatch_window")],
+)
+def test_invalid_sensor_mismatch_window_is_fail_closed(test_db, soft, hard, expected_field) -> None:
+    adj = _enable_weather(test_db)
+    assert test_db.set_setting_value("weather.sensor_mismatch_soft_c", soft)
+    assert test_db.set_setting_value("weather.sensor_mismatch_hard_c", hard)
+
+    decision = adj.should_skip(weather=_weather())
+
+    assert decision["skip"] is True
+    assert decision["details"]["field"] == expected_field
+    assert adj.get_coefficient(weather=_weather()) == 0
+
+
+def test_nan_current_temperature_with_freezing_forecast_stays_fail_closed(test_db) -> None:
+    adj = _enable_weather(test_db)
+    weather = _weather(temperature=float("nan"), min_temp_forecast_6h=-5.0)
+
+    decision = adj.should_skip(weather=weather)
+
+    assert decision["skip"] is True
+    assert decision["details"] == {
+        "type": "weather_unavailable",
+        "api_unavailable": False,
+        "field": "temperature",
+    }
+    assert adj.get_coefficient(weather=weather) == 0
+
+
+@pytest.mark.parametrize("invalid", [-1.0, float("nan"), float("inf"), "1e999"])
+def test_invalid_precipitation_forecast_member_invalidates_the_whole_window(test_db, invalid) -> None:
+    now = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    raw = _raw_weather_window(now, future_precipitation=[invalid, 0.0, 0.0, 0.0, 0.0, 0.0])
+    with patch("services.weather.models.time.time", return_value=now.timestamp()):
+        weather = WeatherData(raw)
+
+    assert weather.precipitation_forecast_6h is None
+    decision = _enable_weather(test_db).should_skip(weather=weather)
+    assert decision["skip"] is True
+    assert decision["details"]["field"] == "precipitation_forecast_6h"
+
+
+def test_invalid_temperature_member_invalidates_freeze_window(test_db) -> None:
+    now = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    raw = _raw_weather_window(
+        now,
+        current_temperature=float("nan"),
+        future_temperatures=[-5.0, 10.0, 11.0, 12.0, 13.0, 14.0],
+    )
+    with patch("services.weather.models.time.time", return_value=now.timestamp()):
+        weather = WeatherData(raw)
+
+    assert weather.temperature is None
+    assert weather.min_temp_forecast_6h is None
+    decision = _enable_weather(test_db).should_skip(weather=weather)
+    assert decision["skip"] is True
+    assert decision["details"]["type"] == "weather_unavailable"
+
+
+def test_cache_only_miss_is_non_suppressing_unknown_and_does_not_alert(test_db) -> None:
+    from services.next_watering import _weather_duration_coefficient, weather_skip_today
+
+    adj = _enable_weather(test_db)
+    service = MagicMock()
+    service.get_weather.return_value = None
+    with (
+        patch("services.weather.adjustment.get_weather_service", return_value=service),
+        patch.object(adj, "_maybe_alert_api_down") as alert,
+    ):
+        decision = adj.should_skip(cache_only=True)
+        with patch("services.weather_adjustment.get_weather_adjustment", return_value=adj):
+            assert weather_skip_today() is False
+
+    assert decision["skip"] is False
+    assert decision["details"]["unknown"] is True
+    assert decision["details"]["display_only"] is True
+    assert service.get_weather.call_count == 2
+    assert all(item.kwargs == {"cache_only": True} for item in service.get_weather.call_args_list)
+    alert.assert_not_called()
+
+    with (
+        patch("services.next_watering.db", test_db),
+        patch("services.weather.service.WeatherService.get_weather", return_value=None) as cache_read,
+    ):
+        assert _weather_duration_coefficient() == 100
+    cache_read.assert_called_once_with(cache_only=True)
+
+
+def test_disabled_heat_factor_is_neutral_even_during_extreme_heat(test_db) -> None:
+    adj = _enable_weather(test_db)
+    assert test_db.set_setting_value("weather.factor.heat", "0")
+
+    heat = adj.get_factors_detail(_weather(temperature=40.0))["heat"]
+
+    assert heat == {"status": "ok", "detail": "фактор отключён", "enabled": False}
 
 
 def test_extended_weather_decisions_share_one_effective_snapshot(test_db) -> None:

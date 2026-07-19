@@ -107,8 +107,9 @@ class WeatherData:
                 arr = data.get(key, [])
                 if arr and index is not None and index < len(arr):
                     val = arr[index]
-                    return float(val) if val is not None else None
-            except (ValueError, TypeError, IndexError):
+                    number = float(val) if val is not None else None
+                    return number if number is not None and math.isfinite(number) else None
+            except (OverflowError, ValueError, TypeError, IndexError):
                 pass
             return None
 
@@ -118,7 +119,7 @@ class WeatherData:
                 if arr and index is not None and index < len(arr):
                     val = arr[index]
                     return int(val) if val is not None else None
-            except (ValueError, TypeError, IndexError):
+            except (OverflowError, ValueError, TypeError, IndexError):
                 pass
             return None
 
@@ -127,6 +128,12 @@ class WeatherData:
         self.precipitation = _safe_get(hourly, "precipitation", idx)
         self.wind_speed = _safe_get(hourly, "wind_speed_10m", idx)
         self.et0_hourly = _safe_get(hourly, "et0_fao_evapotranspiration", idx)
+        if self.humidity is not None and not 0.0 <= self.humidity <= 100.0:
+            self.humidity = None
+        for attribute in ("precipitation", "wind_speed", "et0_hourly"):
+            value = getattr(self, attribute)
+            if value is not None and value < 0:
+                setattr(self, attribute, None)
 
         # Current weather code (WMO)
         self.weather_code = _safe_get_int(hourly, "weather_code", idx)
@@ -140,6 +147,10 @@ class WeatherData:
 
         self.daily_precipitation = _safe_get(daily, "precipitation_sum", daily_idx)
         self.daily_et0 = _safe_get(daily, "et0_fao_evapotranspiration", daily_idx)
+        if self.daily_precipitation is not None and self.daily_precipitation < 0:
+            self.daily_precipitation = None
+        if self.daily_et0 is not None and self.daily_et0 < 0:
+            self.daily_et0 = None
 
         # Daily temperature min/max (today)
         self.temperature_min = _safe_get(daily, "temperature_2m_min", daily_idx)
@@ -174,8 +185,7 @@ class WeatherData:
                         break
             if contiguous:
                 contiguous = all(
-                    (parsed_times[i] - parsed_times[i - 1]).total_seconds() == 3600
-                    for i in range(1, len(parsed_times))
+                    (parsed_times[i] - parsed_times[i - 1]).total_seconds() == 3600 for i in range(1, len(parsed_times))
                 )
             values = []
             if contiguous and idx < len(precip_arr):
@@ -185,24 +195,33 @@ class WeatherData:
                         if not math.isfinite(value) or value < 0:
                             raise ValueError("invalid precipitation")
                         values.append(value)
-                    except (IndexError, ValueError, TypeError):
+                    except (IndexError, OverflowError, ValueError, TypeError):
                         values = []
                         break
             if len(values) == 24:
-                self.precipitation_24h = sum(values)
+                total = sum(values)
+                if math.isfinite(total):
+                    self.precipitation_24h = total
 
         # Calculate precipitation forecast for next 6h
-        self.precipitation_forecast_6h = 0.0
+        self.precipitation_forecast_6h = None
         if idx is not None:
             precip_arr = hourly.get("precipitation", [])
-            end_idx = min(len(precip_arr), idx + 7)
-            for i in range(idx + 1, end_idx):
+            forecast_values = []
+            for i in range(idx + 1, idx + 7):
                 try:
                     val = precip_arr[i]
-                    if val is not None:
-                        self.precipitation_forecast_6h += float(val)
-                except (IndexError, ValueError, TypeError):
-                    pass
+                    number = float(val)
+                    if val is None or not math.isfinite(number) or number < 0:
+                        raise ValueError("invalid precipitation forecast")
+                    forecast_values.append(number)
+                except (IndexError, OverflowError, ValueError, TypeError):
+                    forecast_values = []
+                    break
+            if len(forecast_values) == 6:
+                total = sum(forecast_values)
+                if math.isfinite(total):
+                    self.precipitation_forecast_6h = total
 
         # Hourly forecast for next 24h (every 4 hours, 6 points)
         self.hourly_forecast_24h = []  # type: List[Dict[str, Any]]
@@ -223,11 +242,14 @@ class WeatherData:
                 if hh_mm is None:
                     continue
 
-                def _arr_val(arr, i):
+                def _arr_val(arr, i, *, nonnegative=False):
                     try:
                         v = arr[i]
-                        return float(v) if v is not None else None
-                    except (IndexError, ValueError, TypeError):
+                        number = float(v) if v is not None else None
+                        if number is None or not math.isfinite(number) or (nonnegative and number < 0):
+                            return None
+                        return number
+                    except (IndexError, OverflowError, ValueError, TypeError):
                         return None
 
                 def _arr_int(arr, i):
@@ -241,8 +263,8 @@ class WeatherData:
                     {
                         "time": hh_mm,
                         "temp": _arr_val(temp_arr, target_idx),
-                        "precip": _arr_val(precip_arr, target_idx),
-                        "wind": _arr_val(wind_arr, target_idx),
+                        "precip": _arr_val(precip_arr, target_idx, nonnegative=True),
+                        "wind": _arr_val(wind_arr, target_idx, nonnegative=True),
                         "weather_code": _arr_int(wcode_arr, target_idx),
                     }
                 )
@@ -267,18 +289,21 @@ class WeatherData:
             except (ValueError, IndexError):
                 pass
 
-            def _dval(arr, i):
+            def _dval(arr, i, *, nonnegative=False):
                 try:
                     v = arr[i]
-                    return float(v) if v is not None else None
-                except (IndexError, ValueError, TypeError):
+                    number = float(v) if v is not None else None
+                    if number is None or not math.isfinite(number) or (nonnegative and number < 0):
+                        return None
+                    return number
+                except (IndexError, OverflowError, ValueError, TypeError):
                     return None
 
             def _dint(arr, i):
                 try:
                     v = arr[i]
                     return int(v) if v is not None else None
-                except (IndexError, ValueError, TypeError):
+                except (IndexError, OverflowError, ValueError, TypeError):
                     return None
 
             sr_val = None
@@ -294,7 +319,7 @@ class WeatherData:
                     "day_name": day_name,
                     "temp_min": _dval(daily_tmin, di),
                     "temp_max": _dval(daily_tmax, di),
-                    "precip_sum": _dval(daily_psum, di),
+                    "precip_sum": _dval(daily_psum, di, nonnegative=True),
                     "weather_code": _dint(daily_wcode, di),
                     "sunrise": sr_val,
                     "sunset": ss_val,
@@ -305,18 +330,19 @@ class WeatherData:
         self.min_temp_forecast_6h = None  # type: Optional[float]
         if idx is not None:
             temp_arr = hourly.get("temperature_2m", [])
-            end_idx_6h = min(len(temp_arr), idx + 7)
-            min_t = None
-            for i in range(idx, end_idx_6h):
+            forecast_temperatures = []
+            for i in range(idx, idx + 7):
                 try:
                     v = temp_arr[i]
-                    if v is not None:
-                        fv = float(v)
-                        if min_t is None or fv < min_t:
-                            min_t = fv
-                except (IndexError, ValueError, TypeError):
-                    pass
-            self.min_temp_forecast_6h = min_t
+                    number = float(v)
+                    if v is None or not math.isfinite(number):
+                        raise ValueError("invalid temperature forecast")
+                    forecast_temperatures.append(number)
+                except (IndexError, OverflowError, ValueError, TypeError):
+                    forecast_temperatures = []
+                    break
+            if len(forecast_temperatures) == 7:
+                self.min_temp_forecast_6h = min(forecast_temperatures)
 
     def to_dict(self):
         # type: () -> Dict[str, Any]

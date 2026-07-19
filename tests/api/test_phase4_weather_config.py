@@ -226,32 +226,37 @@ def test_weather_api_rejects_nonfinite_stale_fallback_days(admin_client, app, in
     assert app.db.get_setting_value("weather.balance.stale_fallback_days") == "2"
 
 
-def test_live_weather_response_overlays_fresh_local_sources(admin_client) -> None:
+def test_live_weather_response_preserves_one_canonical_effective_snapshot(admin_client) -> None:
     service_payload = {
         "available": True,
-        "temperature": 18.0,
+        "temperature": 0.0,
         "humidity": 40.0,
         "current": {
-            "temperature": {"value": 18.0, "source": "api", "unit": "°C"},
-            "humidity": {"value": 40.0, "source": "api", "unit": "%"},
+            "temperature": {"value": 0.0, "source": "local", "unit": "°C"},
+            "humidity": {"value": 40.0, "source": "local", "unit": "%"},
             "rain": {"value": False, "source": "api"},
             "precipitation_mm": {"value": 0.0, "source": "api", "unit": "мм"},
+        },
+        "adjustment": {
+            "skip": True,
+            "skip_reason": "freeze_skip: 0.0°C",
+            "factors": {"freeze": {"status": "danger", "enabled": True}},
         },
     }
     env = {
         "temp_enabled": True,
-        "temp_value": 7.5,
+        "temp_value": 30.0,
         "temp_last_rx": 100.0,
         "temp_online": True,
         "hum_enabled": True,
-        "hum_value": 82.0,
+        "hum_value": 70.0,
         "hum_last_rx": 100.0,
         "hum_online": True,
     }
 
     with (
         patch("services.weather.get_weather_service") as get_service,
-        patch("services.weather_merged._get_env_state", return_value=env),
+        patch("services.weather_merged._get_env_state", return_value=env) as get_env,
         patch("services.weather_merged._get_rain_state", return_value={"enabled": True, "is_rain": True}),
     ):
         get_service.return_value.get_weather_extended.return_value = service_payload
@@ -259,8 +264,10 @@ def test_live_weather_response_overlays_fresh_local_sources(admin_client) -> Non
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["current"]["temperature"] == {"value": 7.5, "source": "local", "unit": "°C"}
-    assert payload["current"]["humidity"] == {"value": 82.0, "source": "local", "unit": "%"}
+    assert payload["current"]["temperature"] == {"value": 0.0, "source": "local", "unit": "°C"}
+    assert payload["current"]["humidity"] == {"value": 40.0, "source": "local", "unit": "%"}
     assert payload["current"]["rain"] == {"value": True, "source": "local"}
-    assert payload["temperature"] == 7.5
-    assert payload["humidity"] == 82.0
+    assert payload["temperature"] == 0.0
+    assert payload["humidity"] == 40.0
+    assert payload["adjustment"]["skip_reason"] == "freeze_skip: 0.0°C"
+    get_env.assert_not_called()
