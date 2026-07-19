@@ -2,7 +2,7 @@
 
 Текущий checkpoint: 2026-07-19. Ветка: `refactor/audit-2026-07`, post-review
 baseline `84f0b3df9712234a504ecbaff2e10b909c6e5975`, последний интегрированный
-main checkpoint `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
+main checkpoint `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
 
 ## Текущее состояние после полного post-review
 
@@ -13,8 +13,9 @@ main checkpoint `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
   `PR-060` — намеренный H2 shadow-mode, не дефект.
 - Финальный реестр сейчас содержит **224 записи**: `VERIFIED_REAL` — 215,
   `VERIFIED_FALSE` — 7, `INTENTIONAL_LIMITATION` — 2, `UNVERIFIED` — 0.
-- Remediation disposition: **141 fixed · 7 deferred · 67 pending ·
-  9 not_applicable**. Все 67 post-review дефектов пока намеренно `pending`:
+- Remediation disposition: **144 fixed · 7 deferred · 64 pending ·
+  9 not_applicable**. Из 67 post-review дефектов 3 закрыты интегрированными
+  пакетами, 64 остаются `pending`:
   интеграция частичного owner-пакета сохраняет root открытым, пока не закрыты
   остальные владельцы и общий regression contract; неслитый owner commit тем
   более не считается fix.
@@ -58,8 +59,37 @@ main checkpoint `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
    - serial evidence: 2090 passed, 2 skipped, 17 deselected; единственный
      sandbox-only AF_UNIX bind failure прошёл точным повтором вне sandbox; Ruff
      и `git diff --check` чисты;
-   - `PR-043` не закрыт: ещё нужны удаление default `1234` из DB bootstrap,
-     интеграция auth cookie/trim policy и deploy cleanup/runtime permissions.
+   - `PR-043` не закрыт: ещё нужны удаление default `1234` из DB bootstrap и
+     deploy cleanup/runtime permissions; auth cookie/trim scope закрыт следующим
+     пакетом.
+
+2. `p4-auth-http` — `PR-001`, `PR-002`, `PR-033` закрыты; `PR-003`, `PR-042`,
+   `PR-043`, `PR-061` получили partial evidence и остаются `pending`; `PR-044`
+   не входил в scope и остаётся `pending`
+   - fixes `194a44e2ab94cac8ca66459fe47dca3cf5f7e3a6`,
+     `5e0783c47028b2974b813cb3651fded379cc0fc7`,
+     `491bb5bff5b0b56aa456c5447fab71f90a585f67`,
+     `f9382ea22af08874cd377c793c613da91d3aab97`,
+     `9c971a0babf5bac1a0d94b02e0bfb126b6004b53`,
+     `b040ddd640b6e0b8c7ece40811f853050a72d48c` и
+     `b4258adc23f7de38e44e43f54512798e709ae57c`;
+   - merge `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`;
+   - anonymous control boundary разрешает только fail-safe OFF/postpone/status,
+     authenticated unsafe mutations требуют CSRF; explicit WSGI executor,
+     reserved workers и SSE lease cap сохраняют control plane; SSE/correlation
+     teardown idempotent и больше не создаёт warnings;
+   - exact regressions находятся в `tests/integration/test_phase4_auth_http.py`,
+     `tests/api/test_guest_zone_control.py` и
+     `tests/api/test_watering_rate_limit_safety.py`; inventory фиксирует nodeid
+     отдельно для каждого fixed/partial PR;
+   - независимый verdict `ACCEPT`: 135 focused + 5 auth/CSRF environment tests
+     прошли с `-W error`;
+   - main serial: 2160 passed, 2 skipped, 17 deselected; единственный sandbox
+     AF_UNIX failure прошёл точным повтором вне sandbox; SSE warnings отсутствуют;
+     full Ruff, renderer и `git diff --check` чисты;
+   - `PR-003` ждёт structured scheduler/physical-OFF contract; `PR-042` —
+     confirmation contract; `PR-043` — DB/deploy; `PR-061` — rain/scheduler
+     adoption monotonic CAS; `PR-044` — отдельный status/API GET-auth owner.
 
 ### Reconciliation post-package reviewer residuals
 
@@ -549,7 +579,7 @@ Docker как production target, e2e и `mqtt_real` без физическог�
   пользовательский untracked `AGENTS.md` сохранён и не индексировался.
 
 Этот блок фиксирует доказательства прежнего HEAD, но больше не является текущим
-completion claim: полный post-review и residual reconciliation оставили 67 pending
+completion claim: полный post-review и residual reconciliation оставили 64 pending
 root causes. Новая локальная
 точка передачи будет готова только после индивидуального fixed/deferred disposition
 для каждого `VERIFIED_REAL` PR-ID (`PR-001…PR-059`, `PR-061…PR-068`), интеграции
