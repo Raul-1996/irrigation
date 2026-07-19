@@ -822,3 +822,26 @@ def test_status_rain_sensor_proxies_fresh_dry_and_rain_truth(admin_client, app, 
     assert dry["rain_sensor_health"] == {"status": "healthy", "error_code": None}
     assert (rain["rain_sensor_state"], rain["rain_sensor"]) == ("rain", "идёт дождь")
     assert rain["rain_sensor_health"] == {"status": "healthy", "error_code": None}
+
+
+def test_status_allows_trusted_projection_beyond_public_zone_limit(admin_client, app):
+    with sqlite3.connect(app.db.db_path) as conn:
+        conn.executemany(
+            "INSERT INTO zones(name, duration, group_id, state) VALUES (?, ?, ?, ?)",
+            [(f"Large status {index}", 10, 1, "off") for index in range(513)],
+        )
+
+    response = admin_client.get("/api/status")
+
+    assert response.status_code == 200
+    assert any(group["id"] == 1 for group in response.get_json()["groups"])
+
+
+def test_public_next_watering_projection_still_rejects_more_than_512_ids(admin_client):
+    response = admin_client.post(
+        "/api/zones/next-watering-bulk",
+        json={"zone_ids": list(range(1, 514))},
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["success"] is False

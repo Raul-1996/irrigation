@@ -739,6 +739,7 @@ def api_status():
         all_zones=zones,
         programs=programs,
         skip_today=weather_skip,
+        enforce_limit=False,
     )
 
     zones_by_group = {}
