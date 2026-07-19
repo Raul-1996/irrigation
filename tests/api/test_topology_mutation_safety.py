@@ -996,6 +996,39 @@ class TestManualMasterSafety:
 
 
 class TestGroupStopConfirmationSafety:
+    def test_malformed_stop_aggregate_is_never_reported_as_success(self, admin_client, app):
+        group = _group(app)
+        zone = _zone(app, group["id"], topic="")
+        valid = {
+            "success": True,
+            "group_id": group["id"],
+            "stopped": [zone["id"]],
+            "unresolved": [],
+            "retry_scheduled": False,
+        }
+        malformed_results = [
+            None,
+            {},
+            {key: value for key, value in valid.items() if key != "group_id"},
+            {**valid, "group_id": group["id"] + 1},
+            {**valid, "stopped": []},
+            {**valid, "unresolved": [zone["id"]]},
+            {**valid, "success": False},
+            {**valid, "stopped": [True]},
+            {**valid, "stopped": [zone["id"], zone["id"]]},
+        ]
+
+        for malformed in malformed_results:
+            with (
+                patch("services.zone_control.stop_all_in_group", return_value=malformed),
+                patch("routes.groups_api.get_scheduler") as get_scheduler,
+            ):
+                response = admin_client.post(f"/api/groups/{group['id']}/stop")
+
+            assert response.status_code == 503
+            assert response.get_json()["unresolved"] == [zone["id"]]
+            get_scheduler.assert_not_called()
+
     @pytest.mark.parametrize("observed_state", ["on", "unconfirmed"])
     def test_unresolved_off_keeps_recovery_jobs_and_returns_503(self, admin_client, app, observed_state):
         group = _group(app)
@@ -1009,7 +1042,13 @@ class TestGroupStopConfirmationSafety:
             },
         )
         scheduler = Mock()
-        result = {"success": False, "stopped": [], "unresolved": [zone["id"]]}
+        result = {
+            "success": False,
+            "group_id": group["id"],
+            "stopped": [],
+            "unresolved": [zone["id"]],
+            "retry_scheduled": False,
+        }
 
         with (
             patch("services.zone_control.stop_all_in_group", return_value=result) as stop_all,
@@ -1026,7 +1065,12 @@ class TestGroupStopConfirmationSafety:
             "stopped": [],
             "unresolved": [zone["id"]],
         }
-        stop_all.assert_called_once_with(group["id"], reason="group_stop", force=True)
+        stop_all.assert_called_once_with(
+            group["id"],
+            reason="group_stop",
+            force=True,
+            require_observed_confirmation=True,
+        )
         get_scheduler.assert_not_called()
         scheduler.cancel_group_jobs.assert_not_called()
         clear_starts.assert_not_called()
@@ -1050,7 +1094,13 @@ class TestGroupStopConfirmationSafety:
         with (
             patch(
                 "services.zone_control.stop_all_in_group",
-                return_value={"success": True, "stopped": [zone["id"]], "unresolved": []},
+                return_value={
+                    "success": True,
+                    "group_id": group["id"],
+                    "stopped": [zone["id"]],
+                    "unresolved": [],
+                    "retry_scheduled": False,
+                },
             ),
             patch("routes.groups_api.get_scheduler", return_value=None),
         ):

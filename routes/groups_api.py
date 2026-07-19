@@ -213,6 +213,39 @@ def _zone_is_physically_safe(zone: dict) -> bool:
     return state == "off" and commanded == "off" and observed == "off"
 
 
+def _validated_group_stop_result(result, group_id: int, expected_ids: list[int]) -> dict | None:
+    """Accept only the core's complete, internally consistent OFF partition."""
+    if not isinstance(result, dict):
+        return None
+    if type(result.get("group_id")) is not int or result["group_id"] != int(group_id):
+        return None
+    if type(result.get("success")) is not bool:
+        return None
+
+    normalized: dict[str, list[int]] = {}
+    for key in ("stopped", "unresolved"):
+        values = result.get(key)
+        if not isinstance(values, list):
+            return None
+        if any(type(zone_id) is not int or zone_id <= 0 for zone_id in values):
+            return None
+        if len(values) != len(set(values)):
+            return None
+        normalized[key] = list(values)
+
+    stopped = set(normalized["stopped"])
+    unresolved = set(normalized["unresolved"])
+    if stopped & unresolved or stopped | unresolved != set(expected_ids):
+        return None
+    if result["success"] is not (not unresolved):
+        return None
+    return {
+        "success": result["success"],
+        "stopped": normalized["stopped"],
+        "unresolved": normalized["unresolved"],
+    }
+
+
 def _canonical_master_topic(value, *, allow_empty: bool) -> tuple[str | None, str | None]:
     """Validate one master-valve report/base topic from public configuration."""
     if value is not None and not isinstance(value, str):
@@ -682,13 +715,35 @@ def api_delete_group(group_id):
 
 @groups_api_bp.route("/api/groups/<int:group_id>/stop", methods=["POST"])
 @audit_log("group_stop", target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
+@_serialize_group_hardware_mutation(always=True)
 def api_stop_group(group_id):
     """Stop all zones in group."""
     try:
         try:
+            expected_zone_ids = sorted(
+                int(zone["id"])
+                for zone in (_strict_zones() or [])
+                if int(zone.get("group_id") or 0) == int(group_id)
+            )
+        except (ConnectionError, OSError, RuntimeError, sqlite3.Error, KeyError, TypeError, ValueError):
+            logger.exception("group stop inventory unavailable group=%s", group_id)
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не удалось проверить состав группы",
+                    "stopped": [],
+                    "unresolved": [],
+                }
+            ), 503
+        try:
             from services.zone_control import stop_all_in_group as _stop_all
 
-            stop_result = _stop_all(int(group_id), reason="group_stop", force=True)
+            stop_result = _stop_all(
+                int(group_id),
+                reason="group_stop",
+                force=True,
+                require_observed_confirmation=True,
+            )
         except Exception:
             logger.exception("group stop: stop_all_in_group failed")
             return jsonify(
@@ -700,30 +755,31 @@ def api_stop_group(group_id):
                 }
             ), 503
 
-        # Newer zone-control implementations return a confirmation aggregate.
-        # ``None`` remains accepted while older callers/branches are rolling
-        # forward, but a reported unresolved OFF is always fail-closed: the
-        # scheduler's recovery/hard-stop jobs must remain alive so they can
-        # continue trying to make the hardware safe.
-        if isinstance(stop_result, dict):
-            stopped = stop_result.get("stopped")
-            unresolved = stop_result.get("unresolved")
-            stopped = stopped if isinstance(stopped, list) else []
-            unresolved = unresolved if isinstance(unresolved, list) else []
-            if stop_result.get("success") is not True or unresolved:
-                logger.error(
-                    "group stop remains unresolved: group_id=%s unresolved=%s",
-                    group_id,
-                    unresolved,
-                )
-                return jsonify(
-                    {
-                        "success": False,
-                        "message": "Не все зоны подтвердили состояние OFF",
-                        "stopped": stopped,
-                        "unresolved": unresolved,
-                    }
-                ), 503
+        validated_stop = _validated_group_stop_result(stop_result, int(group_id), expected_zone_ids)
+        if validated_stop is None:
+            logger.error("group stop returned malformed partition group_id=%s result=%r", group_id, stop_result)
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не удалось подтвердить остановку всех зон группы",
+                    "stopped": [],
+                    "unresolved": expected_zone_ids,
+                }
+            ), 503
+        if validated_stop["success"] is not True:
+            logger.error(
+                "group stop remains unresolved: group_id=%s unresolved=%s",
+                group_id,
+                validated_stop["unresolved"],
+            )
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не все зоны подтвердили состояние OFF",
+                    "stopped": validated_stop["stopped"],
+                    "unresolved": validated_stop["unresolved"],
+                }
+            ), 503
 
         scheduler = get_scheduler()
         if scheduler:
