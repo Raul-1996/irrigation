@@ -89,6 +89,9 @@ def test_group_stop_honors_structured_scheduler_failure_without_ids() -> None:
         result = telegram._do_group_stop(7)
 
     assert "OFF не подтверждён для группы 7" in result
+    assert "Повторная остановка не запланирована: нет доступных целей." in result
+    assert "Повторная остановка запланирована." not in result
+    scheduler.schedule_zone_hard_stop.assert_not_called()
 
 
 def test_group_stop_treats_logical_off_with_observed_on_as_unresolved() -> None:

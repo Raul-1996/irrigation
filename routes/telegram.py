@@ -247,12 +247,14 @@ def _do_group_stop(group_id: int) -> str:
             return "⏹ Полив группы остановлен"
 
         retry_at = datetime.now() + timedelta(seconds=15)
+        scheduled_retry_count = 0
         if scheduler is not None and hasattr(scheduler, "schedule_zone_hard_stop"):
             for zone_id in unresolved:
                 # Scheduler owns the activation-bound force=True callback.  Its
                 # executable contract is pinned by
                 # test_safety_stop_forces_mqtt_off_and_rearms_after_publish_failure.
                 scheduler.schedule_zone_hard_stop(zone_id, retry_at)
+                scheduled_retry_count += 1
         else:
             # Without APScheduler, retain observed-state retry publishes rather
             # than converting an unresolved command into a false success.
@@ -260,6 +262,7 @@ def _do_group_stop(group_id: int) -> str:
 
             for zone_id in unresolved:
                 state_verifier.verify_async(zone_id, "off")
+                scheduled_retry_count += 1
 
         messages = []
         if failed:
@@ -270,7 +273,10 @@ def _do_group_stop(group_id: int) -> str:
         if pending:
             ids = ", ".join(str(zone_id) for zone_id in pending)
             messages.append(f"⏳ Команда OFF принята для зон: {ids}; ожидается свежее подтверждение реле.")
-        messages.append("Повторная остановка запланирована.")
+        if scheduled_retry_count:
+            messages.append("Повторная остановка запланирована.")
+        else:
+            messages.append("Повторная остановка не запланирована: нет доступных целей.")
         return " ".join(messages)
     except (ImportError, sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         logger.debug("Exception in _do_group_stop: %s", e)
