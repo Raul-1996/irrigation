@@ -351,3 +351,49 @@ def test_naive_dst_fold_rows_sort_by_utc_creation_timeline(app, client, monkeypa
         "2026-11-01T01:15:00-05:00",
         "2026-11-01T01:45:00-04:00",
     ]
+
+
+def test_naive_dst_fold_resolution_flows_through_duration_and_aggregates(app, client, monkeypatch):
+    controller_tz = ZoneInfo("America/New_York")
+    controller_now = datetime(2026, 11, 1, 12, 0, tzinfo=controller_tz)
+    monkeypatch.setenv("WB_TZ", "America/New_York")
+
+    with (
+        _system_timezone("Pacific/Kiritimati"),
+        patch("routes.zones_history_api._controller_now", return_value=controller_now),
+    ):
+        zone = _create_zone(app, "history-naive-dst-duration")
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute(
+                "INSERT INTO zone_runs(zone_id, group_id, start_utc, end_utc, "
+                "start_monotonic, end_monotonic, total_liters, status, source, created_at) "
+                "VALUES (?, 1, '2026-11-01 01:55:00', '2026-11-01 01:05:00', "
+                "0.0, NULL, 4.0, 'ok', 'manual', '2026-11-01 05:55:00')",
+                (zone["id"],),
+            )
+            conn.commit()
+        app.db.create_program(
+            {
+                "name": "DST morning plan",
+                "time": "00:00",
+                "days": [6],
+                "zones": [zone["id"]],
+                "schedule_type": "weekdays",
+                "enabled": True,
+            }
+        )
+
+        payload = client.get(f"/api/zones/{zone['id']}/history?days=7").get_json()
+
+    run = payload["runs"][0]
+    assert run["start_utc"] == "2026-11-01T01:55:00-04:00"
+    assert run["end_utc"] == "2026-11-01T01:05:00-05:00"
+    assert run["duration_min"] == 10
+    assert payload["summary"]["actuals_complete"] is True
+    assert payload["summary"]["total_runs"] == 1
+    assert payload["summary"]["total_minutes"] == 10
+    assert payload["summary"]["total_liters"] == 4.0
+    assert payload["summary"]["saved_minutes"] == 5
+    assert payload["summary"]["savings_available"] is True
+    bucket = next(day for day in payload["daily"] if day["date"] == "2026-11-01")
+    assert bucket["actual_minutes"] == 10

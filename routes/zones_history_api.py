@@ -234,6 +234,12 @@ def _fetch_runs(
                 and (end_local is None or end_local.astimezone(UTC) > range_start)
             )
             if overlaps:
+                # Resolve legacy controller-local naive folds exactly once.
+                # Every downstream duration/bucket/serializer then consumes
+                # these same aware UTC instants instead of reparsing fold=0.
+                run["start_utc"] = start_local.astimezone(UTC).isoformat()
+                if end_local is not None:
+                    run["end_utc"] = end_local.astimezone(UTC).isoformat()
                 dated_rows.append((_run_sort_instant(start_local), run))
         dated_rows.sort(key=lambda item: item[0], reverse=True)
         return [run for _, run in dated_rows]
