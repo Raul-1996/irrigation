@@ -68,6 +68,17 @@ _RAIN_SENSOR_LABELS = {
     "dry": "дождя нет",
 }
 _RAIN_SENSOR_STATES = frozenset(_RAIN_SENSOR_LABELS)
+_GROUP_CANCEL_RESULT_KEYS = frozenset(
+    {
+        "success",
+        "group_id",
+        "aggregate_valid",
+        "stopped",
+        "unresolved",
+        "unverified_zone_ids",
+        "retry_scheduled",
+    }
+)
 
 
 def _rain_runtime_snapshot(enabled: bool) -> dict[str, Any]:
@@ -114,6 +125,88 @@ def _rain_runtime_snapshot(enabled: bool) -> dict[str, Any]:
         "label": _RAIN_SENSOR_LABELS[state],
         "health": {"status": health_status, "error_code": error_code},
     }
+
+
+def _strict_group_zone_ids(group_id: int) -> list[int]:
+    """Read a complete group membership snapshot without repository fallbacks."""
+    if type(group_id) is not int or group_id <= 0:
+        raise ValueError("group_id must be a positive canonical integer")
+    with sqlite3.connect(db.db_path, timeout=5.0) as conn:
+        rows = conn.execute(
+            "SELECT id FROM zones WHERE group_id = ? ORDER BY id",
+            (group_id,),
+        ).fetchall()
+    zone_ids = [row[0] for row in rows]
+    if any(type(zone_id) is not int or zone_id <= 0 for zone_id in zone_ids):
+        raise ValueError("group snapshot contains a noncanonical zone id")
+    if len(zone_ids) != len(set(zone_ids)):
+        raise ValueError("group snapshot contains duplicate zone ids")
+    return zone_ids
+
+
+def _validate_group_cancel_result(
+    outcome: Any,
+    *,
+    group_id: int,
+    expected_zone_ids: list[int],
+) -> tuple[str, dict[str, Any] | None]:
+    """Validate the scheduler's exact physical-OFF aggregate contract."""
+    if type(outcome) is not dict or set(outcome) != _GROUP_CANCEL_RESULT_KEYS:
+        return "invalid", None
+    if (
+        type(outcome["success"]) is not bool
+        or type(outcome["aggregate_valid"]) is not bool
+        or type(outcome["retry_scheduled"]) is not bool
+        or type(outcome["group_id"]) is not int
+        or outcome["group_id"] <= 0
+        or outcome["group_id"] != group_id
+    ):
+        return "invalid", None
+    if outcome["aggregate_valid"] is not True:
+        return "invalid", None
+
+    partition: dict[str, list[int]] = {}
+    for field in ("stopped", "unresolved", "unverified_zone_ids"):
+        values = outcome[field]
+        if type(values) is not list:
+            return "invalid", None
+        if any(type(zone_id) is not int or zone_id <= 0 for zone_id in values):
+            return "invalid", None
+        if len(values) != len(set(values)):
+            return "invalid", None
+        partition[field] = list(values)
+
+    expected = set(expected_zone_ids)
+    stopped = set(partition["stopped"])
+    unresolved = set(partition["unresolved"])
+    unverified = set(partition["unverified_zone_ids"])
+    if (
+        not stopped.isdisjoint(unresolved)
+        or not stopped.isdisjoint(unverified)
+        or not unresolved.isdisjoint(unverified)
+        or not (stopped | unresolved | unverified).issubset(expected)
+    ):
+        return "invalid", None
+
+    details = {
+        "group_id": group_id,
+        "aggregate_valid": True,
+        "stopped": partition["stopped"],
+        "unresolved": partition["unresolved"],
+        "unverified_zone_ids": partition["unverified_zone_ids"],
+        "retry_scheduled": outcome["retry_scheduled"],
+    }
+    if stopped | unresolved | unverified != expected:
+        return "incomplete", details
+    if (
+        outcome["success"] is not True
+        or outcome["retry_scheduled"] is not False
+        or partition["stopped"] != expected_zone_ids
+        or partition["unresolved"]
+        or partition["unverified_zone_ids"]
+    ):
+        return "incomplete", details
+    return "valid", details
 
 
 def _reset_runtime_mqtt_health_cache() -> None:
@@ -486,6 +579,7 @@ def api_health_cancel_group(group_id):
         sched = get_scheduler()
         if not sched:
             return api_error("scheduler_unavailable", "scheduler unavailable", 503)
+        gid = int(group_id)
         try:
             cancel_group_jobs = getattr(sched, "cancel_group_jobs", None)
             if not callable(cancel_group_jobs):
@@ -493,41 +587,57 @@ def api_health_cancel_group(group_id):
                     "group_cancel_unavailable",
                     "group cancellation is unavailable",
                     503,
-                    {"group_id": int(group_id)},
+                    {"group_id": gid},
                 )
-            outcome = cancel_group_jobs(int(group_id))
-        except (ValueError, TypeError, RuntimeError):
+            expected_zone_ids = _strict_group_zone_ids(gid)
+            outcome = cancel_group_jobs(gid)
+            confirmed_zone_ids = _strict_group_zone_ids(gid)
+        except (AttributeError, OSError, sqlite3.Error, ValueError, TypeError, RuntimeError):
             logger.exception("group cancel failed")
-            return api_error("group_cancel_failed", "failed to cancel group jobs", 400)
-        if not isinstance(outcome, dict):
             return api_error(
                 "group_cancel_result_invalid",
-                "group cancellation result is unavailable",
+                "group cancellation result could not be verified",
                 503,
-                {"group_id": int(group_id)},
+                {"group_id": gid},
             )
-        stopped = list(outcome.get("stopped") or [])
-        unresolved = list(outcome.get("unresolved") or [])
-        if not bool(outcome.get("success")) or unresolved:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error_code": "GROUP_CANCEL_INCOMPLETE",
-                        "group_id": int(group_id),
-                        "stopped": stopped,
-                        "unresolved": unresolved,
-                    }
-                ),
+        if confirmed_zone_ids != expected_zone_ids:
+            return api_error(
+                "group_cancel_result_invalid",
+                "group membership changed during cancellation",
                 503,
+                {"group_id": gid},
+            )
+        verdict, details = _validate_group_cancel_result(
+            outcome,
+            group_id=gid,
+            expected_zone_ids=expected_zone_ids,
+        )
+        if verdict == "invalid":
+            return api_error(
+                "group_cancel_result_invalid",
+                "group cancellation result is invalid",
+                503,
+                {"group_id": gid},
+            )
+        if verdict == "incomplete":
+            return api_error(
+                "group_cancel_result_incomplete",
+                "group cancellation is incomplete",
+                503,
+                details,
+            )
+        if details is None:
+            return api_error(
+                "group_cancel_result_invalid",
+                "group cancellation result is invalid",
+                503,
+                {"group_id": gid},
             )
         return jsonify(
             {
                 "success": True,
                 "message": f"group {group_id} cancelled",
-                "group_id": int(group_id),
-                "stopped": stopped,
-                "unresolved": [],
+                **details,
             }
         )
     except (ValueError, TypeError, KeyError) as e:

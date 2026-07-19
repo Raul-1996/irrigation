@@ -8,6 +8,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 
 def test_status_reuses_runtime_health_without_creating_diagnostic_client(admin_client, app, monkeypatch):
     """The polling endpoint must never open a broker connection in a WSGI worker."""
@@ -580,13 +582,32 @@ def test_finding_139_status_deduplicates_program_cancellation_queries(admin_clie
     assert len(set(cancellation_queries)) == len(cancellation_queries)
 
 
+def _exact_group_cancel_result(
+    group_id,
+    stopped,
+    *,
+    success=True,
+    unresolved=None,
+    unverified=None,
+    aggregate_valid=True,
+    retry_scheduled=False,
+):
+    return {
+        "success": success,
+        "group_id": group_id,
+        "aggregate_valid": aggregate_valid,
+        "stopped": list(stopped),
+        "unresolved": list(unresolved or []),
+        "unverified_zone_ids": list(unverified or []),
+        "retry_scheduled": retry_scheduled,
+    }
+
+
 def test_finding_148_health_cancel_does_not_create_ownerless_group_session(admin_client, monkeypatch):
     """Cancelling an idle group delegates cleanup without planting a session event."""
     scheduler = SimpleNamespace(
         group_cancel_events={},
-        cancel_group_jobs=Mock(
-            return_value={"success": True, "stopped": [], "unresolved": [], "group_id": 37}
-        ),
+        cancel_group_jobs=Mock(return_value=_exact_group_cancel_result(37, [])),
     )
     monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
 
@@ -597,50 +618,57 @@ def test_finding_148_health_cancel_does_not_create_ownerless_group_session(admin
     assert scheduler.group_cancel_events == {}
 
 
-def test_health_cancel_group_fails_closed_on_unresolved_relays(admin_client, monkeypatch):
+def test_health_cancel_group_fails_closed_on_unresolved_relays(admin_client, app, monkeypatch):
+    group = app.db.create_group("cancel-unresolved")
+    zones = [
+        app.db.create_zone({"name": f"cancel-{index}", "duration": 10, "group_id": group["id"]})
+        for index in range(3)
+    ]
+    zone_ids = [zone["id"] for zone in zones]
     scheduler = SimpleNamespace(
         group_cancel_events={},
         cancel_group_jobs=Mock(
-            return_value={
-                "success": False,
-                "stopped": [11],
-                "unresolved": [12, 13],
-                "group_id": 37,
-            }
+            return_value=_exact_group_cancel_result(
+                group["id"],
+                zone_ids[:1],
+                success=False,
+                unresolved=zone_ids[1:],
+                retry_scheduled=True,
+            )
         ),
     )
     monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
 
-    response = admin_client.post("/api/health/group/37/cancel")
+    response = admin_client.post(f"/api/health/group/{group['id']}/cancel")
 
     assert response.status_code == 503
-    assert response.get_json() == {
-        "success": False,
-        "error_code": "GROUP_CANCEL_INCOMPLETE",
-        "group_id": 37,
-        "stopped": [11],
-        "unresolved": [12, 13],
-    }
+    assert response.get_json()["error_code"] == "group_cancel_result_incomplete"
+    assert response.get_json()["stopped"] == zone_ids[:1]
+    assert response.get_json()["unresolved"] == zone_ids[1:]
 
 
-def test_health_cancel_group_never_trusts_success_when_unresolved_is_nonempty(admin_client, monkeypatch):
+def test_health_cancel_group_never_trusts_success_when_unresolved_is_nonempty(admin_client, app, monkeypatch):
+    group = app.db.create_group("cancel-contradictory-success")
+    zone = app.db.create_zone({"name": "still-on", "duration": 10, "group_id": group["id"]})
     scheduler = SimpleNamespace(
         group_cancel_events={},
         cancel_group_jobs=Mock(
-            return_value={
-                "success": True,
-                "stopped": [],
-                "unresolved": [21],
-                "group_id": 37,
-            }
+            return_value=_exact_group_cancel_result(
+                group["id"],
+                [],
+                success=True,
+                unresolved=[zone["id"]],
+                retry_scheduled=True,
+            )
         ),
     )
     monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
 
-    response = admin_client.post("/api/health/group/37/cancel")
+    response = admin_client.post(f"/api/health/group/{group['id']}/cancel")
 
     assert response.status_code == 503
-    assert response.get_json()["unresolved"] == [21]
+    assert response.get_json()["error_code"] == "group_cancel_result_incomplete"
+    assert response.get_json()["unresolved"] == [zone["id"]]
     assert response.get_json()["success"] is False
 
 
@@ -652,6 +680,135 @@ def test_health_cancel_group_fails_closed_when_scheduler_returns_no_outcome(admi
 
     assert response.status_code == 503
     assert response.get_json()["success"] is False
+    assert response.get_json()["error_code"] == "group_cancel_result_invalid"
+
+
+@pytest.mark.parametrize(
+    ("malformation", "expected_error"),
+    [
+        ("legacy_four_field", "group_cancel_result_invalid"),
+        ("aggregate_false", "group_cancel_result_invalid"),
+        ("unverified", "group_cancel_result_incomplete"),
+        ("incomplete_stopped", "group_cancel_result_incomplete"),
+        ("wrong_group", "group_cancel_result_invalid"),
+        ("retry_true", "group_cancel_result_incomplete"),
+        ("success_int", "group_cancel_result_invalid"),
+        ("duplicate_stopped", "group_cancel_result_invalid"),
+        ("overlapping_partition", "group_cancel_result_invalid"),
+        ("outside_snapshot", "group_cancel_result_invalid"),
+        ("zone_id_bool", "group_cancel_result_invalid"),
+        ("zone_id_zero", "group_cancel_result_invalid"),
+        ("retry_int", "group_cancel_result_invalid"),
+        ("stopped_tuple", "group_cancel_result_invalid"),
+        ("aggregate_int", "group_cancel_result_invalid"),
+        ("group_id_bool", "group_cancel_result_invalid"),
+        ("stopped_reordered", "group_cancel_result_incomplete"),
+    ],
+)
+def test_health_cancel_group_requires_exact_seven_field_partition(
+    admin_client,
+    app,
+    monkeypatch,
+    malformation,
+    expected_error,
+):
+    group = app.db.create_group(f"strict-cancel-{malformation}")
+    zones = [
+        app.db.create_zone({"name": f"strict-{index}", "duration": 10, "group_id": group["id"]})
+        for index in range(2)
+    ]
+    zone_ids = [zone["id"] for zone in zones]
+    outcome = _exact_group_cancel_result(group["id"], zone_ids)
+    if malformation == "legacy_four_field":
+        outcome = {
+            "success": True,
+            "group_id": group["id"],
+            "stopped": zone_ids,
+            "unresolved": [],
+        }
+    elif malformation == "aggregate_false":
+        outcome["aggregate_valid"] = False
+    elif malformation == "unverified":
+        outcome.update(
+            success=False,
+            stopped=zone_ids[:1],
+            unverified_zone_ids=zone_ids[1:],
+        )
+    elif malformation == "incomplete_stopped":
+        outcome["stopped"] = zone_ids[:1]
+    elif malformation == "wrong_group":
+        outcome["group_id"] = group["id"] + 1
+    elif malformation == "retry_true":
+        outcome["retry_scheduled"] = True
+    elif malformation == "success_int":
+        outcome["success"] = 1
+    elif malformation == "duplicate_stopped":
+        outcome["stopped"] = [zone_ids[0], zone_ids[0], zone_ids[1]]
+    elif malformation == "overlapping_partition":
+        outcome["unresolved"] = [zone_ids[1]]
+    elif malformation == "outside_snapshot":
+        outcome["stopped"] = [*zone_ids, max(zone_ids) + 10_000]
+    elif malformation == "zone_id_bool":
+        outcome["stopped"] = [True, zone_ids[1]]
+    elif malformation == "zone_id_zero":
+        outcome["stopped"] = [0, zone_ids[1]]
+    elif malformation == "retry_int":
+        outcome["retry_scheduled"] = 0
+    elif malformation == "stopped_tuple":
+        outcome["stopped"] = tuple(zone_ids)
+    elif malformation == "aggregate_int":
+        outcome["aggregate_valid"] = 1
+    elif malformation == "group_id_bool":
+        outcome["group_id"] = True
+    elif malformation == "stopped_reordered":
+        outcome["stopped"] = list(reversed(zone_ids))
+
+    scheduler = SimpleNamespace(cancel_group_jobs=Mock(return_value=outcome))
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = admin_client.post(f"/api/health/group/{group['id']}/cancel")
+
+    assert response.status_code == 503
+    assert response.get_json()["success"] is False
+    assert response.get_json()["error_code"] == expected_error
+
+
+def test_health_cancel_group_accepts_only_exact_full_success(admin_client, app, monkeypatch):
+    group = app.db.create_group("strict-cancel-valid")
+    zones = [
+        app.db.create_zone({"name": f"valid-{index}", "duration": 10, "group_id": group["id"]})
+        for index in range(2)
+    ]
+    zone_ids = [zone["id"] for zone in zones]
+    scheduler = SimpleNamespace(
+        cancel_group_jobs=Mock(return_value=_exact_group_cancel_result(group["id"], zone_ids))
+    )
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = admin_client.post(f"/api/health/group/{group['id']}/cancel")
+
+    assert response.status_code == 200
+    assert response.get_json()["success"] is True
+    assert response.get_json()["stopped"] == zone_ids
+    assert response.get_json()["unresolved"] == []
+    assert response.get_json()["unverified_zone_ids"] == []
+    assert response.get_json()["retry_scheduled"] is False
+
+
+def test_health_cancel_group_rejects_membership_change_during_cancel(admin_client, app, monkeypatch):
+    group = app.db.create_group("strict-cancel-membership-race")
+    zone = app.db.create_zone({"name": "before", "duration": 10, "group_id": group["id"]})
+
+    def cancel_and_add_zone(_group_id):
+        app.db.create_zone({"name": "raced", "duration": 10, "group_id": group["id"]})
+        return _exact_group_cancel_result(group["id"], [zone["id"]])
+
+    scheduler = SimpleNamespace(cancel_group_jobs=Mock(side_effect=cancel_and_add_zone))
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = admin_client.post(f"/api/health/group/{group['id']}/cancel")
+
+    assert response.status_code == 503
     assert response.get_json()["error_code"] == "group_cancel_result_invalid"
 
 
