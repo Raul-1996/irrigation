@@ -9,8 +9,8 @@ parser and every other submodule consume the same values, and splitting a
 ten-line constants module would add import churn without clarity.
 """
 
-import contextlib
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -31,6 +31,27 @@ _DAY_NAMES_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Sensor data older than this is considered stale (for merged weather)
 SENSOR_STALE_TIMEOUT = 600  # 10 minutes
+
+_HH_MM_RE = re.compile(r"^\d{2}:\d{2}$")
+_LOCAL_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$")
+
+
+def _canonical_hh_mm(value: object) -> str | None:
+    """Validate an API/relay time and return the only UI-safe representation."""
+    if not isinstance(value, str):
+        return None
+    if _HH_MM_RE.fullmatch(value):
+        formats = ("%H:%M",)
+    elif _LOCAL_DATETIME_RE.fullmatch(value):
+        formats = ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S")
+    else:
+        return None
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    return None
 
 
 # ===================================================================
@@ -126,19 +147,9 @@ class WeatherData:
         self.sunrise = None
         self.sunset = None
         if daily_idx is not None and daily_idx < len(daily_sunrise) and daily_sunrise[daily_idx]:
-            with contextlib.suppress(IndexError, ValueError):
-                self.sunrise = (
-                    str(daily_sunrise[daily_idx]).split("T")[1][:5]
-                    if "T" in str(daily_sunrise[daily_idx])
-                    else str(daily_sunrise[daily_idx])
-                )
+            self.sunrise = _canonical_hh_mm(daily_sunrise[daily_idx])
         if daily_idx is not None and daily_idx < len(daily_sunset) and daily_sunset[daily_idx]:
-            with contextlib.suppress(IndexError, ValueError):
-                self.sunset = (
-                    str(daily_sunset[daily_idx]).split("T")[1][:5]
-                    if "T" in str(daily_sunset[daily_idx])
-                    else str(daily_sunset[daily_idx])
-                )
+            self.sunset = _canonical_hh_mm(daily_sunset[daily_idx])
 
         # Calculate precipitation sum for past 24h from hourly data
         self.precipitation_24h = 0.0
@@ -181,11 +192,9 @@ class WeatherData:
                 target_idx = idx + (target_h - current_h)
                 if target_idx < 0 or target_idx >= len(hour_times):
                     continue
-                try:
-                    t_str = hour_times[target_idx]
-                    hh_mm = t_str.split("T")[1][:5] if "T" in t_str else t_str
-                except (IndexError, ValueError):
-                    hh_mm = ""
+                hh_mm = _canonical_hh_mm(hour_times[target_idx])
+                if hh_mm is None:
+                    continue
 
                 def _arr_val(arr, i):
                     try:
@@ -248,11 +257,9 @@ class WeatherData:
             sr_val = None
             ss_val = None
             if di < len(daily_sr) and daily_sr[di]:
-                with contextlib.suppress(IndexError, ValueError):
-                    sr_val = str(daily_sr[di]).split("T")[1][:5] if "T" in str(daily_sr[di]) else str(daily_sr[di])
+                sr_val = _canonical_hh_mm(daily_sr[di])
             if di < len(daily_ss) and daily_ss[di]:
-                with contextlib.suppress(IndexError, ValueError):
-                    ss_val = str(daily_ss[di]).split("T")[1][:5] if "T" in str(daily_ss[di]) else str(daily_ss[di])
+                ss_val = _canonical_hh_mm(daily_ss[di])
 
             self.daily_forecast.append(
                 {
