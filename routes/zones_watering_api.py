@@ -86,33 +86,102 @@ def _signal_group_session_cancel(scheduler, group_id: int) -> None:
         logger.exception("group session cancel signal failed group=%s", group_id)
 
 
+_SCHEDULER_STOP_AGGREGATE_KEYS = {
+    "success",
+    "aggregate_valid",
+    "stopped",
+    "unresolved",
+    "unverified_zone_ids",
+    "retry_scheduled",
+    "group_id",
+}
+
+
+def _strict_zone_id_bucket(value) -> list[int] | None:
+    if type(value) is not list:
+        return None
+    if any(type(zone_id) is not int or zone_id <= 0 for zone_id in value):
+        return None
+    if len(value) != len(set(value)):
+        return None
+    return sorted(value)
+
+
+def _completed_session_stop_aggregate(result, group_id: int, expected_zone_ids: list[int]) -> dict | None:
+    """Accept only the scheduler's exact proof of one completed group OFF."""
+    gid = int(group_id)
+    if type(result) is not dict or set(result) != _SCHEDULER_STOP_AGGREGATE_KEYS:
+        return None
+    if (
+        type(result.get("success")) is not bool
+        or result.get("success") is not True
+        or type(result.get("aggregate_valid")) is not bool
+        or result.get("aggregate_valid") is not True
+        or type(result.get("retry_scheduled")) is not bool
+        or result.get("retry_scheduled") is not False
+        or type(result.get("group_id")) is not int
+        or result.get("group_id") != gid
+    ):
+        return None
+
+    stopped = _strict_zone_id_bucket(result.get("stopped"))
+    unresolved = _strict_zone_id_bucket(result.get("unresolved"))
+    unverified = _strict_zone_id_bucket(result.get("unverified_zone_ids"))
+    expected = set(expected_zone_ids)
+    if stopped is None or unresolved is None or unverified is None:
+        return None
+    stopped_set = set(stopped)
+    unresolved_set = set(unresolved)
+    unverified_set = set(unverified)
+    if stopped_set & unresolved_set or stopped_set & unverified_set or unresolved_set & unverified_set:
+        return None
+    if stopped_set | unresolved_set | unverified_set != expected:
+        return None
+    if stopped_set != expected or unresolved or unverified:
+        return None
+    return {
+        "success": True,
+        "stopped": stopped,
+        "unresolved": [],
+        "unverified_zone_ids": [],
+        "group_id": gid,
+    }
+
+
 def _abort_group_session_after_off(scheduler, group_id: int) -> dict:
     """Abort a session while preserving safety retries for unresolved OFFs."""
     gid = int(group_id)
-    result = {"success": False, "stopped": [], "unresolved": [], "group_id": gid}
+    result = {
+        "success": False,
+        "stopped": [],
+        "unresolved": [],
+        "unverified_zone_ids": [],
+        "group_id": gid,
+    }
     _signal_group_session_cancel(scheduler, gid)
     try:
-        zones = db.get_zones_by_group(gid) or []
-    except (sqlite3.Error, OSError, TypeError, ValueError):
-        logger.exception("session abort: unable to load group zones group=%s", gid)
+        from services import zone_control
+
+        strict_group_zone_ids = getattr(zone_control, "_strict_group_zone_ids", None)
+        expected_zone_ids = strict_group_zone_ids(gid) if callable(strict_group_zone_ids) else None
+    except (sqlite3.Error, OSError, AttributeError, TypeError, ValueError):
+        logger.exception("session abort: unable to load strict group zones group=%s", gid)
+        expected_zone_ids = None
+    if expected_zone_ids is None:
         result["error_code"] = "SESSION_INVENTORY_UNAVAILABLE"
         return result
 
-    from services.zone_control import stop_zone as _stop_central
+    _stop_central = zone_control.stop_zone
 
     stopped: set[int] = set()
     unresolved: set[int] = set()
-    for member in zones:
-        zone_id = None
+    for zone_id in expected_zone_ids:
         try:
-            zone_id = int(member["id"])
             physically_stopped = _stop_central(zone_id, reason="manual_session_abort", force=True)
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeError):
-            logger.exception("session abort OFF failed zone=%s", member.get("id"))
+            logger.exception("session abort OFF failed zone=%s", zone_id)
             physically_stopped = False
-        if zone_id is None:
-            continue
-        (stopped if physically_stopped else unresolved).add(zone_id)
+        (stopped if physically_stopped is True else unresolved).add(zone_id)
 
     if unresolved:
         # Keep zone_stop / hard_stop jobs planted.  They are the remaining
@@ -133,40 +202,18 @@ def _abort_group_session_after_off(scheduler, group_id: int) -> dict:
         )
         return result
 
-    # New scheduler versions return the authoritative structured physical
-    # outcome and preserve hard/cap retry jobs for unresolved zones.  ``None``
-    # remains compatible with the legacy scheduler during rolling integration.
-    if isinstance(cancel_result, dict):
-        scheduler_stopped: set[int] = set()
-        scheduler_unresolved: set[int] = set()
-        for value in cancel_result.get("stopped") or []:
-            try:
-                scheduler_stopped.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        for value in cancel_result.get("unresolved") or []:
-            try:
-                scheduler_unresolved.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        unresolved.update(scheduler_unresolved)
-        stopped.update(scheduler_stopped)
-        stopped.difference_update(unresolved)
+    completed = _completed_session_stop_aggregate(cancel_result, gid, expected_zone_ids)
+    if completed is None:
         result.update(
             {
-                "success": cancel_result.get("success") is True and not unresolved,
-                "stopped": sorted(stopped),
-                "unresolved": sorted(unresolved),
+                "stopped": [],
+                "unresolved": [],
+                "unverified_zone_ids": sorted(expected_zone_ids),
+                "error_code": "SESSION_AGGREGATE_INVALID",
             }
         )
-        if result["success"] is not True:
-            result["error_code"] = cancel_result.get("error_code") or (
-                "SESSION_OFF_UNRESOLVED" if unresolved else "SESSION_CLEANUP_FAILED"
-            )
         return result
-
-    result.update({"success": True, "stopped": sorted(stopped), "unresolved": []})
-    return result
+    return completed
 
 
 # ---- Zone start/stop ----
@@ -242,9 +289,10 @@ def stop_zone(zone_id):
                             {
                                 "success": False,
                                 "message": "Не все зоны подтвердили состояние OFF",
-                                "session_aborted": True,
+                                "session_aborted": False,
                                 "stopped": session_result.get("stopped") or [],
                                 "unresolved": session_result.get("unresolved") or [],
+                                "unverified_zone_ids": session_result.get("unverified_zone_ids") or [],
                                 "error_code": session_result.get("error_code") or "SESSION_OFF_UNRESOLVED",
                             }
                         ),
@@ -268,9 +316,10 @@ def stop_zone(zone_id):
                         {
                             "success": False,
                             "message": "Не удалось подтвердить остановку сессии группы",
-                            "session_aborted": True,
+                            "session_aborted": False,
                             "stopped": [],
                             "unresolved": [int(zone_id)],
+                            "unverified_zone_ids": [],
                             "error_code": "SESSION_ABORT_FAILED",
                         }
                     ),
@@ -626,9 +675,10 @@ def api_zone_mqtt_stop(zone_id: int):
                         {
                             "success": False,
                             "message": "Не все зоны подтвердили состояние OFF",
-                            "session_aborted": True,
+                            "session_aborted": False,
                             "stopped": session_result.get("stopped") or [],
                             "unresolved": session_result.get("unresolved") or [],
+                            "unverified_zone_ids": session_result.get("unverified_zone_ids") or [],
                             "error_code": session_result.get("error_code") or "SESSION_OFF_UNRESOLVED",
                         }
                     ),
@@ -650,9 +700,10 @@ def api_zone_mqtt_stop(zone_id: int):
                     {
                         "success": False,
                         "message": "Не удалось подтвердить остановку сессии группы",
-                        "session_aborted": True,
+                        "session_aborted": False,
                         "stopped": [],
                         "unresolved": [int(zone_id)],
+                        "unverified_zone_ids": [],
                         "error_code": "SESSION_ABORT_FAILED",
                     }
                 ),

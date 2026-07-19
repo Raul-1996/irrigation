@@ -20,8 +20,12 @@ class TestEmergencyFlow:
 
         # Emergency stop
         resp = admin_client.post("/api/emergency-stop", content_type="application/json")
-        assert resp.status_code == 200
-        assert resp.get_json()["success"] is True
+        assert resp.status_code == 503
+        body = resp.get_json()
+        assert body["success"] is False
+        assert body["physical_stop_confirmed"] is True
+        assert body["sessions_quiesced"] is False
+        assert app.config["EMERGENCY_STOP"] is True
 
     def test_emergency_resume(self, admin_client, app):
         """Emergency resume should clear emergency state."""

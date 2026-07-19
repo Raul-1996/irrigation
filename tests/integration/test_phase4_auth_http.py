@@ -1240,7 +1240,7 @@ def test_session_stop_keeps_retry_jobs_when_any_physical_off_fails(admin_client,
 
 
 @pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
-def test_session_stop_propagates_scheduler_unresolved_aggregate(admin_client, app, endpoint):
+def test_session_stop_rejects_scheduler_retry_aggregate_as_incomplete_abort(admin_client, app, endpoint):
     import routes.zones_watering_api as route
 
     group = app.db.create_group(f"scheduler unresolved {endpoint}")
@@ -1252,8 +1252,11 @@ def test_session_stop_propagates_scheduler_unresolved_aggregate(admin_client, ap
         cancel_group_jobs=Mock(
             return_value={
                 "success": False,
+                "aggregate_valid": True,
                 "stopped": [],
                 "unresolved": [zone["id"]],
+                "unverified_zone_ids": [],
+                "retry_scheduled": True,
                 "group_id": group["id"],
             }
         ),
@@ -1269,11 +1272,169 @@ def test_session_stop_propagates_scheduler_unresolved_aggregate(admin_client, ap
     assert response.status_code == 503
     body = response.get_json()
     assert body["success"] is False
-    assert body["session_aborted"] is True
+    assert body["session_aborted"] is False
     assert body["stopped"] == []
-    assert body["unresolved"] == [zone["id"]]
+    assert body["unresolved"] == []
+    assert body["unverified_zone_ids"] == [zone["id"]]
+    assert body["error_code"] == "SESSION_AGGREGATE_INVALID"
     assert cancel_event.is_set()
     scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
+
+
+@pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "none",
+        "malformed",
+        "extra",
+        "missing",
+        "wrong_group",
+        "aggregate_false",
+        "unverified",
+        "incomplete",
+        "retry_true",
+        "coerced_ids",
+    ],
+)
+def test_session_stop_rejects_non_exact_scheduler_aggregate(admin_client, app, endpoint, invalid_case):
+    import routes.zones_watering_api as route
+
+    group = app.db.create_group(f"strict session aggregate {endpoint} {invalid_case}")
+    zones = [
+        app.db.create_zone({"name": f"strict {invalid_case} {index}", "duration": 5, "group_id": group["id"]})
+        for index in range(2)
+    ]
+    zone_ids = [zone["id"] for zone in zones]
+    cancel_result = {
+        "success": True,
+        "aggregate_valid": True,
+        "stopped": zone_ids,
+        "unresolved": [],
+        "unverified_zone_ids": [],
+        "retry_scheduled": False,
+        "group_id": group["id"],
+    }
+    if invalid_case == "none":
+        cancel_result = None
+    elif invalid_case == "malformed":
+        cancel_result = ["not", "an", "aggregate"]
+    elif invalid_case == "extra":
+        cancel_result["error_code"] = None
+    elif invalid_case == "missing":
+        cancel_result.pop("aggregate_valid")
+    elif invalid_case == "wrong_group":
+        cancel_result["group_id"] = group["id"] + 1
+    elif invalid_case == "aggregate_false":
+        cancel_result["aggregate_valid"] = False
+    elif invalid_case == "unverified":
+        cancel_result["unverified_zone_ids"] = [zone_ids[0]]
+    elif invalid_case == "incomplete":
+        cancel_result["stopped"] = [zone_ids[0]]
+    elif invalid_case == "retry_true":
+        cancel_result["retry_scheduled"] = True
+    elif invalid_case == "coerced_ids":
+        cancel_result["stopped"] = [str(zone_ids[0]), zone_ids[1]]
+
+    cancel_group_jobs = Mock(return_value=cancel_result)
+    scheduler = SimpleNamespace(
+        group_cancel_events={group["id"]: threading.Event()},
+        is_group_session_active=Mock(return_value=True),
+        cancel_group_jobs=cancel_group_jobs,
+    )
+    path = f"/api/zones/{zone_ids[0]}/{'stop' if endpoint == 'legacy' else 'mqtt/stop'}"
+
+    with (
+        patch.object(route, "get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_zone", return_value=True) as physical_stop,
+    ):
+        response = admin_client.post(path, content_type="application/json")
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["success"] is False
+    assert body["error_code"] == "SESSION_AGGREGATE_INVALID"
+    assert body.get("state") != "off"
+    assert body.get("message") != "Сессия группы остановлена"
+    assert physical_stop.call_count == len(zone_ids)
+    cancel_group_jobs.assert_called_once_with(group["id"])
+
+
+@pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
+def test_session_stop_accepts_only_exact_complete_scheduler_aggregate(admin_client, app, endpoint):
+    import routes.zones_watering_api as route
+
+    group = app.db.create_group(f"complete session aggregate {endpoint}")
+    zones = [
+        app.db.create_zone({"name": f"complete {endpoint} {index}", "duration": 5, "group_id": group["id"]})
+        for index in range(2)
+    ]
+    zone_ids = [zone["id"] for zone in zones]
+    cancel_group_jobs = Mock(
+        return_value={
+            "success": True,
+            "aggregate_valid": True,
+            "stopped": zone_ids,
+            "unresolved": [],
+            "unverified_zone_ids": [],
+            "retry_scheduled": False,
+            "group_id": group["id"],
+        }
+    )
+    scheduler = SimpleNamespace(
+        group_cancel_events={group["id"]: threading.Event()},
+        is_group_session_active=Mock(return_value=True),
+        cancel_group_jobs=cancel_group_jobs,
+    )
+    path = f"/api/zones/{zone_ids[0]}/{'stop' if endpoint == 'legacy' else 'mqtt/stop'}"
+
+    with (
+        patch.object(route, "get_scheduler", return_value=scheduler),
+        patch("services.zone_control.stop_zone", return_value=True) as physical_stop,
+    ):
+        response = admin_client.post(path, content_type="application/json")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["session_aborted"] is True
+    assert body["stopped"] == zone_ids
+    assert body["unresolved"] == []
+    assert physical_stop.call_count == len(zone_ids)
+    cancel_group_jobs.assert_called_once_with(group["id"])
+
+
+@pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
+def test_session_stop_fails_closed_when_strict_group_inventory_is_unavailable(admin_client, app, endpoint):
+    import routes.zones_watering_api as route
+    import services.zone_control as zone_control
+
+    group = app.db.create_group(f"missing strict session inventory {endpoint}")
+    zone = app.db.create_zone({"name": f"missing inventory {endpoint}", "duration": 5, "group_id": group["id"]})
+    cancel_event = threading.Event()
+    scheduler = SimpleNamespace(
+        group_cancel_events={group["id"]: cancel_event},
+        is_group_session_active=Mock(return_value=True),
+        cancel_group_jobs=Mock(),
+    )
+    path = f"/api/zones/{zone['id']}/{'stop' if endpoint == 'legacy' else 'mqtt/stop'}"
+
+    with (
+        patch.object(route, "get_scheduler", return_value=scheduler),
+        patch.object(zone_control, "_strict_group_zone_ids", return_value=None),
+        patch.object(zone_control, "stop_zone") as physical_stop,
+    ):
+        response = admin_client.post(path, content_type="application/json")
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["success"] is False
+    assert body["session_aborted"] is False
+    assert body["error_code"] == "SESSION_INVENTORY_UNAVAILABLE"
+    assert body.get("state") != "off"
+    assert cancel_event.is_set()
+    physical_stop.assert_not_called()
+    scheduler.cancel_group_jobs.assert_not_called()
 
 
 def test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false(admin_client, app):

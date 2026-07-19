@@ -268,9 +268,10 @@ class TestEmergency:
 
     def test_emergency_stop(self, admin_client):
         resp = admin_client.post("/api/emergency-stop")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = json.loads(resp.data)
-        assert data.get("success") is True
+        assert data.get("success") is False
+        assert data.get("sessions_quiesced") is False
 
     def test_emergency_resume(self, admin_client):
         # Stop first
