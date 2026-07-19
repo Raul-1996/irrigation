@@ -555,7 +555,7 @@ def test_unreadable_server_credential_does_not_abort_other_server_startup():
     assert 2 in sse_hub._SSE_HUB_MQTT
 
 
-def test_unreadable_credential_during_reload_preserves_live_client():
+def test_unreadable_credential_during_reload_retires_live_client_authority():
     class UnreadableCredential(Exception):
         pass
 
@@ -569,8 +569,8 @@ def test_unreadable_credential_during_reload_preserves_live_client():
     sse_hub.reload_hub()
     _wait_for(lambda: requested_before < sse_hub._SSE_HUB_APPLIED_GENERATION)
 
-    assert sse_hub._SSE_HUB_MQTT[1] is client
-    assert client.stop_entered.is_set() is False
+    assert 1 not in sse_hub._SSE_HUB_MQTT
+    assert client.stop_entered.is_set() is True
 
 
 def test_evicted_full_client_queue_gets_immediate_terminal_sentinel(monkeypatch):

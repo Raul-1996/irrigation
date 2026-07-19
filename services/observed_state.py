@@ -159,7 +159,9 @@ class StateVerifier:
         if mqtt is None:
             return None
         result = threading.Event()
-        subscribed = threading.Event()
+        suback_ready = threading.Event()
+        subscription_state: dict[str, object] = {"mid": None, "accepted": False}
+        subscription_lock = threading.Lock()
         import uuid
 
         client_id = f"verifier_{uuid.uuid4().hex[:8]}"
@@ -182,16 +184,76 @@ class StateVerifier:
                 self._close_client(client)
                 return None
 
-        def on_connect(cl, _userdata, _flags, _reason_code, _properties=None):
+        def reject_subscription(message: str) -> None:
+            logger.error("StateVerifier: %s target=%s topic=%s", message, log_target, topic)
+            with subscription_lock:
+                subscription_state["accepted"] = False
+            suback_ready.set()
+
+        def on_connect(cl, _userdata, _flags, reason_code, _properties=None):
+            try:
+                connect_failed = bool(getattr(reason_code, "is_failure", False)) or (
+                    isinstance(reason_code, int) and reason_code != 0
+                )
+            except (TypeError, ValueError, AttributeError):
+                connect_failed = True
+            if connect_failed:
+                reject_subscription(f"connect rejected reason={reason_code!r}")
+                return
             try:
                 subscribe_result = cl.subscribe(topic, qos=1)
-                if isinstance(subscribe_result, (tuple, list)) and subscribe_result and subscribe_result[0] != 0:
-                    logger.error("StateVerifier: prepared subscribe rejected topic=%s", topic)
-            except (ConnectionError, TimeoutError, OSError, RuntimeError):
+                if not isinstance(subscribe_result, (tuple, list)) or len(subscribe_result) < 2:
+                    reject_subscription("subscribe returned no matchable MID")
+                    return
+                if int(subscribe_result[0]) != 0:
+                    reject_subscription(f"subscribe rejected rc={subscribe_result[0]!r}")
+                    return
+                with subscription_lock:
+                    subscription_state["mid"] = int(subscribe_result[1])
+            except (ConnectionError, TimeoutError, OSError, RuntimeError, TypeError, ValueError, AttributeError):
                 logger.exception("StateVerifier: prepared subscribe failed topic=%s", topic)
+                reject_subscription("subscribe raised")
 
-        def on_subscribe(_cl, _userdata, _mid, _reason_codes, _properties=None):
-            subscribed.set()
+        def on_subscribe(_cl, _userdata, mid, reason_codes, _properties=None):
+            with subscription_lock:
+                expected_mid = subscription_state.get("mid")
+            if expected_mid is None or int(mid) != int(expected_mid):
+                logger.warning(
+                    "StateVerifier: unrelated SUBACK ignored target=%s topic=%s expected_mid=%s actual_mid=%s",
+                    log_target,
+                    topic,
+                    expected_mid,
+                    mid,
+                )
+                return
+            try:
+                codes = list(reason_codes or [])
+            except TypeError:
+                codes = []
+            failed = not codes
+            for code in codes:
+                try:
+                    if bool(getattr(code, "is_failure", False)) or int(code) >= 128:
+                        failed = True
+                        break
+                except (TypeError, ValueError, AttributeError):
+                    failed = True
+                    break
+            with subscription_lock:
+                subscription_state["accepted"] = not failed
+            if failed:
+                logger.error(
+                    "StateVerifier: SUBACK rejected target=%s topic=%s mid=%s codes=%r",
+                    log_target,
+                    topic,
+                    mid,
+                    reason_codes,
+                )
+            suback_ready.set()
+
+        def on_disconnect(_cl, _userdata, *_args):
+            if not suback_ready.is_set():
+                reject_subscription("disconnected before successful SUBACK")
 
         def on_message(_cl, _userdata, msg):
             try:
@@ -203,6 +265,7 @@ class StateVerifier:
 
         client.on_connect = on_connect
         client.on_subscribe = on_subscribe
+        client.on_disconnect = on_disconnect
         client.on_message = on_message
         try:
             client.connect(
@@ -211,8 +274,13 @@ class StateVerifier:
                 keepalive=max(5, int(timeout) + 5),
             )
             client.loop_start()
-            if not subscribed.wait(timeout=max(0.001, float(timeout))):
+            if not suback_ready.wait(timeout=max(0.001, float(timeout))):
                 logger.error("StateVerifier: SUBACK timeout target=%s topic=%s", log_target, topic)
+                self._close_client(client)
+                return None
+            with subscription_lock:
+                accepted = bool(subscription_state.get("accepted"))
+            if not accepted:
                 self._close_client(client)
                 return None
             return client, result
