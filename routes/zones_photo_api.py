@@ -418,6 +418,7 @@ def rotate_zone_photo(zone_id):
         if photo_thumb:
             targets.append(("thumb", photo_thumb))
 
+        prepared = []
         for label, rel in targets:
             try:
                 filepath = safe_zone_photo_path(rel)
@@ -441,19 +442,45 @@ def rotate_zone_photo(zone_id):
                     return jsonify({"success": False, "message": "Файл не найден"}), 404
                 continue
             try:
-                with Image.open(filepath) as img:
+                with open(filepath, "rb") as source:
+                    original_bytes = source.read()
+                with Image.open(io.BytesIO(original_bytes)) as img:
                     # Capture the format BEFORE rotate(): derived images always
                     # have .format == None, which silently re-encoded WebP as JPEG.
                     fmt = img.format or "JPEG"
                     rotated = img.rotate(-angle, expand=True)
-                    if fmt == "WEBP":
-                        # Same quality as the upload pipeline (main q=92 / thumb q=90).
-                        rotated.save(filepath, format="WEBP", quality=92 if label == "main" else 90, method=6)
-                    else:
-                        rotated.save(filepath, format=fmt)
+                    try:
+                        encoded = io.BytesIO()
+                        if fmt == "WEBP":
+                            # Same quality as the upload pipeline (main q=92 / thumb q=90).
+                            rotated.save(
+                                encoded,
+                                format="WEBP",
+                                quality=92 if label == "main" else 90,
+                                method=6,
+                            )
+                        else:
+                            rotated.save(encoded, format=fmt)
+                    finally:
+                        rotated.close()
+                prepared.append((filepath, original_bytes, encoded.getvalue()))
             except (OSError, PermissionError) as e:
                 logger.error(f"rotate failed ({label}): {e}")
                 return jsonify({"success": False, "message": "Ошибка обработки изображения"}), 500
+
+        written = []
+        try:
+            for filepath, original_bytes, rotated_bytes in prepared:
+                _atomic_write(filepath, rotated_bytes)
+                written.append((filepath, original_bytes))
+        except (OSError, PermissionError):
+            logger.exception("atomic rotate commit failed for zone %s", zone_id)
+            for filepath, original_bytes in reversed(written):
+                try:
+                    _atomic_write(filepath, original_bytes)
+                except (OSError, PermissionError):
+                    logger.critical("rotate rollback could not restore %s", filepath, exc_info=True)
+            return jsonify({"success": False, "message": "Ошибка обработки изображения"}), 500
 
         try:
             db.add_log("photo_rotate", json.dumps({"zone": zone_id, "angle": angle}))

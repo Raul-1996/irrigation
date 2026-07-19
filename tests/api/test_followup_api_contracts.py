@@ -320,6 +320,49 @@ class TestZonePhotoMutationSafety:
         assert response.status_code == 400
         assert response.get_json()["error_code"] == "INVALID_ANGLE"
 
+    def test_rotate_second_variant_failure_restores_original_pair(self, admin_client, app, tmp_path):
+        import routes.zones_photo_api as photo_api
+
+        zone = app.db.create_zone({"name": "Atomic rotate", "group_id": 1, "duration": 10})
+        main_name = f"ZONE_{zone['id']}.webp"
+        thumb_name = f"ZONE_{zone['id']}_thumb.webp"
+        main_path = tmp_path / main_name
+        thumb_path = tmp_path / thumb_name
+        for path, color in ((main_path, "red"), (thumb_path, "blue")):
+            image = photo_api.Image.new("RGB", (3, 2), color=color)
+            image.save(path, format="WEBP", quality=90)
+        original_main = main_path.read_bytes()
+        original_thumb = thumb_path.read_bytes()
+        assert app.db.update_zone_photo(
+            zone["id"],
+            f"media/zones/{main_name}",
+            photo_thumb=f"media/zones/{thumb_name}",
+            update_thumb=True,
+        )
+
+        real_atomic_write = photo_api._atomic_write
+        write_count = 0
+
+        def fail_second_write(path, data):
+            nonlocal write_count
+            write_count += 1
+            if write_count == 2:
+                raise OSError("thumb replace denied")
+            return real_atomic_write(path, data)
+
+        with (
+            patch.object(photo_api, "UPLOAD_FOLDER", str(tmp_path)),
+            patch.object(photo_api, "_atomic_write", side_effect=fail_second_write),
+        ):
+            response = admin_client.post(
+                f"/api/zones/{zone['id']}/photo/rotate",
+                json={"angle": 90},
+            )
+
+        assert response.status_code == 500
+        assert main_path.read_bytes() == original_main
+        assert thumb_path.read_bytes() == original_thumb
+
 
 class TestMapRetention:
     def test_listing_and_upload_keep_only_newest_regular_maps(self, admin_client, tmp_path):
