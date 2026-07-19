@@ -1793,6 +1793,54 @@ def _stop_zone_locked(
         return False
 
 
+def _strict_zone_ids(group_id: int | None = None) -> list[int] | None:
+    """Read a complete zone partition without repository error collapsing.
+
+    ``ZoneRepository.get_zones_by_group`` intentionally preserves its legacy
+    ``[]``-on-SQLite-error contract. Safety callers cannot distinguish that
+    from a legitimately empty group, so this central primitive uses the same
+    repository connection boundary but lets read failures remain explicit.
+    """
+    repository = getattr(db, "zones", None)
+    connector = getattr(repository, "_connect", None)
+    if not callable(connector):
+        logger.error("strict zone repository unavailable group=%s", group_id)
+        return None
+    try:
+        with connector() as conn:
+            conn.row_factory = sqlite3.Row
+            if group_id is None:
+                rows = conn.execute("SELECT id, group_id FROM zones ORDER BY id").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, group_id FROM zones WHERE group_id = ? ORDER BY id",
+                    (int(group_id),),
+                ).fetchall()
+        if not isinstance(rows, (list, tuple)):
+            raise TypeError("strict group query returned a non-sequence")
+        ids: list[int] = []
+        seen: set[int] = set()
+        for row in rows:
+            row_keys = set(row.keys()) if hasattr(row, "keys") else set()
+            if not {"id", "group_id"}.issubset(row_keys):
+                raise TypeError("strict group query returned an invalid row")
+            zone_id = int(row["id"])
+            row_group_id = int(row["group_id"])
+            wrong_group = group_id is not None and row_group_id != int(group_id)
+            if zone_id <= 0 or wrong_group or zone_id in seen:
+                raise ValueError("strict group query returned an invalid partition")
+            ids.append(zone_id)
+            seen.add(zone_id)
+        return ids
+    except (sqlite3.Error, OSError, AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+        logger.exception("strict zone partition read failed group=%s", group_id)
+        return None
+
+
+def _strict_group_zone_ids(group_id: int) -> list[int] | None:
+    return _strict_zone_ids(int(group_id))
+
+
 def stop_all_in_group(
     group_id: int,
     reason: str = "group_cancel",
@@ -1831,32 +1879,59 @@ def stop_all_in_group(
         "retry_scheduled": False,
     }
     try:
-        zones = db.get_zones_by_group(normalized_group_id)
-        for z in zones:
-            zone_id = None
-            try:
-                zone_id = int(z["id"])
-                stopped = stop_zone(
-                    zone_id,
-                    reason=reason,
-                    force=force,
-                    master_close_immediately=master_close_immediately,
-                    skip_master_close=skip_master_close,
-                    require_observed_confirmation=require_observed_confirmation,
-                )
-                target = result["stopped"] if stopped else result["unresolved"]
+        # Keep the expected-ID snapshot, all OFF attempts, and the final
+        # partition validation under the same central group boundary used by
+        # starts and topology mutations.
+        with group_lock(normalized_group_id):
+            expected_ids = _strict_group_zone_ids(normalized_group_id)
+            if expected_ids is None:
+                result["success"] = False
+                return result
+            for zone_id in expected_ids:
+                stopped = False
+                try:
+                    stopped = stop_zone(
+                        zone_id,
+                        reason=reason,
+                        force=force,
+                        master_close_immediately=master_close_immediately,
+                        skip_master_close=skip_master_close,
+                        require_observed_confirmation=require_observed_confirmation,
+                    )
+                except (
+                    ConnectionError,
+                    TimeoutError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    sqlite3.Error,
+                ):
+                    logger.exception("stop_all_in_group: stop_zone failed zone=%s", zone_id)
+                target = result["stopped"] if stopped is True else result["unresolved"]
                 target.append(zone_id)
                 # Небольшая пауза, чтобы избежать всплесков при публикации на слабом железе (пропускаем в тестах)
-                try:
-                    if not TESTING:
-                        time.sleep(0.05)
-                except (KeyError, TypeError, ValueError) as e:
-                    logger.debug("Handled exception in stop_all_in_group: %s", e)
-            except (ValueError, TypeError, KeyError):
-                logger.exception("stop_all_in_group: stop_zone failed")
-                if zone_id is not None:
-                    result["unresolved"].append(zone_id)
-    except (sqlite3.Error, OSError):
+                if not TESTING:
+                    time.sleep(0.05)
+
+            final_ids = _strict_group_zone_ids(normalized_group_id)
+            if final_ids is None:
+                result["success"] = False
+                return result
+            if final_ids != expected_ids:
+                logger.error(
+                    "stop_all_in_group: group partition changed during stop group=%s before=%s after=%s",
+                    normalized_group_id,
+                    expected_ids,
+                    final_ids,
+                )
+                changed_ids = set(expected_ids) ^ set(final_ids)
+                result["stopped"] = [zone_id for zone_id in result["stopped"] if zone_id not in changed_ids]
+                result["unresolved"] = sorted(set(result["unresolved"]) | changed_ids)
+                result["success"] = False
+                return result
+    except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
         logger.exception("stop_all_in_group failed")
         result["success"] = False
         return result
@@ -1903,38 +1978,38 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
         "masters_failed_publish": 0,
         "zones_still_active_after_wait": 0,
     }
+    groups: list[dict] = []
     try:
         group_snapshot = db.get_groups()
-    except (sqlite3.Error, OSError):
+        if not isinstance(group_snapshot, (list, tuple)) or not group_snapshot:
+            stats["errors"].append("groups:snapshot_empty_or_unavailable")
+        else:
+            for group in group_snapshot:
+                try:
+                    if not isinstance(group, dict) or int(group["id"]) <= 0:
+                        raise ValueError("invalid group row")
+                    groups.append(group)
+                except (KeyError, TypeError, ValueError):
+                    stats["errors"].append("groups:invalid_snapshot_row")
+    except (sqlite3.Error, OSError, TypeError, ValueError):
         logger.exception("emergency_stop_all: get_groups failed")
-        stats["success"] = False
-        return stats
-    if not group_snapshot:
         stats["errors"].append("groups:snapshot_empty_or_unavailable")
-        stats["success"] = False
-        return stats
-    groups = list(group_snapshot)
-    try:
-        zone_snapshot = db.get_zones()
-    except (sqlite3.Error, OSError):
-        logger.exception("emergency_stop_all: get_zones failed")
+
+    # Zone OFF is independent of master/group reconciliation. A fail-soft
+    # groups=[] read must never prevent closing relays that are still present
+    # in the strict physical zone partition.
+    expected_zone_ids = _strict_zone_ids()
+    if expected_zone_ids is None:
         stats["errors"].append("zones:snapshot_unavailable")
         stats["success"] = False
         return stats
-    if zone_snapshot is None:
-        stats["errors"].append("zones:snapshot_unavailable")
-        stats["success"] = False
-        return stats
-    expected_zone_ids: list[int] = []
-    for zone in zone_snapshot:
-        try:
-            expected_zone_ids.append(int(zone["id"]))
-        except (KeyError, TypeError, ValueError):
-            stats["errors"].append("zones:invalid_snapshot_row")
-    expected_zone_ids = sorted(set(expected_zone_ids))
 
     stats["groups_total"] = len(groups)
-    logger.info("emergency_stop_all: starting phase A — stop zones across %d groups", len(groups))
+    logger.info(
+        "emergency_stop_all: starting phase A — stop %d zones; master snapshot has %d groups",
+        len(expected_zone_ids),
+        len(groups),
+    )
 
     # Phase A: stop the complete zone snapshot WITHOUT scheduling any master
     # close. Group-only iteration can silently omit orphaned/reassigned zones.
@@ -2023,14 +2098,10 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
     confirmed_zone_ids: set[int] = set()
     unresolved_zone_ids: set[int] = set(stats["zones_failed"])
     try:
-        latest_snapshot = db.get_zones()
-        if latest_snapshot is None:
+        latest_partition = _strict_zone_ids()
+        if latest_partition is None:
             raise OSError("zone snapshot unavailable during reconciliation")
-        latest_ids = {
-            int(current["id"])
-            for current in latest_snapshot
-            if isinstance(current, dict) and current.get("id") is not None
-        }
+        latest_ids = set(latest_partition)
         initial_ids = set(expected_zone_ids)
         if latest_ids != initial_ids:
             stats["errors"].append("zones:partition_changed_during_emergency")

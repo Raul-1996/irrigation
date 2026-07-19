@@ -10,6 +10,7 @@ import contextlib
 import logging
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
@@ -64,6 +65,7 @@ class StateVerifier:
         self._notifier = None
         self._generation_lock = threading.Lock()
         self._generations: dict[int, int] = {}
+        self._generation_registered_at: dict[int, float] = {}
 
     @property
     def db(self):
@@ -104,7 +106,14 @@ class StateVerifier:
         with zone_lock(zid), self._generation_lock:
             generation = self._generations.get(zid, 0) + 1
             self._generations[zid] = generation
+            self._generation_registered_at[zid] = time.time()
         return generation
+
+    def command_registered_at(self, zone_id: int) -> float | None:
+        """Return the receipt-time fence for the latest zone command."""
+        with self._generation_lock:
+            registered_at = self._generation_registered_at.get(int(zone_id))
+        return float(registered_at) if registered_at is not None else None
 
     @staticmethod
     def _canonical_state(value: object) -> str | None:

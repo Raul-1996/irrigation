@@ -19,7 +19,7 @@ from collections import deque
 from datetime import datetime, timedelta
 
 from services.locks import zone_lock
-from services.observed_state import canonical_relay_state
+from services.observed_state import canonical_relay_state, state_verifier
 from utils import normalize_topic
 
 logger = logging.getLogger(__name__)
@@ -488,6 +488,19 @@ def _process_mqtt_message(
                 current = _db.get_zone(zid) or {}
                 if not current or _zone_activation_snapshot(current) != snapshot:
                     logger.info("sse_hub: stale fresh OFF event ignored after activation changed zone=%s", zid)
+                    continue
+                command_registered_at = state_verifier.command_registered_at(zid)
+                if (
+                    received_at is not None
+                    and command_registered_at is not None
+                    and float(received_at) < command_registered_at
+                ):
+                    logger.info(
+                        "sse_hub: queued OFF predates current command generation zone=%s received_at=%s command_at=%s",
+                        zid,
+                        received_at,
+                        command_registered_at,
+                    )
                     continue
                 if str(current.get("commanded_state") or "").lower() != "on":
                     mark_zone_stopped(zid)
