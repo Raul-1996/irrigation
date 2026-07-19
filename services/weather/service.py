@@ -223,29 +223,14 @@ class WeatherService:
             "daily_et0": weather.daily_et0,
         }
 
-        # H2 "second opinion": expose BOTH coefficients (legacy is cheap to
-        # compute from current weather, balance is a cached read), tagging which
-        # one is actually applied. The balance value is surfaced whenever the
-        # nightly job has computed it at least once — even in shadow (flag off) —
-        # so the operator can compare without balance steering watering. In live
-        # mode (flag on + fresh) balance is applied and legacy is the 2nd opinion.
-        coefficient_legacy = coefficient  # == get_coefficient() above
-        balance_on = adj._balance_enabled()
-        balance_fresh = balance_on and adj._balance_coef_fresh()
+        # H2 is intentionally shadow-only (PR-060): expose its cached diagnostic
+        # value as a second opinion, but always report H1 as the applied value.
+        coefficient_legacy = coefficient
         from services.weather.balance import has_computed, read_cached_coef
 
         coefficient_balance = read_cached_coef(self.db_path) if has_computed(self.db_path) else None
-        if balance_fresh:
-            mode = "balance"
-            coefficient_applied = coefficient_balance
-        elif coefficient_balance is not None:
-            # Computed but not live (flag off, or flag on yet cache stale):
-            # legacy is applied, balance is shown only as the second opinion.
-            mode = "shadow"
-            coefficient_applied = coefficient_legacy
-        else:
-            mode = "legacy"
-            coefficient_applied = coefficient_legacy
+        mode = "shadow" if coefficient_balance is not None else "legacy"
+        coefficient_applied = coefficient_legacy
 
         adjustment = {
             "coefficient": coefficient,

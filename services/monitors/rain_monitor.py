@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import ssl
+from datetime import datetime
 
 from database import db
 
@@ -12,6 +13,67 @@ except ImportError as e:
     mqtt = None
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_rain_postpone_compat(group_id: int, postpone_until: str) -> bool:
+    """Pre-integration fallback mirroring the shared monotonic contract."""
+    requested = datetime.strptime(postpone_until, "%Y-%m-%d %H:%M:%S")
+    group_zones = [z for z in (db.get_zones() or []) if int(z.get("group_id") or 0) == int(group_id)]
+    zones_to_update = []
+    for zone in group_zones:
+        current_raw = zone.get("postpone_until")
+        if current_raw is None:
+            zones_to_update.append(zone)
+            continue
+        try:
+            current_text = str(current_raw)
+            if current_text != current_text.strip():
+                raise ValueError("padded deadline")
+            current = datetime.fromisoformat(current_text)
+            if current.tzinfo is not None:
+                raise ValueError("timezone-aware deadline")
+            current = current.replace(microsecond=0)
+        except (TypeError, ValueError):
+            logger.warning("RainMonitor: malformed postpone deadline for zone=%s", zone.get("id"))
+            return False
+        if requested < current:
+            logger.info("RainMonitor: preserving longer postpone for zone=%s", zone.get("id"))
+            return False
+        if requested > current:
+            zones_to_update.append(zone)
+    for zone in zones_to_update:
+        db.update_zone_postpone(int(zone["id"]), postpone_until, "rain")
+    return True
+
+
+def _apply_rain_postpone_deadline(group_id: int, postpone_until: str) -> bool:
+    """Apply rain postpone through the shared monotonic service when present.
+
+    The auth/http package introduces ``apply_group_postpone_deadline``.  This
+    weather branch is based on an earlier isolated commit, so the small fallback
+    keeps the branch safe and testable until integration order makes the shared
+    helper available.  It mirrors its fail-before-write/never-shorten contract.
+    """
+    try:
+        import services.postpone as postpone_service
+
+        apply_deadline = postpone_service.apply_group_postpone_deadline
+        conflict_error = postpone_service.PostponeConflictError
+    except (AttributeError, ImportError):
+        return _apply_rain_postpone_compat(group_id, postpone_until)
+
+    # Existing monitor tests inject an isolated DB object into this module.  In
+    # that case the shared service still points at the application singleton, so
+    # use the same safe fallback instead of mutating the wrong database.
+    if postpone_service.db is not db:
+        return _apply_rain_postpone_compat(group_id, postpone_until)
+
+    try:
+        apply_deadline(group_id, postpone_until, reason="rain")
+        return True
+    except conflict_error as error:
+        logger.info("RainMonitor: preserving existing postpone for group=%s: %s", group_id, error)
+        return False
 
 
 class RainMonitor:
@@ -179,16 +241,12 @@ class RainMonitor:
             except ImportError:
                 logger.exception("RainMonitor: import stop_all_in_group failed")
             # 2) Set postpone for zones in affected groups (until end of day)
-            from datetime import datetime as _dt
-
-            postpone_until = _dt.now().strftime("%Y-%m-%d 23:59:59")
-            zones = db.get_zones()
-            for z in zones:
-                if int(z.get("group_id") or 0) in target_groups:
-                    try:
-                        db.update_zone_postpone(int(z["id"]), postpone_until, "rain")
-                    except (sqlite3.Error, OSError) as e:
-                        logger.debug("Handled exception in _on_rain_start: %s", e)
+            postpone_until = datetime.now().strftime("%Y-%m-%d 23:59:59")
+            for gid in target_groups:
+                try:
+                    _apply_rain_postpone_deadline(gid, postpone_until)
+                except (sqlite3.Error, OSError, RuntimeError, ValueError) as e:
+                    logger.debug("Handled exception in _on_rain_start: %s", e)
             # Note: не отменяем сегодняшние запуски программ заранее.
             # Если дождь начался до времени старта — при отсутствии отложки к моменту старта программа отработает.
             # Если дождь начался во время выполнения — оставшиеся зоны пропустятся из-за отложки.

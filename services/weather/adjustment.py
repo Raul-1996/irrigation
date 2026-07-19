@@ -226,6 +226,21 @@ class WeatherAdjustment:
         eff = copy.copy(weather)
         eff.temperature = verdict["temperature"]
         eff.humidity = verdict["humidity"]
+        eff.temperature_source = verdict.get("temp_source", "api")
+        eff.humidity_source = verdict.get("hum_source", "api")
+        eff.sensor_mismatch = verdict.get("mismatch")
+        # Keep provenance next to the values that flow into safety and decision
+        # logging.  Open-Meteo remains the only source for all fields except the
+        # two values that may be overlaid by the local WB-MSW sensor.
+        eff.data_sources = {
+            "temperature": eff.temperature_source,
+            "humidity": eff.humidity_source,
+            "precipitation_24h": "api",
+            "precipitation_forecast_6h": "api",
+            "wind_speed": "api",
+            "daily_et0": "api",
+            "min_temp_forecast_6h": "api",
+        }
         return eff
 
     def _select_input_source(self, weather: Any) -> Any:
@@ -422,7 +437,7 @@ class WeatherAdjustment:
         return result
 
     def get_coefficient(self) -> int:
-        """Calculate watering adjustment coefficient (0-200%)."""
+        """Calculate the H1 watering adjustment coefficient (0-200%)."""
         settings = self._get_settings()
         if not settings.get("enabled"):
             return 100
@@ -518,12 +533,11 @@ class WeatherAdjustment:
         return result
 
     # --- H2 water-balance integration -----------------------------------
-    # These additive methods route the watering path to the cached balance
-    # coefficient when enabled and fresh, and fall back to H1 otherwise.
-    # ``get_coefficient`` / sensor-source / ``should_skip`` are NOT touched.
+    # H2 is intentionally shadow-only (PR-060).  These helpers expose diagnostic
+    # state to the UI/nightly job; the scheduler always calls the H1 method above.
 
     def _balance_enabled(self) -> bool:
-        """True if the H2 water-balance mode flag is set in settings."""
+        """True if the H2 shadow/diagnostic calculation flag is set."""
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.enabled'")
@@ -533,12 +547,12 @@ class WeatherAdjustment:
             return False
 
     def _balance_coef_fresh(self) -> bool:
-        """True if the cached balance coef was recalculated recently enough.
+        """True if the cached diagnostic balance coef is recent enough.
 
         Stale = ``last_recalc_date`` older than ``stale_fallback_days`` (the
         nightly job has not run — service was down or Open-Meteo unreachable for
-        several nights). A stale balance must not steer watering (review #5);
-        we fall back to H1 instead.
+        several nights). This is diagnostic metadata only; neither a fresh nor a
+        stale H2 value is used by the scheduler (PR-060).
         """
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
@@ -563,18 +577,7 @@ class WeatherAdjustment:
             return False
 
     def get_effective_coefficient(self) -> int:
-        """Coefficient actually applied to watering: balance if live, else H1.
-
-        Returns the cached H2 water-balance coefficient when the balance mode is
-        enabled AND its cache is fresh; otherwise (disabled / stale / empty)
-        returns the H1 ``get_coefficient()`` — leaving the legacy path entirely
-        untouched. The hard safety-skip thresholds remain a separate gate on top
-        of whichever multiplier is returned.
-        """
-        if self._balance_enabled() and self._balance_coef_fresh():
-            from services.weather.balance import read_cached_coef
-
-            return read_cached_coef(self.db_path)
+        """Compatibility alias; H2 remains diagnostic and never steers watering."""
         return self.get_coefficient()
 
     def get_factors_detail(self, weather: Any | None = None) -> dict[str, dict[str, Any]]:
@@ -608,7 +611,10 @@ class WeatherAdjustment:
         if self._rain_reaches_threshold(rain_24h, rain_threshold):
             rain_status = "danger"
             rain_detail = f"{rain_24h:.1f} мм ≥ {rain_threshold:.0f} мм (skip)"
-        elif rain_24h > rain_threshold * 0.5:
+        elif self._rain_reaches_threshold(rain_forecast, rain_threshold):
+            rain_status = "danger"
+            rain_detail = f"прогноз {rain_forecast:.1f} мм за 6ч ≥ {rain_threshold:.0f} мм (skip)"
+        elif max(rain_24h, rain_forecast) > rain_threshold * 0.5:
             rain_status = "warn"
             rain_detail = f"{rain_24h:.1f} мм (прогноз +{rain_forecast:.1f} мм)"
 
@@ -622,21 +628,19 @@ class WeatherAdjustment:
         min_temp_6h = _raw_min_6h if isinstance(_raw_min_6h, (int, float)) else None
 
         freeze_status = "ok"
-        if temp is not None:
-            if temp <= freeze_threshold:
-                freeze_status = "danger"
-                freeze_detail = f"{temp:.1f}°C ≤ {freeze_threshold:.0f}°C (skip)"
-            elif min_temp_6h is not None and min_temp_6h <= freeze_threshold:
-                freeze_status = "danger"
-                freeze_detail = f"прогноз мин {min_temp_6h:.1f}°C за 6ч (skip)"
-            elif min_temp_6h is not None and min_temp_6h < freeze_threshold + 3:
-                freeze_status = "warn"
-                freeze_detail = f"мин {min_temp_6h:.1f}°C за 6ч (близко к порогу)"
-            else:
-                if min_temp_6h is not None:
-                    freeze_detail = f"мин +{min_temp_6h:.1f}°C за 6ч"
-                else:
-                    freeze_detail = f"+{temp:.1f}°C — норма"
+        if temp is not None and temp <= freeze_threshold:
+            freeze_status = "danger"
+            freeze_detail = f"{temp:.1f}°C ≤ {freeze_threshold:.0f}°C (skip)"
+        elif min_temp_6h is not None and min_temp_6h <= freeze_threshold:
+            freeze_status = "danger"
+            freeze_detail = f"прогноз мин {min_temp_6h:.1f}°C за 6ч (skip)"
+        elif min_temp_6h is not None and min_temp_6h < freeze_threshold + 3:
+            freeze_status = "warn"
+            freeze_detail = f"мин {min_temp_6h:.1f}°C за 6ч (близко к порогу)"
+        elif min_temp_6h is not None:
+            freeze_detail = f"мин +{min_temp_6h:.1f}°C за 6ч"
+        elif temp is not None:
+            freeze_detail = f"+{temp:.1f}°C — норма"
         else:
             freeze_detail = "нет данных"
 
@@ -770,6 +774,23 @@ class WeatherAdjustment:
             except (TypeError, ValueError):
                 return None
 
+        allowed_sources = {"api", "api_fallback", "local"}
+
+        def _source(attr: str) -> str:
+            sources = getattr(weather, "data_sources", None)
+            value = sources.get(attr) if isinstance(sources, dict) else None
+            return value if value in allowed_sources else "api"
+
+        data_sources = {
+            "temperature": _source("temperature"),
+            "humidity": _source("humidity"),
+            "precipitation_24h": _source("precipitation_24h"),
+            "precipitation_forecast_6h": _source("precipitation_forecast_6h"),
+            "wind_speed": _source("wind_speed"),
+            "daily_et0": _source("daily_et0"),
+            "min_temp_forecast_6h": _source("min_temp_forecast_6h"),
+        }
+
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.execute(
@@ -788,7 +809,7 @@ class WeatherAdjustment:
                         decision,
                         reason or "",
                         mode,
-                        json.dumps({"source": "open-meteo"}),
+                        json.dumps(data_sources),
                         0,
                     ),
                 )

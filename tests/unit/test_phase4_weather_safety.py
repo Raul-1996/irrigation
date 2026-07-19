@@ -60,6 +60,37 @@ def test_hard_mismatch_never_discards_the_colder_local_reading(test_db) -> None:
     assert verdict["temp_source"] == "local"
 
 
+def test_colder_local_hard_mismatch_reaches_the_freeze_gate(test_db) -> None:
+    """Source selection must carry the colder local value into hard safety."""
+    adj = _enable_weather(test_db)
+    api = _weather(temperature=8.0, humidity=45.0)
+    api.timestamp = datetime.now(tz=UTC).timestamp()
+    local = {
+        "temp_enabled": True,
+        "temp_value": -3.0,
+        "temp_last_rx": 100.0,
+        "temp_online": True,
+        "hum_enabled": True,
+        "hum_value": 70.0,
+        "hum_last_rx": 100.0,
+        "hum_online": True,
+    }
+    service = MagicMock()
+    service.get_weather.return_value = api
+
+    with (
+        patch("services.weather.adjustment.get_weather_service", return_value=service),
+        patch("services.weather.merge._get_env_state", return_value=local),
+    ):
+        skip = adj.should_skip()
+        coefficient = adj.get_coefficient()
+
+    assert skip["skip"] is True
+    assert skip["details"]["type"] == "freeze"
+    assert skip["details"]["value"] == -3.0
+    assert coefficient == 0
+
+
 def test_open_meteo_request_includes_previous_day_for_rolling_24h() -> None:
     from services.weather import client
 
@@ -187,6 +218,100 @@ def test_disabling_humidity_factor_removes_all_humidity_adjustment(test_db) -> N
         assert adj.get_factors_detail(weather)["humidity"]["detail"] == "фактор отключён"
 
 
+def test_weather_payload_labels_water_balance_as_shadow_only(test_db) -> None:
+    _enable_weather(test_db)
+    assert test_db.set_setting_value("weather.balance.enabled", "1")
+    assert test_db.set_setting_value("weather.balance.last_recalc_date", datetime.now().date().isoformat())
+    assert test_db.set_setting_value("weather.balance.coef_cached", "130")
+    weather = _weather()
+    weather.timestamp = datetime.now(tz=UTC).timestamp()
+    weather.weather_code = 0
+    weather.hourly_forecast_24h = []
+    weather.daily_forecast = []
+    weather.sunrise = None
+    weather.sunset = None
+    service = WeatherService(test_db.db_path)
+    local_disabled = {
+        "temp_enabled": False,
+        "temp_value": None,
+        "temp_last_rx": None,
+        "temp_online": False,
+        "hum_enabled": False,
+        "hum_value": None,
+        "hum_last_rx": None,
+        "hum_online": False,
+    }
+
+    with (
+        patch.object(service, "get_weather", return_value=weather),
+        patch("services.weather.adjustment.get_weather_service", return_value=service),
+        patch("services.weather.merge._get_env_state", return_value=local_disabled),
+    ):
+        adjustment = service.get_weather_extended()["adjustment"]
+
+    assert adjustment["mode"] == "shadow"
+    assert adjustment["coefficient"] == 100
+    assert adjustment["coefficient_applied"] == 100
+    assert adjustment["coefficient_legacy"] == 100
+    assert adjustment["coefficient_balance"] == 130
+
+
+def test_hard_freeze_safety_ignores_the_factor_toggle(test_db) -> None:
+    adj = _enable_weather(test_db)
+    assert test_db.set_setting_value("weather.factor.freeze", "0")
+
+    with patch.object(adj, "_get_weather", return_value=_weather(temperature=-3.0)):
+        assert adj.get_coefficient() == 0
+
+
+@pytest.mark.parametrize(
+    ("weather", "factor", "expected_text"),
+    [
+        (_weather(precipitation_forecast_6h=5.0), "rain", "прогноз"),
+        (_weather(temperature=None, min_temp_forecast_6h=2.0), "freeze", "прогноз"),
+    ],
+)
+def test_factor_detail_matches_forecast_skip_truth(test_db, weather, factor, expected_text) -> None:
+    adj = _enable_weather(test_db)
+
+    with patch.object(adj, "_get_weather", return_value=weather):
+        skip = adj.should_skip()
+        detail = adj.get_factors_detail(weather)[factor]
+
+    assert skip["skip"] is True
+    assert detail["status"] == "danger"
+    assert expected_text in detail["detail"]
+
+
+def test_decision_history_preserves_per_field_source_provenance(test_db) -> None:
+    adj = _enable_weather(test_db)
+    api = _weather(temperature=8.0, humidity=45.0)
+    selected = adj._apply_source(
+        api,
+        {
+            "temperature": -3.0,
+            "humidity": 45.0,
+            "temp_source": "local",
+            "hum_source": "api_fallback",
+            "mismatch": {"level": "hard"},
+        },
+    )
+
+    adj.log_decision(selected, 0, True, "freeze")
+
+    with sqlite3.connect(test_db.db_path) as conn:
+        raw_sources = conn.execute(
+            "SELECT data_sources FROM weather_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    sources = json.loads(raw_sources)
+    assert sources["temperature"] == "local"
+    assert sources["humidity"] == "api_fallback"
+    assert sources["precipitation_24h"] == "api"
+    assert sources["precipitation_forecast_6h"] == "api"
+    assert sources["wind_speed"] == "api"
+    assert sources["daily_et0"] == "api"
+
+
 def test_zero_rain_threshold_does_not_skip_when_it_is_dry(test_db) -> None:
     adj = _enable_weather(test_db)
     assert test_db.set_setting_value("weather.rain_threshold_mm", "0")
@@ -195,6 +320,40 @@ def test_zero_rain_threshold_does_not_skip_when_it_is_dry(test_db) -> None:
     with patch.object(adj, "_get_weather", return_value=weather):
         assert adj.should_skip()["skip"] is False
         assert adj.get_coefficient() == 100
+
+
+def test_relay_time_fields_are_strictly_canonicalized_before_ui_output() -> None:
+    now = datetime(2026, 7, 19, 10, 10, tzinfo=UTC)
+    raw = {
+        "utc_offset_seconds": 0,
+        "hourly": {
+            "time": [
+                "2026-07-19T10:00",
+                "2026-07-19T11:00",
+                '<img src=x onerror="alert(1)">',
+                "2026-07-19T13:00",
+                "2026-07-19T14:00",
+            ],
+            "temperature_2m": [20.0] * 5,
+            "relative_humidity_2m": [50.0] * 5,
+            "precipitation": [0.0] * 5,
+            "wind_speed_10m": [1.0] * 5,
+        },
+        "daily": {
+            "time": ["2026-07-19"],
+            "sunrise": ['<img src=x onerror="alert(2)">'],
+            "sunset": ["2026-07-19T20:30"],
+        },
+    }
+
+    with patch("services.weather.models.time.time", return_value=now.timestamp()):
+        weather = WeatherData(raw)
+
+    assert weather.sunrise is None
+    assert weather.sunset == "20:30"
+    assert weather.hourly_forecast_24h == []
+    assert weather.daily_forecast[0]["sunrise"] is None
+    assert weather.daily_forecast[0]["sunset"] == "20:30"
 
 
 def test_rain_monitor_start_replaces_or_disables_existing_client() -> None:
@@ -239,6 +398,38 @@ def test_rain_stop_does_not_erase_manual_program_cancellations() -> None:
         monitor._on_rain_stop()
 
     fake_db.clear_program_cancellations_for_group_on_date.assert_not_called()
+
+
+def test_rain_postpone_never_shortens_a_manual_deadline() -> None:
+    class PostponeConflictError(RuntimeError):
+        pass
+
+    monitor = RainMonitor()
+    fake_db = MagicMock()
+    fake_db.get_groups.return_value = [{"id": 1}]
+    fake_db.get_group_use_rain.return_value = True
+    fake_db.get_zones.return_value = [
+        {
+            "id": 10,
+            "group_id": 1,
+            "postpone_until": "2099-12-31 23:59:59",
+            "postpone_reason": "manual",
+        }
+    ]
+    apply_deadline = MagicMock(side_effect=PostponeConflictError("would shorten"))
+
+    with (
+        patch("services.monitors.rain_monitor.db", fake_db),
+        patch("services.zone_control.stop_all_in_group"),
+        patch("services.postpone.db", fake_db),
+        patch("services.postpone.PostponeConflictError", PostponeConflictError, create=True),
+        patch("services.postpone.apply_group_postpone_deadline", apply_deadline, create=True),
+    ):
+        monitor._on_rain_start()
+
+    apply_deadline.assert_called_once()
+    assert apply_deadline.call_args.kwargs == {"reason": "rain"}
+    fake_db.update_zone_postpone.assert_not_called()
 
 
 def _mqtt_module(client):
