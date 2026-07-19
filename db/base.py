@@ -195,9 +195,13 @@ class BaseRepository:
         row: sqlite3.Row | None,
         snapshot: dict[str, Any],
         columns: tuple[str, ...],
+        *,
+        ignored_fields: frozenset[str] = frozenset(),
     ) -> bool:
         values = cls._validated_snapshot_values(snapshot, columns)
-        return row is not None and values is not None and tuple(row[column] for column in columns) == values
+        if row is None or values is None or not ignored_fields.issubset(columns):
+            return False
+        return all(row[column] == snapshot[column] for column in columns if column not in ignored_fields)
 
     def _get_storage_snapshot(self, table: str, row_id: int) -> dict[str, Any] | None:
         """Read an exact at-rest row for trusted compensating transactions."""
@@ -218,6 +222,8 @@ class BaseRepository:
         entity: str,
         before: dict[str, Any],
         expected_current: dict[str, Any] | None,
+        *,
+        ignored_current_fields: frozenset[str] = frozenset(),
     ) -> bool:
         """CAS-restore ``before`` or reinsert an exactly deleted durable row."""
 
@@ -246,7 +252,12 @@ class BaseRepository:
                         before_values,
                     )
                 else:
-                    if expected_current is None or not self._snapshot_matches(current, expected_current, columns):
+                    if expected_current is None or not self._snapshot_matches(
+                        current,
+                        expected_current,
+                        columns,
+                        ignored_fields=ignored_current_fields,
+                    ):
                         conn.rollback()
                         return False
                     mutable_columns = tuple(column for column in columns if column != "id")
@@ -267,6 +278,7 @@ class BaseRepository:
         expected: dict[str, Any],
         *,
         restrict_query: str | None = None,
+        ignored_expected_fields: frozenset[str] = frozenset(),
     ) -> bool:
         """Delete a just-created row only while its full stored value matches."""
 
@@ -279,7 +291,12 @@ class BaseRepository:
                     return False
                 row_id = int(expected["id"])
                 current = conn.execute(f'SELECT * FROM "{table}" WHERE id = ?', (row_id,)).fetchone()
-                if not self._snapshot_matches(current, expected, columns):
+                if not self._snapshot_matches(
+                    current,
+                    expected,
+                    columns,
+                    ignored_fields=ignored_expected_fields,
+                ):
                     conn.rollback()
                     return False
                 if restrict_query is not None and conn.execute(restrict_query, (row_id,)).fetchone() is not None:

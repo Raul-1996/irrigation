@@ -127,11 +127,16 @@ def test_rain_lock_covers_commit_enforcement_and_exact_cas_rollback(admin_client
         phases.append("enforce")
         return False
 
-    def guarded_restore(snapshot, *, expected_current):
+    def guarded_restore(snapshot, *, expected_current, allow_observed_drift):
         assert committed == [expected_current]
+        assert allow_observed_drift is False
         assert not _available_to_another_thread(rain_lock)
         phases.append("rollback")
-        return original_restore(snapshot, expected_current=expected_current)
+        return original_restore(
+            snapshot,
+            expected_current=expected_current,
+            allow_observed_drift=allow_observed_drift,
+        )
 
     with (
         patch.object(app.db, "update_group_config_with_snapshot", side_effect=guarded_commit),

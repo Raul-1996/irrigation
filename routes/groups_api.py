@@ -517,6 +517,7 @@ def api_update_group(group_id):
         int(group_id),
         updates,
         expected_current=before_snapshot,
+        allow_observed_drift=True,
     )
     if committed_snapshot is None:
         return jsonify(
@@ -534,6 +535,7 @@ def api_update_group(group_id):
         restored = db.restore_group_snapshot(
             rollback_snapshot,
             expected_current=committed_snapshot,
+            allow_observed_drift=master_topology_changed,
         )
         if not restored:
             logger.critical("WaterMonitor rollback CAS failed for group %s", group_id)
@@ -558,6 +560,7 @@ def api_update_group(group_id):
         restored = db.restore_group_snapshot(
             rollback_snapshot,
             expected_current=committed_snapshot,
+            allow_observed_drift=master_topology_changed,
         )
         runtime_restored = True
         if restored and water_topology_changed:
@@ -643,7 +646,7 @@ def api_delete_group(group_id):
         return jsonify(
             {"success": False, "message": close_error, "error_code": "MASTER_CONFIRMATION_TIMEOUT"}
         ), 503
-    if db.delete_group_if_unchanged(before_snapshot):
+    if db.delete_group_if_unchanged(before_snapshot, allow_observed_drift=True):
         if int(group.get("use_water_meter") or 0) == 1 and not _reconfigure_water_monitor():
             rollback_snapshot = dict(before_snapshot)
             if int(group.get("use_master_valve") or 0) == 1:

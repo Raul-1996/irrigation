@@ -6,6 +6,8 @@ from db.base import BaseRepository, retry_on_busy
 
 logger = logging.getLogger(__name__)
 
+_GROUP_OBSERVATION_FIELDS = frozenset({"master_valve_observed"})
+
 _GROUP_CONFIG_FIELDS = frozenset(
     {
         "name",
@@ -68,10 +70,23 @@ class GroupRepository(BaseRepository):
         self,
         before: dict[str, Any],
         expected_current: dict[str, Any] | None = None,
+        *,
+        allow_observed_drift: bool = False,
     ) -> bool:
-        return self._restore_storage_snapshot("groups", "group", before, expected_current)
+        return self._restore_storage_snapshot(
+            "groups",
+            "group",
+            before,
+            expected_current,
+            ignored_current_fields=_GROUP_OBSERVATION_FIELDS if allow_observed_drift else frozenset(),
+        )
 
-    def delete_group_if_unchanged(self, expected: dict[str, Any]) -> bool:
+    def delete_group_if_unchanged(
+        self,
+        expected: dict[str, Any],
+        *,
+        allow_observed_drift: bool = False,
+    ) -> bool:
         try:
             if int(expected.get("id")) == 999:
                 return False
@@ -81,6 +96,7 @@ class GroupRepository(BaseRepository):
             "groups",
             expected,
             restrict_query="SELECT 1 FROM zones WHERE group_id = ? LIMIT 1",
+            ignored_expected_fields=_GROUP_OBSERVATION_FIELDS if allow_observed_drift else frozenset(),
         )
 
     @retry_on_busy()
@@ -158,16 +174,25 @@ class GroupRepository(BaseRepository):
         }
         set_parts = []
         params = []
+        persisted_fields = set()
         for k, v in updates.items():
             if k in allowed:
                 set_parts.append(f"{k} = ?")
                 params.append(v)
+                persisted_fields.add(k)
         if not set_parts:
             return False
         params.append(group_id)
         try:
             with self._connect() as conn:
-                sql = f"UPDATE groups SET {', '.join(set_parts)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+                # Physical observation is volatile runtime truth, not a group
+                # configuration revision.  Bumping updated_at here makes a
+                # fresh MQTT echo look like a competing topology writer and
+                # defeats exact config CAS/rollback transactions.
+                if persisted_fields == {"master_valve_observed"}:
+                    sql = f"UPDATE groups SET {', '.join(set_parts)} WHERE id = ?"
+                else:
+                    sql = f"UPDATE groups SET {', '.join(set_parts)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
                 cursor = conn.execute(sql, tuple(params))
                 conn.commit()
                 return cursor.rowcount == 1
@@ -182,6 +207,7 @@ class GroupRepository(BaseRepository):
         updates: dict[str, Any],
         *,
         expected_current: dict[str, Any] | None = None,
+        allow_observed_drift: bool = False,
     ) -> dict[str, Any] | None:
         """Update settings and return the exact committed row for later CAS."""
         fields = [(key, value) for key, value in updates.items() if key in _GROUP_CONFIG_FIELDS]
@@ -199,7 +225,12 @@ class GroupRepository(BaseRepository):
                         "SELECT * FROM groups WHERE id = ?",
                         (int(group_id),),
                     ).fetchone()
-                    if not self._snapshot_matches(current, expected_current, columns):
+                    if not self._snapshot_matches(
+                        current,
+                        expected_current,
+                        columns,
+                        ignored_fields=_GROUP_OBSERVATION_FIELDS if allow_observed_drift else frozenset(),
+                    ):
                         conn.rollback()
                         return None
                 cursor = conn.execute(

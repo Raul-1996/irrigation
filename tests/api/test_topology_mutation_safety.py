@@ -365,6 +365,48 @@ class TestGroupTopologyMutationSafety:
         assert response.get_json()["error_code"] == "WATER_MONITOR_RECONFIGURE_FAILED"
         assert app.db.get_group_storage_snapshot(group["id"]) == before
 
+    def test_master_topology_rollback_tolerates_stale_old_echo(self, admin_client, app):
+        from services.monitors import water_monitor
+
+        group = _group(app)
+        server = _server(app, name="Master water rollback")
+        _configure_master(app, group["id"], server["id"], observed="open")
+        before = app.db.get_group_storage_snapshot(group["id"])
+
+        def reject_after_old_hub_echo():
+            # The hub can finish dispatching the old mapping after the DB
+            # topology commit but before the staged water runtime rejects it.
+            assert app.db.update_group_fields(
+                group["id"],
+                {"master_valve_observed": "closed"},
+            )
+            return False
+
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_confirmed),
+            patch.object(
+                water_monitor,
+                "reconfigure",
+                side_effect=reject_after_old_hub_echo,
+                create=True,
+            ),
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={
+                    "master_mqtt_topic": "/master/new",
+                    "use_water_meter": True,
+                    "water_mqtt_topic": "/water/new",
+                    "water_mqtt_server_id": server["id"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "WATER_MONITOR_RECONFIGURE_FAILED"
+        restored = app.db.get_group_storage_snapshot(group["id"])
+        assert restored == {**before, "master_valve_observed": None}
+
     def test_water_monitor_rollback_never_clobbers_concurrent_group_update(self, admin_client, app):
         from services.monitors import water_monitor
 
@@ -457,9 +499,10 @@ class TestGroupTopologyMutationSafety:
         group = _group(app)
         original_delete = app.db.delete_group_if_unchanged
 
-        def concurrent_update_before_delete(expected):
+        def concurrent_update_before_delete(expected, **kwargs):
+            assert kwargs == {"allow_observed_drift": True}
             assert app.db.update_group(group["id"], "Concurrent delete rename")
-            return original_delete(expected)
+            return original_delete(expected, **kwargs)
 
         with patch.object(
             app.db,
@@ -559,6 +602,82 @@ class TestGroupTopologyMutationSafety:
         assert after["master_mqtt_topic"] == "/master/new"
         assert after["master_mode"] == "NO"
         assert after["master_valve_observed"] is None
+
+    def test_fresh_old_master_echo_does_not_conflict_with_topology_commit(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"], observed="open")
+        confirmations = 0
+
+        def close_core(_server_id, _topic, _mode, publish_command):
+            nonlocal confirmations
+            assert publish_command()
+            if confirmations == 0:
+                # The permanent SSE subscriber receives the same fresh old-
+                # channel echo as the command verifier and persists it before
+                # the route reaches its topology commit.
+                assert app.db.update_group_fields(
+                    group["id"],
+                    {"master_valve_observed": "closed"},
+                )
+            confirmations += 1
+            return True
+
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=close_core),
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={"master_mqtt_topic": "/master/new"},
+            )
+
+        assert response.status_code == 200
+        assert confirmations == 2
+        after = _get_group(app, group["id"])
+        assert after["master_mqtt_topic"] == "/master/new"
+        assert after["master_valve_observed"] is None
+
+    def test_master_observation_does_not_advance_config_revision(self, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"], observed="open")
+        marker = "2001-02-03 04:05:06.000001"
+        with app.db.groups._connect() as connection:
+            connection.execute(
+                "UPDATE groups SET updated_at = ? WHERE id = ?",
+                (marker, group["id"]),
+            )
+            connection.commit()
+
+        assert app.db.update_group_fields(group["id"], {"master_valve_observed": "closed"})
+
+        after = app.db.get_group_storage_snapshot(group["id"])
+        assert after["master_valve_observed"] == "closed"
+        assert after["updated_at"] == marker
+
+    def test_fresh_master_close_echo_does_not_block_group_delete(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"], observed="open")
+
+        def close_core(_server_id, _topic, _mode, publish_command):
+            assert publish_command()
+            assert app.db.update_group_fields(
+                group["id"],
+                {"master_valve_observed": "closed"},
+            )
+            return True
+
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=close_core),
+            patch("routes.groups_api._sse_hub.reload_hub"),
+        ):
+            response = admin_client.delete(f"/api/groups/{group['id']}")
+
+        assert response.status_code == 204
+        assert app.db.get_group_storage_snapshot(group["id"]) is None
 
     def test_failed_old_master_close_leaves_group_unchanged(self, admin_client, app):
         group = _group(app)

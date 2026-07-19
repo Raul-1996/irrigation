@@ -212,11 +212,29 @@ class IrrigationDB:
     def get_group_storage_snapshot(self, group_id: int) -> dict[str, Any] | None:
         return self.groups.get_group_storage_snapshot(group_id)
 
-    def restore_group_snapshot(self, before: dict[str, Any], expected_current: dict[str, Any] | None = None) -> bool:
-        return self.groups.restore_group_snapshot(before, expected_current)
+    def restore_group_snapshot(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any] | None = None,
+        *,
+        allow_observed_drift: bool = False,
+    ) -> bool:
+        return self.groups.restore_group_snapshot(
+            before,
+            expected_current,
+            allow_observed_drift=allow_observed_drift,
+        )
 
-    def delete_group_if_unchanged(self, expected: dict[str, Any]) -> bool:
-        return self.groups.delete_group_if_unchanged(expected)
+    def delete_group_if_unchanged(
+        self,
+        expected: dict[str, Any],
+        *,
+        allow_observed_drift: bool = False,
+    ) -> bool:
+        return self.groups.delete_group_if_unchanged(
+            expected,
+            allow_observed_drift=allow_observed_drift,
+        )
 
     def create_group(self, name: str) -> dict[str, Any] | None:
         return self.groups.create_group(name)
@@ -239,11 +257,13 @@ class IrrigationDB:
         updates: dict[str, Any],
         *,
         expected_current: dict[str, Any] | None = None,
+        allow_observed_drift: bool = False,
     ) -> dict[str, Any] | None:
         return self.groups.update_group_config_with_snapshot(
             group_id,
             updates,
             expected_current=expected_current,
+            allow_observed_drift=allow_observed_drift,
         )
 
     def get_group_use_rain(self, group_id: int) -> bool:
