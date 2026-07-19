@@ -1,11 +1,13 @@
 """System Status API — status, health, scheduler, logs, water, server-time."""
 
-import json
 import logging
 import sqlite3
+import threading
 import time
-import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 from flask import Blueprint, current_app, jsonify, request, session
 
@@ -19,15 +21,200 @@ from services.locks import snapshot_all_locks as _locks_snapshot
 from services.monitors import env_monitor, rain_monitor, water_monitor
 from services.next_watering import compute_next_watering, weather_skip_today
 from services.security import admin_required
-
-try:
-    import paho.mqtt.client as mqtt
-except ImportError:
-    mqtt = None
+from utils import SecretDecryptionError
 
 logger = logging.getLogger(__name__)
 
 system_status_api_bp = Blueprint("system_status_api", __name__)
+
+
+# ``/api/status`` is polled continuously. Broker health therefore comes only
+# from already-running MQTT clients; opening a diagnostic connection here
+# would pin a WSGI worker for every unreachable broker. A short, bounded cache
+# bridges harmless runtime-map rebuild races without turning a stale success
+# into permanent health.
+MQTT_RUNTIME_HEALTH_CACHE_TTL_SEC = 30.0
+MQTT_RUNTIME_HEALTH_CACHE_MAX = 64
+_MQTT_RUNTIME_HEALTH_CACHE: "OrderedDict[tuple[Any, ...], tuple[bool, float]]" = OrderedDict()
+_MQTT_RUNTIME_HEALTH_CACHE_LOCK = threading.Lock()
+
+
+def _reset_runtime_mqtt_health_cache() -> None:
+    """Clear process-local health state (also used for deterministic tests)."""
+    with _MQTT_RUNTIME_HEALTH_CACHE_LOCK:
+        _MQTT_RUNTIME_HEALTH_CACHE.clear()
+
+
+def _server_health_cache_key(server: dict[str, Any]) -> tuple[Any, ...]:
+    """Tie cached state to this DB instance and immutable connection identity."""
+    try:
+        port = int(server.get("port") or 1883)
+    except (TypeError, ValueError):
+        port = 1883
+    return (
+        id(db),
+        int(server.get("id") or 0),
+        str(server.get("host") or ""),
+        port,
+        str(server.get("username") or ""),
+        str(server.get("client_id") or ""),
+        int(server.get("tls_enabled") or 0),
+        str(server.get("tls_ca_path") or ""),
+        str(server.get("tls_cert_path") or ""),
+        str(server.get("tls_key_path") or ""),
+        int(server.get("tls_insecure") or 0),
+        str(server.get("tls_version") or ""),
+    )
+
+
+def _copy_runtime_clients(lock: Any, clients: Any, server_ids: set[int]) -> dict[int, Any]:
+    """Take a non-blocking snapshot of one live-client registry."""
+    acquired = False
+    try:
+        acquired = bool(lock.acquire(blocking=False))
+        if not acquired:
+            return {}
+        return {int(sid): client for sid, client in dict(clients).items() if int(sid) in server_ids}
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return {}
+    finally:
+        if acquired:
+            try:
+                lock.release()
+            except (AttributeError, RuntimeError):
+                pass
+
+
+def _snapshot_runtime_mqtt_health(server_ids: set[int]) -> dict[int, bool]:
+    """Return non-blocking health observations from permanent MQTT clients.
+
+    Paho's ``is_connected()`` becomes true only after an accepted CONNACK.
+    Merely having a client object, a socket, or a successful ``connect()``
+    return code is deliberately not treated as broker health.
+    """
+    if not server_ids:
+        return {}
+    candidates: dict[int, list[Any]] = {}
+    try:
+        hub_clients = _copy_runtime_clients(
+            _sse_hub._SSE_HUB_LOCK,
+            _sse_hub._SSE_HUB_MQTT,
+            server_ids,
+        )
+    except AttributeError:
+        hub_clients = {}
+    try:
+        from services import mqtt_pub
+
+        publisher_clients = _copy_runtime_clients(
+            mqtt_pub._MQTT_CLIENTS_LOCK,
+            mqtt_pub._MQTT_CLIENTS,
+            server_ids,
+        )
+    except (AttributeError, ImportError):
+        publisher_clients = {}
+    for source in (hub_clients, publisher_clients):
+        for sid, client in source.items():
+            candidates.setdefault(sid, []).append(client)
+
+    observed: dict[int, bool] = {}
+    for sid, clients in candidates.items():
+        states: list[bool] = []
+        for client in clients:
+            try:
+                is_connected = getattr(client, "is_connected", None)
+                if callable(is_connected):
+                    states.append(bool(is_connected()))
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
+        if states:
+            observed[sid] = any(states)
+    return observed
+
+
+def _prune_runtime_mqtt_health_cache(now: float) -> None:
+    for key, (_connected, observed_at) in list(_MQTT_RUNTIME_HEALTH_CACHE.items()):
+        if now - observed_at > MQTT_RUNTIME_HEALTH_CACHE_TTL_SEC:
+            _MQTT_RUNTIME_HEALTH_CACHE.pop(key, None)
+    while len(_MQTT_RUNTIME_HEALTH_CACHE) > MQTT_RUNTIME_HEALTH_CACHE_MAX:
+        _MQTT_RUNTIME_HEALTH_CACHE.popitem(last=False)
+
+
+def _runtime_mqtt_health(servers: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate live health without network or disk I/O in the request."""
+    if not servers:
+        return {
+            "status": "not_configured",
+            "source": "runtime_cache",
+            "connected": False,
+            "known_servers": 0,
+        }
+
+    server_ids = {int(server.get("id") or 0) for server in servers}
+    observed = _snapshot_runtime_mqtt_health(server_ids)
+    now = time.monotonic()
+    states: dict[int, bool] = {}
+    with _MQTT_RUNTIME_HEALTH_CACHE_LOCK:
+        _prune_runtime_mqtt_health_cache(now)
+        for server in servers:
+            sid = int(server.get("id") or 0)
+            key = _server_health_cache_key(server)
+            if sid in observed:
+                _MQTT_RUNTIME_HEALTH_CACHE[key] = (bool(observed[sid]), now)
+                _MQTT_RUNTIME_HEALTH_CACHE.move_to_end(key)
+            cached = _MQTT_RUNTIME_HEALTH_CACHE.get(key)
+            if cached is not None:
+                states[sid] = bool(cached[0])
+        _prune_runtime_mqtt_health_cache(now)
+
+    connected = any(states.values())
+    if connected:
+        status = "healthy"
+    elif states:
+        status = "degraded"
+    else:
+        status = "unknown"
+    return {
+        "status": status,
+        "source": "runtime_cache",
+        "connected": connected,
+        "known_servers": len(states),
+    }
+
+
+def _last_known_runtime_mqtt_health() -> dict[str, Any]:
+    """Preserve a recent signal when encrypted configuration is unavailable."""
+    now = time.monotonic()
+    with _MQTT_RUNTIME_HEALTH_CACHE_LOCK:
+        _prune_runtime_mqtt_health_cache(now)
+        states = [
+            connected
+            for key, (connected, _observed_at) in _MQTT_RUNTIME_HEALTH_CACHE.items()
+            if key and key[0] == id(db)
+        ]
+    return {
+        "status": "degraded",
+        "source": "runtime_cache",
+        "connected": any(states),
+        "known_servers": len(states),
+        "error_code": "MQTT_SECRET_UNAVAILABLE",
+    }
+
+
+def _database_is_healthy() -> bool:
+    """Validate the existing application DB without creating a new empty file."""
+    db_path = getattr(db, "db_path", None)
+    if not db_path or str(db_path) == ":memory:":
+        return False
+    try:
+        uri = Path(str(db_path)).resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.25) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zones'"
+            ).fetchone()
+        return row is not None
+    except (OSError, sqlite3.Error, ValueError):
+        return False
 
 
 # ===== Health / Scheduler =====
@@ -174,6 +361,7 @@ def api_scheduler_init():
 
 
 @system_status_api_bp.route("/api/scheduler/status")
+@admin_required
 def api_scheduler_status():
     """Get scheduler status.
 
@@ -215,6 +403,7 @@ def api_scheduler_status():
 
 
 @system_status_api_bp.route("/api/scheduler/jobs")
+@admin_required
 def api_scheduler_jobs():
     try:
         sched = get_scheduler()
@@ -247,43 +436,58 @@ def api_scheduler_jobs():
 @system_status_api_bp.route("/health")
 def health_check():
     try:
-        try:
-            _ = db.get_zones()
-            db_ok = True
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("Exception in health_check: %s", e)
-            db_ok = False
+        db_ok = _database_is_healthy()
         try:
             sched = get_scheduler()
             sched_ok = bool(sched is not None)
         except (ValueError, KeyError, RuntimeError) as e:
             logger.debug("Exception in health_check: %s", e)
             sched_ok = False
+        mqtt_configured = False
         try:
             servers = db.get_mqtt_servers() or []
-            mqtt_ok = bool(len(servers) >= 0)
-        except (ConnectionError, TimeoutError, OSError) as e:
-            logger.debug("Exception in health_check: %s", e)
-            mqtt_ok = False
+            mqtt_configured = bool(servers)
+            enabled_servers = [server for server in servers if int(server.get("enabled") or 0) == 1]
+            if servers and not enabled_servers:
+                mqtt_health = {
+                    "status": "disabled",
+                    "source": "runtime_cache",
+                    "connected": False,
+                    "known_servers": 0,
+                }
+            else:
+                mqtt_health = _runtime_mqtt_health(enabled_servers)
+        except SecretDecryptionError:
+            mqtt_health = _last_known_runtime_mqtt_health()
+        except (ConnectionError, TimeoutError, OSError, sqlite3.Error, TypeError, ValueError):
+            mqtt_health = {
+                "status": "degraded",
+                "source": "runtime_cache",
+                "connected": False,
+                "known_servers": 0,
+                "error_code": "MQTT_CONFIG_UNAVAILABLE",
+            }
+        mqtt_ready = mqtt_health.get("status") in {"healthy", "not_configured", "disabled"}
+        payload = {
+            "ok": db_ok and (sched_ok or TESTING) and mqtt_ready,
+            "db": db_ok,
+            "scheduler": sched_ok if sched_ok else ("not_initialized" if TESTING else False),
+            "mqtt_configured": mqtt_configured,
+            "mqtt_health": mqtt_health,
+        }
         # In TESTING mode the scheduler is optional — most tests run without
         # bootstrapping APScheduler.  Treat its absence as a soft "not_initialized"
         # signal (HTTP 200) instead of failing health-check.  In production a
         # missing scheduler is a real incident — keep the 503.
         if TESTING and not sched_ok:
-            return jsonify(
-                {
-                    "ok": db_ok,
-                    "db": db_ok,
-                    "scheduler": "not_initialized",
-                    "mqtt_configured": mqtt_ok,
-                }
-            ), 200 if db_ok else 503
-        overall = db_ok and sched_ok
+            return jsonify(payload), 200 if payload["ok"] else 503
+        overall = db_ok and sched_ok and mqtt_ready
         code = 200 if overall else 503
-        return jsonify({"ok": overall, "db": db_ok, "scheduler": sched_ok, "mqtt_configured": mqtt_ok}), code
-    except (ConnectionError, TimeoutError, OSError) as e:
+        payload["ok"] = overall
+        return jsonify(payload), code
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error) as e:
         logger.exception("health check failed")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error_code": "HEALTH_CHECK_FAILED"}), 500
 
 
 # ===== Server time =====
@@ -528,63 +732,31 @@ def api_status():
         None if not hum_enabled else (env_monitor.hum_value if env_monitor.hum_value is not None else "нет данных")
     )
 
+    mqtt_secret_unavailable = False
     try:
-        servers = db.get_mqtt_servers()
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.debug("Exception in line_843: %s", e)
+        servers = db.get_mqtt_servers() or []
+    except SecretDecryptionError:
+        # Keep the rest of the public status usable and preserve a recent live
+        # signal, but expose the recovery problem as structured degraded state.
+        servers = []
+        mqtt_secret_unavailable = True
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, TypeError, ValueError):
         servers = []
     mqtt_servers_count = len(servers)
     enabled_servers = [s for s in servers if int(s.get("enabled") or 0) == 1]
     mqtt_enabled_count = len(enabled_servers)
-    mqtt_connected = False
-    try:
-        if current_app.config.get("TESTING"):
-            mqtt_connected = True  # Skip real MQTT in tests
-        elif mqtt_servers_count > 0 and mqtt is not None:
-            candidates = enabled_servers if mqtt_enabled_count > 0 else servers
-            for s in candidates:
-                try:
-                    # This is a short-lived health probe, not the long-lived
-                    # hub client. Reusing the configured client ID makes the
-                    # broker evict the hub's MQTT session on every status poll.
-                    client = mqtt.Client(
-                        mqtt.CallbackAPIVersion.VERSION2,
-                        client_id=f"wb-status-{uuid.uuid4().hex[:10]}",
-                    )
-                    if s.get("username"):
-                        client.username_pw_set(s.get("username"), s.get("password") or None)
-                    client.connect(s.get("host") or "127.0.0.1", int(s.get("port") or 1883), 3)
-                    mqtt_connected = True
-                    try:
-                        client.disconnect()
-                    except (ConnectionError, TimeoutError, OSError) as e:
-                        logger.debug("Handled exception in line_862: %s", e)
-                    break
-                except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.debug("Exception in line_865: %s", e)
-                    mqtt_connected = False
-        if mqtt_servers_count == 0:
-            try:
-                logger.warning("MQTT: нет ни одного сервера в настройках")
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("Handled exception in line_871: %s", e)
-            try:
-                db.add_log("mqtt_warn", "нет ни одного сервера в настройках")
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("Handled exception in line_875: %s", e)
-        elif not mqtt_connected:
-            try:
-                logger.warning("MQTT: нет связи ни с одним сервером")
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("Handled exception in line_880: %s", e)
-            try:
-                db.add_log("mqtt_warn", "нет связи ни с одним MQTT сервером")
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("Handled exception in line_884: %s", e)
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.debug("Handled exception in line_886: %s", e)
-
-    logger.info(f"api_status: temp={temperature} hum={humidity} temp_enabled={temp_enabled} hum_enabled={hum_enabled}")
+    if mqtt_secret_unavailable:
+        mqtt_health = _last_known_runtime_mqtt_health()
+    elif mqtt_servers_count and not mqtt_enabled_count:
+        mqtt_health = {
+            "status": "disabled",
+            "source": "runtime_cache",
+            "connected": False,
+            "known_servers": 0,
+        }
+    else:
+        mqtt_health = _runtime_mqtt_health(enabled_servers)
+    mqtt_connected = bool(mqtt_health.get("connected"))
     try:
         role = session.get("role")
         is_admin = role == "admin"
@@ -614,10 +786,22 @@ def api_status():
     except (KeyError, TypeError, ValueError) as e:
         logger.debug("api_status: fault aggregation failed: %s", e)
 
-    # MQTT broker unreachable while servers are enabled — no command can reach
-    # any relay, so the whole system is effectively not watering.
+    if mqtt_secret_unavailable:
+        faults.append(
+            {
+                "type": "mqtt_secret_unavailable",
+                "severity": "critical",
+                "zone_id": None,
+                "zone_name": None,
+                "reason": "MQTT credentials cannot be decrypted; restore the configured secret key",
+                "since": None,
+            }
+        )
+    # Report a hard disconnect only when a live runtime client explicitly says
+    # it is disconnected. With no current signal, remain degraded/unknown
+    # rather than turning absence of a request-time probe into a false claim.
     try:
-        if mqtt_enabled_count and not mqtt_connected:
+        if mqtt_enabled_count and mqtt_health.get("status") == "degraded":
             faults.append(
                 {
                     "type": "mqtt_disconnect",
@@ -625,6 +809,17 @@ def api_status():
                     "zone_id": None,
                     "zone_name": None,
                     "reason": "Нет связи с MQTT-брокером — команды не доходят до реле",
+                    "since": None,
+                }
+            )
+        elif mqtt_enabled_count and mqtt_health.get("status") == "unknown":
+            faults.append(
+                {
+                    "type": "mqtt_health_unknown",
+                    "severity": "warning",
+                    "zone_id": None,
+                    "zone_name": None,
+                    "reason": "Нет актуального сигнала от MQTT runtime",
                     "since": None,
                 }
             )
@@ -668,6 +863,7 @@ def api_status():
             "mqtt_servers_count": mqtt_servers_count,
             "mqtt_enabled_count": mqtt_enabled_count,
             "mqtt_connected": mqtt_connected,
+            "mqtt_health": mqtt_health,
             "system_health": {
                 "ok": not any(f.get("severity", "critical") == "critical" for f in faults),
                 "faults": faults,
@@ -680,6 +876,7 @@ def api_status():
 
 
 @system_status_api_bp.route("/api/logs")
+@admin_required
 def api_logs():
     try:
         from_date = request.args.get("from")
