@@ -35,6 +35,32 @@ logger = logging.getLogger(__name__)
 
 _INTERVAL_JOB_RE = re.compile(r"^program:(\d+):(main|extra:\d+)$")
 _ACTIVE_SCHEDULE_STATES = {"starting", "on", "stopping"}
+MAX_NEXT_WATERING_ZONE_IDS = 512
+
+
+class NextWateringLimitError(ValueError):
+    """An explicit projection request exceeds the controller work budget."""
+
+
+def normalize_requested_zone_ids(
+    zone_ids: list[int] | tuple[int, ...],
+    *,
+    enforce_limit: bool = True,
+) -> list[int]:
+    """Validate strict positive IDs and deduplicate them in request order."""
+    if not isinstance(zone_ids, (list, tuple)):
+        raise TypeError("zone_ids must be a list of integers")
+    if enforce_limit and len(zone_ids) > MAX_NEXT_WATERING_ZONE_IDS:
+        raise NextWateringLimitError("too many zone ids")
+    result: list[int] = []
+    seen: set[int] = set()
+    for zone_id in zone_ids:
+        if type(zone_id) is not int or zone_id <= 0:
+            raise ValueError("zone ids must be positive canonical integers")
+        if zone_id not in seen:
+            seen.add(zone_id)
+            result.append(zone_id)
+    return result
 
 
 def weather_skip_today() -> bool:
@@ -278,13 +304,14 @@ def compute_next_watering(
         all_zones = db.get_zones() or []
     if programs is None:
         programs = db.get_programs() or []
+    explicit_zone_ids = zone_ids is not None
     if zone_ids is None:
         zone_ids = [
             int(z.get("id"))
             for z in all_zones
             if int(z.get("group_id") or z.get("group") or 0) != 999
         ]
-    zone_ids = [int(zone_id) for zone_id in zone_ids]
+    zone_ids = normalize_requested_zone_ids(zone_ids, enforce_limit=explicit_zone_ids)
     zone_by_id = {int(z["id"]): z for z in all_zones}
     base_duration = {int(z["id"]): int(z.get("duration") or 0) for z in all_zones}
 

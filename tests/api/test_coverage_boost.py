@@ -126,7 +126,7 @@ class TestAllGetEndpoints:
 class TestZoneCRUDWorkflow:
     """Full CRUD workflow for zones."""
 
-    def test_zone_crud_lifecycle(self, admin_client):
+    def test_zone_crud_lifecycle(self, admin_client, app):
         """Create → Read → Update → Delete a zone."""
         # Create
         resp = admin_client.post(
@@ -152,6 +152,10 @@ class TestZoneCRUDWorkflow:
             assert resp.status_code == 200
 
             # Delete
+            assert app.db.update_zone(
+                zone_id,
+                {"state": "off", "commanded_state": "off", "observed_state": "off"},
+            )
             resp = admin_client.delete(f"/api/zones/{zone_id}")
             assert resp.status_code in (200, 204)
 
@@ -260,9 +264,13 @@ class TestMQTTOperations:
         zones = app.db.get_zones()
         zid = zones[0]["id"]
 
-        with patch("services.zone_control.publish_mqtt_value", return_value=True):
+        with patch(
+            "services.zone_control.start_zone_orchestrated",
+            return_value=("started", {"warnings": [], "duration": 10}),
+        ):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/start")
             assert resp.status_code == 200
+        with patch("services.zone_control.publish_mqtt_value", return_value=True):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/stop")
             assert resp.status_code == 200
 

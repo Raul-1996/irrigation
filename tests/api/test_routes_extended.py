@@ -147,7 +147,7 @@ class TestMasterValveToggle:
             },
         )
         resp = admin_client.post(f"/api/groups/{g['id']}/master-valve/open", content_type="application/json")
-        assert resp.status_code in (200, 400, 500)
+        assert resp.status_code in (200, 400, 500, 503)
 
     def test_master_valve_close(self, admin_client, app):
         g = app.db.create_group("MVC")
@@ -161,7 +161,7 @@ class TestMasterValveToggle:
             },
         )
         resp = admin_client.post(f"/api/groups/{g['id']}/master-valve/close", content_type="application/json")
-        assert resp.status_code in (200, 400, 500)
+        assert resp.status_code in (200, 400, 500, 503)
 
 
 class TestSystemAPIExtended:
@@ -239,4 +239,4 @@ class TestGroupUpdate:
             ),
             content_type="application/json",
         )
-        assert resp.status_code in (200, 400)
+        assert resp.status_code in (200, 400, 409)

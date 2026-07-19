@@ -58,7 +58,10 @@ class TestMQTTZoneControl:
         )
         zones = app.db.get_zones()
         zid = zones[0]["id"]
-        with patch("services.zone_control.publish_mqtt_value", return_value=True):
+        with patch(
+            "services.zone_control.start_zone_orchestrated",
+            return_value=("started", {"warnings": [], "duration": 10}),
+        ):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/start")
         assert resp.status_code == 200
 

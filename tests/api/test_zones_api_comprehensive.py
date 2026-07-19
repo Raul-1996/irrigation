@@ -77,6 +77,10 @@ class TestZonesAPI:
 
     def test_delete_zone(self, admin_client, app):
         z = app.db.create_zone({"name": "Del", "duration": 10, "group_id": 1})
+        assert app.db.update_zone(
+            z["id"],
+            {"state": "off", "commanded_state": "off", "observed_state": "off"},
+        )
         resp = admin_client.delete(f"/api/zones/{z['id']}")
         assert resp.status_code in (200, 204)
 

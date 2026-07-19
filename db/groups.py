@@ -6,6 +6,29 @@ from db.base import BaseRepository, retry_on_busy
 
 logger = logging.getLogger(__name__)
 
+_GROUP_CONFIG_FIELDS = frozenset(
+    {
+        "name",
+        "use_rain_sensor",
+        "use_master_valve",
+        "master_mqtt_topic",
+        "master_mode",
+        "master_mqtt_server_id",
+        "use_pressure_sensor",
+        "pressure_mqtt_topic",
+        "pressure_unit",
+        "pressure_mqtt_server_id",
+        "use_water_meter",
+        "water_mqtt_topic",
+        "water_mqtt_server_id",
+        "water_pulse_size",
+        "water_base_value_m3",
+        "water_base_pulses",
+        "master_close_delay_sec",
+        "master_valve_observed",
+    }
+)
+
 
 class GroupRepository(BaseRepository):
     """Repository for group CRUD operations."""
@@ -153,44 +176,53 @@ class GroupRepository(BaseRepository):
             return False
 
     @retry_on_busy()
-    def update_group_config(self, group_id: int, updates: dict[str, Any]) -> bool:
-        """Atomically update all fields accepted by the group settings API."""
-        allowed = {
-            "name",
-            "use_rain_sensor",
-            "use_master_valve",
-            "master_mqtt_topic",
-            "master_mode",
-            "master_mqtt_server_id",
-            "use_pressure_sensor",
-            "pressure_mqtt_topic",
-            "pressure_unit",
-            "pressure_mqtt_server_id",
-            "use_water_meter",
-            "water_mqtt_topic",
-            "water_mqtt_server_id",
-            "water_pulse_size",
-            "water_base_value_m3",
-            "water_base_pulses",
-            "master_close_delay_sec",
-        }
-        fields = [(key, value) for key, value in updates.items() if key in allowed]
+    def update_group_config_with_snapshot(
+        self,
+        group_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_current: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Update settings and return the exact committed row for later CAS."""
+        fields = [(key, value) for key, value in updates.items() if key in _GROUP_CONFIG_FIELDS]
         if not fields:
-            return False
+            return None
         assignments = [f"{key} = ?" for key, _value in fields]
         params = [value for _key, value in fields]
         params.append(group_id)
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if expected_current is not None:
+                    columns = self._storage_columns(conn, "groups")
+                    current = conn.execute(
+                        "SELECT * FROM groups WHERE id = ?",
+                        (int(group_id),),
+                    ).fetchone()
+                    if not self._snapshot_matches(current, expected_current, columns):
+                        conn.rollback()
+                        return None
                 cursor = conn.execute(
                     f"UPDATE groups SET {', '.join(assignments)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     tuple(params),
                 )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return None
+                row = conn.execute("SELECT * FROM groups WHERE id = ?", (int(group_id),)).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                snapshot = dict(row)
                 conn.commit()
-                return cursor.rowcount == 1
+                return snapshot
         except sqlite3.Error as e:
             logger.error("Ошибка атомарного обновления группы %s: %s", group_id, e)
-            return False
+            return None
+
+    def update_group_config(self, group_id: int, updates: dict[str, Any]) -> bool:
+        """Atomically update all fields accepted by the group settings API."""
+        return self.update_group_config_with_snapshot(group_id, updates) is not None
 
     def get_group_use_rain(self, group_id: int) -> bool:
         try:

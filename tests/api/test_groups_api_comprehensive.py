@@ -72,7 +72,7 @@ class TestGroupMasterValveAPI:
             ),
             content_type="application/json",
         )
-        assert resp.status_code in (200, 400, 404, 500)
+        assert resp.status_code in (200, 400, 404, 500, 503)
 
 
 class TestGroupRainAPI:

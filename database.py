@@ -233,6 +233,19 @@ class IrrigationDB:
     def update_group_config(self, group_id: int, updates: dict[str, Any]) -> bool:
         return self.groups.update_group_config(group_id, updates)
 
+    def update_group_config_with_snapshot(
+        self,
+        group_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_current: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        return self.groups.update_group_config_with_snapshot(
+            group_id,
+            updates,
+            expected_current=expected_current,
+        )
+
     def get_group_use_rain(self, group_id: int) -> bool:
         return self.groups.get_group_use_rain(group_id)
 
@@ -262,6 +275,32 @@ class IrrigationDB:
         self, before: dict[str, Any], expected_current: dict[str, Any] | None = None
     ) -> bool:
         return self.mqtt.restore_mqtt_server_snapshot(before, expected_current)
+
+    def update_mqtt_server_reference_guarded(
+        self,
+        server_id: int,
+        data: dict[str, Any],
+        *,
+        allowed_settings: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        return self.mqtt.update_mqtt_server_reference_guarded(
+            server_id,
+            data,
+            allowed_settings=allowed_settings,
+        )
+
+    def restore_mqtt_server_snapshot_reference_guarded(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any],
+        *,
+        allowed_settings: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        return self.mqtt.restore_mqtt_server_snapshot_reference_guarded(
+            before,
+            expected_current,
+            allowed_settings=allowed_settings,
+        )
 
     def delete_mqtt_server_if_unchanged(self, expected: dict[str, Any]) -> bool:
         return self.mqtt.delete_mqtt_server_if_unchanged(expected)

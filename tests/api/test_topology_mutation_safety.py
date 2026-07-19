@@ -1,5 +1,6 @@
 """Regression tests for fail-closed hardware topology mutations."""
 
+import sqlite3
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -43,12 +44,30 @@ def _get_group(app, group_id):
     return next(g for g in app.db.get_groups() if int(g["id"]) == int(group_id))
 
 
+def _confirm_published(_server_id, _topic, _expected_payload, publish_command, **_kwargs):
+    return bool(publish_command())
+
+
+def _publish_without_echo(_server_id, _topic, _expected_payload, publish_command, **_kwargs):
+    publish_command()
+    return False
+
+
+def _core_close_confirmed(_server_id, _topic, _mode, publish_command):
+    return bool(publish_command())
+
+
+def _core_close_without_echo(_server_id, _topic, _mode, publish_command):
+    publish_command()
+    return False
+
+
 class TestZoneTopologyMutationSafety:
     @pytest.mark.parametrize(
         ("change", "field"),
         [
             ({"topic": "/zone/new"}, "topic"),
-            ({"mqtt_server_id": None}, "mqtt_server_id"),
+            ({"mqtt_server_id": None, "topic": ""}, "mqtt_server_id"),
             ({"group_id": 999}, "group_id"),
         ],
     )
@@ -88,13 +107,33 @@ class TestZoneTopologyMutationSafety:
 
     def test_confirmed_off_zone_can_be_rewired(self, admin_client, app):
         group = _group(app)
-        zone = _zone(app, group["id"])
+        server = _server(app)
+        zone = _zone(app, group["id"], server["id"])
         app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
 
         response = admin_client.put(f"/api/zones/{zone['id']}", json={"topic": "/zone/new"})
 
         assert response.status_code == 200
         assert app.db.get_zone(zone["id"])["topic"] == "/zone/new"
+
+    @pytest.mark.parametrize(
+        "runtime_fields",
+        [
+            {"state": "off", "commanded_state": None, "observed_state": "off"},
+            {"state": "off", "commanded_state": "", "observed_state": "off"},
+            {"state": "off", "commanded_state": "off", "observed_state": None},
+            {"state": "off", "commanded_state": "off", "observed_state": ""},
+        ],
+    )
+    def test_null_or_empty_confirmation_is_unknown_and_blocks_delete(self, admin_client, app, runtime_fields):
+        group = _group(app)
+        zone = _zone(app, group["id"])
+        app.db.update_zone(zone["id"], runtime_fields)
+
+        response = admin_client.delete(f"/api/zones/{zone['id']}")
+
+        assert response.status_code == 409
+        assert app.db.get_zone(zone["id"]) is not None
 
     def test_rewire_rejects_missing_group_without_mutation(self, admin_client, app):
         group = _group(app)
@@ -113,6 +152,39 @@ class TestZoneTopologyMutationSafety:
 
         assert response.status_code == 400
         assert app.db.get_zone(zone["id"])["mqtt_server_id"] is None
+
+    @pytest.mark.parametrize("method", ["update", "delete"])
+    def test_topology_mutation_relocks_a_concurrently_changed_group(self, admin_client, app, method):
+        from services.locks import group_lock as real_group_lock
+
+        source = _group(app, "Initial lock group")
+        target = _group(app, "Requested target group")
+        raced = _group(app, "Concurrent target group")
+        server = _server(app)
+        zone = _zone(app, source["id"], server["id"])
+        app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
+        acquired_group_ids = []
+        moved = False
+
+        def racing_group_lock(group_id):
+            nonlocal moved
+            acquired_group_ids.append(int(group_id))
+            if not moved:
+                moved = True
+                assert app.db.update_zone(zone["id"], {"group_id": raced["id"]})
+            return real_group_lock(int(group_id))
+
+        with patch("routes.zones_crud_api.group_lock", side_effect=racing_group_lock):
+            if method == "update":
+                response = admin_client.put(
+                    f"/api/zones/{zone['id']}",
+                    json={"group_id": target["id"]},
+                )
+            else:
+                response = admin_client.delete(f"/api/zones/{zone['id']}")
+
+        assert response.status_code == (200 if method == "update" else 204)
+        assert int(raced["id"]) in acquired_group_ids
 
 
 class TestZoneBulkImportSafety:
@@ -149,8 +221,9 @@ class TestZoneBulkImportSafety:
 
     def test_import_active_rewire_rejects_entire_batch(self, admin_client, app):
         group = _group(app)
+        server = _server(app)
         safe_zone = _zone(app, group["id"], topic="", name="Safe zone")
-        live_zone = _zone(app, group["id"], topic="/zone/live", name="Live zone")
+        live_zone = _zone(app, group["id"], server["id"], topic="/zone/live", name="Live zone")
         app.db.update_zone(
             live_zone["id"],
             {"state": "on", "commanded_state": "on", "observed_state": "on"},
@@ -180,6 +253,7 @@ class TestZoneBulkImportSafety:
     def test_import_rejects_dangling_hardware_reference_atomically(self, admin_client, app, change):
         group = _group(app)
         zone = _zone(app, group["id"], topic="", name="Original")
+        app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
 
         response = admin_client.post(
             "/api/zones/import",
@@ -191,7 +265,9 @@ class TestZoneBulkImportSafety:
 
     def test_repository_rollback_is_not_reported_as_partial_success(self, admin_client, app):
         group = _group(app)
-        zone = _zone(app, group["id"], topic="", name="Original")
+        server = _server(app)
+        zone = _zone(app, group["id"], server["id"], topic="/zone/original", name="Original")
+        app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
         rolled_back = {
             "success": False,
             "created": 0,
@@ -217,19 +293,184 @@ class TestZoneBulkImportSafety:
         add_log.assert_not_called()
         reload_hub.assert_not_called()
 
+    def test_import_relocks_group_created_by_a_concurrent_zone_move(self, admin_client, app):
+        from services.locks import group_lock as real_group_lock
+
+        source = _group(app, "Bulk initial group")
+        server = _server(app)
+        zone = _zone(app, source["id"], server["id"])
+        app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
+        acquired_group_ids = []
+        raced_group_id = None
+
+        def racing_group_lock(group_id):
+            nonlocal raced_group_id
+            acquired_group_ids.append(int(group_id))
+            if raced_group_id is None:
+                raced = _group(app, "Bulk concurrent new group")
+                raced_group_id = int(raced["id"])
+                assert app.db.update_zone(zone["id"], {"group_id": raced_group_id})
+            return real_group_lock(int(group_id))
+
+        with patch("routes.zones_crud_api.group_lock", side_effect=racing_group_lock):
+            response = admin_client.post(
+                "/api/zones/import",
+                json={"zones": [{"id": zone["id"], "topic": "/zone/new"}]},
+            )
+
+        assert response.status_code == 200
+        assert raced_group_id is not None
+        assert raced_group_id in acquired_group_ids
+
 
 class TestGroupTopologyMutationSafety:
     def test_successful_group_crud_reconfigures_water_monitor(self, admin_client, app):
         from services.monitors import water_monitor
 
+        server = _server(app, name="Water runtime")
         with patch.object(water_monitor, "reconfigure", return_value=True, create=True) as reconfigure:
             created = admin_client.post("/api/groups", json={"name": "Runtime group"})
             group_id = created.get_json()["id"]
-            updated = admin_client.put(f"/api/groups/{group_id}", json={"name": "Runtime group updated"})
+            updated = admin_client.put(
+                f"/api/groups/{group_id}",
+                json={
+                    "use_water_meter": True,
+                    "water_mqtt_topic": "/water/runtime",
+                    "water_mqtt_server_id": server["id"],
+                },
+            )
             deleted = admin_client.delete(f"/api/groups/{group_id}")
 
         assert (created.status_code, updated.status_code, deleted.status_code) == (201, 200, 204)
-        assert reconfigure.call_count == 3
+        assert reconfigure.call_count == 2
+
+    def test_failed_water_monitor_reconfigure_rolls_back_group_update(self, admin_client, app):
+        from services.monitors import water_monitor
+
+        group = _group(app)
+        server = _server(app, name="Water rollback")
+        before = app.db.get_group_storage_snapshot(group["id"])
+
+        with patch.object(water_monitor, "reconfigure", return_value=False, create=True):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={
+                    "use_water_meter": True,
+                    "water_mqtt_topic": "/water/rollback",
+                    "water_mqtt_server_id": server["id"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "WATER_MONITOR_RECONFIGURE_FAILED"
+        assert app.db.get_group_storage_snapshot(group["id"]) == before
+
+    def test_water_monitor_rollback_never_clobbers_concurrent_group_update(self, admin_client, app):
+        from services.monitors import water_monitor
+
+        group = _group(app)
+        server = _server(app, name="Water rollback race")
+
+        def concurrent_update_then_reject():
+            assert app.db.update_group(group["id"], "Concurrent operator update")
+            return False
+
+        with patch.object(
+            water_monitor,
+            "reconfigure",
+            side_effect=concurrent_update_then_reject,
+            create=True,
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={
+                    "use_water_meter": True,
+                    "water_mqtt_topic": "/water/race",
+                    "water_mqtt_server_id": server["id"],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.get_json()["error_code"] == "WATER_MONITOR_ROLLBACK_CONFLICT"
+        current = _get_group(app, group["id"])
+        assert current["name"] == "Concurrent operator update"
+        assert current["water_mqtt_topic"] == "/water/race"
+
+    def test_group_update_cas_rejects_change_between_preflight_and_commit(self, admin_client, app):
+        from services.monitors import water_monitor
+
+        group = _group(app)
+        server = _server(app, name="Group precommit race")
+        original_update = app.db.update_group_config_with_snapshot
+
+        def concurrent_update_before_commit(group_id, updates, **kwargs):
+            assert app.db.update_group(group_id, "Concurrent precommit rename")
+            return original_update(group_id, updates, **kwargs)
+
+        with (
+            patch.object(
+                app.db,
+                "update_group_config_with_snapshot",
+                side_effect=concurrent_update_before_commit,
+            ),
+            patch.object(water_monitor, "reconfigure", return_value=True, create=True) as reconfigure,
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={
+                    "use_water_meter": True,
+                    "water_mqtt_topic": "/water/precommit-race",
+                    "water_mqtt_server_id": server["id"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "GROUP_UPDATE_CONFLICT"
+        current = _get_group(app, group["id"])
+        assert current["name"] == "Concurrent precommit rename"
+        assert current["use_water_meter"] == 0
+        reconfigure.assert_not_called()
+
+    def test_failed_water_monitor_reconfigure_restores_deleted_group(self, admin_client, app):
+        from services.monitors import water_monitor
+
+        group = _group(app)
+        server = _server(app, name="Water delete rollback")
+        assert app.db.update_group_fields(
+            group["id"],
+            {
+                "use_water_meter": 1,
+                "water_mqtt_topic": "/water/delete",
+                "water_mqtt_server_id": server["id"],
+            },
+        )
+        before = app.db.get_group_storage_snapshot(group["id"])
+
+        with patch.object(water_monitor, "reconfigure", return_value=False, create=True):
+            response = admin_client.delete(f"/api/groups/{group['id']}")
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "WATER_MONITOR_RECONFIGURE_FAILED"
+        assert app.db.get_group_storage_snapshot(group["id"]) == before
+
+    def test_group_delete_cas_preserves_concurrent_update(self, admin_client, app):
+        group = _group(app)
+        original_delete = app.db.delete_group_if_unchanged
+
+        def concurrent_update_before_delete(expected):
+            assert app.db.update_group(group["id"], "Concurrent delete rename")
+            return original_delete(expected)
+
+        with patch.object(
+            app.db,
+            "delete_group_if_unchanged",
+            side_effect=concurrent_update_before_delete,
+        ):
+            response = admin_client.delete(f"/api/groups/{group['id']}")
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "GROUP_DELETE_CONFLICT"
+        assert _get_group(app, group["id"])["name"] == "Concurrent delete rename"
 
     def test_active_group_cannot_change_master_wiring(self, admin_client, app):
         group = _group(app)
@@ -252,6 +493,43 @@ class TestGroupTopologyMutationSafety:
             {"state": "off", "commanded_state": "off", "observed_state": "off", "topic": ""},
         )
 
+    def test_unknown_zone_confirmation_blocks_master_rewire(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"])
+        zone = _zone(app, group["id"], server["id"])
+        app.db.update_zone(
+            zone["id"],
+            {"state": "off", "commanded_state": None, "observed_state": "off"},
+        )
+
+        response = admin_client.put(
+            f"/api/groups/{group['id']}",
+            json={"master_mqtt_topic": "/master/new"},
+        )
+
+        assert response.status_code == 409
+        assert _get_group(app, group["id"])["master_mqtt_topic"] == "/master/old"
+
+    def test_strict_zone_scan_failure_blocks_master_rewire(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"])
+
+        with patch.object(
+            app.db,
+            "get_zones_strict",
+            side_effect=sqlite3.OperationalError("safety scan failed"),
+            create=True,
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={"master_mqtt_topic": "/master/new"},
+            )
+
+        assert response.status_code == 503
+        assert _get_group(app, group["id"])["master_mqtt_topic"] == "/master/old"
+
     def test_open_master_is_closed_on_old_channel_before_rewire(self, admin_client, app):
         group = _group(app)
         server = _server(app)
@@ -263,18 +541,24 @@ class TestGroupTopologyMutationSafety:
             events.append((actual_server["id"], topic, value))
             return True
 
-        with patch("routes.groups_api._publish_mqtt_value", side_effect=publish):
+        with (
+            patch("routes.groups_api._publish_mqtt_value", side_effect=publish),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_confirmed),
+        ):
             response = admin_client.put(
                 f"/api/groups/{group['id']}",
                 json={"master_mqtt_topic": "/master/new", "master_mode": "NO"},
             )
 
         assert response.status_code == 200
-        assert events == [(server["id"], "/master/old", "0")]
+        assert events == [
+            (server["id"], "/master/old", "0"),
+            (server["id"], "/master/new", "1"),
+        ]
         after = _get_group(app, group["id"])
         assert after["master_mqtt_topic"] == "/master/new"
         assert after["master_mode"] == "NO"
-        assert after["master_valve_observed"] == "closed"
+        assert after["master_valve_observed"] is None
 
     def test_failed_old_master_close_leaves_group_unchanged(self, admin_client, app):
         group = _group(app)
@@ -282,13 +566,16 @@ class TestGroupTopologyMutationSafety:
         _configure_master(app, group["id"], server["id"], observed="open")
         before = _get_group(app, group["id"])
 
-        with patch("routes.groups_api._publish_mqtt_value", return_value=False):
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_without_echo),
+        ):
             response = admin_client.put(
                 f"/api/groups/{group['id']}",
                 json={"name": "must-not-commit", "use_master_valve": False},
             )
 
-        assert response.status_code == 409
+        assert response.status_code == 503
         after = _get_group(app, group["id"])
         assert after["name"] == before["name"]
         assert after["use_master_valve"] == 1
@@ -318,7 +605,10 @@ class TestGroupTopologyMutationSafety:
         server = _server(app)
         _configure_master(app, group["id"], server["id"], observed="open")
 
-        with patch("routes.groups_api._publish_mqtt_value", return_value=True) as publish:
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True) as publish,
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_confirmed),
+        ):
             response = admin_client.delete(f"/api/groups/{group['id']}")
 
         assert response.status_code == 204
@@ -330,10 +620,13 @@ class TestGroupTopologyMutationSafety:
         server = _server(app)
         _configure_master(app, group["id"], server["id"], observed="open")
 
-        with patch("routes.groups_api._publish_mqtt_value", return_value=False):
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_without_echo),
+        ):
             response = admin_client.delete(f"/api/groups/{group['id']}")
 
-        assert response.status_code == 409
+        assert response.status_code == 503
         assert _get_group(app, group["id"])["master_valve_observed"] == "open"
 
     def test_start_zone_must_belong_to_url_group(self, admin_client, app):
@@ -346,6 +639,121 @@ class TestGroupTopologyMutationSafety:
 
         assert response.status_code == 409
         start.assert_not_called()
+
+
+class TestRainGroupEnforcement:
+    def test_opt_in_enforces_after_commit_before_success(self, admin_client, app):
+        from services.monitors import rain_monitor
+
+        group = _group(app, "Rain opt-in")
+
+        def enforce(group_id):
+            persisted = _get_group(app, group_id)
+            assert int(persisted["use_rain_sensor"] or 0) == 1
+            return True
+
+        with patch.object(rain_monitor, "enforce_group", side_effect=enforce, create=True) as enforce_group:
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={"use_rain_sensor": True},
+            )
+
+        assert response.status_code == 200
+        enforce_group.assert_called_once_with(group["id"])
+        assert int(_get_group(app, group["id"])["use_rain_sensor"] or 0) == 1
+
+    @pytest.mark.parametrize("enforcement_result", [False, None, {"success": True}])
+    def test_failed_or_noncanonical_enforcement_rolls_back_exactly(
+        self,
+        admin_client,
+        app,
+        enforcement_result,
+    ):
+        from services.monitors import rain_monitor
+
+        group = _group(app, "Rain rollback")
+
+        with patch.object(
+            rain_monitor,
+            "enforce_group",
+            return_value=enforcement_result,
+            create=True,
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={"use_rain_sensor": True},
+            )
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "RAIN_GROUP_ENFORCEMENT_FAILED"
+        assert int(_get_group(app, group["id"])["use_rain_sensor"] or 0) == 0
+
+    def test_enforcement_rollback_never_clobbers_concurrent_operator_update(self, admin_client, app):
+        from services.monitors import rain_monitor
+
+        group = _group(app, "Rain concurrent")
+
+        def concurrent_update(_group_id):
+            assert app.db.update_group_config(group["id"], {"name": "Operator won"})
+            return False
+
+        with patch.object(
+            rain_monitor,
+            "enforce_group",
+            side_effect=concurrent_update,
+            create=True,
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={"use_rain_sensor": True},
+            )
+
+        assert response.status_code == 500
+        assert response.get_json()["error_code"] == "RAIN_GROUP_ENFORCEMENT_ROLLBACK_CONFLICT"
+        persisted = _get_group(app, group["id"])
+        assert persisted["name"] == "Operator won"
+        assert int(persisted["use_rain_sensor"] or 0) == 1
+
+    def test_combined_water_update_is_rebound_to_restored_snapshot_after_rain_failure(self, admin_client, app):
+        from services.monitors import rain_monitor, water_monitor
+
+        group = _group(app, "Rain and water rollback")
+        server = _server(app, "Rain and water broker")
+
+        with (
+            patch.object(rain_monitor, "enforce_group", return_value=False, create=True),
+            patch.object(water_monitor, "reconfigure", side_effect=[True, True], create=True) as water_reconfigure,
+        ):
+            response = admin_client.put(
+                f"/api/groups/{group['id']}",
+                json={
+                    "use_rain_sensor": True,
+                    "use_water_meter": True,
+                    "water_mqtt_server_id": server["id"],
+                    "water_mqtt_topic": "/meter/pulses",
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "RAIN_GROUP_ENFORCEMENT_FAILED"
+        assert water_reconfigure.call_count == 2
+        persisted = _get_group(app, group["id"])
+        assert int(persisted["use_rain_sensor"] or 0) == 0
+        assert int(persisted["use_water_meter"] or 0) == 0
+
+    def test_non_opt_in_group_updates_do_not_enforce_rain(self, admin_client, app):
+        from services.monitors import rain_monitor
+
+        group = _group(app, "Rain unchanged")
+        assert app.db.set_group_use_rain(group["id"], True)
+
+        with patch.object(rain_monitor, "enforce_group", return_value=True, create=True) as enforce_group:
+            same = admin_client.put(f"/api/groups/{group['id']}", json={"use_rain_sensor": True})
+            disabled = admin_client.put(f"/api/groups/{group['id']}", json={"use_rain_sensor": False})
+
+        assert same.status_code == 200
+        assert disabled.status_code == 200
+        enforce_group.assert_not_called()
 
 
 class TestManualMasterSafety:
@@ -385,6 +793,7 @@ class TestManualMasterSafety:
         with (
             patch("routes.groups_api._master_has_unsafe_zone", side_effect=[False, True]),
             patch("routes.groups_api._publish_mqtt_value") as publish,
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_confirmed),
         ):
             response = admin_client.post(f"/api/groups/{group['id']}/master-valve/close")
 
@@ -392,53 +801,79 @@ class TestManualMasterSafety:
         publish.assert_not_called()
         assert _get_group(app, group["id"])["master_valve_observed"] == "open"
 
-    def test_manual_close_uses_public_master_topic_lock(self, admin_client, app):
+    def test_manual_close_delegates_to_core_and_publishes_inside_its_callback(self, admin_client, app):
         from services import zone_control
 
         group = _group(app)
         server = _server(app)
         _configure_master(app, group["id"], server["id"], observed="open")
         events = []
-        lock_held = False
 
-        class TrackingLock:
-            def __enter__(self):
-                nonlocal lock_held
-                lock_held = True
-                events.append("lock_enter")
-
-            def __exit__(self, *_exc):
-                nonlocal lock_held
-                events.append("lock_exit")
-                lock_held = False
-
-        def lock_for(server_id, topic):
+        def close_core(server_id, topic, mode, publish_command):
             assert server_id == server["id"]
             assert topic == "/master/old"
-            return TrackingLock()
-
-        def cancel(server_id, topic):
-            assert lock_held
-            assert server_id == server["id"]
-            assert topic == "/master/old"
-            events.append("cancel")
+            assert mode == "NC"
+            events.append("core_enter")
+            result = publish_command()
+            events.append("fresh_echo")
+            return result
 
         def publish(_server, topic, value, **_kwargs):
-            assert lock_held
             assert topic == "/master/old"
             assert value == "0"
             events.append("publish")
             return True
 
         with (
-            patch.object(zone_control, "master_topic_lock", side_effect=lock_for),
-            patch.object(zone_control, "cancel_pending_master_close", side_effect=cancel),
+            patch.object(zone_control, "cancel_pending_master_close") as cancel,
             patch("routes.groups_api._publish_mqtt_value", side_effect=publish),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=close_core),
         ):
             response = admin_client.post(f"/api/groups/{group['id']}/master-valve/close")
 
         assert response.status_code == 200
-        assert events == ["lock_enter", "cancel", "publish", "lock_exit"]
+        assert events == ["core_enter", "publish", "fresh_echo"]
+        cancel.assert_not_called()
+
+    def test_publish_ack_without_fresh_echo_returns_503_and_does_not_claim_observed_state(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"], observed="open")
+
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True) as publish,
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=_core_close_without_echo),
+        ):
+            response = admin_client.post(f"/api/groups/{group['id']}/master-valve/close")
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "MASTER_CONFIRMATION_TIMEOUT"
+        publish.assert_called_once()
+        assert _get_group(app, group["id"])["master_valve_observed"] == "open"
+
+    def test_mode_only_rewire_confirms_both_old_and_new_close_values(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _configure_master(app, group["id"], server["id"], observed="closed")
+        confirmations = []
+
+        def close_core(server_id, topic, mode, publish_command):
+            expected_payload = "1" if mode == "NO" else "0"
+            confirmations.append((server_id, topic, expected_payload))
+            return bool(publish_command())
+
+        with (
+            patch("routes.groups_api._publish_mqtt_value", return_value=True),
+            patch("routes.groups_api._close_master_valve_confirmed", side_effect=close_core),
+        ):
+            response = admin_client.put(f"/api/groups/{group['id']}", json={"master_mode": "NO"})
+
+        assert response.status_code == 200
+        assert confirmations == [
+            (server["id"], "/master/old", "0"),
+            (server["id"], "/master/old", "1"),
+        ]
+        assert _get_group(app, group["id"])["master_valve_observed"] is None
 
 
 class TestGroupStopConfirmationSafety:
@@ -507,7 +942,63 @@ class TestGroupStopConfirmationSafety:
 
 
 class TestMqttServerTopologySafety:
-    def test_successful_server_crud_reconfigures_water_and_env_monitors(self, admin_client, app):
+    def test_server_read_models_expose_nonsecret_reference_metadata(self, admin_client, app):
+        group = _group(app)
+        server = app.db.create_mqtt_server(
+            {
+                "name": "Referenced MQTT",
+                "host": "referenced-host",
+                "port": 1883,
+                "username": "operator",
+                "password": "top-secret",
+            }
+        )
+        zone = _zone(app, group["id"], server["id"], topic="")
+
+        listed_response = admin_client.get("/api/mqtt/servers")
+        detail_response = admin_client.get(f"/api/mqtt/servers/{server['id']}")
+
+        assert (listed_response.status_code, detail_response.status_code) == (200, 200)
+        listed = next(
+            item for item in listed_response.get_json()["servers"] if int(item["id"]) == int(server["id"])
+        )
+        detail = detail_response.get_json()["server"]
+        for item in (listed, detail):
+            assert item["is_referenced"] is True
+            assert item["references"] == {"zones": [zone["id"]]}
+            assert item["password"] == "***"
+            assert "top-secret" not in str(item["references"])
+
+    def test_unreferenced_server_read_models_return_false_and_empty_references(self, admin_client, app):
+        server = _server(app)
+
+        listed_response = admin_client.get("/api/mqtt/servers")
+        detail_response = admin_client.get(f"/api/mqtt/servers/{server['id']}")
+
+        listed = next(
+            item for item in listed_response.get_json()["servers"] if int(item["id"]) == int(server["id"])
+        )
+        detail = detail_response.get_json()["server"]
+        for item in (listed, detail):
+            assert item["is_referenced"] is False
+            assert item["references"] == {}
+
+    @pytest.mark.parametrize("path", ["/api/mqtt/servers", "/api/mqtt/servers/{server_id}"])
+    def test_reference_scan_failure_does_not_report_server_as_unreferenced(self, admin_client, app, path):
+        server = _server(app)
+
+        with patch.object(
+            app.db,
+            "get_mqtt_server_references",
+            side_effect=sqlite3.OperationalError("reference scan failed"),
+            create=True,
+        ):
+            response = admin_client.get(path.format(server_id=server["id"]))
+
+        assert response.status_code == 500
+        assert response.get_json()["success"] is False
+
+    def test_server_crud_does_not_rebind_unreferenced_monitors(self, admin_client, app):
         from services.monitors import env_monitor, water_monitor
 
         with (
@@ -524,10 +1015,8 @@ class TestMqttServerTopologySafety:
             deleted = admin_client.delete(f"/api/mqtt/servers/{server_id}")
 
         assert (created.status_code, updated.status_code, deleted.status_code) == (201, 200, 204)
-        assert water.call_count == 3
-        assert env.call_count == 3
-        for call in env.call_args_list:
-            assert call.args == (app.db.get_env_config(),)
+        water.assert_not_called()
+        env.assert_not_called()
 
     def test_referenced_server_cannot_be_reconfigured(self, admin_client, app):
         group = _group(app)
@@ -566,10 +1055,175 @@ class TestMqttServerTopologySafety:
         server = _server(app)
         _zone(app, group["id"], server["id"])
 
-        response = admin_client.put(f"/api/mqtt/servers/{server['id']}", json={"name": "Renamed"})
+        with patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh:
+            response = admin_client.put(f"/api/mqtt/servers/{server['id']}", json={"name": "Renamed"})
 
         assert response.status_code == 200
         assert app.db.get_mqtt_server(server["id"])["name"] == "Renamed"
+        refresh.assert_not_called()
+
+    def test_referenced_server_full_form_with_unchanged_runtime_values_is_allowed(self, admin_client, app):
+        group = _group(app)
+        server = app.db.create_mqtt_server(
+            {
+                "name": "Full form",
+                "host": "same-host",
+                "port": 1883,
+                "username": "operator",
+                "password": "secret",
+                "enabled": True,
+                "tls_enabled": False,
+                "tls_insecure": False,
+            }
+        )
+        _zone(app, group["id"], server["id"])
+
+        payload = {
+            "name": "Full form renamed",
+            "host": server["host"],
+            "port": server["port"],
+            "username": server["username"],
+            "password": "***",
+            "client_id": server["client_id"],
+            "enabled": bool(server["enabled"]),
+            "tls_enabled": bool(server["tls_enabled"]),
+            "tls_ca_path": server["tls_ca_path"],
+            "tls_cert_path": server["tls_cert_path"],
+            "tls_key_path": server["tls_key_path"],
+            "tls_insecure": bool(server["tls_insecure"]),
+            "tls_version": server["tls_version"],
+        }
+        with patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh:
+            response = admin_client.put(f"/api/mqtt/servers/{server['id']}", json=payload)
+
+        assert response.status_code == 200
+        assert app.db.get_mqtt_server(server["id"])["name"] == "Full form renamed"
+        refresh.assert_not_called()
+
+    def test_stale_full_form_never_reverts_concurrent_runtime_rotation(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        zone = _zone(app, group["id"], server["id"])
+
+        def rotate_runtime_after_preflight(_server_id):
+            assert app.db.update_mqtt_server(server["id"], {"host": "concurrent-host"})
+            return {"zones": [zone["id"]]}
+
+        with (
+            patch(
+                "routes.mqtt_api._mqtt_server_references",
+                side_effect=rotate_runtime_after_preflight,
+            ),
+            patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh,
+        ):
+            response = admin_client.put(
+                f"/api/mqtt/servers/{server['id']}",
+                json={"name": "Cosmetic after race", "host": server["host"]},
+            )
+
+        assert response.status_code == 200
+        current = app.db.get_mqtt_server(server["id"])
+        assert current["name"] == "Cosmetic after race"
+        assert current["host"] == "concurrent-host"
+        refresh.assert_not_called()
+
+    def test_referenced_server_reports_only_actual_blocked_runtime_delta(self, admin_client, app):
+        group = _group(app)
+        server = _server(app)
+        _zone(app, group["id"], server["id"])
+
+        response = admin_client.put(
+            f"/api/mqtt/servers/{server['id']}",
+            json={"name": "Cosmetic", "host": "changed", "port": server["port"]},
+        )
+
+        assert response.status_code == 409
+        assert response.get_json()["blocked_fields"] == ["host"]
+
+    def test_enabled_rain_only_reference_stages_runtime_before_accepting_update(self, admin_client, app):
+        server = _server(app)
+        assert app.db.set_rain_config(
+            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
+        )
+
+        with (
+            patch("routes.mqtt_api._reconfigure_rain_monitor", return_value=True) as reconfigure,
+            patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh,
+        ):
+            response = admin_client.put(f"/api/mqtt/servers/{server['id']}", json={"host": "rain-new"})
+
+        assert response.status_code == 200
+        assert app.db.get_mqtt_server(server["id"])["host"] == "rain-new"
+        reconfigure.assert_called_once_with(
+            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
+        )
+        refresh.assert_called_once_with(server["id"])
+
+    def test_failed_rain_stage_cas_rolls_back_server_update(self, admin_client, app):
+        server = _server(app)
+        assert app.db.set_rain_config(
+            {"enabled": True, "topic": "/rain", "type": "NC", "server_id": server["id"]}
+        )
+        before = app.db.get_mqtt_server_storage_snapshot(server["id"])
+
+        with (
+            patch("routes.mqtt_api._reconfigure_rain_monitor", return_value=False),
+            patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh,
+        ):
+            response = admin_client.put(
+                f"/api/mqtt/servers/{server['id']}",
+                json={"host": "must-rollback", "password": "rotated"},
+            )
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "RAIN_MONITOR_RECONFIGURE_FAILED"
+        assert app.db.get_mqtt_server_storage_snapshot(server["id"]) == before
+        refresh.assert_not_called()
+
+    def test_rain_rollback_never_clobbers_concurrent_server_update(self, admin_client, app):
+        server = _server(app)
+        assert app.db.set_rain_config(
+            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
+        )
+
+        def concurrent_update_then_reject(_config):
+            assert app.db.update_mqtt_server(server["id"], {"name": "Concurrent broker rename"})
+            return False
+
+        with (
+            patch(
+                "routes.mqtt_api._reconfigure_rain_monitor",
+                side_effect=concurrent_update_then_reject,
+            ),
+            patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh,
+        ):
+            response = admin_client.put(
+                f"/api/mqtt/servers/{server['id']}",
+                json={"host": "rain-race"},
+            )
+
+        assert response.status_code == 500
+        assert response.get_json()["error_code"] == "RAIN_MONITOR_ROLLBACK_CONFLICT"
+        current = app.db.get_mqtt_server(server["id"])
+        assert current["name"] == "Concurrent broker rename"
+        assert current["host"] == "rain-race"
+        refresh.assert_not_called()
+
+    def test_rain_referenced_cosmetic_rename_never_reconnects(self, admin_client, app):
+        server = _server(app)
+        assert app.db.set_rain_config(
+            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
+        )
+
+        with (
+            patch("routes.mqtt_api._reconfigure_rain_monitor") as reconfigure,
+            patch("routes.mqtt_api._refresh_mqtt_runtime") as refresh,
+        ):
+            response = admin_client.put(f"/api/mqtt/servers/{server['id']}", json={"name": "Rain renamed"})
+
+        assert response.status_code == 200
+        reconfigure.assert_not_called()
+        refresh.assert_not_called()
 
     def test_missing_server_put_and_delete_return_404(self, admin_client):
         assert admin_client.put("/api/mqtt/servers/424242", json={"host": "new"}).status_code == 404

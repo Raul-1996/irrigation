@@ -38,7 +38,7 @@ class TestGroupsAPIDeep:
             ),
             content_type="application/json",
         )
-        assert resp.status_code in (200, 400, 500)
+        assert resp.status_code in (200, 400, 500, 503)
 
     def test_delete_group_with_zones(self, admin_client, app):
         g = app.db.create_group("WithZones")
