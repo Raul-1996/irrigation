@@ -294,15 +294,15 @@ def _normalize_postpone_stop_result(
     *,
     group_id: int,
     expected_zone_ids: list[int],
-    require_proof_fields: bool,
+    source: str,
 ) -> dict:
     """Strictly validate one complete, disjoint physical stop aggregate.
 
-    Scheduler results carry the canonical seven-field proof shape.  The lower
-    level zone-control boundary carries the same physical/retry truth but does
-    not add the two derived proof fields.  In both cases, success must exactly
-    match an empty unresolved bucket and every expected zone must occur once in
-    exactly one physical bucket.
+    Scheduler results carry the canonical seven-field proof shape and may own
+    durable retries.  The lower-level zone-control boundary carries a five-field
+    immediate-stop shape and must never claim retry ownership.  In both cases,
+    success must exactly match an empty unresolved bucket and every expected
+    zone must occur once in exactly one physical bucket.
     """
     invalid = _invalid_postpone_stop_result(group_id, expected_zone_ids)
     if not isinstance(result, dict):
@@ -314,8 +314,10 @@ def _normalize_postpone_stop_result(
         "unresolved",
         "retry_scheduled",
     }
-    if require_proof_fields:
+    if source == "scheduler":
         required_keys |= {"aggregate_valid", "unverified_zone_ids"}
+    elif source != "core":
+        return invalid
     if set(result) != required_keys:
         return invalid
 
@@ -329,10 +331,16 @@ def _normalize_postpone_stop_result(
         or type(retry_scheduled) is not bool
     ):
         return invalid
-
-    if require_proof_fields and result.get("aggregate_valid") is False:
+    if source == "core" and retry_scheduled is not False:
+        # The core boundary owns only the immediate confirmed OFF attempt.
+        # Durable retry ownership exists exclusively in the scheduler layer.
         return invalid
-    if require_proof_fields and (result.get("aggregate_valid") is not True or result.get("unverified_zone_ids") != []):
+
+    if source == "scheduler" and result.get("aggregate_valid") is False:
+        return invalid
+    if source == "scheduler" and (
+        result.get("aggregate_valid") is not True or result.get("unverified_zone_ids") != []
+    ):
         return invalid
 
     stopped = _strict_zone_id_list(result.get("stopped"))
@@ -417,7 +425,7 @@ def _stop_group_for_postpone(group_id: int, group_zones: list[dict]) -> dict:
             result,
             group_id=group_id,
             expected_zone_ids=expected_zone_ids,
-            require_proof_fields=True,
+            source="scheduler",
         )
 
     try:
@@ -479,7 +487,7 @@ def _stop_group_for_postpone(group_id: int, group_zones: list[dict]) -> dict:
         result,
         group_id=group_id,
         expected_zone_ids=expected_zone_ids,
-        require_proof_fields=False,
+        source="core",
     )
     physical_stop_confirmed = normalized["success"] is True
     normalized["physical_stop_confirmed"] = physical_stop_confirmed
