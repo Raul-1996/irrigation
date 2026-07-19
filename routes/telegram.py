@@ -165,14 +165,24 @@ def _do_group_start(group_id: int) -> str:
         return "Ошибка запуска группы"
 
 
-def _zone_has_physical_off(zone: dict) -> bool:
-    """Return true only when OFF is authoritative for this zone channel."""
-    if str(zone.get("state") or "").strip().lower() != "off":
-        return False
+def _zone_off_status(zone: dict, stop_result: bool | None) -> str:
+    """Classify one stop as ``confirmed``, ``pending`` or ``failed``.
+
+    ``observed_state`` is a stored snapshot and may predate this Telegram
+    command.  Therefore an MQTT-backed zone cannot be called confirmed here;
+    only the command-scoped verifier can establish a fresh physical echo.
+    """
+    state = str(zone.get("state") or "").strip().lower()
+    commanded = str(zone.get("commanded_state") or "").strip().lower()
+    if stop_result is False or state != "off" or (commanded and commanded != "off"):
+        return "failed"
     has_mqtt_channel = bool(zone.get("mqtt_server_id") and str(zone.get("topic") or "").strip())
     if not has_mqtt_channel:
-        return True
-    return str(zone.get("observed_state") or "").strip().lower() in ("off", "0", "false")
+        return "confirmed"
+    observed = str(zone.get("observed_state") or "").strip().lower()
+    if observed in ("on", "1", "true"):
+        return "failed"
+    return "pending"
 
 
 def _do_group_stop(group_id: int) -> str:
@@ -201,17 +211,22 @@ def _do_group_stop(group_id: int) -> str:
         # aggregate result.  Re-read the authoritative state before telling an
         # operator that physical OFF succeeded.
         zones = db.get_zones_by_group(int(group_id)) or []
-        unresolved = [
-            int(zone["id"])
+        statuses = {
+            int(zone["id"]): _zone_off_status(zone, stop_results.get(int(zone["id"])))
             for zone in zones
-            if stop_results.get(int(zone["id"])) is False or not _zone_has_physical_off(zone)
-        ]
+        }
+        failed = [zone_id for zone_id, status in statuses.items() if status == "failed"]
+        pending = [zone_id for zone_id, status in statuses.items() if status == "pending"]
+        unresolved = failed + pending
         if not unresolved:
             return "⏹ Полив группы остановлен"
 
         retry_at = datetime.now() + timedelta(seconds=15)
         if scheduler is not None and hasattr(scheduler, "schedule_zone_hard_stop"):
             for zone_id in unresolved:
+                # Scheduler owns the activation-bound force=True callback.  Its
+                # executable contract is pinned by
+                # test_safety_stop_forces_mqtt_off_and_rearms_after_publish_failure.
                 scheduler.schedule_zone_hard_stop(zone_id, retry_at)
         else:
             # Without APScheduler, retain observed-state retry publishes rather
@@ -221,8 +236,15 @@ def _do_group_stop(group_id: int) -> str:
             for zone_id in unresolved:
                 state_verifier.verify_async(zone_id, "off")
 
-        ids = ", ".join(str(zone_id) for zone_id in unresolved)
-        return f"⚠️ Команда остановки отправлена, но OFF не подтверждён для зон: {ids}. Повторная проверка запущена."
+        messages = []
+        if failed:
+            ids = ", ".join(str(zone_id) for zone_id in failed)
+            messages.append(f"⚠️ OFF не подтверждён для зон: {ids}.")
+        if pending:
+            ids = ", ".join(str(zone_id) for zone_id in pending)
+            messages.append(f"⏳ Команда OFF принята для зон: {ids}; ожидается свежее подтверждение реле.")
+        messages.append("Повторная остановка запланирована.")
+        return " ".join(messages)
     except (ImportError, sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         logger.debug("Exception in _do_group_stop: %s", e)
         return "Ошибка остановки группы"

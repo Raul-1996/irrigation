@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import importlib.util
 import logging
 import os
@@ -503,6 +504,7 @@ class AiogramBotRunner:
 
     async def _main(self):
         bot = None
+        polling_task = None
         try:
             token = notifier._ensure_token()
             if not token or Bot is None or Dispatcher is None:
@@ -533,17 +535,41 @@ class AiogramBotRunner:
 
             self._dp.message.register(self._on_message, F.text)
             self._dp.callback_query.register(self._on_callback)
-            polling_coro = self._dp.start_polling(
-                self._bot,
-                allowed_updates=["message", "callback_query"],
+            polling_task = asyncio.create_task(
+                self._dp.start_polling(
+                    self._bot,
+                    allowed_updates=["message", "callback_query"],
+                    handle_signals=False,
+                    close_bot_session=False,
+                )
             )
             if self._stop_requested.is_set():
-                polling_coro.close()
+                polling_task.cancel()
+                await asyncio.gather(polling_task, return_exceptions=True)
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+
+            # Give the real Dispatcher a bounded window to enter its steady
+            # polling wait.  Immediate failures (bad thread setup, startup
+            # observer errors, etc.) must be visible before settings persistence
+            # is accepted by reconfigure_bot_token().
+            done, _pending = await asyncio.wait({polling_task}, timeout=0.05)
+            if polling_task in done:
+                if polling_task.cancelled():
+                    self._signal_startup(False, "polling cancelled during bootstrap")
+                    return
+                error = polling_task.exception()
+                if error is not None:
+                    raise error
+                raise RuntimeError("polling exited during bootstrap")
+            if self._stop_requested.is_set():
+                polling_task.cancel()
+                await asyncio.gather(polling_task, return_exceptions=True)
                 self._signal_startup(False, "stop requested during bootstrap")
                 return
             self._running = True
             self._signal_startup(True)
-            await polling_coro
+            await polling_task
         except Exception as e:  # Bootstrap failures must reach the synchronous caller.
             self._signal_startup(False, str(e))
             logger.error("Aiogram runner failed: %s", e)
@@ -628,7 +654,7 @@ class AiogramBotRunner:
             try:
                 future = asyncio.run_coroutine_threadsafe(dispatcher.stop_polling(), loop)
                 future.result(timeout=min(5.0, timeout))
-            except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
+            except (concurrent.futures.CancelledError, ConnectionError, TimeoutError, OSError, RuntimeError) as e:
                 logger.debug("aiogram stop_polling failed: %s", e)
         if thread is threading.current_thread():
             return False

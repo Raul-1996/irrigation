@@ -126,6 +126,107 @@ def test_aiogram_start_reports_bootstrap_token_failure() -> None:
     assert not runner._thread.is_alive()
 
 
+def test_immediate_polling_failure_is_reported_before_start_returns() -> None:
+    from services import telegram_bot
+
+    release_close = threading.Event()
+
+    class Session:
+        async def close(self) -> None:
+            while not release_close.is_set():
+                await asyncio.sleep(0.005)
+
+    class AuthenticatedBot:
+        def __init__(self, *, token: str):
+            self.token = token
+            self.session = Session()
+
+        async def get_me(self):
+            return {"id": 1}
+
+        async def delete_webhook(self, *, drop_pending_updates: bool):
+            return True
+
+    class Registry:
+        def register(self, *_args, **_kwargs) -> None:
+            return None
+
+    class FailingDispatcher:
+        def __init__(self):
+            self.message = Registry()
+            self.callback_query = Registry()
+
+        async def start_polling(self, *_args, **kwargs) -> None:
+            assert kwargs["handle_signals"] is False
+            raise RuntimeError("polling bootstrap failed")
+
+        async def stop_polling(self) -> None:
+            return None
+
+    runner = telegram_bot.AiogramBotRunner()
+    try:
+        with (
+            patch.object(telegram_bot.notifier, "_ensure_token", return_value="valid-token"),
+            patch.object(telegram_bot, "Bot", AuthenticatedBot),
+            patch.object(telegram_bot, "Dispatcher", FailingDispatcher),
+        ):
+            assert runner.start(timeout=1) is False
+    finally:
+        release_close.set()
+        if runner._thread is not None:
+            runner._thread.join(timeout=1)
+
+
+def test_real_dispatcher_runs_in_background_thread_without_signal_handlers() -> None:
+    """Real aiogram Dispatcher must not call set_wakeup_fd outside main thread."""
+    from services import telegram_bot
+
+    closed = threading.Event()
+
+    class User:
+        username = "irrigation_test_bot"
+        full_name = "Irrigation Test Bot"
+
+    class Session:
+        timeout = None
+
+        async def close(self) -> None:
+            closed.set()
+
+    class AuthenticatedBot:
+        id = 1
+
+        def __init__(self, *, token: str):
+            self.token = token
+            self.session = Session()
+            self._updates = asyncio.Event()
+
+        async def get_me(self):
+            return User()
+
+        async def me(self):
+            return User()
+
+        async def delete_webhook(self, *, drop_pending_updates: bool):
+            return True
+
+        async def __call__(self, *_args, **_kwargs):
+            await self._updates.wait()
+            return []
+
+    runner = telegram_bot.AiogramBotRunner()
+    with (
+        patch.object(telegram_bot.notifier, "_ensure_token", return_value="valid-token"),
+        patch.object(telegram_bot, "Bot", AuthenticatedBot),
+    ):
+        assert runner.start(timeout=2) is True
+        assert runner._thread is not None
+        assert runner._thread.is_alive()
+        assert runner.stop(timeout=2) is True
+
+    assert closed.is_set()
+
+
 def test_stop_during_aiogram_bootstrap_never_enters_polling() -> None:
     from services import telegram_bot
 

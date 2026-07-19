@@ -77,6 +77,31 @@ def test_group_stop_treats_logical_off_with_observed_on_as_unresolved() -> None:
     scheduler.schedule_zone_hard_stop.assert_called_once()
 
 
+def test_group_stop_does_not_treat_stored_observed_off_as_fresh_confirmation() -> None:
+    scheduler = Mock()
+    stale_off = [
+        {
+            "id": 73,
+            "group_id": 7,
+            "state": "off",
+            "commanded_state": "off",
+            "observed_state": "off",
+            "mqtt_server_id": 1,
+            "topic": "relay/73",
+        }
+    ]
+
+    with (
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch.object(telegram.db, "get_zones_by_group", return_value=stale_off),
+    ):
+        result = telegram._do_group_stop(7)
+
+    assert "Команда OFF принята" in result
+    assert "ожидается свежее подтверждение" in result
+    scheduler.schedule_zone_hard_stop.assert_called_once()
+
+
 def test_group_stop_uses_failed_stop_result_even_for_logical_off() -> None:
     no_channel_zone = [{"id": 82, "group_id": 8, "state": "off", "observed_state": None}]
 
