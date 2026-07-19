@@ -1,17 +1,672 @@
 # Финальный инвентарь аудита wb-irrigation
 
-Фаза 1 завершена 2026-07-18: каждая исходная находка получила требуемые независимые роли, все расхождения разрешены оркестратором, пять линз diff-review завершены.
+Исторический реестр Фаз 1–3 сохранён неизменяемым префиксом #1–#152. После полного post-review текущего HEAD добавлены новые и переоткрытые корневые дефекты с отдельными стабильными PR-ID, owner packages и проверяемыми сценариями.
 
-- Всего записей: **152** (138 исходных + 14 новых).
-- `VERIFIED_REAL`: **147**.
-- `VERIFIED_FALSE`: **5**.
+- Всего записей: **216** (152 исторических + 64 post-review решений).
+- `VERIFIED_REAL`: **207**.
+- `VERIFIED_FALSE`: **7**.
+- `INTENTIONAL_LIMITATION`: **2**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Phase 2 disposition: **141 fixed · 6 deferred · 0 pending · 5 not_applicable**.
+- Remediation disposition: **141 fixed · 7 deferred · 59 pending · 9 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
-## Подтверждённые — 147
+## Post-review remediation — 59
+
+### #153 / PR-001 [high] `app.py:142-172,398-425,438-464; run.py:75-82; routes/system_emergency_api.py:88-101` — Неаутентифицированный клиент может управлять физическим поливом
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Без Cookie и CSRF выполнить POST /api/zones/1/start, /api/groups/1/master-valve/open или /api/emergency-resume: production-like probe получает success и достигает hardware control path.
+- **Evidence:** Global auth назначает анониму guest, public allowlist и CSRF exemptions пропускают start/stop зон и групп, master-valve и emergency-resume; native Hypercorn слушает 0.0.0.0, а поддерживаемая установка не ставит nginx Basic Auth.
+- **Owner packages:** `p4-auth-http`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #154 / PR-002 [high] `run.py:28-59,75-78; routes/zones_watering_api.py:238-286; services/sse_hub.py:25,767-779` — Публичные SSE-соединения исчерпывают WSGI executor и блокируют control plane
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Открыть восемь curl -N /api/mqtt/zones-sse и затем вызвать /readyz с двухсекундным timeout: запрос не получает executor thread.
+- **Evidence:** AsyncioWSGIMiddleware исполняет бесконечный WSGI response iterator в default executor. На 4-ядерном WB обычно восемь потоков, а SSE cap равен 20 и не резервирует потоки для ready/control API.
+- **Owner packages:** `p4-auth-http`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #155 / PR-003 [high] `services/zone_control.py:1129-1281; routes/zones_watering_api.py:403-455; routes/groups_api.py:182-242; routes/system_emergency_api.py:73-82; routes/telegram.py:150-170; irrigation_scheduler.py:2186-2239` — Пути stop отбрасывают неуспешный OFF, удаляют страховочные jobs и сообщают успех
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Заставить все OFF publish вернуть False: zone/group/emergency/Telegram stop всё равно возвращают success/«остановлена», а реле остаётся unresolved и будущий safety retry удалён.
+- **Evidence:** stop_all_in_group/emergency callers и HTTP/Telegram adapters игнорируют False от stop_zone или fallback publish, fault исключается из active scan, а cancel_group_jobs удаляет normal/hard-stop jobs независимо от физического результата.
+- **Переоткрывает:** #132.
+- **Owner packages:** `p4-auth-http`, `p4-topology-api`, `p4-telegram`, `p4-scheduler`, `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #156 / PR-004 [high] `routes/zones_crud_api.py:127-152,213-250; db/zones.py:247-283,464-471; services/zone_control.py:1008-1078` — Удаление или перепривязка активной зоны теряет старый relay/master channel
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Запустить зону на broker A/topic old, выполнить PUT topic=new либо DELETE, затем fire всех stop jobs: OFF на A/old не публикуется, старый relay/master остаётся открыт.
+- **Evidence:** PUT/import меняют topic, mqtt_server_id и group_id, а DELETE удаляет строку до подтверждённого OFF. Все поздние stop/watchdog/boot paths перечитывают уже новую либо отсутствующую строку.
+- **Owner packages:** `p4-topology-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #157 / PR-005 [high] `routes/groups_api.py:52-125,171-176; db/groups.py:81-120; services/zone_control.py:934-952` — Изменение или удаление live master-valve topology оставляет старый master открытым
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** При открытом master выполнить PUT use_master_valve=false/topic=new либо DELETE пустой группы: API успешен, OFF по прежнему server/topic отсутствует.
+- **Evidence:** Group PUT/Delete разрешают менять use_master_valve, server, topic и mode либо удалять группу без закрытия наблюдаемого старого actuator; последующий stop использует только новую конфигурацию.
+- **Owner packages:** `p4-topology-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #158 / PR-006 [high] `routes/mqtt_api.py:165-194; db/mqtt.py:113-134; services/zone_control.py:193-196,1061-1065` — PUT/DELETE используемого MQTT-сервера уничтожает или перенаправляет OFF path
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Удалить или изменить broker активной зоны/master: следующий OFF получает server=None либо уходит на новый host. PUT отсутствующего ID возвращает success с server=null.
+- **Evidence:** CRUD не проверяет hardware references/active state и rowcount. Delete оставляет dangling IDs, update меняет endpoint in place, а отсутствующий ID получает ложный 200/204; runtime refresh не возвращает старый OFF channel.
+- **Переоткрывает:** #53.
+- **Owner packages:** `p4-topology-api`, `p4-db-integrity`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #159 / PR-007 [high] `db/migrations.py:37-50,73-81; db/zones.py:196-229,464-471; irrigation_scheduler.py:116-127` — Повторное использование zone ID передаёт replacement-зоне старую программу и историю
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Создать highest-ID зону в enabled-программе, удалить, создать новую с тем же ID и fire программы: включается topic replacement-зоны; get_zone показывает last_watering старого актива.
+- **Evidence:** zones.id — INTEGER PRIMARY KEY без AUTOINCREMENT; delete не удаляет ID из programs.zones и сохраняет zone_runs. Runtime revalidation различает активы только по числу.
+- **Owner packages:** `p4-db-integrity`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #160 / PR-008 [high] `db/migrations.py:468-486,542-552; db/mqtt.py:49-71,128-134` — Повторное использование MQTT server ID молча перенаправляет hardware references
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Broker id=1 привязан к зоне; DELETE и POST нового host дают новому broker id=1, после чего start зоны публикует на новый host.
+- **Evidence:** mqtt_servers.id переиспользуется, DELETE не RESTRICT/CASCADE references зон, master и sensors. Новый server получает прежний ID, и старые ссылки начинают управлять другим host.
+- **Owner packages:** `p4-db-integrity`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #161 / PR-009 [high] `services/mqtt_pub.py:421-467; services/sse_hub.py:300-395; services/observed_state.py:425-439` — Собственная MQTT-команда принимается за независимое физическое echo
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Base PUBACK успешен, physical /on publish запрещён ACL: queued base message всё равно завершает run/снимает stop jobs или подтверждает desired state.
+- **Evidence:** Publisher сначала пишет desired value в base/report topic, permanent hub получает live self-publish и меняет observed/state/jobs до доказательства исполнения physical /on command.
+- **Переоткрывает:** #50.
+- **Owner packages:** `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #162 / PR-010 [high] `services/sse_hub.py:300,332-378` — Неизвестный MQTT payload трактуется как OFF и снимает safety jobs
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Передать payload UNKNOWN или пустую строку для физически ON relay: DB становится off и cancel_zone_jobs вызывается.
+- **Evidence:** Есть только ON allowlist; любое другое значение попадает в OFF branch, завершает zone_run, очищает timing и отменяет stop/hard-stop.
+- **Owner packages:** `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #163 / PR-011 [high] `services/zone_control.py:71-112,115-180,250-272,1285-1339` — Master-valve identity не включает MQTT server ID
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Две группы SID 11/22 с topic /master: emergency публикует один OFF и masters_skipped_dup_topic=1; open одной отменяет close timer другой.
+- **Evidence:** Locks, delayed-close timers, active scans и emergency dedupe keyed только normalized topic; одинаковый /master на разных brokers считается одним actuator.
+- **Owner packages:** `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #164 / PR-012 [high] `services/zone_control.py:435-450,505-673` — Exclusive start делает make-before-break и не блокирует shared-master fault relay
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Заблокировать peer OFF: selected ON уже опубликован. Либо оставить relay группы A fault при закрытом shared master и стартовать B: master снова подаёт воду в A.
+- **Evidence:** Target master/relay получают ON до подтверждённого peer OFF; peer-set ограничен группой, поэтому fault/unconfirmed relay другой группы на том же (server,topic) master не участвует в interlock.
+- **Owner packages:** `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #165 / PR-013 [high] `services/app_init.py:79-129,137-213; services/master_valve.py:47-75; routes/health_api.py:250-320; irrigation_scheduler.py:466-474,2463-2482` — Boot reconciliation игнорирует OFF/recovery failure и объявляет READY
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Все OFF publish=False и complete_boot_recovery=False: initialize_app всё равно вызывает notify_ready, /readyz и metrics показывают healthy/running.
+- **Evidence:** Failed zone/master OFF не меняют итог, _boot_sync_done ставится безусловно, complete_boot_recovery(False) игнорируется; readiness видит scheduler running даже когда он paused.
+- **Переоткрывает:** #38.
+- **Owner packages:** `p4-lifecycle`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #166 / PR-014 [high] `services/shutdown.py:17-42,71-200; irrigation_scheduler.py:513-543; wb-irrigation.service:1-20` — Shutdown не подтверждает OFF, игнорирует quiesce и не соблюдает общий deadline
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Fake MessageInfo возвращает из wait_for_publish при is_published=False: shutdown считает publish подтверждённым. Два клапана дают worst case 50s; late runner может отправить retained ON после final OFF.
+- **Evidence:** Quiesce False игнорируется; последовательные per-message waits превышают TimeoutStopSec=45; wait_for_publish timeout без exception считается success без is_published/rc, после чего DB безусловно пишется off.
+- **Переоткрывает:** #149.
+- **Owner packages:** `p4-lifecycle`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #167 / PR-015 [high] `irrigation_scheduler.py:1206-1274,1311-1369,2275-2282,2489-2513` — load_programs уничтожает восстановленные misfire и interval anchors
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Persist interval anchor 20 июля, restart 21 июля: после load_programs start_date становится 21 июля. Cron next_run_time внутри grace заменяется следующим будущим slot.
+- **Evidence:** Paused scheduler восстанавливает valid SQLAlchemyJobStore jobs, но load_programs cancel/recreate каждого job: eligible cron misfire теряется, interval start_date переякоривается на текущий день.
+- **Owner packages:** `p4-scheduler`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #168 / PR-016 [high] `routes/programs_api.py:27-39,117-160; db/programs.py:54-149; irrigation_scheduler.py:101-127,1206-1274` — Malformed program payload сохраняется до reschedule и оставляет старый cron/опасные zones
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Обновить рабочую программу time=bad или zones='12': API сохраняет значение; старый cron остаётся и может полить актуальные неправильные зоны, scalar extra_times ломает последующую загрузку.
+- **Evidence:** Строгого contract для time/zones/days/extra_times/enabled нет; scalar zones превращается в character IDs, malformed time падает до cancel_program, а invalid JSON может poison startup. PUT успевает commit до scheduler failure.
+- **Переоткрывает:** #127, #152.
+- **Owner packages:** `p4-programs`, `p4-scheduler`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #169 / PR-017 [high] `services/weather/adjustment.py:177-220,273-279` — Hard mismatch отбрасывает более холодный local sensor до freeze gate
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Fresh local -3°C, API +8°C, forecast min +6°C, hard threshold 10°C дают should_skip=False и разрешают полив.
+- **Evidence:** При delta выше hard threshold local reading целиком заменяется API, хотя freeze safety должна использовать минимум локального/forecast значения.
+- **Owner packages:** `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #170 / PR-018 [high] `services/weather/client.py:45-90; services/weather/models.py:105-140` — precipitation_24h считает осадки только с полуночи
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Дождь 10 мм накануне в 22:00 и решение сегодня в 05:00 дают precipitation_24h=0, поэтому rain safety не срабатывает.
+- **Evidence:** Forecast request не запрашивает past_days/past_hours, а parser суммирует доступные hourly samples; до конца суток в payload нет полного rolling 24h окна.
+- **Owner packages:** `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #171 / PR-019 [high] `routes/system_config_api.py:202-217; services/app_init.py:236-239; services/monitors/rain_monitor.py:24-76` — Изменение rain config не перенастраивает живой MQTT monitor
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Включить, сменить topic или отключить rain sensor через API: без restart новый config не действует, а старый subscriber продолжает останавливать/откладывать полив.
+- **Evidence:** POST пишет только БД; monitor запускается при boot, start не заменяет старого клиента. Enable/topic/server/mode не действуют, disable оставляет старую subscription активной.
+- **Owner packages:** `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #172 / PR-020 [high] `services/monitors/rain_monitor.py:150-180; routes/groups_api.py:219-230; db/programs.py:504-533` — Rain stop без provenance удаляет ручную отмену программы
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Оператор отменяет программу после main 06:00; дождь 12:00-13:00; rain stop удаляет cancellation и extra slot 18:00 неожиданно запускается.
+- **Evidence:** _on_rain_stop очищает все cancellations группы за день, не различая записи, созданные дождём и оператором; rain start не владеет этими строками.
+- **Переоткрывает:** #89.
+- **Owner packages:** `p4-weather`, `p4-scheduler`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #173 / PR-021 [high] `app.py:7-25; config.py:8; services/logging_setup.py:389; irrigation_scheduler.py:1311-1369` — Документированные TZ/WB_TZ не управляют runtime triggers
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** На OS UTC с WB_TZ=Asia/Bishkek программа 06:00 получает фактический запуск около 12:00 controller-local.
+- **Evidence:** Logging setup выполняется до load_dotenv, устанавливает process TZ и перезаписывает WB_TZ; Cron/Interval triggers создаются без explicit scheduler timezone.
+- **Owner packages:** `p4-auth-http`, `p4-scheduler`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #174 / PR-022 [high] `update_server.sh:63-90; db/logs.py:175-205` — Оба backup path могут вернуть целый, но никогда не существовавший или устаревший SQLite snapshot
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Между копиями выполнить checkpoint/commits: restore проходит integrity_check, но содержит cross-time state. Инъекция OperationalError в backup API дала success=True backup без закоммиченной WAL-строки.
+- **Evidence:** Updater последовательно копирует live main/WAL/SHM и подавляет ошибки; LogRepository после online-backup failure делает copy2 только main DB без WAL и проверяет лишь размер/integrity.
+- **Owner packages:** `p4-deploy`, `p4-db-integrity`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #175 / PR-023 [high] `update_server.sh:16,104-109; AGENTS.md:5-34` — Updater восстанавливает отсутствующий venv системным Python 3.9
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Удалить/повредить venv и запустить updater: он создаёт Python 3.9 environment, затем restart переводит service в import/boot failure.
+- **Evidence:** PY_BIN default python3 и venv creation не проверяют 3.11; на WB system python=3.9.2, тогда как код импортирует datetime.UTC и использует PEP 604.
+- **Owner packages:** `p4-deploy`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #176 / PR-024 [high] `.github/workflows/deploy.yml:25-31; update_server.sh:1-190` — Deploy workflow обходит supported updater и маскирует failed rollout
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Сломать restart/readyz на target: workflow завершает deploy step зелёным, хотя supported update_server gates не выполнялись.
+- **Evidence:** Workflow использует divergent git/pip path без authoritative backup/rollback и применяет command || echo, поэтому inactive service/failed readyz не делает job красным.
+- **Owner packages:** `p4-deploy`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #177 / PR-025 [high] `services/mqtt_pub.py:137-175; services/observed_state.py:264-276` — MQTT publisher после TLS setup error продолжает plaintext connect
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** tls_set бросает FileNotFoundError при доступном plaintext listener: connect всё равно вызывается, credentials и commands уходят без TLS.
+- **Evidence:** tls_set OSError/ValueError логируется, но execution проваливается в connect; tls_enabled не является fail-closed contract.
+- **Переоткрывает:** #81.
+- **Owner packages:** `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #178 / PR-026 [high] `services/telegram_bot.py:119-133,307-367` — Telegram handler блокирует собственный asyncio loop на десять секунд
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Вызов из same_loop занимает 10.01s, coroutine не выполняется; одно сообщение/управляющий callback получает последовательные timeout и теряет ответы.
+- **Evidence:** _submit_aiogram вызывает run_coroutine_threadsafe на _aiogram_runner._loop и синхронно future.result(10), хотя _on_message/_on_callback уже исполняются на том же loop.
+- **Owner packages:** `p4-telegram`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #179 / PR-027 [high] `static/js/status.js:2132-2151` — Selected-run popup наследует предыдущий режим 200%
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Открыть запуск группы, выбрать 200%, закрыть; затем selected-zones flow с ожидаемыми 15 минутами отправляет 200% и существенно увеличивает полив.
+- **Evidence:** confirmRunSelectedNext не сбрасывает runPopupMode/runPopupPct и не refresh UI; popup state остаётся от предыдущего all/group run.
+- **Owner packages:** `p4-frontend`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #180 / PR-028 [high] `static/js/zones.js:1317-1361,2043-2053; routes/zones_crud_api.py:213-250` — Bulk/CSV duration validation fail-open сохраняет опасные значения
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Bulk/CSV duration 4000, -5 или malformed доходит до import и сохраняется; network failure conflict checker не блокирует mutation, hard-stop строится по неверной длительности.
+- **Evidence:** parseInt принимает junk/out-of-range, conflict-check exception трактуется как ok, import endpoint не применяет обычный range contract и может частично выполнить batch.
+- **Owner packages:** `p4-frontend`, `p4-topology-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #181 / PR-029 [high] `routes/system_status_api.py:531-587; static/js/system_health.js:153-169; static/js/status.js:1122-1125` — /api/status синхронно подключается к каждому MQTT broker на каждом poll
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Настроить два blackhole brokers и открыть несколько вкладок: /api/status latency около 5N секунд, concurrent polls задерживают /readyz/OFF API и быстро растят logs.
+- **Evidence:** Последовательный Paho connect имеет фактический timeout около 5s на broker; несколько polling loops перекрываются, пишут mqtt_warn durable logs и занимают тот же малый HTTP executor.
+- **Owner packages:** `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #182 / PR-030 [medium] `db/migrations.py:250-310; database.py:1-60; services/app_init.py:79-129` — Migration runner проглатывает partial schema failure и позволяет readiness
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Инъецировать failure в середине named migration: facade construction не падает, applied/partial schema расходятся, startup достигает readiness.
+- **Evidence:** Named migration methods ловят sqlite error, могут оставить частичные DDL/data changes и вернуть управление; app продолжает initialize/READY на несовместимой схеме.
+- **Owner packages:** `p4-db-integrity`.
+- **Решение оркестратора:** Решение оркестратора: db/migrations.py разрешено менять узко для identity/referential-integrity и fail-closed migration fixes только вместе с migration regression tests.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #183 / PR-031 [medium] `db/base.py:100-119; db/zones.py:196-241; db/programs.py:54-95` — BUSY retry повторяет метод после уже committed INSERT
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Один _RetryableBusyError на первом post-commit read create_zone/create_program создаёт две строки; обе enabled programs после restart планируются.
+- **Evidence:** Whole-method retry boundary не знает, что commit уже прошёл; BUSY в post-commit get_* повторно выполняет INSERT.
+- **Переоткрывает:** #45.
+- **Owner packages:** `p4-db-integrity`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #184 / PR-032 [medium] `db/migrations.py:73-81,100-106; db/programs.py:54-95,175-182,504-533` — Повторно использованный program ID наследует same-day cancellation
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Cancel highest-ID OLD сегодня/group1, удалить и создать NEW с тем же ID: is_program_run_cancelled_for_group(NEW) возвращает true и новый run молча пропускается.
+- **Evidence:** Program IDs reusable, delete не удаляет program_cancellations, ключ которых содержит только numeric program_id/date/group.
+- **Owner packages:** `p4-db-integrity`, `p4-programs`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #185 / PR-033 [medium] `app.py:264,328-336; services/correlation.py:98-106; tests/api/test_routes_deep.py:49` — Streaming teardown повторно reset-ит уже использованный ContextVar token
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** buffered=False, прочитать первое SSE event и response.close(): стабильно RuntimeError Token has already been used once и PytestUnraisableExceptionWarning.
+- **Evidence:** Token хранится на request и после reset не очищается; stream_with_context выполняет teardown/close повторно, RuntimeError не входит в suppress list.
+- **Owner packages:** `p4-auth-http`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #186 / PR-034 [medium] `services/monitors/env_monitor.py:71-120; routes/system_config_api.py:246-270` — EnvMonitor Paho-v2 disconnect callback очищает не тот client и течёт loops
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Реальный пятиаргументный callback после temp disconnect даёт temp_still_referenced=true и hum_reference_lost; start создаёт новые clients без loop_stop старого.
+- **Evidence:** VERSION2 callback принимает пятый Paho argument вместо captured sensor type: temp disconnect оставляет temp stale и очищает hum handle; restart не может остановить потерянный auto-reconnect client.
+- **Owner packages:** `p4-monitors`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #187 / PR-035 [medium] `services/monitors/env_monitor.py:71-120; services/monitors/rain_monitor.py:24-76; services/monitors/water_monitor.py:46-74; routes/groups_api.py:52-125; routes/mqtt_api.py:118-194` — Env/water/rain MQTT monitors игнорируют TLS и live server reconfiguration
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** На TLS-only broker relay commands работают, а rain/env/water остаются offline. Смена/delete broker или water topic оставляет старого subscriber влияющим до restart.
+- **Evidence:** Sensor clients делают plaintext CONNECT при tls_enabled и сохраняют старые broker/topic clients после MQTT/group CRUD; publisher/SSE refresh их не охватывает.
+- **Owner packages:** `p4-monitors`, `p4-weather`, `p4-topology-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #188 / PR-036 [medium] `irrigation_scheduler.py:191-224,1528-1617,1661-1668,1775-1811,2186-2273; services/zone_control.py:856-864` — Stale safety caps и отменённый pending group_seq переживают владельца activation
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Ранний manual stop, поздний новый run около старого cap deadline — cap останавливает новый activation. Cancel group_seq до callable start — следующий group start блокируется до restart.
+- **Evidence:** Zone/master cap jobs не activation-bound и не снимаются при раннем успешном завершении; group_seq claim передаётся job до start, но cancel pending job не освобождает event.
+- **Owner packages:** `p4-scheduler`, `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #189 / PR-037 [medium] `db/programs.py:234-253,300-417; routes/programs_api.py:60-90,117-160` — Program conflict checker не моделирует реальные schedule/calendar/weather races
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Sun 23:50x30 и Mon 00:05 возвращают []; even/odd с пустыми days ошибаются; candidate 06:30x20 при 200% vs 07:00 пропускается; concurrent identical POST создаёт оба rows.
+- **Evidence:** Checker не знает interval/even-odd, adjacent-day overlap, candidate main-vs-own-extra и candidate weather expansion; POST check-then-insert не транзакционен, два concurrent creates проходят одинаковый snapshot.
+- **Переоткрывает:** #100, #129.
+- **Owner packages:** `p4-programs`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #190 / PR-038 [medium] `services/weather/models.py:65-140,171-205; services/weather/service.py:113-160; services/weather/adjustment.py:267,444-466` — Weather cache/date/toggle semantics дают недостоверный коэффициент
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Старый payload 1 июля запрошен 5 июля и читается как current; cache через midnight смешивает daily dates; rain==threshold даёт should_skip false при coefficient 0; humidity toggle off даёт 50%.
+- **Evidence:** Unbounded stale fallback при отсутствии current hour выбирает idx=0; daily index 0 становится yesterday при past data/midnight; exact rain threshold расходится между should_skip и coefficient; factor_humidity=false всё равно применяет multiplier.
+- **Owner packages:** `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #191 / PR-039 [medium] `routes/weather_api.py:180-225,280-315; routes/system_config_api.py:202-217; db/settings.py:27-38,92-104` — Weather/location/rain settings частично коммитятся до полной валидации
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** weather enabled=true + rain_threshold_mm=bad оставляет enabled; valid latitude + invalid longitude сохраняет latitude; rain server_id=bad сохраняет enabled/topic/type.
+- **Evidence:** Multi-key setters commit отдельно; conversion/range/write error позднего поля возвращает 500/400 после сохранения ранних enabled/topic/latitude values.
+- **Owner packages:** `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #192 / PR-040 [medium] `static/js/status.js:145-233; static/js/zones.js:38-65,1201-1238,1563-1611; static/js/history.js:182-197` — Frontend применяет stale polling/SSE responses поверх свежего состояния
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Старый zones snapshot off ждёт медленный env, SSE сообщает on/emergency, затем Promise.all commit возвращает UI в off; late history group A заменяет уже выбранную B.
+- **Evidence:** Несколько independent intervals не имеют generation/AbortController; loadData и mutation responses обходят SSE version guard, один feed success очищает shared connectionError другого.
+- **Owner packages:** `p4-frontend`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #193 / PR-041 [medium] `templates/programs.html:27-37,125-133,208-218; routes/programs_api.py:326-364; irrigation_scheduler.py:101-127` — Programs UI/ручной Run сообщают отсутствие или успех вопреки runtime
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Во время реального полива открыть Execution — «Нет активного полива». Disable program и POST /run — success message без _run_program_threaded и без zone start.
+- **Evidence:** Execution tab статичен и никогда не читает authoritative active groups; Run доступен disabled program, endpoint возвращает 200/thread, но job_run_program сразу отменяет и выходит.
+- **Owner packages:** `p4-frontend`, `p4-programs`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #194 / PR-042 [medium] `templates/settings.html:253-266; routes/system_config_api.py:88-104; routes/auth.py:57-66` — Password confirmation игнорируется, а крайние пробелы создают admin lockout
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Ввести разные confirmation либо сменить пароль на ' abcdefgh ': save success; login тем же вводом strip-ит его и возвращает 401.
+- **Evidence:** new_password2 не читается; backend хеширует exact string, login всегда strip. UI может сохранить ошибочный либо whitespace-padded password, которым затем нельзя войти.
+- **Owner packages:** `p4-frontend`, `p4-auth-http`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #195 / PR-043 [medium] `update_server.sh:63-89,142-155; db/settings.py:41-60; services/logging_setup.py:345-362; app.py:370-376; run.py:75-82` — Deploy/runtime permissions и cookie transport раскрывают ключи и bootstrap access
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** При umask 022 unprivileged local user читает repo_snapshot/.env/app.log, получает signing/decryption/bootstrap secrets; SESSION_COOKIE_SECURE=1 оставляет app.config False.
+- **Evidence:** Backup tar и .env становятся 0644/0755 и включают secret files; initial admin password пишется в app.log 0644; SESSION_COOKIE_SECURE env не применяется из-за prepopulated Flask key, native transport остаётся HTTP.
+- **Owner packages:** `p4-deploy`, `p4-auth-http`, `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #196 / PR-044 [medium] `app.py:438-464; routes/audit_api.py:113-190; routes/system_status_api.py:176-240,682-760` — Sensitive logs/audit/scheduler GET endpoints доступны анонимно
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Без session cookie GET /api/scheduler/jobs, /api/audit и /api/logs возвращают production records вместо 401/403.
+- **Evidence:** Global policy пропускает все GET без role check; scheduler jobs/status, audit и logs содержат timing, topics, failures и operational metadata.
+- **Owner packages:** `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #197 / PR-045 [medium] `static/js/status.js:182-205,1122-1125; routes/zones_crud_api.py:290-296; services/audit.py:241-275,338-354` — Frequent next-watering bulk poll не bounded и пишет durable audit каждые пять секунд
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Открыть dashboard на минуту: COUNT audit action zones_next_watering_bulk растёт примерно на 12; payload с повторёнными/огромным числом IDs умножает расчёты.
+- **Evidence:** Read-only POST проходит mutation audit: одна вкладка создаёт 17,280 INSERT+COMMIT/сутки. Endpoint принимает unbounded/duplicate IDs и poll использует mutation rate bucket.
+- **Owner packages:** `p4-topology-api`, `p4-performance`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #198 / PR-046 [medium] `db/zones.py:100-137,501-506,845-911; irrigation_scheduler.py:2186-2244; services/zone_control.py:793-810` — Zone snapshots сканируют всю history, а reschedule открывает сотни SQLite connections
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** 1M runs: 20 snapshots около 5.7s. На 24 зонах один reschedule открыл 351 connection, start path около 702 до MQTT ON.
+- **Evidence:** get_zones/get_zones_by_group глобально GROUP BY zone_runs без подходящего latest-ok index; reschedule_group_to_next_program делает quadratic nested repository calls и вызывается дважды на manual start.
+- **Owner packages:** `p4-db-integrity`, `p4-scheduler`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #199 / PR-047 [medium] `services/app_init.py:151-159; services/history_calc.py:101-214; routes/zones_history_api.py:77,242; static/js/history.js:341-444` — History смешивает timestamp/group/confirmation/calendar domains
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Asia/Bishkek reboot даёт end раньше start; перенести зону между группами — старая history переезжает; run около midnight отображается в разных датах; будущий 23:00 slot в 09:00 уже показан как экономия.
+- **Evidence:** Boot пишет UTC в local-naive zone_runs; unconfirmed aborted считается water; even_odd NULL трактуется opposite scheduler; future slots уже savings; group report использует current zone group; browser/controller dates расходятся.
+- **Переоткрывает:** #38, #93, #94.
+- **Owner packages:** `p4-history`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #200 / PR-048 [medium] `static/js/zones.js:638-842,1317-1383,1926-2053; templates/zones.html:96-120` — Frontend bulk/CSV/water/null-ID contracts допускают потерю или подмену конфигурации
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** id=12x обновляет zone12, =WEBSERVICE экспортируется формулой, bulk delete partial error всё равно выглядит success, изменение water digits исчезает после reload, unrelated group edit превращает null broker в #1.
+- **Evidence:** Bulk delete не подтверждает scope/результаты; CSV parseInt принимает aliases и export допускает formulas; water base digits никогда не сохраняются; null sensor/master broker IDs рендерятся первым broker и автосохраняются.
+- **Owner packages:** `p4-frontend`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #201 / PR-049 [medium] `templates/mqtt.html:262-288,311-321,340-440; routes/mqtt_api.py:383-421` — MQTT topic browser допускает prototype pollution и unbounded memory/payload growth
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Topic /devices/__proto__ изменяет Object.prototype; 20,001 /devices/* topics остаются все, один rebuild создаёт около 42k DOM elements и рост продолжается.
+- **Evidence:** Broker segments пишутся в ordinary object (__proto__/constructor); 20k prune сохраняет все normal /devices keys, payload bytes не ограничены, state не очищается, весь DOM пересобирается каждые 300ms.
+- **Owner packages:** `p4-frontend`, `p4-topology-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #202 / PR-050 [medium] `routes/system_config_api.py:119-174; templates/map.html:68-107; static/sw.js:65-71` — Map page и service worker неограниченно размножают media/cache entries
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** 75 maps создают 75 новых cache keys на reload; десять reload добавляют примерно 216MB CacheStorage до quota eviction.
+- **Evidence:** Все timestamp map files выдаются без retention/pagination; UI добавляет Date.now query к каждому image, SW cache-first хранит каждый full URL как отдельную WebP copy.
+- **Owner packages:** `p4-frontend`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #203 / PR-051 [medium] `services/telegram_bot.py:101-133,307-362,576-603; routes/settings.py:56-78; db/telegram.py:220-250` — Telegram subscriptions/token/webhook runtime contracts неработоспособны или небезопасны
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Команды подписки показывают menu без записи; token change оставляет OLD bot; set_webhook=true даёт 500 после commit; legacy chat получает report после смены admin.
+- **Evidence:** /subscribe и /unsubscribe расположены после unconditional return; token cache/poller не reconfigure; set_webhook вызывает отсутствующий method после DB write; due query не revalidates authorization/current admin.
+- **Owner packages:** `p4-telegram`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #204 / PR-052 [medium] `.github/workflows/ci.yml:30; tests/api/test_auth_api.py:47; tests/unit/test_check_conflicts_v2.py:136-340; tests/api/test_routes_deep.py:49; tests/e2e/test_live_controller.py:29` — CI и ключевые auth/weather/SSE/E2E тесты имеют false-green coverage
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Удаление viewer guard/extended conflict behavior остаётся green; strict PytestUnraisableExceptionWarning ломает SSE tests; недоступный opt-in target даёт skipped/green run.
+- **Evidence:** CI исключает 77 integration + 69 UI; viewer test принимает 200/401/403 при TESTING bypass; weather asserts условны/xfail; SSE close warning не failure; explicit E2E opt-in connection failure превращается в skip/all([]).
+- **Owner packages:** `p4-deploy`, `p4-test-quality`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #205 / PR-053 [medium] `routes/health_api.py:250-320,415-432; services/app_init.py:115-125; services/systemd_notify.py:1-120` — Health/metrics классифицируют paused/fault/wedged service как healthy
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Wrapper с тремя jobs даёт scheduler_jobs_total 0/running 0; одна fault zone даёт off=1; заблокировать HTTP executor — independent heartbeat продолжает уведомлять systemd.
+- **Evidence:** Scheduler metrics читают nonexistent wrapper attributes и остаются zero; все non-on states считаются off; heartbeat независим от HTTP/main plane и продолжает WATCHDOG=1 при wedge; readiness принимает paused scheduler/частичный broker health.
+- **Owner packages:** `p4-lifecycle`, `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #206 / PR-054 [medium] `routes/mqtt_api.py:165-194,200-365; db/mqtt.py:113-134` — MQTT diagnostics и missing-row CRUD возвращают ложный success
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Broker принимает TCP, но отказывает CONNACK: status/probe сообщает доступность. PUT несуществующего id возвращает success true, DELETE — 204.
+- **Evidence:** Probe/status могут считать TCP connect достаточным без CONNACK/auth outcome; repository update/delete не проверяют rowcount, поэтому absent PUT даёт 200 server=null, DELETE 204 и runtime refresh.
+- **Owner packages:** `p4-topology-api`, `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #207 / PR-055 [medium] `templates/settings.html:397-409; app.py:343-349` — IP geolocation всегда блокируется CSP, а fetch timeout option не существует
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Нажать «По IP» в standards browser: CSP блокирует request/Failed to fetch и координаты не заполняются; при relaxed CSP зависший fetch не abort-ится.
+- **Evidence:** connect-src разрешает только self, но button fetch-ит https://ipapi.co/json; {timeout:5000} не является Fetch API option и не прерывает request.
+- **Owner packages:** `p4-frontend`, `p4-auth-http`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #208 / PR-056 [medium] `routes/programs_api.py:27; templates/programs.html:169-228; routes/zones_crud_api.py:82; static/js/status.js:405-595,1337-1382; services/weather/models.py:118-174` — Program/postpone/weather strings достигают innerHTML как stored/cached XSS
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Сохранить <img onerror=...> в program.time/postpone_until либо вернуть его из configured weather relay: открытие programs/status исполняет payload в app origin.
+- **Evidence:** Malformed program.time/color и postpone_until сохраняются verbatim; relay weather sunrise/sunset/hourly.time проходят cache/API; sinks используют innerHTML, CSP допускает inline handlers.
+- **Owner packages:** `p4-frontend`, `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #209 / PR-057 [low] `db/migrations.py:1095-1160; db/zones.py:100-137` — Первый uptime после zones-table rebuild работает без idx_zones_group
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Применить rebuild migration на DB и до restart проверить PRAGMA index_list(zones)/EXPLAIN get_zones_by_group: idx отсутствует и query scans zones.
+- **Evidence:** Rebuild migration не восстанавливает idx_zones_group; индекс появляется только при следующем init path/restart, а hot group lookups первого uptime делают table scans.
+- **Owner packages:** `p4-db-integrity`.
+- **Решение оркестратора:** Узкая правка db/migrations.py разрешена только вместе с migration regression test.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #210 / PR-058 [medium] `services/reports.py:7-27; db/logs.py:122-159` — Reports today и yesterday используют одинаковое rolling 24h окно
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Запросить today и yesterday с данными по обе стороны controller-local midnight: repository получает args [1,1] и отчёты содержат идентичные rows.
+- **Evidence:** Правильный calendar range helper не используется; оба периода вызывают get_water_statistics(days=1), то есть один и тот же rolling UTC interval с разными labels.
+- **Owner packages:** `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #211 / PR-059 [medium] `routes/system_status_api.py:720-790; static/js/status.js:1200-1320` — Daily water «today» строится по last snapshots, а не календарным событиям дня
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Оставить последний water snapshot вчера и открыть dashboard сегодня без новых pulses: карточка today показывает старое потребление вместо нуля/нет данных.
+- **Evidence:** Endpoint/widget используют последние доступные snapshots/rolling values как сегодняшнюю величину, не ограничивая их controller-local day; stale предыдущее значение маркируется today.
+- **Owner packages:** `p4-frontend`, `p4-status-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+## Intentional limitations — 2
+
+### #212 / PR-060 [low] `services/weather/adjustment.py:550-563; irrigation_scheduler.py:774-784; docs/handoff/README.md:136-139` — H2 water-balance остаётся намеренным shadow-mode
+
+- **Статус:** `INTENTIONAL_LIMITATION`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Fresh H2=150% и H1=70% оставляют scheduler duration на H1. Это ожидаемая зафиксированная семантика, не bug.
+- **Evidence:** Production scheduler использует H1; H2 рассчитывается/показывается, но по objective намеренно не подключается к physical watering до отдельного product decision и доказанного hard-safety composition.
+- **Owner packages:** `orchestrator-decision`.
+- **Disposition Фаз 2–3:** `not_applicable`.
+- **Причина disposition:** H2 намеренно остаётся shadow-mode; подключение запрещено текущим objective и требует отдельного product/safety решения.
+- **Пакет:** `orchestrator-decision`.
+
+### #214 / IL-001 [low] `AGENTS.md:38-47; docker/` — Docker остаётся только локальным development target
+
+- **Статус:** `INTENTIONAL_LIMITATION`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Никакие production deploy/health выводы не должны строиться по docker-compose; отсутствие Docker parity не является дефектом WB rollout.
+- **Evidence:** Project contract явно называет native WB systemd единственным production target; Docker assets сохранены для desktop development.
+- **Disposition Фаз 2–3:** `not_applicable`.
+- **Причина disposition:** Docker production support не входит в продуктовый контракт.
+- **Пакет:** `orchestrator-decision`.
+
+## Post-review rejected — 2
+
+### #215 / RD-001 [low] `db/programs.py:354-366; irrigation_scheduler.py:831-875,956-1020` — Total-duration conflict false-positive отклонён
+
+- **Статус:** `VERIFIED_FALSE`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Проследить _run_program_threaded: все зоны выполняются последовательно, claims живут до завершения invocation; отдельного параллельного group schedule нет.
+- **Evidence:** Кандидат утверждал, что checker ошибочно суммирует parallel groups, но runtime serializes all zones и preclaims каждую group на всё execution; total sequential duration соответствует admission semantics.
+- **Disposition Фаз 2–3:** `not_applicable`.
+- **Причина disposition:** Фактический runtime подтверждает последовательную total-duration модель; заявленный false positive отсутствует.
+- **Пакет:** `post-review-verification`.
+
+### #216 / RD-002 [low] `docs/archive/; AGENTS.md:38-47; install_wb.sh; update_server.sh` — Legacy runbook не является автоматическим production path
+
+- **Статус:** `VERIFIED_FALSE`.
+- **Происхождение:** `current_head_post_review`.
+- **Верификация:** Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.
+- **Репродукция/сценарий:** Read-only caller/deploy review не нашёл invocation архивного runbook из CI, installer, updater или unit.
+- **Evidence:** Кандидаты из архивных Docker/legacy документов не достигаются поддерживаемым native WB installer/updater; docs/archive явно исторический слой, а authoritative scripts определены project contract.
+- **Disposition Фаз 2–3:** `not_applicable`.
+- **Причина disposition:** Архивный текст не является исполняемым либо поддерживаемым deploy path; отдельный runtime fix не требуется.
+- **Пакет:** `post-review-verification`.
+
+## Исторические подтверждённые — 147
 
 ### #1 [medium] `services/sse_hub.py:422` — reload_hub: окно гонки со встречным ensure_hub_started даёт двойную обработку MQTT-сообщений
 
@@ -1799,7 +2454,7 @@
 - **Fix commit:** `8c51a0f10e6b2b4166c1bac632ad43eb980d34c6`.
 - **Regression tests:** `tests/unit/test_phase2_next_watering.py::test_malformed_main_time_is_not_invented_as_midnight`, `tests/unit/test_phase2_next_watering.py::test_malformed_main_does_not_hide_valid_extra_time`.
 
-## Отклонённые — 5
+## Исторические отклонённые — 5
 
 ### #16 [low] `routes/system_status_api.py:743` — /api/water: суточные корзины строятся по UTC-дате timestamp, а ось дат — по локальному времени контроллера
 

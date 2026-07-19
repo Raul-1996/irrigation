@@ -4706,5 +4706,1968 @@
         "tests/unit/test_phase2_next_watering.py::test_malformed_main_does_not_hide_valid_extra_time"
       ]
     }
+  },
+  {
+    "post_review_id": "PR-001",
+    "title": "Неаутентифицированный клиент может управлять физическим поливом",
+    "file": "app.py",
+    "line": 403,
+    "severity": "high",
+    "current_location": "app.py:142-172,398-425,438-464; run.py:75-82; routes/system_emergency_api.py:88-101",
+    "evidence": "Global auth назначает анониму guest, public allowlist и CSRF exemptions пропускают start/stop зон и групп, master-valve и emergency-resume; native Hypercorn слушает 0.0.0.0, а поддерживаемая установка не ставит nginx Basic Auth.",
+    "reproduction": "Без Cookie и CSRF выполнить POST /api/zones/1/start, /api/groups/1/master-valve/open или /api/emergency-resume: production-like probe получает success и достигает hardware control path.",
+    "owner_packages": [
+      "p4-auth-http"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Без Cookie и CSRF выполнить POST /api/zones/1/start, /api/groups/1/master-valve/open или /api/emergency-resume: production-like probe получает success и достигает hardware control path.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-002",
+    "title": "Публичные SSE-соединения исчерпывают WSGI executor и блокируют control plane",
+    "file": "run.py",
+    "line": 28,
+    "severity": "high",
+    "current_location": "run.py:28-59,75-78; routes/zones_watering_api.py:238-286; services/sse_hub.py:25,767-779",
+    "evidence": "AsyncioWSGIMiddleware исполняет бесконечный WSGI response iterator в default executor. На 4-ядерном WB обычно восемь потоков, а SSE cap равен 20 и не резервирует потоки для ready/control API.",
+    "reproduction": "Открыть восемь curl -N /api/mqtt/zones-sse и затем вызвать /readyz с двухсекундным timeout: запрос не получает executor thread.",
+    "owner_packages": [
+      "p4-auth-http"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Открыть восемь curl -N /api/mqtt/zones-sse и затем вызвать /readyz с двухсекундным timeout: запрос не получает executor thread.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-003",
+    "title": "Пути stop отбрасывают неуспешный OFF, удаляют страховочные jobs и сообщают успех",
+    "file": "services/zone_control.py",
+    "line": 1129,
+    "severity": "high",
+    "current_location": "services/zone_control.py:1129-1281; routes/zones_watering_api.py:403-455; routes/groups_api.py:182-242; routes/system_emergency_api.py:73-82; routes/telegram.py:150-170; irrigation_scheduler.py:2186-2239",
+    "evidence": "stop_all_in_group/emergency callers и HTTP/Telegram adapters игнорируют False от stop_zone или fallback publish, fault исключается из active scan, а cancel_group_jobs удаляет normal/hard-stop jobs независимо от физического результата.",
+    "reproduction": "Заставить все OFF publish вернуть False: zone/group/emergency/Telegram stop всё равно возвращают success/«остановлена», а реле остаётся unresolved и будущий safety retry удалён.",
+    "owner_packages": [
+      "p4-auth-http",
+      "p4-topology-api",
+      "p4-telegram",
+      "p4-scheduler",
+      "p4-mqtt-core"
+    ],
+    "reopens": [
+      132
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Заставить все OFF publish вернуть False: zone/group/emergency/Telegram stop всё равно возвращают success/«остановлена», а реле остаётся unresolved и будущий safety retry удалён.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-004",
+    "title": "Удаление или перепривязка активной зоны теряет старый relay/master channel",
+    "file": "routes/zones_crud_api.py",
+    "line": 127,
+    "severity": "high",
+    "current_location": "routes/zones_crud_api.py:127-152,213-250; db/zones.py:247-283,464-471; services/zone_control.py:1008-1078",
+    "evidence": "PUT/import меняют topic, mqtt_server_id и group_id, а DELETE удаляет строку до подтверждённого OFF. Все поздние stop/watchdog/boot paths перечитывают уже новую либо отсутствующую строку.",
+    "reproduction": "Запустить зону на broker A/topic old, выполнить PUT topic=new либо DELETE, затем fire всех stop jobs: OFF на A/old не публикуется, старый relay/master остаётся открыт.",
+    "owner_packages": [
+      "p4-topology-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Запустить зону на broker A/topic old, выполнить PUT topic=new либо DELETE, затем fire всех stop jobs: OFF на A/old не публикуется, старый relay/master остаётся открыт.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-005",
+    "title": "Изменение или удаление live master-valve topology оставляет старый master открытым",
+    "file": "routes/groups_api.py",
+    "line": 52,
+    "severity": "high",
+    "current_location": "routes/groups_api.py:52-125,171-176; db/groups.py:81-120; services/zone_control.py:934-952",
+    "evidence": "Group PUT/Delete разрешают менять use_master_valve, server, topic и mode либо удалять группу без закрытия наблюдаемого старого actuator; последующий stop использует только новую конфигурацию.",
+    "reproduction": "При открытом master выполнить PUT use_master_valve=false/topic=new либо DELETE пустой группы: API успешен, OFF по прежнему server/topic отсутствует.",
+    "owner_packages": [
+      "p4-topology-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "При открытом master выполнить PUT use_master_valve=false/topic=new либо DELETE пустой группы: API успешен, OFF по прежнему server/topic отсутствует.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-006",
+    "title": "PUT/DELETE используемого MQTT-сервера уничтожает или перенаправляет OFF path",
+    "file": "routes/mqtt_api.py",
+    "line": 165,
+    "severity": "high",
+    "current_location": "routes/mqtt_api.py:165-194; db/mqtt.py:113-134; services/zone_control.py:193-196,1061-1065",
+    "evidence": "CRUD не проверяет hardware references/active state и rowcount. Delete оставляет dangling IDs, update меняет endpoint in place, а отсутствующий ID получает ложный 200/204; runtime refresh не возвращает старый OFF channel.",
+    "reproduction": "Удалить или изменить broker активной зоны/master: следующий OFF получает server=None либо уходит на новый host. PUT отсутствующего ID возвращает success с server=null.",
+    "owner_packages": [
+      "p4-topology-api",
+      "p4-db-integrity"
+    ],
+    "reopens": [
+      53
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Удалить или изменить broker активной зоны/master: следующий OFF получает server=None либо уходит на новый host. PUT отсутствующего ID возвращает success с server=null.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-007",
+    "title": "Повторное использование zone ID передаёт replacement-зоне старую программу и историю",
+    "file": "db/migrations.py",
+    "line": 37,
+    "severity": "high",
+    "current_location": "db/migrations.py:37-50,73-81; db/zones.py:196-229,464-471; irrigation_scheduler.py:116-127",
+    "evidence": "zones.id — INTEGER PRIMARY KEY без AUTOINCREMENT; delete не удаляет ID из programs.zones и сохраняет zone_runs. Runtime revalidation различает активы только по числу.",
+    "reproduction": "Создать highest-ID зону в enabled-программе, удалить, создать новую с тем же ID и fire программы: включается topic replacement-зоны; get_zone показывает last_watering старого актива.",
+    "owner_packages": [
+      "p4-db-integrity"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Создать highest-ID зону в enabled-программе, удалить, создать новую с тем же ID и fire программы: включается topic replacement-зоны; get_zone показывает last_watering старого актива.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-008",
+    "title": "Повторное использование MQTT server ID молча перенаправляет hardware references",
+    "file": "db/migrations.py",
+    "line": 468,
+    "severity": "high",
+    "current_location": "db/migrations.py:468-486,542-552; db/mqtt.py:49-71,128-134",
+    "evidence": "mqtt_servers.id переиспользуется, DELETE не RESTRICT/CASCADE references зон, master и sensors. Новый server получает прежний ID, и старые ссылки начинают управлять другим host.",
+    "reproduction": "Broker id=1 привязан к зоне; DELETE и POST нового host дают новому broker id=1, после чего start зоны публикует на новый host.",
+    "owner_packages": [
+      "p4-db-integrity"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Broker id=1 привязан к зоне; DELETE и POST нового host дают новому broker id=1, после чего start зоны публикует на новый host.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-009",
+    "title": "Собственная MQTT-команда принимается за независимое физическое echo",
+    "file": "services/mqtt_pub.py",
+    "line": 421,
+    "severity": "high",
+    "current_location": "services/mqtt_pub.py:421-467; services/sse_hub.py:300-395; services/observed_state.py:425-439",
+    "evidence": "Publisher сначала пишет desired value в base/report topic, permanent hub получает live self-publish и меняет observed/state/jobs до доказательства исполнения physical /on command.",
+    "reproduction": "Base PUBACK успешен, physical /on publish запрещён ACL: queued base message всё равно завершает run/снимает stop jobs или подтверждает desired state.",
+    "owner_packages": [
+      "p4-mqtt-core"
+    ],
+    "reopens": [
+      50
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Base PUBACK успешен, physical /on publish запрещён ACL: queued base message всё равно завершает run/снимает stop jobs или подтверждает desired state.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-010",
+    "title": "Неизвестный MQTT payload трактуется как OFF и снимает safety jobs",
+    "file": "services/sse_hub.py",
+    "line": 300,
+    "severity": "high",
+    "current_location": "services/sse_hub.py:300,332-378",
+    "evidence": "Есть только ON allowlist; любое другое значение попадает в OFF branch, завершает zone_run, очищает timing и отменяет stop/hard-stop.",
+    "reproduction": "Передать payload UNKNOWN или пустую строку для физически ON relay: DB становится off и cancel_zone_jobs вызывается.",
+    "owner_packages": [
+      "p4-mqtt-core"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Передать payload UNKNOWN или пустую строку для физически ON relay: DB становится off и cancel_zone_jobs вызывается.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-011",
+    "title": "Master-valve identity не включает MQTT server ID",
+    "file": "services/zone_control.py",
+    "line": 71,
+    "severity": "high",
+    "current_location": "services/zone_control.py:71-112,115-180,250-272,1285-1339",
+    "evidence": "Locks, delayed-close timers, active scans и emergency dedupe keyed только normalized topic; одинаковый /master на разных brokers считается одним actuator.",
+    "reproduction": "Две группы SID 11/22 с topic /master: emergency публикует один OFF и masters_skipped_dup_topic=1; open одной отменяет close timer другой.",
+    "owner_packages": [
+      "p4-mqtt-core"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Две группы SID 11/22 с topic /master: emergency публикует один OFF и masters_skipped_dup_topic=1; open одной отменяет close timer другой.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-012",
+    "title": "Exclusive start делает make-before-break и не блокирует shared-master fault relay",
+    "file": "services/zone_control.py",
+    "line": 435,
+    "severity": "high",
+    "current_location": "services/zone_control.py:435-450,505-673",
+    "evidence": "Target master/relay получают ON до подтверждённого peer OFF; peer-set ограничен группой, поэтому fault/unconfirmed relay другой группы на том же (server,topic) master не участвует в interlock.",
+    "reproduction": "Заблокировать peer OFF: selected ON уже опубликован. Либо оставить relay группы A fault при закрытом shared master и стартовать B: master снова подаёт воду в A.",
+    "owner_packages": [
+      "p4-mqtt-core"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Заблокировать peer OFF: selected ON уже опубликован. Либо оставить relay группы A fault при закрытом shared master и стартовать B: master снова подаёт воду в A.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-013",
+    "title": "Boot reconciliation игнорирует OFF/recovery failure и объявляет READY",
+    "file": "services/app_init.py",
+    "line": 79,
+    "severity": "high",
+    "current_location": "services/app_init.py:79-129,137-213; services/master_valve.py:47-75; routes/health_api.py:250-320; irrigation_scheduler.py:466-474,2463-2482",
+    "evidence": "Failed zone/master OFF не меняют итог, _boot_sync_done ставится безусловно, complete_boot_recovery(False) игнорируется; readiness видит scheduler running даже когда он paused.",
+    "reproduction": "Все OFF publish=False и complete_boot_recovery=False: initialize_app всё равно вызывает notify_ready, /readyz и metrics показывают healthy/running.",
+    "owner_packages": [
+      "p4-lifecycle"
+    ],
+    "reopens": [
+      38
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Все OFF publish=False и complete_boot_recovery=False: initialize_app всё равно вызывает notify_ready, /readyz и metrics показывают healthy/running.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-014",
+    "title": "Shutdown не подтверждает OFF, игнорирует quiesce и не соблюдает общий deadline",
+    "file": "services/shutdown.py",
+    "line": 71,
+    "severity": "high",
+    "current_location": "services/shutdown.py:17-42,71-200; irrigation_scheduler.py:513-543; wb-irrigation.service:1-20",
+    "evidence": "Quiesce False игнорируется; последовательные per-message waits превышают TimeoutStopSec=45; wait_for_publish timeout без exception считается success без is_published/rc, после чего DB безусловно пишется off.",
+    "reproduction": "Fake MessageInfo возвращает из wait_for_publish при is_published=False: shutdown считает publish подтверждённым. Два клапана дают worst case 50s; late runner может отправить retained ON после final OFF.",
+    "owner_packages": [
+      "p4-lifecycle"
+    ],
+    "reopens": [
+      149
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Fake MessageInfo возвращает из wait_for_publish при is_published=False: shutdown считает publish подтверждённым. Два клапана дают worst case 50s; late runner может отправить retained ON после final OFF.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-015",
+    "title": "load_programs уничтожает восстановленные misfire и interval anchors",
+    "file": "irrigation_scheduler.py",
+    "line": 2489,
+    "severity": "high",
+    "current_location": "irrigation_scheduler.py:1206-1274,1311-1369,2275-2282,2489-2513",
+    "evidence": "Paused scheduler восстанавливает valid SQLAlchemyJobStore jobs, но load_programs cancel/recreate каждого job: eligible cron misfire теряется, interval start_date переякоривается на текущий день.",
+    "reproduction": "Persist interval anchor 20 июля, restart 21 июля: после load_programs start_date становится 21 июля. Cron next_run_time внутри grace заменяется следующим будущим slot.",
+    "owner_packages": [
+      "p4-scheduler"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Persist interval anchor 20 июля, restart 21 июля: после load_programs start_date становится 21 июля. Cron next_run_time внутри grace заменяется следующим будущим slot.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-016",
+    "title": "Malformed program payload сохраняется до reschedule и оставляет старый cron/опасные zones",
+    "file": "routes/programs_api.py",
+    "line": 27,
+    "severity": "high",
+    "current_location": "routes/programs_api.py:27-39,117-160; db/programs.py:54-149; irrigation_scheduler.py:101-127,1206-1274",
+    "evidence": "Строгого contract для time/zones/days/extra_times/enabled нет; scalar zones превращается в character IDs, malformed time падает до cancel_program, а invalid JSON может poison startup. PUT успевает commit до scheduler failure.",
+    "reproduction": "Обновить рабочую программу time=bad или zones='12': API сохраняет значение; старый cron остаётся и может полить актуальные неправильные зоны, scalar extra_times ломает последующую загрузку.",
+    "owner_packages": [
+      "p4-programs",
+      "p4-scheduler"
+    ],
+    "reopens": [
+      127,
+      152
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Обновить рабочую программу time=bad или zones='12': API сохраняет значение; старый cron остаётся и может полить актуальные неправильные зоны, scalar extra_times ломает последующую загрузку.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-017",
+    "title": "Hard mismatch отбрасывает более холодный local sensor до freeze gate",
+    "file": "services/weather/adjustment.py",
+    "line": 177,
+    "severity": "high",
+    "current_location": "services/weather/adjustment.py:177-220,273-279",
+    "evidence": "При delta выше hard threshold local reading целиком заменяется API, хотя freeze safety должна использовать минимум локального/forecast значения.",
+    "reproduction": "Fresh local -3°C, API +8°C, forecast min +6°C, hard threshold 10°C дают should_skip=False и разрешают полив.",
+    "owner_packages": [
+      "p4-weather"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Fresh local -3°C, API +8°C, forecast min +6°C, hard threshold 10°C дают should_skip=False и разрешают полив.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-018",
+    "title": "precipitation_24h считает осадки только с полуночи",
+    "file": "services/weather/client.py",
+    "line": 45,
+    "severity": "high",
+    "current_location": "services/weather/client.py:45-90; services/weather/models.py:105-140",
+    "evidence": "Forecast request не запрашивает past_days/past_hours, а parser суммирует доступные hourly samples; до конца суток в payload нет полного rolling 24h окна.",
+    "reproduction": "Дождь 10 мм накануне в 22:00 и решение сегодня в 05:00 дают precipitation_24h=0, поэтому rain safety не срабатывает.",
+    "owner_packages": [
+      "p4-weather"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Дождь 10 мм накануне в 22:00 и решение сегодня в 05:00 дают precipitation_24h=0, поэтому rain safety не срабатывает.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-019",
+    "title": "Изменение rain config не перенастраивает живой MQTT monitor",
+    "file": "routes/system_config_api.py",
+    "line": 202,
+    "severity": "high",
+    "current_location": "routes/system_config_api.py:202-217; services/app_init.py:236-239; services/monitors/rain_monitor.py:24-76",
+    "evidence": "POST пишет только БД; monitor запускается при boot, start не заменяет старого клиента. Enable/topic/server/mode не действуют, disable оставляет старую subscription активной.",
+    "reproduction": "Включить, сменить topic или отключить rain sensor через API: без restart новый config не действует, а старый subscriber продолжает останавливать/откладывать полив.",
+    "owner_packages": [
+      "p4-weather"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Включить, сменить topic или отключить rain sensor через API: без restart новый config не действует, а старый subscriber продолжает останавливать/откладывать полив.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-020",
+    "title": "Rain stop без provenance удаляет ручную отмену программы",
+    "file": "services/monitors/rain_monitor.py",
+    "line": 171,
+    "severity": "high",
+    "current_location": "services/monitors/rain_monitor.py:150-180; routes/groups_api.py:219-230; db/programs.py:504-533",
+    "evidence": "_on_rain_stop очищает все cancellations группы за день, не различая записи, созданные дождём и оператором; rain start не владеет этими строками.",
+    "reproduction": "Оператор отменяет программу после main 06:00; дождь 12:00-13:00; rain stop удаляет cancellation и extra slot 18:00 неожиданно запускается.",
+    "owner_packages": [
+      "p4-weather",
+      "p4-scheduler"
+    ],
+    "reopens": [
+      89
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Оператор отменяет программу после main 06:00; дождь 12:00-13:00; rain stop удаляет cancellation и extra slot 18:00 неожиданно запускается.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-021",
+    "title": "Документированные TZ/WB_TZ не управляют runtime triggers",
+    "file": "app.py",
+    "line": 22,
+    "severity": "high",
+    "current_location": "app.py:7-25; config.py:8; services/logging_setup.py:389; irrigation_scheduler.py:1311-1369",
+    "evidence": "Logging setup выполняется до load_dotenv, устанавливает process TZ и перезаписывает WB_TZ; Cron/Interval triggers создаются без explicit scheduler timezone.",
+    "reproduction": "На OS UTC с WB_TZ=Asia/Bishkek программа 06:00 получает фактический запуск около 12:00 controller-local.",
+    "owner_packages": [
+      "p4-auth-http",
+      "p4-scheduler"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "На OS UTC с WB_TZ=Asia/Bishkek программа 06:00 получает фактический запуск около 12:00 controller-local.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-022",
+    "title": "Оба backup path могут вернуть целый, но никогда не существовавший или устаревший SQLite snapshot",
+    "file": "update_server.sh",
+    "line": 70,
+    "severity": "high",
+    "current_location": "update_server.sh:63-90; db/logs.py:175-205",
+    "evidence": "Updater последовательно копирует live main/WAL/SHM и подавляет ошибки; LogRepository после online-backup failure делает copy2 только main DB без WAL и проверяет лишь размер/integrity.",
+    "reproduction": "Между копиями выполнить checkpoint/commits: restore проходит integrity_check, но содержит cross-time state. Инъекция OperationalError в backup API дала success=True backup без закоммиченной WAL-строки.",
+    "owner_packages": [
+      "p4-deploy",
+      "p4-db-integrity"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Между копиями выполнить checkpoint/commits: restore проходит integrity_check, но содержит cross-time state. Инъекция OperationalError в backup API дала success=True backup без закоммиченной WAL-строки.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-023",
+    "title": "Updater восстанавливает отсутствующий venv системным Python 3.9",
+    "file": "update_server.sh",
+    "line": 16,
+    "severity": "high",
+    "current_location": "update_server.sh:16,104-109; AGENTS.md:5-34",
+    "evidence": "PY_BIN default python3 и venv creation не проверяют 3.11; на WB system python=3.9.2, тогда как код импортирует datetime.UTC и использует PEP 604.",
+    "reproduction": "Удалить/повредить venv и запустить updater: он создаёт Python 3.9 environment, затем restart переводит service в import/boot failure.",
+    "owner_packages": [
+      "p4-deploy"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Удалить/повредить venv и запустить updater: он создаёт Python 3.9 environment, затем restart переводит service в import/boot failure.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-024",
+    "title": "Deploy workflow обходит supported updater и маскирует failed rollout",
+    "file": ".github/workflows/deploy.yml",
+    "line": 25,
+    "severity": "high",
+    "current_location": ".github/workflows/deploy.yml:25-31; update_server.sh:1-190",
+    "evidence": "Workflow использует divergent git/pip path без authoritative backup/rollback и применяет command || echo, поэтому inactive service/failed readyz не делает job красным.",
+    "reproduction": "Сломать restart/readyz на target: workflow завершает deploy step зелёным, хотя supported update_server gates не выполнялись.",
+    "owner_packages": [
+      "p4-deploy"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Сломать restart/readyz на target: workflow завершает deploy step зелёным, хотя supported update_server gates не выполнялись.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-025",
+    "title": "MQTT publisher после TLS setup error продолжает plaintext connect",
+    "file": "services/mqtt_pub.py",
+    "line": 137,
+    "severity": "high",
+    "current_location": "services/mqtt_pub.py:137-175; services/observed_state.py:264-276",
+    "evidence": "tls_set OSError/ValueError логируется, но execution проваливается в connect; tls_enabled не является fail-closed contract.",
+    "reproduction": "tls_set бросает FileNotFoundError при доступном plaintext listener: connect всё равно вызывается, credentials и commands уходят без TLS.",
+    "owner_packages": [
+      "p4-mqtt-core"
+    ],
+    "reopens": [
+      81
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "tls_set бросает FileNotFoundError при доступном plaintext listener: connect всё равно вызывается, credentials и commands уходят без TLS.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-026",
+    "title": "Telegram handler блокирует собственный asyncio loop на десять секунд",
+    "file": "services/telegram_bot.py",
+    "line": 119,
+    "severity": "high",
+    "current_location": "services/telegram_bot.py:119-133,307-367",
+    "evidence": "_submit_aiogram вызывает run_coroutine_threadsafe на _aiogram_runner._loop и синхронно future.result(10), хотя _on_message/_on_callback уже исполняются на том же loop.",
+    "reproduction": "Вызов из same_loop занимает 10.01s, coroutine не выполняется; одно сообщение/управляющий callback получает последовательные timeout и теряет ответы.",
+    "owner_packages": [
+      "p4-telegram"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Вызов из same_loop занимает 10.01s, coroutine не выполняется; одно сообщение/управляющий callback получает последовательные timeout и теряет ответы.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-027",
+    "title": "Selected-run popup наследует предыдущий режим 200%",
+    "file": "static/js/status.js",
+    "line": 2132,
+    "severity": "high",
+    "current_location": "static/js/status.js:2132-2151",
+    "evidence": "confirmRunSelectedNext не сбрасывает runPopupMode/runPopupPct и не refresh UI; popup state остаётся от предыдущего all/group run.",
+    "reproduction": "Открыть запуск группы, выбрать 200%, закрыть; затем selected-zones flow с ожидаемыми 15 минутами отправляет 200% и существенно увеличивает полив.",
+    "owner_packages": [
+      "p4-frontend"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Открыть запуск группы, выбрать 200%, закрыть; затем selected-zones flow с ожидаемыми 15 минутами отправляет 200% и существенно увеличивает полив.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-028",
+    "title": "Bulk/CSV duration validation fail-open сохраняет опасные значения",
+    "file": "static/js/zones.js",
+    "line": 1317,
+    "severity": "high",
+    "current_location": "static/js/zones.js:1317-1361,2043-2053; routes/zones_crud_api.py:213-250",
+    "evidence": "parseInt принимает junk/out-of-range, conflict-check exception трактуется как ok, import endpoint не применяет обычный range contract и может частично выполнить batch.",
+    "reproduction": "Bulk/CSV duration 4000, -5 или malformed доходит до import и сохраняется; network failure conflict checker не блокирует mutation, hard-stop строится по неверной длительности.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-topology-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Bulk/CSV duration 4000, -5 или malformed доходит до import и сохраняется; network failure conflict checker не блокирует mutation, hard-stop строится по неверной длительности.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-029",
+    "title": "/api/status синхронно подключается к каждому MQTT broker на каждом poll",
+    "file": "routes/system_status_api.py",
+    "line": 531,
+    "severity": "high",
+    "current_location": "routes/system_status_api.py:531-587; static/js/system_health.js:153-169; static/js/status.js:1122-1125",
+    "evidence": "Последовательный Paho connect имеет фактический timeout около 5s на broker; несколько polling loops перекрываются, пишут mqtt_warn durable logs и занимают тот же малый HTTP executor.",
+    "reproduction": "Настроить два blackhole brokers и открыть несколько вкладок: /api/status latency около 5N секунд, concurrent polls задерживают /readyz/OFF API и быстро растят logs.",
+    "owner_packages": [
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Настроить два blackhole brokers и открыть несколько вкладок: /api/status latency около 5N секунд, concurrent polls задерживают /readyz/OFF API и быстро растят logs.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-030",
+    "title": "Migration runner проглатывает partial schema failure и позволяет readiness",
+    "file": "db/migrations.py",
+    "line": 276,
+    "severity": "medium",
+    "current_location": "db/migrations.py:250-310; database.py:1-60; services/app_init.py:79-129",
+    "evidence": "Named migration methods ловят sqlite error, могут оставить частичные DDL/data changes и вернуть управление; app продолжает initialize/READY на несовместимой схеме.",
+    "reproduction": "Инъецировать failure в середине named migration: facade construction не падает, applied/partial schema расходятся, startup достигает readiness.",
+    "owner_packages": [
+      "p4-db-integrity"
+    ],
+    "decision_notes": "Решение оркестратора: db/migrations.py разрешено менять узко для identity/referential-integrity и fail-closed migration fixes только вместе с migration regression tests.",
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Инъецировать failure в середине named migration: facade construction не падает, applied/partial schema расходятся, startup достигает readiness.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-031",
+    "title": "BUSY retry повторяет метод после уже committed INSERT",
+    "file": "db/base.py",
+    "line": 100,
+    "severity": "medium",
+    "current_location": "db/base.py:100-119; db/zones.py:196-241; db/programs.py:54-95",
+    "evidence": "Whole-method retry boundary не знает, что commit уже прошёл; BUSY в post-commit get_* повторно выполняет INSERT.",
+    "reproduction": "Один _RetryableBusyError на первом post-commit read create_zone/create_program создаёт две строки; обе enabled programs после restart планируются.",
+    "owner_packages": [
+      "p4-db-integrity"
+    ],
+    "reopens": [
+      45
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Один _RetryableBusyError на первом post-commit read create_zone/create_program создаёт две строки; обе enabled programs после restart планируются.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-032",
+    "title": "Повторно использованный program ID наследует same-day cancellation",
+    "file": "db/programs.py",
+    "line": 175,
+    "severity": "medium",
+    "current_location": "db/migrations.py:73-81,100-106; db/programs.py:54-95,175-182,504-533",
+    "evidence": "Program IDs reusable, delete не удаляет program_cancellations, ключ которых содержит только numeric program_id/date/group.",
+    "reproduction": "Cancel highest-ID OLD сегодня/group1, удалить и создать NEW с тем же ID: is_program_run_cancelled_for_group(NEW) возвращает true и новый run молча пропускается.",
+    "owner_packages": [
+      "p4-db-integrity",
+      "p4-programs"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Cancel highest-ID OLD сегодня/group1, удалить и создать NEW с тем же ID: is_program_run_cancelled_for_group(NEW) возвращает true и новый run молча пропускается.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-033",
+    "title": "Streaming teardown повторно reset-ит уже использованный ContextVar token",
+    "file": "app.py",
+    "line": 328,
+    "severity": "medium",
+    "current_location": "app.py:264,328-336; services/correlation.py:98-106; tests/api/test_routes_deep.py:49",
+    "evidence": "Token хранится на request и после reset не очищается; stream_with_context выполняет teardown/close повторно, RuntimeError не входит в suppress list.",
+    "reproduction": "buffered=False, прочитать первое SSE event и response.close(): стабильно RuntimeError Token has already been used once и PytestUnraisableExceptionWarning.",
+    "owner_packages": [
+      "p4-auth-http"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "buffered=False, прочитать первое SSE event и response.close(): стабильно RuntimeError Token has already been used once и PytestUnraisableExceptionWarning.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-034",
+    "title": "EnvMonitor Paho-v2 disconnect callback очищает не тот client и течёт loops",
+    "file": "services/monitors/env_monitor.py",
+    "line": 106,
+    "severity": "medium",
+    "current_location": "services/monitors/env_monitor.py:71-120; routes/system_config_api.py:246-270",
+    "evidence": "VERSION2 callback принимает пятый Paho argument вместо captured sensor type: temp disconnect оставляет temp stale и очищает hum handle; restart не может остановить потерянный auto-reconnect client.",
+    "reproduction": "Реальный пятиаргументный callback после temp disconnect даёт temp_still_referenced=true и hum_reference_lost; start создаёт новые clients без loop_stop старого.",
+    "owner_packages": [
+      "p4-monitors"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Реальный пятиаргументный callback после temp disconnect даёт temp_still_referenced=true и hum_reference_lost; start создаёт новые clients без loop_stop старого.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-035",
+    "title": "Env/water/rain MQTT monitors игнорируют TLS и live server reconfiguration",
+    "file": "services/monitors/env_monitor.py",
+    "line": 71,
+    "severity": "medium",
+    "current_location": "services/monitors/env_monitor.py:71-120; services/monitors/rain_monitor.py:24-76; services/monitors/water_monitor.py:46-74; routes/groups_api.py:52-125; routes/mqtt_api.py:118-194",
+    "evidence": "Sensor clients делают plaintext CONNECT при tls_enabled и сохраняют старые broker/topic clients после MQTT/group CRUD; publisher/SSE refresh их не охватывает.",
+    "reproduction": "На TLS-only broker relay commands работают, а rain/env/water остаются offline. Смена/delete broker или water topic оставляет старого subscriber влияющим до restart.",
+    "owner_packages": [
+      "p4-monitors",
+      "p4-weather",
+      "p4-topology-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "На TLS-only broker relay commands работают, а rain/env/water остаются offline. Смена/delete broker или water topic оставляет старого subscriber влияющим до restart.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-036",
+    "title": "Stale safety caps и отменённый pending group_seq переживают владельца activation",
+    "file": "irrigation_scheduler.py",
+    "line": 1661,
+    "severity": "medium",
+    "current_location": "irrigation_scheduler.py:191-224,1528-1617,1661-1668,1775-1811,2186-2273; services/zone_control.py:856-864",
+    "evidence": "Zone/master cap jobs не activation-bound и не снимаются при раннем успешном завершении; group_seq claim передаётся job до start, но cancel pending job не освобождает event.",
+    "reproduction": "Ранний manual stop, поздний новый run около старого cap deadline — cap останавливает новый activation. Cancel group_seq до callable start — следующий group start блокируется до restart.",
+    "owner_packages": [
+      "p4-scheduler",
+      "p4-mqtt-core"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Ранний manual stop, поздний новый run около старого cap deadline — cap останавливает новый activation. Cancel group_seq до callable start — следующий group start блокируется до restart.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-037",
+    "title": "Program conflict checker не моделирует реальные schedule/calendar/weather races",
+    "file": "db/programs.py",
+    "line": 234,
+    "severity": "medium",
+    "current_location": "db/programs.py:234-253,300-417; routes/programs_api.py:60-90,117-160",
+    "evidence": "Checker не знает interval/even-odd, adjacent-day overlap, candidate main-vs-own-extra и candidate weather expansion; POST check-then-insert не транзакционен, два concurrent creates проходят одинаковый snapshot.",
+    "reproduction": "Sun 23:50x30 и Mon 00:05 возвращают []; even/odd с пустыми days ошибаются; candidate 06:30x20 при 200% vs 07:00 пропускается; concurrent identical POST создаёт оба rows.",
+    "owner_packages": [
+      "p4-programs"
+    ],
+    "reopens": [
+      100,
+      129
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Sun 23:50x30 и Mon 00:05 возвращают []; even/odd с пустыми days ошибаются; candidate 06:30x20 при 200% vs 07:00 пропускается; concurrent identical POST создаёт оба rows.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-038",
+    "title": "Weather cache/date/toggle semantics дают недостоверный коэффициент",
+    "file": "services/weather/models.py",
+    "line": 65,
+    "severity": "medium",
+    "current_location": "services/weather/models.py:65-140,171-205; services/weather/service.py:113-160; services/weather/adjustment.py:267,444-466",
+    "evidence": "Unbounded stale fallback при отсутствии current hour выбирает idx=0; daily index 0 становится yesterday при past data/midnight; exact rain threshold расходится между should_skip и coefficient; factor_humidity=false всё равно применяет multiplier.",
+    "reproduction": "Старый payload 1 июля запрошен 5 июля и читается как current; cache через midnight смешивает daily dates; rain==threshold даёт should_skip false при coefficient 0; humidity toggle off даёт 50%.",
+    "owner_packages": [
+      "p4-weather"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Старый payload 1 июля запрошен 5 июля и читается как current; cache через midnight смешивает daily dates; rain==threshold даёт should_skip false при coefficient 0; humidity toggle off даёт 50%.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-039",
+    "title": "Weather/location/rain settings частично коммитятся до полной валидации",
+    "file": "routes/weather_api.py",
+    "line": 197,
+    "severity": "medium",
+    "current_location": "routes/weather_api.py:180-225,280-315; routes/system_config_api.py:202-217; db/settings.py:27-38,92-104",
+    "evidence": "Multi-key setters commit отдельно; conversion/range/write error позднего поля возвращает 500/400 после сохранения ранних enabled/topic/latitude values.",
+    "reproduction": "weather enabled=true + rain_threshold_mm=bad оставляет enabled; valid latitude + invalid longitude сохраняет latitude; rain server_id=bad сохраняет enabled/topic/type.",
+    "owner_packages": [
+      "p4-weather"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "weather enabled=true + rain_threshold_mm=bad оставляет enabled; valid latitude + invalid longitude сохраняет latitude; rain server_id=bad сохраняет enabled/topic/type.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-040",
+    "title": "Frontend применяет stale polling/SSE responses поверх свежего состояния",
+    "file": "static/js/status.js",
+    "line": 145,
+    "severity": "medium",
+    "current_location": "static/js/status.js:145-233; static/js/zones.js:38-65,1201-1238,1563-1611; static/js/history.js:182-197",
+    "evidence": "Несколько independent intervals не имеют generation/AbortController; loadData и mutation responses обходят SSE version guard, один feed success очищает shared connectionError другого.",
+    "reproduction": "Старый zones snapshot off ждёт медленный env, SSE сообщает on/emergency, затем Promise.all commit возвращает UI в off; late history group A заменяет уже выбранную B.",
+    "owner_packages": [
+      "p4-frontend"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Старый zones snapshot off ждёт медленный env, SSE сообщает on/emergency, затем Promise.all commit возвращает UI в off; late history group A заменяет уже выбранную B.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-041",
+    "title": "Programs UI/ручной Run сообщают отсутствие или успех вопреки runtime",
+    "file": "templates/programs.html",
+    "line": 27,
+    "severity": "medium",
+    "current_location": "templates/programs.html:27-37,125-133,208-218; routes/programs_api.py:326-364; irrigation_scheduler.py:101-127",
+    "evidence": "Execution tab статичен и никогда не читает authoritative active groups; Run доступен disabled program, endpoint возвращает 200/thread, но job_run_program сразу отменяет и выходит.",
+    "reproduction": "Во время реального полива открыть Execution — «Нет активного полива». Disable program и POST /run — success message без _run_program_threaded и без zone start.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-programs"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Во время реального полива открыть Execution — «Нет активного полива». Disable program и POST /run — success message без _run_program_threaded и без zone start.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-042",
+    "title": "Password confirmation игнорируется, а крайние пробелы создают admin lockout",
+    "file": "templates/settings.html",
+    "line": 253,
+    "severity": "medium",
+    "current_location": "templates/settings.html:253-266; routes/system_config_api.py:88-104; routes/auth.py:57-66",
+    "evidence": "new_password2 не читается; backend хеширует exact string, login всегда strip. UI может сохранить ошибочный либо whitespace-padded password, которым затем нельзя войти.",
+    "reproduction": "Ввести разные confirmation либо сменить пароль на ' abcdefgh ': save success; login тем же вводом strip-ит его и возвращает 401.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-auth-http"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Ввести разные confirmation либо сменить пароль на ' abcdefgh ': save success; login тем же вводом strip-ит его и возвращает 401.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-043",
+    "title": "Deploy/runtime permissions и cookie transport раскрывают ключи и bootstrap access",
+    "file": "update_server.sh",
+    "line": 63,
+    "severity": "medium",
+    "current_location": "update_server.sh:63-89,142-155; db/settings.py:41-60; services/logging_setup.py:345-362; app.py:370-376; run.py:75-82",
+    "evidence": "Backup tar и .env становятся 0644/0755 и включают secret files; initial admin password пишется в app.log 0644; SESSION_COOKIE_SECURE env не применяется из-за prepopulated Flask key, native transport остаётся HTTP.",
+    "reproduction": "При umask 022 unprivileged local user читает repo_snapshot/.env/app.log, получает signing/decryption/bootstrap secrets; SESSION_COOKIE_SECURE=1 оставляет app.config False.",
+    "owner_packages": [
+      "p4-deploy",
+      "p4-auth-http",
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "При umask 022 unprivileged local user читает repo_snapshot/.env/app.log, получает signing/decryption/bootstrap secrets; SESSION_COOKIE_SECURE=1 оставляет app.config False.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-044",
+    "title": "Sensitive logs/audit/scheduler GET endpoints доступны анонимно",
+    "file": "app.py",
+    "line": 449,
+    "severity": "medium",
+    "current_location": "app.py:438-464; routes/audit_api.py:113-190; routes/system_status_api.py:176-240,682-760",
+    "evidence": "Global policy пропускает все GET без role check; scheduler jobs/status, audit и logs содержат timing, topics, failures и operational metadata.",
+    "reproduction": "Без session cookie GET /api/scheduler/jobs, /api/audit и /api/logs возвращают production records вместо 401/403.",
+    "owner_packages": [
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Без session cookie GET /api/scheduler/jobs, /api/audit и /api/logs возвращают production records вместо 401/403.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-045",
+    "title": "Frequent next-watering bulk poll не bounded и пишет durable audit каждые пять секунд",
+    "file": "routes/zones_crud_api.py",
+    "line": 290,
+    "severity": "medium",
+    "current_location": "static/js/status.js:182-205,1122-1125; routes/zones_crud_api.py:290-296; services/audit.py:241-275,338-354",
+    "evidence": "Read-only POST проходит mutation audit: одна вкладка создаёт 17,280 INSERT+COMMIT/сутки. Endpoint принимает unbounded/duplicate IDs и poll использует mutation rate bucket.",
+    "reproduction": "Открыть dashboard на минуту: COUNT audit action zones_next_watering_bulk растёт примерно на 12; payload с повторёнными/огромным числом IDs умножает расчёты.",
+    "owner_packages": [
+      "p4-topology-api",
+      "p4-performance"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Открыть dashboard на минуту: COUNT audit action zones_next_watering_bulk растёт примерно на 12; payload с повторёнными/огромным числом IDs умножает расчёты.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-046",
+    "title": "Zone snapshots сканируют всю history, а reschedule открывает сотни SQLite connections",
+    "file": "db/zones.py",
+    "line": 100,
+    "severity": "medium",
+    "current_location": "db/zones.py:100-137,501-506,845-911; irrigation_scheduler.py:2186-2244; services/zone_control.py:793-810",
+    "evidence": "get_zones/get_zones_by_group глобально GROUP BY zone_runs без подходящего latest-ok index; reschedule_group_to_next_program делает quadratic nested repository calls и вызывается дважды на manual start.",
+    "reproduction": "1M runs: 20 snapshots около 5.7s. На 24 зонах один reschedule открыл 351 connection, start path около 702 до MQTT ON.",
+    "owner_packages": [
+      "p4-db-integrity",
+      "p4-scheduler"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "1M runs: 20 snapshots около 5.7s. На 24 зонах один reschedule открыл 351 connection, start path около 702 до MQTT ON.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-047",
+    "title": "History смешивает timestamp/group/confirmation/calendar domains",
+    "file": "services/history_calc.py",
+    "line": 101,
+    "severity": "medium",
+    "current_location": "services/app_init.py:151-159; services/history_calc.py:101-214; routes/zones_history_api.py:77,242; static/js/history.js:341-444",
+    "evidence": "Boot пишет UTC в local-naive zone_runs; unconfirmed aborted считается water; even_odd NULL трактуется opposite scheduler; future slots уже savings; group report использует current zone group; browser/controller dates расходятся.",
+    "reproduction": "Asia/Bishkek reboot даёт end раньше start; перенести зону между группами — старая history переезжает; run около midnight отображается в разных датах; будущий 23:00 slot в 09:00 уже показан как экономия.",
+    "owner_packages": [
+      "p4-history"
+    ],
+    "reopens": [
+      38,
+      93,
+      94
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Asia/Bishkek reboot даёт end раньше start; перенести зону между группами — старая history переезжает; run около midnight отображается в разных датах; будущий 23:00 slot в 09:00 уже показан как экономия.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-048",
+    "title": "Frontend bulk/CSV/water/null-ID contracts допускают потерю или подмену конфигурации",
+    "file": "static/js/zones.js",
+    "line": 764,
+    "severity": "medium",
+    "current_location": "static/js/zones.js:638-842,1317-1383,1926-2053; templates/zones.html:96-120",
+    "evidence": "Bulk delete не подтверждает scope/результаты; CSV parseInt принимает aliases и export допускает formulas; water base digits никогда не сохраняются; null sensor/master broker IDs рендерятся первым broker и автосохраняются.",
+    "reproduction": "id=12x обновляет zone12, =WEBSERVICE экспортируется формулой, bulk delete partial error всё равно выглядит success, изменение water digits исчезает после reload, unrelated group edit превращает null broker в #1.",
+    "owner_packages": [
+      "p4-frontend"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "id=12x обновляет zone12, =WEBSERVICE экспортируется формулой, bulk delete partial error всё равно выглядит success, изменение water digits исчезает после reload, unrelated group edit превращает null broker в #1.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-049",
+    "title": "MQTT topic browser допускает prototype pollution и unbounded memory/payload growth",
+    "file": "templates/mqtt.html",
+    "line": 340,
+    "severity": "medium",
+    "current_location": "templates/mqtt.html:262-288,311-321,340-440; routes/mqtt_api.py:383-421",
+    "evidence": "Broker segments пишутся в ordinary object (__proto__/constructor); 20k prune сохраняет все normal /devices keys, payload bytes не ограничены, state не очищается, весь DOM пересобирается каждые 300ms.",
+    "reproduction": "Topic /devices/__proto__ изменяет Object.prototype; 20,001 /devices/* topics остаются все, один rebuild создаёт около 42k DOM elements и рост продолжается.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-topology-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Topic /devices/__proto__ изменяет Object.prototype; 20,001 /devices/* topics остаются все, один rebuild создаёт около 42k DOM elements и рост продолжается.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-050",
+    "title": "Map page и service worker неограниченно размножают media/cache entries",
+    "file": "templates/map.html",
+    "line": 83,
+    "severity": "medium",
+    "current_location": "routes/system_config_api.py:119-174; templates/map.html:68-107; static/sw.js:65-71",
+    "evidence": "Все timestamp map files выдаются без retention/pagination; UI добавляет Date.now query к каждому image, SW cache-first хранит каждый full URL как отдельную WebP copy.",
+    "reproduction": "75 maps создают 75 новых cache keys на reload; десять reload добавляют примерно 216MB CacheStorage до quota eviction.",
+    "owner_packages": [
+      "p4-frontend"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "75 maps создают 75 новых cache keys на reload; десять reload добавляют примерно 216MB CacheStorage до quota eviction.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-051",
+    "title": "Telegram subscriptions/token/webhook runtime contracts неработоспособны или небезопасны",
+    "file": "services/telegram_bot.py",
+    "line": 101,
+    "severity": "medium",
+    "current_location": "services/telegram_bot.py:101-133,307-362,576-603; routes/settings.py:56-78; db/telegram.py:220-250",
+    "evidence": "/subscribe и /unsubscribe расположены после unconditional return; token cache/poller не reconfigure; set_webhook вызывает отсутствующий method после DB write; due query не revalidates authorization/current admin.",
+    "reproduction": "Команды подписки показывают menu без записи; token change оставляет OLD bot; set_webhook=true даёт 500 после commit; legacy chat получает report после смены admin.",
+    "owner_packages": [
+      "p4-telegram"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Команды подписки показывают menu без записи; token change оставляет OLD bot; set_webhook=true даёт 500 после commit; legacy chat получает report после смены admin.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-052",
+    "title": "CI и ключевые auth/weather/SSE/E2E тесты имеют false-green coverage",
+    "file": ".github/workflows/ci.yml",
+    "line": 30,
+    "severity": "medium",
+    "current_location": ".github/workflows/ci.yml:30; tests/api/test_auth_api.py:47; tests/unit/test_check_conflicts_v2.py:136-340; tests/api/test_routes_deep.py:49; tests/e2e/test_live_controller.py:29",
+    "evidence": "CI исключает 77 integration + 69 UI; viewer test принимает 200/401/403 при TESTING bypass; weather asserts условны/xfail; SSE close warning не failure; explicit E2E opt-in connection failure превращается в skip/all([]).",
+    "reproduction": "Удаление viewer guard/extended conflict behavior остаётся green; strict PytestUnraisableExceptionWarning ломает SSE tests; недоступный opt-in target даёт skipped/green run.",
+    "owner_packages": [
+      "p4-deploy",
+      "p4-test-quality"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Удаление viewer guard/extended conflict behavior остаётся green; strict PytestUnraisableExceptionWarning ломает SSE tests; недоступный opt-in target даёт skipped/green run.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-053",
+    "title": "Health/metrics классифицируют paused/fault/wedged service как healthy",
+    "file": "routes/health_api.py",
+    "line": 250,
+    "severity": "medium",
+    "current_location": "routes/health_api.py:250-320,415-432; services/app_init.py:115-125; services/systemd_notify.py:1-120",
+    "evidence": "Scheduler metrics читают nonexistent wrapper attributes и остаются zero; все non-on states считаются off; heartbeat независим от HTTP/main plane и продолжает WATCHDOG=1 при wedge; readiness принимает paused scheduler/частичный broker health.",
+    "reproduction": "Wrapper с тремя jobs даёт scheduler_jobs_total 0/running 0; одна fault zone даёт off=1; заблокировать HTTP executor — independent heartbeat продолжает уведомлять systemd.",
+    "owner_packages": [
+      "p4-lifecycle",
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Wrapper с тремя jobs даёт scheduler_jobs_total 0/running 0; одна fault zone даёт off=1; заблокировать HTTP executor — independent heartbeat продолжает уведомлять systemd.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-054",
+    "title": "MQTT diagnostics и missing-row CRUD возвращают ложный success",
+    "file": "routes/mqtt_api.py",
+    "line": 165,
+    "severity": "medium",
+    "current_location": "routes/mqtt_api.py:165-194,200-365; db/mqtt.py:113-134",
+    "evidence": "Probe/status могут считать TCP connect достаточным без CONNACK/auth outcome; repository update/delete не проверяют rowcount, поэтому absent PUT даёт 200 server=null, DELETE 204 и runtime refresh.",
+    "reproduction": "Broker принимает TCP, но отказывает CONNACK: status/probe сообщает доступность. PUT несуществующего id возвращает success true, DELETE — 204.",
+    "owner_packages": [
+      "p4-topology-api",
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Broker принимает TCP, но отказывает CONNACK: status/probe сообщает доступность. PUT несуществующего id возвращает success true, DELETE — 204.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-055",
+    "title": "IP geolocation всегда блокируется CSP, а fetch timeout option не существует",
+    "file": "templates/settings.html",
+    "line": 397,
+    "severity": "medium",
+    "current_location": "templates/settings.html:397-409; app.py:343-349",
+    "evidence": "connect-src разрешает только self, но button fetch-ит https://ipapi.co/json; {timeout:5000} не является Fetch API option и не прерывает request.",
+    "reproduction": "Нажать «По IP» в standards browser: CSP блокирует request/Failed to fetch и координаты не заполняются; при relaxed CSP зависший fetch не abort-ится.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-auth-http"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Нажать «По IP» в standards browser: CSP блокирует request/Failed to fetch и координаты не заполняются; при relaxed CSP зависший fetch не abort-ится.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-056",
+    "title": "Program/postpone/weather strings достигают innerHTML как stored/cached XSS",
+    "file": "static/js/status.js",
+    "line": 405,
+    "severity": "medium",
+    "current_location": "routes/programs_api.py:27; templates/programs.html:169-228; routes/zones_crud_api.py:82; static/js/status.js:405-595,1337-1382; services/weather/models.py:118-174",
+    "evidence": "Malformed program.time/color и postpone_until сохраняются verbatim; relay weather sunrise/sunset/hourly.time проходят cache/API; sinks используют innerHTML, CSP допускает inline handlers.",
+    "reproduction": "Сохранить <img onerror=...> в program.time/postpone_until либо вернуть его из configured weather relay: открытие programs/status исполняет payload в app origin.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-weather"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Сохранить <img onerror=...> в program.time/postpone_until либо вернуть его из configured weather relay: открытие programs/status исполняет payload в app origin.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-057",
+    "title": "Первый uptime после zones-table rebuild работает без idx_zones_group",
+    "file": "db/migrations.py",
+    "line": 1095,
+    "severity": "low",
+    "current_location": "db/migrations.py:1095-1160; db/zones.py:100-137",
+    "evidence": "Rebuild migration не восстанавливает idx_zones_group; индекс появляется только при следующем init path/restart, а hot group lookups первого uptime делают table scans.",
+    "reproduction": "Применить rebuild migration на DB и до restart проверить PRAGMA index_list(zones)/EXPLAIN get_zones_by_group: idx отсутствует и query scans zones.",
+    "owner_packages": [
+      "p4-db-integrity"
+    ],
+    "decision_notes": "Узкая правка db/migrations.py разрешена только вместе с migration regression test.",
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Применить rebuild migration на DB и до restart проверить PRAGMA index_list(zones)/EXPLAIN get_zones_by_group: idx отсутствует и query scans zones.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-058",
+    "title": "Reports today и yesterday используют одинаковое rolling 24h окно",
+    "file": "services/reports.py",
+    "line": 7,
+    "severity": "medium",
+    "current_location": "services/reports.py:7-27; db/logs.py:122-159",
+    "evidence": "Правильный calendar range helper не используется; оба периода вызывают get_water_statistics(days=1), то есть один и тот же rolling UTC interval с разными labels.",
+    "reproduction": "Запросить today и yesterday с данными по обе стороны controller-local midnight: repository получает args [1,1] и отчёты содержат идентичные rows.",
+    "owner_packages": [
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Запросить today и yesterday с данными по обе стороны controller-local midnight: repository получает args [1,1] и отчёты содержат идентичные rows.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-059",
+    "title": "Daily water «today» строится по last snapshots, а не календарным событиям дня",
+    "file": "routes/system_status_api.py",
+    "line": 743,
+    "severity": "medium",
+    "current_location": "routes/system_status_api.py:720-790; static/js/status.js:1200-1320",
+    "evidence": "Endpoint/widget используют последние доступные snapshots/rolling values как сегодняшнюю величину, не ограничивая их controller-local day; stale предыдущее значение маркируется today.",
+    "reproduction": "Оставить последний water snapshot вчера и открыть dashboard сегодня без новых pulses: карточка today показывает старое потребление вместо нуля/нет данных.",
+    "owner_packages": [
+      "p4-frontend",
+      "p4-status-api"
+    ],
+    "introduced_by_branch": false,
+    "status": "VERIFIED_REAL",
+    "scenario": "Оставить последний water snapshot вчера и открыть dashboard сегодня без новых pulses: карточка today показывает старое потребление вместо нуля/нет данных.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": [],
+    "implementation": {
+      "disposition": "pending",
+      "reason": null,
+      "package": null,
+      "commit": null,
+      "tests": []
+    }
+  },
+  {
+    "post_review_id": "PR-060",
+    "title": "H2 water-balance остаётся намеренным shadow-mode",
+    "file": "services/weather/adjustment.py",
+    "line": 550,
+    "severity": "low",
+    "current_location": "services/weather/adjustment.py:550-563; irrigation_scheduler.py:774-784; docs/handoff/README.md:136-139",
+    "evidence": "Production scheduler использует H1; H2 рассчитывается/показывается, но по objective намеренно не подключается к physical watering до отдельного product decision и доказанного hard-safety composition.",
+    "reproduction": "Fresh H2=150% и H1=70% оставляют scheduler duration на H1. Это ожидаемая зафиксированная семантика, не bug.",
+    "owner_packages": [
+      "orchestrator-decision"
+    ],
+    "status": "INTENTIONAL_LIMITATION",
+    "implementation": {
+      "disposition": "not_applicable",
+      "reason": "H2 намеренно остаётся shadow-mode; подключение запрещено текущим objective и требует отдельного product/safety решения.",
+      "package": "orchestrator-decision",
+      "commit": null,
+      "tests": []
+    },
+    "introduced_by_branch": false,
+    "scenario": "Fresh H2=150% и H1=70% оставляют scheduler duration на H1. Это ожидаемая зафиксированная семантика, не bug.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": []
+  },
+  {
+    "decision_id": "KD-001",
+    "title": "Запуск systemd-сервиса от root индивидуально отложен как platform hardening",
+    "file": "wb-irrigation.service",
+    "line": 1,
+    "severity": "medium",
+    "current_location": "wb-irrigation.service:1-20; install_wb.sh:1-260",
+    "evidence": "Native WB unit не задаёт User= и исторически использует root для /opt, /mnt/data, systemd и device integration. Без отдельной privilege/file/device model узкое изменение unit сломает поддерживаемый deploy.",
+    "reproduction": "Read-only review подтверждает root execution, но не безопасный drop-in user contract; это отдельная platform-hardening работа, не silent fix текущего цикла.",
+    "status": "VERIFIED_REAL",
+    "implementation": {
+      "disposition": "deferred",
+      "reason": "Нужны отдельные ownership, writable paths, device/network capabilities и migration/rollback plan для WB; изменение User= без этой модели рискованно и выходит за scope текущих подтверждённых runtime fixes.",
+      "package": "post-review-known-deferred",
+      "commit": null,
+      "tests": []
+    },
+    "introduced_by_branch": false,
+    "scenario": "Read-only review подтверждает root execution, но не безопасный drop-in user contract; это отдельная platform-hardening работа, не silent fix текущего цикла.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": []
+  },
+  {
+    "decision_id": "IL-001",
+    "title": "Docker остаётся только локальным development target",
+    "file": "AGENTS.md",
+    "line": 38,
+    "severity": "low",
+    "current_location": "AGENTS.md:38-47; docker/",
+    "evidence": "Project contract явно называет native WB systemd единственным production target; Docker assets сохранены для desktop development.",
+    "reproduction": "Никакие production deploy/health выводы не должны строиться по docker-compose; отсутствие Docker parity не является дефектом WB rollout.",
+    "status": "INTENTIONAL_LIMITATION",
+    "implementation": {
+      "disposition": "not_applicable",
+      "reason": "Docker production support не входит в продуктовый контракт.",
+      "package": "orchestrator-decision",
+      "commit": null,
+      "tests": []
+    },
+    "introduced_by_branch": false,
+    "scenario": "Никакие production deploy/health выводы не должны строиться по docker-compose; отсутствие Docker parity не является дефектом WB rollout.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": []
+  },
+  {
+    "decision_id": "RD-001",
+    "title": "Total-duration conflict false-positive отклонён",
+    "file": "db/programs.py",
+    "line": 354,
+    "severity": "low",
+    "current_location": "db/programs.py:354-366; irrigation_scheduler.py:831-875,956-1020",
+    "evidence": "Кандидат утверждал, что checker ошибочно суммирует parallel groups, но runtime serializes all zones и preclaims каждую group на всё execution; total sequential duration соответствует admission semantics.",
+    "reproduction": "Проследить _run_program_threaded: все зоны выполняются последовательно, claims живут до завершения invocation; отдельного параллельного group schedule нет.",
+    "status": "VERIFIED_FALSE",
+    "implementation": {
+      "disposition": "not_applicable",
+      "reason": "Фактический runtime подтверждает последовательную total-duration модель; заявленный false positive отсутствует.",
+      "package": "post-review-verification",
+      "commit": null,
+      "tests": []
+    },
+    "introduced_by_branch": false,
+    "scenario": "Проследить _run_program_threaded: все зоны выполняются последовательно, claims живут до завершения invocation; отдельного параллельного group schedule нет.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": []
+  },
+  {
+    "decision_id": "RD-002",
+    "title": "Legacy runbook не является автоматическим production path",
+    "file": "docs/archive/README-LONG.md",
+    "line": 1,
+    "severity": "low",
+    "current_location": "docs/archive/; AGENTS.md:38-47; install_wb.sh; update_server.sh",
+    "evidence": "Кандидаты из архивных Docker/legacy документов не достигаются поддерживаемым native WB installer/updater; docs/archive явно исторический слой, а authoritative scripts определены project contract.",
+    "reproduction": "Read-only caller/deploy review не нашёл invocation архивного runbook из CI, installer, updater или unit.",
+    "status": "VERIFIED_FALSE",
+    "implementation": {
+      "disposition": "not_applicable",
+      "reason": "Архивный текст не является исполняемым либо поддерживаемым deploy path; отдельный runtime fix не требуется.",
+      "package": "post-review-verification",
+      "commit": null,
+      "tests": []
+    },
+    "introduced_by_branch": false,
+    "scenario": "Read-only caller/deploy review не нашёл invocation архивного runbook из CI, installer, updater или unit.",
+    "verified_by": [
+      "2026-07-19 full-project review",
+      "/root"
+    ],
+    "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
+    "main_or_branch": "current_head_post_review",
+    "reopens": []
   }
 ]

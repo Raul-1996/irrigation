@@ -1,7 +1,8 @@
-"""Apply Phase 2 package resolutions and render the findings inventory.
+"""Apply package resolutions and render the findings inventory.
 
-The JSON inventory remains authoritative. Finding IDs are the immutable one-based
-array positions established by Phase 1; never reorder or insert entries.
+The JSON inventory remains authoritative. Finding IDs are immutable one-based
+array positions: never reorder or insert entries, only append new records. The
+Phase 1 prefix (#1..#152) is additionally protected by validation.
 """
 
 from __future__ import annotations
@@ -18,15 +19,28 @@ INVENTORY_PATH = ROOT / "findings-inventory.json"
 PACKAGES_PATH = ROOT / "PHASE2-PACKAGES.json"
 MARKDOWN_PATH = ROOT / "findings-inventory.md"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+POST_REVIEW_ID_RE = re.compile(r"^PR-(\d{3})$")
+DECISION_ID_RE = re.compile(r"^(IL|KD|RD)-(\d{3})$")
 DISPOSITIONS = {"pending", "fixed", "deferred", "not_applicable"}
+VERIFICATION_STATUSES = {"VERIFIED_REAL", "VERIFIED_FALSE", "INTENTIONAL_LIMITATION"}
+HISTORICAL_COUNT = 152
+HISTORICAL_STATUS_COUNTS = Counter({"VERIFIED_REAL": 147, "VERIFIED_FALSE": 5})
 
 
 def _default_implementation(finding: dict) -> dict:
-    if finding["status"] == "VERIFIED_FALSE":
+    if finding["status"] in {"VERIFIED_FALSE", "INTENTIONAL_LIMITATION"}:
+        if finding["status"] == "VERIFIED_FALSE":
+            return {
+                "disposition": "not_applicable",
+                "reason": "Фаза 1 признала находку ложной; production-fix не применяется.",
+                "package": "phase1-verification",
+                "commit": None,
+                "tests": [],
+            }
         return {
             "disposition": "not_applicable",
-            "reason": "Фаза 1 признала находку ложной; production-fix не применяется.",
-            "package": "phase1-verification",
+            "reason": "Это явно зафиксированное ограничение/решение продукта, а не дефект.",
+            "package": "orchestrator-decision",
             "commit": None,
             "tests": [],
         }
@@ -45,7 +59,12 @@ def apply_packages(inventory: list[dict], package_doc: dict) -> None:
         raise ValueError("unsupported PHASE2-PACKAGES schema")
 
     for finding in inventory:
-        finding["implementation"] = _default_implementation(finding)
+        # Phase 2 resolutions remain ledger-owned. Appended post-review records
+        # are authoritative in-place until their future package ledger exists.
+        if finding.get("post_review_id") or finding.get("decision_id"):
+            finding.setdefault("implementation", _default_implementation(finding))
+        else:
+            finding["implementation"] = _default_implementation(finding)
 
     seen_roots: set[int] = set()
     package_slugs: set[str] = set()
@@ -103,19 +122,56 @@ def apply_packages(inventory: list[dict], package_doc: dict) -> None:
 
 
 def validate(inventory: list[dict], package_doc: dict) -> Counter:
-    if len(inventory) != 152:
-        raise ValueError(f"expected 152 findings, got {len(inventory)}")
-    status_counts = Counter(item["status"] for item in inventory)
-    if status_counts != Counter({"VERIFIED_REAL": 147, "VERIFIED_FALSE": 5}):
-        raise ValueError(f"unexpected status counts: {status_counts}")
+    if len(inventory) < HISTORICAL_COUNT:
+        raise ValueError(f"expected at least {HISTORICAL_COUNT} findings, got {len(inventory)}")
+    historical_status_counts = Counter(item["status"] for item in inventory[:HISTORICAL_COUNT])
+    if historical_status_counts != HISTORICAL_STATUS_COUNTS:
+        raise ValueError(f"historical prefix changed: {historical_status_counts}")
+
+    post_review_ids: list[int] = []
+    decision_ids: set[str] = set()
     for finding_id, finding in enumerate(inventory, start=1):
+        status = finding["status"]
+        if status not in VERIFICATION_STATUSES:
+            raise ValueError(f"finding #{finding_id}: invalid verification status {status}")
+
+        post_review_id = finding.get("post_review_id")
+        decision_id = finding.get("decision_id")
+        if finding_id <= HISTORICAL_COUNT:
+            if post_review_id or decision_id:
+                raise ValueError(f"historical finding #{finding_id}: appended ID is forbidden")
+        elif bool(post_review_id) == bool(decision_id):
+            raise ValueError(f"finding #{finding_id}: exactly one appended stable ID is required")
+
+        if post_review_id:
+            match = POST_REVIEW_ID_RE.fullmatch(post_review_id)
+            if not match:
+                raise ValueError(f"finding #{finding_id}: invalid post_review_id {post_review_id}")
+            post_review_ids.append(int(match.group(1)))
+            owners = finding.get("owner_packages")
+            if not isinstance(owners, list) or not owners or len(owners) != len(set(owners)):
+                raise ValueError(f"finding #{finding_id}: owner_packages must be a unique non-empty list")
+            for key in ("title", "file", "current_location", "evidence", "reproduction"):
+                if not isinstance(finding.get(key), str) or not finding[key].strip():
+                    raise ValueError(f"finding #{finding_id}: missing {key}")
+        if decision_id:
+            if not DECISION_ID_RE.fullmatch(decision_id) or decision_id in decision_ids:
+                raise ValueError(f"finding #{finding_id}: invalid/duplicate decision_id {decision_id}")
+            decision_ids.add(decision_id)
+
+        reopens = finding.get("reopens", [])
+        if not isinstance(reopens, list) or len(reopens) != len(set(reopens)):
+            raise ValueError(f"finding #{finding_id}: reopens must be a unique list")
+        if any(not isinstance(item, int) or not 1 <= item <= HISTORICAL_COUNT for item in reopens):
+            raise ValueError(f"finding #{finding_id}: invalid historical reopen target")
+
         implementation = finding["implementation"]
         disposition = implementation["disposition"]
         if disposition not in DISPOSITIONS:
             raise ValueError(f"finding #{finding_id}: invalid disposition {disposition}")
-        if finding["status"] == "VERIFIED_FALSE":
+        if status in {"VERIFIED_FALSE", "INTENTIONAL_LIMITATION"}:
             if disposition != "not_applicable":
-                raise ValueError(f"finding #{finding_id}: false finding must be not_applicable")
+                raise ValueError(f"finding #{finding_id}: non-defect decision must be not_applicable")
         elif disposition == "not_applicable":
             raise ValueError(f"finding #{finding_id}: real finding cannot be not_applicable")
         if disposition == "fixed":
@@ -131,9 +187,12 @@ def validate(inventory: list[dict], package_doc: dict) -> Counter:
             if implementation["commit"] is not None or implementation["tests"]:
                 raise ValueError(f"finding #{finding_id}: deferred resolution cannot have commit/tests")
         elif disposition == "pending":
-            if finding["status"] != "VERIFIED_REAL":
+            if status != "VERIFIED_REAL":
                 raise ValueError(f"finding #{finding_id}: only real findings may be pending")
-            if any(implementation[key] is not None for key in ("reason", "package", "commit")) or implementation["tests"]:
+            if (
+                any(implementation[key] is not None for key in ("reason", "package", "commit"))
+                or implementation["tests"]
+            ):
                 raise ValueError(f"finding #{finding_id}: pending resolution must be empty")
 
         duplicate_of = finding.get("duplicate_of")
@@ -148,21 +207,34 @@ def validate(inventory: list[dict], package_doc: dict) -> Counter:
             if implementation != target["implementation"]:
                 raise ValueError(f"finding #{finding_id}: duplicate implementation mismatch")
 
+    if post_review_ids and post_review_ids != list(range(1, len(post_review_ids) + 1)):
+        raise ValueError(f"post-review IDs must be contiguous and ordered, got {post_review_ids}")
+
     return Counter(item["implementation"]["disposition"] for item in inventory)
 
 
 def _render_finding(finding_id: int, finding: dict) -> list[str]:
     implementation = finding["implementation"]
+    stable_id = finding.get("post_review_id") or finding.get("decision_id")
+    rendered_id = f"#{finding_id}" + (f" / {stable_id}" if stable_id else "")
     lines = [
-        f"### #{finding_id} [{finding['severity']}] `{finding['current_location']}` — {finding['title']}",
+        f"### {rendered_id} [{finding['severity']}] `{finding['current_location']}` — {finding['title']}",
         "",
         f"- **Статус:** `{finding['status']}`.",
         f"- **Происхождение:** `{finding['main_or_branch']}`.",
         f"- **Верификация:** {finding['verified_reason']}",
         f"- **Репродукция/сценарий:** {finding['reproduction']}",
     ]
+    if stable_id and finding.get("evidence"):
+        lines.append(f"- **Evidence:** {finding['evidence']}")
     if finding.get("duplicate_of") is not None:
         lines.append(f"- **Дубль:** `#{finding['duplicate_of']}`.")
+    if finding.get("reopens"):
+        rendered_reopens = ", ".join(f"#{item}" for item in finding["reopens"])
+        lines.append(f"- **Переоткрывает:** {rendered_reopens}.")
+    if finding.get("owner_packages"):
+        rendered_owners = ", ".join(f"`{owner}`" for owner in finding["owner_packages"])
+        lines.append(f"- **Owner packages:** {rendered_owners}.")
     if finding.get("decision_notes"):
         lines.append(f"- **Решение оркестратора:** {finding['decision_notes']}")
     lines.append(f"- **Disposition Фаз 2–3:** `{implementation['disposition']}`.")
@@ -180,29 +252,48 @@ def _render_finding(finding_id: int, finding: dict) -> list[str]:
 
 
 def render_markdown(inventory: list[dict], disposition_counts: Counter) -> str:
-    real = [(index, item) for index, item in enumerate(inventory, start=1) if item["status"] == "VERIFIED_REAL"]
-    false = [(index, item) for index, item in enumerate(inventory, start=1) if item["status"] == "VERIFIED_FALSE"]
+    indexed = list(enumerate(inventory, start=1))
+    historical_real = [(index, item) for index, item in indexed[:HISTORICAL_COUNT] if item["status"] == "VERIFIED_REAL"]
+    historical_false = [
+        (index, item) for index, item in indexed[:HISTORICAL_COUNT] if item["status"] == "VERIFIED_FALSE"
+    ]
+    post_review = [
+        (index, item) for index, item in indexed if item.get("post_review_id") and item["status"] == "VERIFIED_REAL"
+    ]
+    intentional = [(index, item) for index, item in indexed if item["status"] == "INTENTIONAL_LIMITATION"]
+    rejected = [(index, item) for index, item in indexed[HISTORICAL_COUNT:] if item["status"] == "VERIFIED_FALSE"]
+    status_counts = Counter(item["status"] for item in inventory)
     lines = [
         "# Финальный инвентарь аудита wb-irrigation",
         "",
-        "Фаза 1 завершена 2026-07-18: каждая исходная находка получила требуемые независимые роли, все расхождения разрешены оркестратором, пять линз diff-review завершены.",
+        "Исторический реестр Фаз 1–3 сохранён неизменяемым префиксом #1–#152. После полного post-review текущего HEAD добавлены новые и переоткрытые корневые дефекты с отдельными стабильными PR-ID, owner packages и проверяемыми сценариями.",
         "",
-        "- Всего записей: **152** (138 исходных + 14 новых).",
-        "- `VERIFIED_REAL`: **147**.",
-        "- `VERIFIED_FALSE`: **5**.",
+        f"- Всего записей: **{len(inventory)}** (152 исторических + {len(inventory) - HISTORICAL_COUNT} post-review решений).",
+        f"- `VERIFIED_REAL`: **{status_counts['VERIFIED_REAL']}**.",
+        f"- `VERIFIED_FALSE`: **{status_counts['VERIFIED_FALSE']}**.",
+        f"- `INTENTIONAL_LIMITATION`: **{status_counts['INTENTIONAL_LIMITATION']}**.",
         "- `UNVERIFIED`: **0**.",
         "- `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.",
-        f"- Phase 2 disposition: **{disposition_counts['fixed']} fixed · {disposition_counts['deferred']} deferred · {disposition_counts['pending']} pending · {disposition_counts['not_applicable']} not_applicable**.",
+        f"- Remediation disposition: **{disposition_counts['fixed']} fixed · {disposition_counts['deferred']} deferred · {disposition_counts['pending']} pending · {disposition_counts['not_applicable']} not_applicable**.",
         "",
         "Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.",
         "",
-        f"## Подтверждённые — {len(real)}",
+        f"## Post-review remediation — {len(post_review)}",
         "",
     ]
-    for finding_id, finding in real:
+    for finding_id, finding in post_review:
         lines.extend(_render_finding(finding_id, finding))
-    lines.extend([f"## Отклонённые — {len(false)}", ""])
-    for finding_id, finding in false:
+    lines.extend([f"## Intentional limitations — {len(intentional)}", ""])
+    for finding_id, finding in intentional:
+        lines.extend(_render_finding(finding_id, finding))
+    lines.extend([f"## Post-review rejected — {len(rejected)}", ""])
+    for finding_id, finding in rejected:
+        lines.extend(_render_finding(finding_id, finding))
+    lines.extend([f"## Исторические подтверждённые — {len(historical_real)}", ""])
+    for finding_id, finding in historical_real:
+        lines.extend(_render_finding(finding_id, finding))
+    lines.extend([f"## Исторические отклонённые — {len(historical_false)}", ""])
+    for finding_id, finding in historical_false:
         lines.extend(_render_finding(finding_id, finding))
     return "\n".join(lines).rstrip() + "\n"
 
