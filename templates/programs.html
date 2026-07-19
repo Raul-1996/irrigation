@@ -549,7 +549,7 @@ function renderWizardStep() {
   html += `<div class="wizard-step ${wizardStep === 3 ? 'active' : ''}">
     <div class="form-group">
       <label class="form-label">Время запуска</label>
-      <input type="time" class="form-input" value="${wizardData.time}" 
+      <input type="time" class="form-input" value="${escapeHtml(wizardData.time)}"
         onchange="wizardData.time = this.value">
     </div>
   </div>`;
@@ -599,7 +599,7 @@ function renderWizardStep() {
             `Каждые ${wizardData.interval_days || 3} дней`
           }
         </div>
-        <div class="summary-value">⏰ ${wizardData.time}</div>
+        <div class="summary-value">⏰ ${escapeHtml(wizardData.time)}</div>
       </div>
       
       <div class="summary-section">

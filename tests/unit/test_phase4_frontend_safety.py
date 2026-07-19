@@ -752,37 +752,64 @@ process.stdout.write(JSON.stringify([
     assert "safeProgramColor(p.color)" in render
 
 
-def test_program_legacy_time_is_escaped_before_rendering() -> None:
+def test_program_legacy_time_is_escaped_in_list_wizard_and_summary() -> None:
     source = _source(PROGRAMS)
-    render = _function(source, "renderList")
+    render_list = _function(source, "renderList")
+    render_wizard = _function(source, "renderWizardStep")
     safe_color = _function(source, "safeProgramColor")
     script = f"""
 function escapeHtml(value) {{
-  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
 }}
 const DEFAULT_PROGRAM_COLOR = '#42a5f5';
+const COLORS = [DEFAULT_PROGRAM_COLOR];
 {safe_color}
-const container = {{innerHTML: ''}};
-const document = {{getElementById() {{ return container; }}}};
+const listContainer = {{innerHTML: ''}};
+const wizardContainer = {{innerHTML: ''}};
+const document = {{getElementById(id) {{
+  return id === 'list-content' ? listContainer : wizardContainer;
+}}}};
 const currentSort = 'name';
 const zones = [];
+const maliciousTime = '"><img src=x onerror=alert(1)>';
 const programs = [{{
   id: 1,
   name: 'legacy',
-  time: '<img src=x onerror=alert(1)>',
+  time: maliciousTime,
   type: 'time-based',
   schedule_type: 'weekdays',
   days: [],
   zones: [],
   enabled: true,
 }}];
-{render}
+let wizardStep = 3;
+const wizardData = {{
+  name: 'legacy', type: 'time-based', color: DEFAULT_PROGRAM_COLOR,
+  schedule_type: 'weekdays', days: [], interval_days: 3, even_odd: null,
+  time: maliciousTime, zones: [], enabled: true,
+}};
+{render_list}
+{render_wizard}
 renderList();
-process.stdout.write(container.innerHTML);
+renderWizardStep();
+process.stdout.write(JSON.stringify({{
+  list: listContainer.innerHTML,
+  wizard: wizardContainer.innerHTML,
+}}));
 """
     completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
-    assert "<img" not in completed.stdout
-    assert "&lt;img" in completed.stdout
+    rendered = json.loads(completed.stdout)
+    assert "<img" not in rendered["list"]
+    assert rendered["list"].count("&lt;img") == 1
+    assert "<img" not in rendered["wizard"]
+    assert rendered["wizard"].count("&lt;img") == 2
+    assert 'value="&quot;&gt;&lt;img' in rendered["wizard"]
+    assert _function(source, "renderWizardStep").count("escapeHtml(wizardData.time)") == 2
 
 
 def test_password_confirmation_and_whitespace_contract() -> None:
