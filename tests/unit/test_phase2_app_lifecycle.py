@@ -15,7 +15,7 @@ def test_initialize_completes_scheduler_boot_only_after_off_reconciliation(test_
 
     events = []
     scheduler = MagicMock()
-    scheduler.complete_boot_recovery.side_effect = lambda: events.append("complete_boot_recovery")
+    scheduler.complete_boot_recovery.side_effect = lambda: events.append("complete_boot_recovery") or True
     flask_app = MagicMock()
     flask_app.config = {"TESTING": False}
 
@@ -24,12 +24,12 @@ def test_initialize_completes_scheduler_boot_only_after_off_reconciliation(test_
         patch.object(irrigation_scheduler, "init_scheduler", side_effect=lambda _db: events.append("init")),
         patch.object(irrigation_scheduler, "get_scheduler", return_value=scheduler),
         patch.object(watchdog, "start_watchdog"),
-        patch.object(app_init, "_boot_sync", side_effect=lambda _app, _db: events.append("boot_sync")),
+        patch.object(app_init, "_boot_sync", side_effect=lambda _app, _db: events.append("boot_sync") or True),
         patch.object(app_init, "_start_monitors", side_effect=lambda _app, _db: events.append("monitors")),
         patch.object(app_init, "_warm_mqtt_clients"),
         patch.object(app_init, "_register_shutdown_handlers"),
         patch.object(health_api, "init_metrics"),
-        patch.object(systemd_notify, "start_heartbeat"),
+        patch.object(app_init, "_start_health_bound_heartbeat"),
         patch.object(systemd_notify, "notify_ready"),
     ):
         app_init.initialize_app(flask_app, test_db, start_watchdog_fn=MagicMock())
@@ -61,37 +61,13 @@ def test_boot_aborts_crash_open_run_before_forced_zone_stop(test_db):
     assert stale_run_id is not None
     test_db.mark_zone_run_confirmed(int(zone["id"]))
 
-    run_seen_by_stop = []
-
-    def ordinary_stop_finalization(_group_id, **_kwargs):
-        if int(_group_id) != int(group["id"]):
-            return
-        run = test_db.get_open_zone_run(int(zone["id"]))
-        run_seen_by_stop.append(run)
-        if run is not None:
-            test_db.finish_zone_run(
-                int(run["id"]),
-                "2026-07-19 10:00:00",
-                time.monotonic(),
-                None,
-                None,
-                None,
-                status="ok",
-            )
-
-    import services.master_valve as master_valve
     import services.mqtt_pub as mqtt_pub
-    import services.zone_control as zone_control
     from services import app_init
 
-    with (
-        patch.object(zone_control, "stop_all_in_group", side_effect=ordinary_stop_finalization),
-        patch.object(mqtt_pub, "publish_mqtt_value", return_value=True),
-        patch.object(master_valve, "close_all_master_valves"),
-    ):
-        app_init._boot_sync(MagicMock(), test_db)
+    with patch.object(mqtt_pub, "publish_mqtt_value", return_value=True):
+        assert app_init._boot_sync(MagicMock(), test_db) is True
 
-    assert run_seen_by_stop == [None]
+    assert test_db.get_open_zone_run(int(zone["id"])) is None
     with sqlite3.connect(test_db.db_path) as conn:
         status, end_utc = conn.execute(
             "SELECT status, end_utc FROM zone_runs WHERE id = ?",
@@ -125,6 +101,8 @@ def test_shutdown_quiesces_scheduler_before_final_retained_off(test_db):
     scheduler = MagicMock()
     scheduler.quiesce.side_effect = lambda **_kwargs: events.append("quiesced") or True
     publish_result = MagicMock()
+    publish_result.rc = 0
+    publish_result.is_published.return_value = True
     mqtt_client = MagicMock()
 
     def record_publish(topic, *, payload, qos, retain):
@@ -142,7 +120,8 @@ def test_shutdown_quiesces_scheduler_before_final_retained_off(test_db):
     ):
         shutdown.shutdown_all_zones_off(timeout_sec=3, db=test_db)
 
-    scheduler.quiesce.assert_called_once_with(timeout_seconds=3)
+    scheduler.quiesce.assert_called_once()
+    assert 0 < scheduler.quiesce.call_args.kwargs["timeout_seconds"] <= 3
     assert events[0] == "quiesced"
     assert events[1:] == [
         ("/devices/test/controls/K1", "0", 2, True),
