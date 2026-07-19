@@ -3,6 +3,7 @@
 import asyncio
 import os
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -103,6 +104,173 @@ def test_same_loop_runner_stop_is_scheduled_without_threadsafe_wait() -> None:
             await asyncio.sleep(0)
 
     asyncio.run(scenario())
+
+
+def test_aiogram_start_reports_bootstrap_token_failure() -> None:
+    from services import telegram_bot
+
+    class InvalidTokenBot:
+        def __init__(self, *, token: str):
+            raise ValueError(f"invalid token: {token}")
+
+    runner = telegram_bot.AiogramBotRunner()
+    with (
+        patch.object(telegram_bot.notifier, "_ensure_token", return_value="invalid-token"),
+        patch.object(telegram_bot, "Bot", InvalidTokenBot),
+        patch.object(telegram_bot, "Dispatcher", object),
+    ):
+        assert runner.start(timeout=1) is False
+
+    assert runner._thread is not None
+    runner._thread.join(timeout=1)
+    assert not runner._thread.is_alive()
+
+
+def test_stop_during_aiogram_bootstrap_never_enters_polling() -> None:
+    from services import telegram_bot
+
+    delete_started = threading.Event()
+    release_delete = threading.Event()
+    polling_started = threading.Event()
+
+    class Session:
+        async def close(self) -> None:
+            return None
+
+    class SlowBootstrapBot:
+        def __init__(self, *, token: str):
+            self.token = token
+            self.session = Session()
+
+        async def get_me(self):
+            return {"id": 1}
+
+        async def delete_webhook(self, *, drop_pending_updates: bool):
+            delete_started.set()
+            while not release_delete.is_set():
+                await asyncio.sleep(0.005)
+            return True
+
+    class Registry:
+        def register(self, *_args, **_kwargs) -> None:
+            return None
+
+    class BootstrapDispatcher:
+        def __init__(self):
+            self.message = Registry()
+            self.callback_query = Registry()
+
+        async def start_polling(self, *_args, **_kwargs) -> None:
+            polling_started.set()
+
+        async def stop_polling(self) -> None:
+            raise RuntimeError("polling has not started")
+
+    runner = telegram_bot.AiogramBotRunner()
+    start_result: list[bool] = []
+    with (
+        patch.object(telegram_bot.notifier, "_ensure_token", return_value="valid-token"),
+        patch.object(telegram_bot, "Bot", SlowBootstrapBot),
+        patch.object(telegram_bot, "Dispatcher", BootstrapDispatcher),
+    ):
+        starter = threading.Thread(target=lambda: start_result.append(runner.start(timeout=2)), daemon=True)
+        starter.start()
+        assert delete_started.wait(timeout=1)
+        assert runner.stop(timeout=0.05) is False
+        release_delete.set()
+        starter.join(timeout=2)
+        assert not starter.is_alive()
+        assert start_result == [False]
+        assert not polling_started.is_set()
+
+
+def test_reconfigure_invalid_token_restores_previous_runtime_and_config() -> None:
+    """Exercise the real runner handshake, not a mocked start return value."""
+    from services import telegram_bot
+
+    persisted = {"token": "old-encrypted"}
+    polling_tokens: list[str] = []
+
+    class Session:
+        async def close(self) -> None:
+            return None
+
+    class ValidatingBot:
+        def __init__(self, *, token: str):
+            self.token = token
+            self.session = Session()
+
+        async def get_me(self):
+            if self.token == "new-invalid-token":
+                raise RuntimeError("Telegram rejected token")
+            return {"id": 1}
+
+        async def delete_webhook(self, *, drop_pending_updates: bool):
+            return True
+
+    class Registry:
+        def register(self, *_args, **_kwargs) -> None:
+            return None
+
+    class PollingDispatcher:
+        def __init__(self):
+            self.message = Registry()
+            self.callback_query = Registry()
+            self._stopped = asyncio.Event()
+
+        async def start_polling(self, bot, **_kwargs) -> None:
+            polling_tokens.append(bot.token)
+            await self._stopped.wait()
+
+        async def stop_polling(self) -> None:
+            self._stopped.set()
+
+    def get_setting(key: str):
+        assert key == "telegram_bot_token_encrypted"
+        return persisted["token"]
+
+    def set_setting(key: str, value: str | None) -> bool:
+        assert key == "telegram_bot_token_encrypted"
+        persisted["token"] = value
+        return True
+
+    def decrypt(value: str) -> str:
+        return {
+            "old-encrypted": "old-valid-token",
+            "new-encrypted": "new-invalid-token",
+        }[value]
+
+    telegram_bot.notifier.invalidate_token()
+    with (
+        patch("config.TESTING", False),
+        patch.object(telegram_bot, "Bot", ValidatingBot),
+        patch.object(telegram_bot, "Dispatcher", PollingDispatcher),
+        patch.object(telegram_bot, "decrypt_secret", side_effect=decrypt),
+        patch.object(telegram_bot.db, "get_setting_value", side_effect=get_setting),
+        patch.object(telegram_bot.db, "set_setting_value", side_effect=set_setting),
+        patch.object(telegram_bot, "_aiogram_runner", None),
+        patch.object(telegram_bot, "_http_poller", None),
+    ):
+        assert telegram_bot._start_runtime_locked() is True
+        deadline = time.monotonic() + 1
+        while polling_tokens != ["old-valid-token"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert polling_tokens == ["old-valid-token"]
+
+        assert telegram_bot.reconfigure_bot_token("new-encrypted") is False
+        assert persisted["token"] == "old-encrypted"
+        assert telegram_bot.notifier._token == "old-valid-token"
+
+        deadline = time.monotonic() + 1
+        while polling_tokens != ["old-valid-token", "old-valid-token"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert polling_tokens == ["old-valid-token", "old-valid-token"]
+        assert telegram_bot._aiogram_runner is not None
+        assert telegram_bot._aiogram_runner._thread is not None
+        assert telegram_bot._aiogram_runner._thread.is_alive()
+        assert telegram_bot._stop_runtime_locked() is True
+
+    telegram_bot.notifier.invalidate_token()
 
 
 def test_aiogram_subscribe_command_is_reachable() -> None:

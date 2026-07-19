@@ -165,17 +165,37 @@ def _do_group_start(group_id: int) -> str:
         return "Ошибка запуска группы"
 
 
+def _zone_has_physical_off(zone: dict) -> bool:
+    """Return true only when OFF is authoritative for this zone channel."""
+    if str(zone.get("state") or "").strip().lower() != "off":
+        return False
+    has_mqtt_channel = bool(zone.get("mqtt_server_id") and str(zone.get("topic") or "").strip())
+    if not has_mqtt_channel:
+        return True
+    return str(zone.get("observed_state") or "").strip().lower() in ("off", "0", "false")
+
+
 def _do_group_stop(group_id: int) -> str:
     try:
         from irrigation_scheduler import get_scheduler
 
         scheduler = get_scheduler()
+        stop_results: dict[int, bool] = {}
         if scheduler:
             scheduler.cancel_group_jobs(int(group_id))
         else:
-            from services.zone_control import stop_all_in_group
+            from services.zone_control import stop_zone
 
-            stop_all_in_group(int(group_id), reason="telegram", force=True)
+            # The group aggregate is deliberately best-effort and has no result.
+            # Call the central per-zone primitive so a failed publish remains
+            # visible to this operator-facing command.
+            for zone in db.get_zones_by_group(int(group_id)) or []:
+                zone_id = int(zone["id"])
+                try:
+                    stop_results[zone_id] = bool(stop_zone(zone_id, reason="telegram", force=True))
+                except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError):
+                    logger.exception("Telegram stop failed for zone %s", zone_id)
+                    stop_results[zone_id] = False
 
         # Both stop primitives are best-effort and historically returned no
         # aggregate result.  Re-read the authoritative state before telling an
@@ -184,7 +204,7 @@ def _do_group_stop(group_id: int) -> str:
         unresolved = [
             int(zone["id"])
             for zone in zones
-            if str(zone.get("state") or "").strip().lower() != "off"
+            if stop_results.get(int(zone["id"])) is False or not _zone_has_physical_off(zone)
         ]
         if not unresolved:
             return "⏹ Полив группы остановлен"

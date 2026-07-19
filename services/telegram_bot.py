@@ -394,6 +394,16 @@ class AiogramBotRunner:
         self._dp: Dispatcher | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop_requested = threading.Event()
+        self._startup_event = threading.Event()
+        self._startup_ok = False
+        self._startup_error: str | None = None
+
+    def _signal_startup(self, ok: bool, error: str | None = None) -> None:
+        if self._startup_event.is_set():
+            return
+        self._startup_ok = bool(ok)
+        self._startup_error = error
+        self._startup_event.set()
 
     def _is_authorized_chat(self, chat_id: int) -> bool:
         """SECURITY FIX (VULN-005): Check if chat_id is the admin chat."""
@@ -496,25 +506,50 @@ class AiogramBotRunner:
         try:
             token = notifier._ensure_token()
             if not token or Bot is None or Dispatcher is None:
-                logger.error("Aiogram _main: missing token or aiogram is not available")
+                message = "Aiogram _main: missing token or aiogram is not available"
+                logger.error(message)
+                self._signal_startup(False, message)
                 return
             logger.info("[telegram] Starting aiogram v3 polling runner")
             self._bot = Bot(token=token)
             bot = self._bot
             self._dp = Dispatcher()
             if self._stop_requested.is_set():
+                self._signal_startup(False, "stop requested during bootstrap")
                 return
-            self._running = True
-            try:
-                await self._bot.delete_webhook(drop_pending_updates=True)
-            except (sqlite3.Error, OSError) as e:
-                logger.warning(f"delete_webhook failed: {e}")
+
+            # Bot() only validates token syntax.  get_me performs an authenticated
+            # request, so settings PUT cannot report success for a token that the
+            # Telegram API rejects.  Both bootstrap calls are bounded because
+            # reconfigure_bot_token synchronously depends on this handshake.
+            await asyncio.wait_for(self._bot.get_me(), timeout=5.0)
+            if self._stop_requested.is_set():
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+            await asyncio.wait_for(self._bot.delete_webhook(drop_pending_updates=True), timeout=5.0)
+            if self._stop_requested.is_set():
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+
             self._dp.message.register(self._on_message, F.text)
             self._dp.callback_query.register(self._on_callback)
-            await self._dp.start_polling(self._bot, allowed_updates=["message", "callback_query"])
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Aiogram runner failed: {e}")
+            polling_coro = self._dp.start_polling(
+                self._bot,
+                allowed_updates=["message", "callback_query"],
+            )
+            if self._stop_requested.is_set():
+                polling_coro.close()
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+            self._running = True
+            self._signal_startup(True)
+            await polling_coro
+        except Exception as e:  # Bootstrap failures must reach the synchronous caller.
+            self._signal_startup(False, str(e))
+            logger.error("Aiogram runner failed: %s", e)
         finally:
+            if not self._startup_event.is_set():
+                self._signal_startup(False, "aiogram runner exited during bootstrap")
             self._running = False
             if bot is not None:
                 try:
@@ -530,8 +565,11 @@ class AiogramBotRunner:
             asyncio.set_event_loop(self._loop)
             self._loop.run_until_complete(self._main())
         except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:  # catch-all: intentional
+            self._signal_startup(False, str(e))
             logger.exception(f"Aiogram thread target error: {e}")
         finally:
+            if not self._startup_event.is_set():
+                self._signal_startup(False, "aiogram thread exited during bootstrap")
             loop = self._loop
             if loop is not None and not loop.is_closed():
                 try:
@@ -546,12 +584,26 @@ class AiogramBotRunner:
             self._loop = None
             self._running = False
 
-    def start(self) -> bool:
+    def start(self, timeout: float = 12.0) -> bool:
         if self._thread and self._thread.is_alive():
-            return True
+            return self._startup_event.is_set() and self._startup_ok
         self._stop_requested.clear()
+        self._startup_event.clear()
+        self._startup_ok = False
+        self._startup_error = None
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
+        if not self._startup_event.wait(timeout=max(0.0, timeout)):
+            self._stop_requested.set()
+            self._startup_error = "aiogram bootstrap timed out"
+            logger.error(self._startup_error)
+            return False
+        if not self._startup_ok:
+            self._thread.join(timeout=1.0)
+            return False
+        if not self._thread.is_alive():
+            self._startup_error = "aiogram runner exited immediately after bootstrap"
+            return False
         return True
 
     def stop(self, timeout: float = 10.0) -> bool:
@@ -797,30 +849,35 @@ def reconfigure_bot_token(token_encrypted: str | None) -> bool:
 
             # Prevent a concurrent scheduler/monitor notification from loading
             # the old DB value back into the plaintext cache between invalidation
-            # and persistence.  RLock is required because runtime start calls
-            # _ensure_token while this transition is still protected.
+            # and persistence.  Runtime bootstrap itself happens after releasing
+            # this lock because its worker thread must call _ensure_token().
             with notifier._lock:
                 notifier.invalidate_token()
                 if not db.set_setting_value("telegram_bot_token_encrypted", token_encrypted):
                     notifier.invalidate_token()
-                    if old_encrypted:
-                        _start_runtime_locked()
-                    return False
+                    persisted = False
+                else:
+                    persisted = True
 
-                if not token_encrypted:
-                    return True
-                if _start_runtime_locked():
-                    return True
+            if not persisted:
+                if old_encrypted:
+                    _start_runtime_locked()
+                return False
+            if not token_encrypted:
+                return True
+            if _start_runtime_locked():
+                return True
 
-                logger.error("Telegram token change rolled back: new polling runtime did not start")
-                _stop_runtime_locked()
+            logger.error("Telegram token change rolled back: new polling runtime did not start")
+            _stop_runtime_locked()
+            with notifier._lock:
                 restored = db.set_setting_value("telegram_bot_token_encrypted", old_encrypted)
                 notifier.invalidate_token()
-                if old_encrypted:
-                    restored = _start_runtime_locked() and restored
-                if not restored:
-                    logger.critical("Telegram token rollback failed; polling remains stopped")
-                return False
+            if old_encrypted:
+                restored = _start_runtime_locked() and restored
+            if not restored:
+                logger.critical("Telegram token rollback failed; polling remains stopped")
+            return False
         except (sqlite3.Error, OSError, RuntimeError) as e:
             logger.error("Telegram token reconfiguration failed: %s", e)
             return False
