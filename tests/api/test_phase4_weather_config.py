@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from unittest.mock import patch
 
+import pytest
+
 
 def _create_enabled_broker(app, *, enabled: bool = True) -> int:
     server = app.db.create_mqtt_server(
@@ -161,6 +163,67 @@ def test_rain_runtime_failure_rolls_back_settings_and_group_flags(admin_client, 
     assert app.db.get_setting_value("rain.type") == "NC"
     assert app.db.get_setting_value("rain.server_id") is None
     assert app.db.get_group_use_rain(1) is False
+
+
+def test_rain_runtime_failure_never_erases_concurrent_group_enable(admin_client, app) -> None:
+    server_id = _create_enabled_broker(app)
+    assert app.db.set_rain_config({"enabled": False, "topic": "/old", "server_id": None, "type": "NC"})
+    assert app.db.set_group_use_rain(1, False)
+
+    def concurrent_enable(_config):
+        assert app.db.set_group_use_rain(1, True)
+        return False
+
+    with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
+        monitor.reconfigure.side_effect = concurrent_enable
+        response = admin_client.post(
+            "/api/rain",
+            json={"enabled": True, "topic": "/new", "server_id": server_id, "type": "NO"},
+        )
+
+    assert response.status_code == 503
+    assert response.get_json()["rollback_success"] is False
+    assert app.db.get_group_use_rain(1) is True
+    # Exact rollback is all-or-none: the concurrent writer changed only the
+    # provenance timestamp while preserving value=1, and still must win.
+    assert app.db.get_setting_value("rain.enabled") == "1"
+
+
+def test_global_rain_enable_returns_authoritative_group_flags(admin_client, app) -> None:
+    server_id = _create_enabled_broker(app)
+    assert app.db.set_group_use_rain(1, False)
+
+    with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
+        monitor.reconfigure.return_value = True
+        response = admin_client.post(
+            "/api/rain",
+            json={"enabled": True, "topic": "/rain", "server_id": server_id, "type": "NO"},
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["config"] == {
+        "enabled": True,
+        "topic": "/rain",
+        "server_id": server_id,
+        "type": "NO",
+    }
+    flags = {row["id"]: row["use_rain_sensor"] for row in payload["groups"]}
+    assert flags[1] is True
+    assert app.db.get_group_use_rain(1) is True
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_weather_api_rejects_nonfinite_stale_fallback_days(admin_client, app, invalid) -> None:
+    assert app.db.set_setting_value("weather.balance.stale_fallback_days", "2")
+
+    response = admin_client.put(
+        "/api/settings/weather",
+        json={"balance": {"stale_fallback_days": invalid}},
+    )
+
+    assert response.status_code == 400
+    assert app.db.get_setting_value("weather.balance.stale_fallback_days") == "2"
 
 
 def test_live_weather_response_overlays_fresh_local_sources(admin_client) -> None:

@@ -6,7 +6,6 @@ import logging
 import os
 import sqlite3
 import stat
-import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -22,7 +21,7 @@ from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
 from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
 from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
-from services.monitors import env_monitor, probe_env_values, rain_monitor
+from services.monitors import env_monitor, probe_env_values, rain_config_transaction_lock, rain_monitor
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from utils import normalize_topic
 
@@ -97,7 +96,6 @@ def _prune_old_maps(current_path: str) -> None:
             logger.warning("map retention could not prune %s", victim["name"], exc_info=True)
 
 
-_RAIN_CONFIG_LOCK = threading.Lock()
 _RAIN_SETTING_KEYS = ("rain.enabled", "rain.topic", "rain.type", "rain.server_id")
 
 
@@ -266,7 +264,7 @@ def _rain_setting_value(cfg: dict, key: str) -> str | None:
     return values[key]
 
 
-def _rain_config_write(conn: sqlite3.Connection, cfg: dict) -> None:
+def _rain_config_write(conn: sqlite3.Connection, cfg: dict, *, group_revision: str) -> None:
     for key in _RAIN_SETTING_KEYS:
         value = _rain_setting_value(cfg, key)
         if value is None:
@@ -274,25 +272,33 @@ def _rain_config_write(conn: sqlite3.Connection, cfg: dict) -> None:
         else:
             conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
     if cfg["enabled"]:
-        conn.execute("UPDATE groups SET use_rain_sensor = 1, updated_at = CURRENT_TIMESTAMP WHERE id != 999")
+        conn.execute(
+            "UPDATE groups SET use_rain_sensor = 1, updated_at = ? WHERE id != 999",
+            (group_revision,),
+        )
 
 
-def _snapshot_rain_db(conn: sqlite3.Connection) -> tuple[dict[str, tuple[bool, str | None]], dict[int, int]]:
+def _snapshot_rain_db(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, tuple[bool, str | None]], dict[int, tuple[int, str | None]]]:
     settings: dict[str, tuple[bool, str | None]] = {}
     for key in _RAIN_SETTING_KEYS:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         settings[key] = (row is not None, row[0] if row is not None else None)
     groups = {
-        int(group_id): int(use_rain or 0)
-        for group_id, use_rain in conn.execute("SELECT id, use_rain_sensor FROM groups ORDER BY id").fetchall()
+        int(group_id): (int(use_rain or 0), updated_at)
+        for group_id, use_rain, updated_at in conn.execute(
+            "SELECT id, use_rain_sensor, updated_at FROM groups ORDER BY id"
+        ).fetchall()
     }
     return settings, groups
 
 
 def _rollback_rain_db_cas(
     old_settings: dict[str, tuple[bool, str | None]],
-    old_groups: dict[int, int],
+    old_groups: dict[int, tuple[int, str | None]],
     attempted_cfg: dict,
+    group_revision: str,
 ) -> bool:
     """Restore only if no concurrent writer changed the attempted snapshot."""
     with db.settings._connect() as conn:
@@ -306,36 +312,33 @@ def _rollback_rain_db_cas(
                 conn.rollback()
                 return False
 
+        expected_groups = {
+            group_id: (1, group_revision) if attempted_cfg["enabled"] and group_id != 999 else old_state
+            for group_id, old_state in old_groups.items()
+        }
+        current_groups = {
+            int(group_id): (int(use_rain or 0), updated_at)
+            for group_id, use_rain, updated_at in conn.execute(
+                "SELECT id, use_rain_sensor, updated_at FROM groups ORDER BY id"
+            ).fetchall()
+        }
+        if current_groups != expected_groups:
+            conn.rollback()
+            return False
+
         for key, (existed, value) in old_settings.items():
             if existed:
                 conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
             else:
                 conn.execute("DELETE FROM settings WHERE key = ?", (key,))
-        rollback_exact = True
         if attempted_cfg["enabled"]:
-            current_groups = {
-                int(group_id): int(use_rain or 0)
-                for group_id, use_rain in conn.execute("SELECT id, use_rain_sensor FROM groups ORDER BY id").fetchall()
-            }
-            if set(current_groups) != set(old_groups):
-                rollback_exact = False
-            for group_id, old_use_rain in old_groups.items():
-                current_use_rain = current_groups.get(group_id)
-                if current_use_rain is None:
-                    continue
-                if group_id == 999:
-                    continue
-                if current_use_rain == 1:
-                    conn.execute(
-                        "UPDATE groups SET use_rain_sensor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (old_use_rain, group_id),
-                    )
-                elif current_use_rain != old_use_rain:
-                    # A concurrent opt-out wins; never overwrite it merely to
-                    # make this rollback look exact.
-                    rollback_exact = False
+            for group_id, (old_use_rain, old_updated_at) in old_groups.items():
+                conn.execute(
+                    "UPDATE groups SET use_rain_sensor = ?, updated_at = ? WHERE id = ?",
+                    (old_use_rain, old_updated_at, group_id),
+                )
         conn.commit()
-    return rollback_exact
+    return True
 
 
 @system_config_api_bp.route("/api/rain", methods=["GET", "POST"])
@@ -384,7 +387,8 @@ def api_rain_config():
         if cfg["enabled"] and cfg["server_id"] is None:
             return jsonify({"success": False, "message": "Требуется MQTT-сервер для датчика дождя"}), 400
 
-        with _RAIN_CONFIG_LOCK:
+        with rain_config_transaction_lock():
+            group_revision = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
             with db.settings._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if cfg["enabled"]:
@@ -399,7 +403,7 @@ def api_rain_config():
                         conn.rollback()
                         return jsonify({"success": False, "message": "MQTT-сервер отключён"}), 400
                 old_settings, old_groups = _snapshot_rain_db(conn)
-                _rain_config_write(conn, cfg)
+                _rain_config_write(conn, cfg, group_revision=group_revision)
                 conn.commit()
 
             try:
@@ -409,7 +413,7 @@ def api_rain_config():
                 runtime_applied = False
             if not runtime_applied:
                 try:
-                    rollback_ok = _rollback_rain_db_cas(old_settings, old_groups, cfg)
+                    rollback_ok = _rollback_rain_db_cas(old_settings, old_groups, cfg, group_revision)
                 except (sqlite3.Error, OSError):
                     logger.exception("rain config DB rollback failed")
                     rollback_ok = False
@@ -423,7 +427,18 @@ def api_rain_config():
                     ),
                     503,
                 )
-        return jsonify({"success": True})
+            # Return the authoritative post-commit group flags. Global enable
+            # updates every non-system group, so callers must refresh their
+            # local group model instead of echoing only the requested toggle.
+            with db.settings._connect() as conn:
+                group_flags = [
+                    {"id": int(group_id), "use_rain_sensor": bool(int(use_rain or 0))}
+                    for group_id, use_rain in conn.execute(
+                        "SELECT id, use_rain_sensor FROM groups WHERE id != 999 ORDER BY id"
+                    ).fetchall()
+                ]
+            effective_config = db.get_rain_config()
+        return jsonify({"success": True, "config": effective_config, "groups": group_flags})
     except (ValueError, TypeError) as e:
         logger.debug("rain config validation failed: %s", e)
         return jsonify({"success": False, "message": str(e)}), 400

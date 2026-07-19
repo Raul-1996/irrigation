@@ -353,6 +353,7 @@ def recalc_balance(db_path: str) -> dict | None:
         latest_day = history_rows[-1] if history_rows else None
         deficit_today = round(buffer_out[-1]["deficit"], 4) if buffer_out else 0.0
         with sqlite3.connect(db_path, timeout=5) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
                 (_K_DEFICIT_BUFFER, json.dumps(buffer_out)),
@@ -367,16 +368,6 @@ def recalc_balance(db_path: str) -> dict | None:
                     "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
                     (_K_NORM_LAST_DAY, latest_day_str),
                 )
-            conn.execute(
-                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                (_K_LAST_RECALC_DATE, today_str),
-            )
-            # coef_cached written LAST: guarantees buffer/date/norm are in place
-            # before the hot path can observe the new coefficient (review #6).
-            conn.execute(
-                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                (_K_COEF_CACHED, str(coef)),
-            )
             # Audit-log row for shadow-mode forecast/fact review — once per
             # completed day (a repeated manual recalc must not duplicate it).
             if not already_folded:
@@ -396,6 +387,14 @@ def recalc_balance(db_path: str) -> dict | None:
                         coef,
                     ),
                 )
+            # Publish the coefficient and its freshness date together in the
+            # final SQL statement. They are one externally visible fact: any
+            # trigger/write failure rolls the whole transaction back, preserving
+            # both previous values (and all supporting shadow diagnostics).
+            conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?), (?, ?)",
+                (_K_COEF_CACHED, str(coef), _K_LAST_RECALC_DATE, today_str),
+            )
             conn.commit()
 
         logger.info(

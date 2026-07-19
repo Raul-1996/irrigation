@@ -42,7 +42,7 @@ class TestRainMonitor:
 
         rm = RainMonitor()
         rm._cfg = {"type": "NO"}
-        with patch.object(rm, "_on_rain_start") as mock_start:
+        with patch.object(rm, "_on_rain_start", return_value=True) as mock_start:
             rm._handle_payload("1")
             assert rm.is_rain is True
             mock_start.assert_called_once()
@@ -52,7 +52,7 @@ class TestRainMonitor:
 
         rm = RainMonitor()
         rm._cfg = {"type": "NO"}
-        with patch.object(rm, "_on_rain_stop") as mock_stop:
+        with patch.object(rm, "_on_rain_stop", return_value=True) as mock_stop:
             rm._handle_payload("0")
             assert rm.is_rain is False
             mock_stop.assert_called_once()
@@ -62,7 +62,7 @@ class TestRainMonitor:
 
         rm = RainMonitor()
         rm._cfg = {"type": "NC"}
-        with patch.object(rm, "_on_rain_stop") as mock_stop:
+        with patch.object(rm, "_on_rain_stop", return_value=True) as mock_stop:
             rm._handle_payload("1")  # NC: 1 = no rain
             assert rm.is_rain is False
             mock_stop.assert_called_once()

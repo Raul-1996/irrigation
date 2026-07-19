@@ -18,6 +18,7 @@ import contextlib
 import copy
 import json
 import logging
+import math
 import sqlite3
 import time
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 from services.weather.singletons import get_weather_service
 
 logger = logging.getLogger(__name__)
+_WEATHER_UNSET = object()
 
 
 class WeatherAdjustment:
@@ -362,7 +364,7 @@ class WeatherAdjustment:
         """Check if weather adjustment is enabled."""
         return self._get_settings().get("enabled", False)
 
-    def should_skip(self, cache_only: bool = False) -> dict[str, Any]:
+    def should_skip(self, cache_only: bool = False, *, weather: Any = _WEATHER_UNSET) -> dict[str, Any]:
         """Determine if watering should be skipped entirely.
 
         Returns a dict with keys ``skip`` (bool), ``reason`` (human-readable
@@ -376,86 +378,82 @@ class WeatherAdjustment:
         if not settings.get("enabled"):
             return result
 
-        weather = self._get_weather(cache_only=cache_only)
+        if weather is _WEATHER_UNSET:
+            weather = self._get_weather(cache_only=cache_only)
         if not weather:
             result["skip"] = True
             result["reason"] = "weather_unavailable"
             result["details"] = {"type": "weather_unavailable", "api_unavailable": True}
             return result
 
-        # Rain skip
-        if settings.get("factor_rain", True):
-            rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-            if weather.precipitation_24h is None:
-                result["skip"] = True
-                result["reason"] = "weather_unavailable: precipitation_24h"
-                result["details"] = {
-                    "type": "weather_unavailable",
-                    "field": "precipitation_24h",
-                    "api_unavailable": False,
-                }
-                return result
-            rain_24h = weather.precipitation_24h
-            rain_forecast = weather.precipitation_forecast_6h or 0.0
+        # Rain/freeze/wind thresholds are hard safety. The factor toggles only
+        # disable their soft coefficient contribution and UI control state.
+        rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
+        if weather.precipitation_24h is None:
+            result["skip"] = True
+            result["reason"] = "weather_unavailable: precipitation_24h"
+            result["details"] = {
+                "type": "weather_unavailable",
+                "field": "precipitation_24h",
+                "api_unavailable": False,
+            }
+            return result
+        rain_24h = weather.precipitation_24h
+        rain_forecast = weather.precipitation_forecast_6h or 0.0
 
-            if self._rain_reaches_threshold(rain_24h, rain_threshold):
-                result["skip"] = True
-                result["reason"] = f"rain_skip: {rain_24h:.1f}mm за 24ч (порог {rain_threshold:.0f}mm)"
-                result["details"] = {"type": "rain", "value": rain_24h, "threshold": rain_threshold}
-                return result
+        if self._rain_reaches_threshold(rain_24h, rain_threshold):
+            result["skip"] = True
+            result["reason"] = f"rain_skip: {rain_24h:.1f}mm за 24ч (порог {rain_threshold:.0f}mm)"
+            result["details"] = {"type": "rain", "value": rain_24h, "threshold": rain_threshold}
+            return result
 
-            if self._rain_reaches_threshold(rain_forecast, rain_threshold):
-                result["skip"] = True
-                result["reason"] = (
-                    f"rain_forecast_skip: прогноз {rain_forecast:.1f}mm за 6ч (порог {rain_threshold:.0f}mm)"
-                )
-                result["details"] = {"type": "rain_forecast", "value": rain_forecast, "threshold": rain_threshold}
-                return result
+        if self._rain_reaches_threshold(rain_forecast, rain_threshold):
+            result["skip"] = True
+            result["reason"] = f"rain_forecast_skip: прогноз {rain_forecast:.1f}mm за 6ч (порог {rain_threshold:.0f}mm)"
+            result["details"] = {"type": "rain_forecast", "value": rain_forecast, "threshold": rain_threshold}
+            return result
 
-        # Freeze skip
-        if settings.get("factor_freeze", True):
-            freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
-            temp = weather.temperature
+        freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
+        temp = weather.temperature
 
-            if temp is not None and temp <= freeze_threshold:
-                result["skip"] = True
-                result["reason"] = f"freeze_skip: {temp:.1f}°C (порог {freeze_threshold:.0f}°C)"
-                result["details"] = {"type": "freeze", "value": temp, "threshold": freeze_threshold}
-                return result
+        if temp is not None and temp <= freeze_threshold:
+            result["skip"] = True
+            result["reason"] = f"freeze_skip: {temp:.1f}°C (порог {freeze_threshold:.0f}°C)"
+            result["details"] = {"type": "freeze", "value": temp, "threshold": freeze_threshold}
+            return result
 
-            min_temp_6h = getattr(weather, "min_temp_forecast_6h", None)
-            if min_temp_6h is not None and isinstance(min_temp_6h, (int, float)) and min_temp_6h <= freeze_threshold:
-                result["skip"] = True
-                result["reason"] = (
-                    f"freeze_forecast_skip: прогноз мин {min_temp_6h:.1f}°C за 6ч (порог {freeze_threshold:.0f}°C)"
-                )
-                result["details"] = {"type": "freeze_forecast", "value": min_temp_6h, "threshold": freeze_threshold}
-                return result
+        min_temp_6h = getattr(weather, "min_temp_forecast_6h", None)
+        if min_temp_6h is not None and isinstance(min_temp_6h, (int, float)) and min_temp_6h <= freeze_threshold:
+            result["skip"] = True
+            result["reason"] = (
+                f"freeze_forecast_skip: прогноз мин {min_temp_6h:.1f}°C за 6ч (порог {freeze_threshold:.0f}°C)"
+            )
+            result["details"] = {"type": "freeze_forecast", "value": min_temp_6h, "threshold": freeze_threshold}
+            return result
 
-        # Wind postpone
-        if settings.get("factor_wind", True):
-            wind = weather.wind_speed
-            exceeds, reason_str = self._get_wind_check(settings, wind)
-            if exceeds:
-                result["skip"] = True
-                result["reason"] = reason_str
-                threshold = (
-                    self._get_wind_threshold_ms(settings)
-                    if self._has_ms_threshold()
-                    else settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH)
-                )
-                result["details"] = {"type": "wind", "value": wind, "threshold": threshold}
-                return result
+        wind = weather.wind_speed
+        exceeds, reason_str = self._get_wind_check(settings, wind)
+        if exceeds:
+            result["skip"] = True
+            result["reason"] = reason_str
+            threshold = (
+                self._get_wind_threshold_ms(settings)
+                if self._has_ms_threshold()
+                else settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH)
+            )
+            result["details"] = {"type": "wind", "value": wind, "threshold": threshold}
+            return result
 
         return result
 
-    def get_coefficient(self) -> int:
+    def get_coefficient(self, *, weather: Any = _WEATHER_UNSET) -> int:
         """Calculate the H1 watering adjustment coefficient (0-200%)."""
         settings = self._get_settings()
         if not settings.get("enabled"):
             return 100
 
-        weather = self._get_weather()
+        if weather is _WEATHER_UNSET:
+            weather = self._get_weather()
         if not weather:
             return 0
 
@@ -587,8 +585,18 @@ class WeatherAdjustment:
                 srow = cur.fetchone()
                 stale_days = 2
                 if srow and srow["value"] is not None:
-                    with contextlib.suppress(ValueError, TypeError):
-                        stale_days = int(float(srow["value"]))
+                    raw_stale_days = float(srow["value"])
+                    if (
+                        not math.isfinite(raw_stale_days)
+                        or not raw_stale_days.is_integer()
+                        or not 1 <= raw_stale_days <= 14
+                    ):
+                        logger.error(
+                            "invalid weather.balance.stale_fallback_days=%r",
+                            srow["value"],
+                        )
+                        return result
+                    stale_days = int(raw_stale_days)
                 from datetime import date, datetime
 
                 raw_date = str(row["value"])
@@ -602,7 +610,7 @@ class WeatherAdjustment:
                     "stale": status == "stale",
                     "fresh": status == "fresh",
                 }
-        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+        except (sqlite3.Error, OSError, OverflowError, ValueError, TypeError) as e:
             logger.debug("balance freshness check failed: %s", e)
             return result
 
@@ -637,7 +645,9 @@ class WeatherAdjustment:
             rain_forecast = weather.precipitation_forecast_6h or 0.0
 
         rain_status = "danger" if rain_24h is None else "ok"
-        rain_detail = "нет полных данных за 24ч (skip)" if rain_24h is None else f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
+        rain_detail = (
+            "нет полных данных за 24ч (skip)" if rain_24h is None else f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
+        )
         if rain_24h is not None and self._rain_reaches_threshold(rain_24h, rain_threshold):
             rain_status = "danger"
             rain_detail = f"{rain_24h:.1f} мм ≥ {rain_threshold:.0f} мм (skip)"

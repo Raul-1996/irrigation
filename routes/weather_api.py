@@ -45,7 +45,10 @@ def _setting_updates_atomically(updates: list[tuple[str, str | None]]) -> None:
 def _finite_number(value: Any, field: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be a finite number") from error
     if not math.isfinite(number):
         raise ValueError(f"{field} must be finite")
     return number
