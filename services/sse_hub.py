@@ -17,6 +17,8 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 
+from services.observed_state import canonical_relay_state
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -297,7 +299,19 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
         )
         return
 
-    relay_high = payload in ("1", "true", "ON", "on")
+    relay_state = canonical_relay_state(payload)
+    if relay_state is None:
+        # Presence/error/status payloads are not physical OFF evidence.  In
+        # particular, never finish a run or cancel its safety jobs merely
+        # because a payload is outside the ON set.
+        logger.warning(
+            "sse_hub: ignoring unknown relay payload sid=%s topic=%s payload=%r",
+            sid,
+            normalized,
+            payload,
+        )
+        return
+    relay_high = relay_state == "on"
     if master_groups:
         for group_id, mode in master_groups:
             # Normally-closed: 1=open, 0=closed. Normally-open is inverted.
@@ -360,6 +374,15 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
                             scheduler.cancel_zone_jobs(zid)
                             scheduler.schedule_zone_stop(zid, duration, command_id=str(time.time_ns()))
                             scheduler.schedule_zone_hard_stop(zid, now + timedelta(minutes=duration))
+                            try:
+                                scheduler.schedule_zone_cap(
+                                    zid,
+                                    activation_token=updates["watering_start_time"],
+                                )
+                            except TypeError:
+                                # Backwards-compatible while rolling upgrades
+                                # still have the pre-token scheduler object.
+                                scheduler.schedule_zone_cap(zid)
                     except (ValueError, TypeError, KeyError, RuntimeError) as e:
                         logger.debug("sse_hub: remote auto-stop schedule failed zone=%s: %s", zid, e)
             # Own/retained ON echoes for an active run only confirm observation.
@@ -374,6 +397,7 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
                 scheduler = _get_scheduler_fn()
                 if scheduler:
                     scheduler.cancel_zone_jobs(zid)
+                    scheduler.cancel_zone_cap(zid)
             except (ValueError, TypeError, KeyError, RuntimeError) as e:
                 logger.debug("sse_hub: cancel observed-off jobs failed zone=%s: %s", zid, e)
 

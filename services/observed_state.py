@@ -6,6 +6,7 @@ publish, and after exhausting retries we increment fault_count and send a
 Telegram alert.
 """
 
+import contextlib
 import logging
 import sqlite3
 import threading
@@ -14,6 +15,24 @@ from datetime import datetime
 from constants import OBSERVED_STATE_MAX_RETRIES, OBSERVED_STATE_TIMEOUT_SEC
 
 logger = logging.getLogger(__name__)
+
+RELAY_ON_PAYLOADS = frozenset({"1", "on", "true"})
+RELAY_OFF_PAYLOADS = frozenset({"0", "off", "false"})
+
+
+def canonical_relay_state(value: object) -> str | None:
+    """Map only protocol-approved relay payloads to a physical state.
+
+    Unknown/status payloads (``UNKNOWN``, ``offline``, numeric error codes,
+    malformed bytes) carry no ON/OFF evidence and must never be interpreted as
+    OFF merely because they are not an ON token.
+    """
+    normalized = str(value or "").strip().lower()
+    if normalized in RELAY_ON_PAYLOADS:
+        return "on"
+    if normalized in RELAY_OFF_PAYLOADS:
+        return "off"
+    return None
 
 try:
     import paho.mqtt.client as mqtt
@@ -71,12 +90,7 @@ class StateVerifier:
 
     @staticmethod
     def _canonical_state(value: object) -> str | None:
-        normalized = str(value or "").strip().lower()
-        if normalized in ("on", "1", "true"):
-            return "on"
-        if normalized in ("off", "0", "false"):
-            return "off"
-        return None
+        return canonical_relay_state(value)
 
     def _is_current(self, zone_id: int, expected: str, generation: int) -> bool:
         """Check both in-process generation and persisted command truth."""
@@ -203,6 +217,18 @@ class StateVerifier:
                         db.mark_zone_run_confirmed(zone_id)
                     except (sqlite3.Error, OSError, AttributeError):
                         logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
+                else:
+                    # Broker ACK is not physical OFF.  Keep the activation cap
+                    # armed until this fresh relay report arrives; only now is
+                    # it safe to disarm the activation-bound retry.
+                    try:
+                        from irrigation_scheduler import get_scheduler
+
+                        scheduler = get_scheduler()
+                        if scheduler is not None:
+                            scheduler.cancel_zone_cap(int(zone_id))
+                    except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
+                        logger.exception("StateVerifier: cancel confirmed OFF cap failed zone=%s", zone_id)
                 return True
 
             if not self._is_current(zone_id, expected, generation):
@@ -237,11 +263,12 @@ class StateVerifier:
     @staticmethod
     def _expected_payloads(expected: str) -> set[str]:
         """Return set of MQTT payloads that satisfy the expected state."""
-        e = expected.lower().strip()
-        if e in ("on", "1"):
+        state = canonical_relay_state(expected)
+        if state == "on":
             return {"1", "on", "ON", "true", "True", "TRUE"}
-        else:
+        if state == "off":
             return {"0", "off", "OFF", "false", "False", "FALSE"}
+        return set()
 
     def _subscribe_and_wait(self, server: dict, topic: str, expected_payloads: set[str], timeout: float) -> bool:
         """Create a temporary MQTT client, subscribe, and wait for matching payload."""
@@ -261,9 +288,11 @@ class StateVerifier:
         if server.get("username"):
             cl.username_pw_set(server.get("username"), server.get("password") or None)
 
-        # TLS if needed
-        try:
-            if int(server.get("tls_enabled") or 0) == 1:
+        # TLS is a strict transport requirement.  If its setup fails, never
+        # continue to ``connect`` because that silently downgrades a configured
+        # secure verifier connection to plaintext.
+        if int(server.get("tls_enabled") or 0) == 1:
+            try:
                 import ssl
 
                 ca = server.get("tls_ca_path") or None
@@ -272,8 +301,11 @@ class StateVerifier:
                 cl.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
                 if int(server.get("tls_insecure") or 0) == 1:
                     cl.tls_insecure_set(True)
-        except ImportError:
-            logger.exception("StateVerifier: TLS setup failed")
+            except (ImportError, OSError, ValueError, RuntimeError):
+                logger.exception("StateVerifier: TLS setup failed; refusing plaintext fallback")
+                with contextlib.suppress(ConnectionError, TimeoutError, OSError, RuntimeError):
+                    cl.disconnect()
+                return False
 
         def on_connect(client, userdata, flags, rc, *args):
             try:
@@ -425,18 +457,12 @@ class StateVerifier:
 def is_command_confirmation_message(message: object) -> bool:
     """Return whether an MQTT report is fresh evidence for a command.
 
-    The application publishes its desired value retained on the base/report
-    topic before writing the physical ``/on`` control topic.  A subscriber
-    receives that stored application value with ``retain=True``; accepting it
-    would confirm the application to itself without any relay observation.
-    Live relay reports have ``retain=False`` even when the relay publisher asks
-    the broker to retain them.
+    Retained replay has no freshness proof and can predate the current command
+    (or have been written by an older application version that still wrote the
+    report channel).  Only a live relay report can confirm this command.
 
-    This primitive addresses retained replay for a verifier that subscribes
-    after the command.  A long-lived subscriber also sees the application's
-    live base-topic publish with ``retain=False``; that path additionally
-    needs command/report correlation or protocol separation before using a
-    message as physical confirmation.
+    Current publishers write desired state exclusively to ``<topic>/on``;
+    this filter remains as a rolling-upgrade and stale-broker safeguard.
     """
     return not bool(getattr(message, "retain", False))
 

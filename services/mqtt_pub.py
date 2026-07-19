@@ -134,8 +134,8 @@ def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) 
             client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
             if server.get("username"):
                 client.username_pw_set(server.get("username"), server.get("password") or None)
-            try:
-                if int(server.get("tls_enabled") or 0) == 1:
+            if int(server.get("tls_enabled") or 0) == 1:
+                try:
                     import ssl
 
                     ca = server.get("tls_ca_path") or None
@@ -146,8 +146,10 @@ def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) 
                     client.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
                     if int(server.get("tls_insecure") or 0) == 1:
                         client.tls_insecure_set(True)
-            except (ImportError, OSError, ValueError):
-                logger.exception("MQTT TLS setup failed for publisher")
+                except (ImportError, OSError, ValueError, RuntimeError):
+                    logger.exception("MQTT TLS setup failed for publisher; refusing plaintext fallback")
+                    _teardown_mqtt_client(client, sid)
+                    return None
 
             host = server.get("host") or "127.0.0.1"
             port = int(server.get("port") or 1883)
@@ -191,12 +193,10 @@ def _publish_with_retries(cl: Any, topic: str, value: str, qos: int, retain: boo
     """Publish ``value`` to ``topic`` with connect-rc retries (up to 10x)
     and, for QoS≥1, broker-ack wait with backoff (up to 3x).
 
-    Returns True on confirmed delivery, False otherwise. Used for both the
-    base device topic and the Wirenboard ``/on`` command companion topic so
-    that BOTH channels get the same delivery guarantee — without this
-    symmetry the relay-command publish would silently drop on transient
-    broker hiccups while the report-channel publish would succeed (Issue
-    #38 root cause).
+    Returns True on confirmed delivery, False otherwise.  Actuator commands
+    use this for the Wirenboard ``/on`` channel; the base device topic is
+    relay-owned observed/report truth and is deliberately never written by
+    the application.
     """
     effective_qos = max(0, min(2, int(qos or 0)))
     try:
@@ -403,26 +403,39 @@ def publish_mqtt_value(
                     if srv:
                         with _SERVER_CACHE_LOCK:
                             _SERVER_CACHE[sid] = (srv, now_ts)
-                if srv:
-                    server = srv
+                if not srv:
+                    logger.error("MQTT server %s is missing or unavailable; refusing stale/virtual publish", sid)
+                    return False
+                server = srv
             except (ConnectionError, SecretDecryptionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in publish_mqtt_value: %s", e)
                 if isinstance(e, SecretDecryptionError):
                     logger.error("MQTT credentials unavailable for server %s; restore the configured secret key", sid)
-                    return False
-        key = (sid or 0, t)
+                return False
+
+        # Wiren Board owns the base topic as its observed/report channel.  The
+        # application must write desired state only to the companion ``/on``
+        # command channel; publishing to the base topic makes our own value
+        # indistinguishable from a physical relay echo to long-lived
+        # subscribers and can falsely complete runs/cancel safety jobs.
+        t_command = t if t.endswith("/on") else t + "/on"
+        key = (sid or 0, t_command)
         now = time.time()
+        pending_send = (value, now)
         with _TOPIC_LOCK:
             last = _TOPIC_LAST_SEND.get(key)
             if last and last[0] == value and (now - last[1]) < min_interval_sec:
-                logger.debug(f"MQTT skip duplicate topic={t} value={value}")
+                logger.debug(f"MQTT skip duplicate topic={t_command} value={value}")
                 return True
-            _TOPIC_LAST_SEND[key] = (value, now)
-        logger.debug(f"MQTT publish topic={t} value={value}")
-        # Publish to base topic with retries + (QoS≥1) broker-ack wait, and
-        # self-heal a wedged client (recreate + retry) on delivery failure.
+            _TOPIC_LAST_SEND[key] = pending_send
+        logger.debug(f"MQTT publish command topic={t_command} value={value}")
         effective_qos = max(0, min(2, int(qos or 0)))
-        if not _publish_one(server, sid, t, value, effective_qos, retain):
+        if not _publish_one(server, sid, t_command, value, effective_qos, retain):
+            # A failed attempt is not a delivered value and must not suppress
+            # the immediate safety retry as a "duplicate".
+            with _TOPIC_LOCK:
+                if _TOPIC_LAST_SEND.get(key) == pending_send:
+                    _TOPIC_LAST_SEND.pop(key, None)
             return False
 
         # Debug-level audit: every successful publish. Volume is high
@@ -434,37 +447,17 @@ def publish_mqtt_value(
             debug_audit(
                 action_type="mqtt_publish",
                 source="mqtt",
-                target=t,
+                target=t_command,
                 payload={
                     "value": value,
                     "qos": effective_qos,
                     "retain": bool(retain),
+                    "report_topic": t,
                     "meta": meta if isinstance(meta, dict) else None,
                 },
             )
         except Exception:
             logger.debug("debug_audit(mqtt_publish) failed", exc_info=True)
-
-        # Also publish to the control topic '/on' for Wirenboard compatibility.
-        # Issue #38: the base topic is the *report* channel; the relay only
-        # reacts to '/on'. Previously this publish was fire-and-forget — a
-        # transient broker hiccup silently dropped the command, leaving the
-        # base topic (and the UI via SSE-hub) showing 'closed' while the
-        # relay stayed open. Now we use the same retry+ack guarantee as the
-        # base topic and propagate failure to the caller.
-        t_on = t + "/on"
-        on_key = (sid or 0, t_on)
-        now2 = time.time()
-        with _TOPIC_LOCK:
-            last2 = _TOPIC_LAST_SEND.get(on_key)
-            if last2 and last2[0] == value and (now2 - last2[1]) < min_interval_sec:
-                # Skipping the duplicate suppression — base already delivered.
-                return True
-            _TOPIC_LAST_SEND[on_key] = (value, now2)
-        logger.debug(f"MQTT publish topic={t_on} value={value}")
-        if not _publish_one(server, sid, t_on, value, effective_qos, retain):
-            logger.error("MQTT publish to /on companion FAILED topic=%s", t_on)
-            return False
 
         # Optional: publish meta information to a side topic for diagnostics/idempotence
         try:
