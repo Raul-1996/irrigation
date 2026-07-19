@@ -234,6 +234,129 @@ def test_status_does_not_carry_cached_health_across_runtime_rebuild(admin_client
     assert rebuilt["mqtt_health"]["status"] == "unknown"
 
 
+def test_status_accepts_atomic_warmup_client_snapshot_before_first_publish(admin_client, app, monkeypatch):
+    """Publisher provenance exists when the client connects, not only after publish."""
+    from routes import system_status_api
+    from services import mqtt_pub
+
+    server = app.db.create_mqtt_server(
+        {
+            "name": "warmup-client",
+            "host": "broker.invalid",
+            "port": 1883,
+            "username": "irrigation",
+            "password": "warmup-secret",
+            "enabled": 1,
+        }
+    )
+    sid = int(server["id"])
+
+    class AcceptedClient:
+        @staticmethod
+        def is_connected():
+            return True
+
+    client = AcceptedClient()
+    snapshot = SimpleNamespace(
+        server_id=sid,
+        client=client,
+        config_fingerprint="current-fingerprint",
+        generation=1,
+    )
+    monkeypatch.setattr(mqtt_pub, "snapshot_mqtt_clients", lambda: {sid: snapshot}, raising=False)
+    monkeypatch.setattr(
+        mqtt_pub,
+        "mqtt_server_config_fingerprint",
+        lambda configured: "current-fingerprint",
+        raising=False,
+    )
+    # Reproduce the pre-fix warm-up state: the connected client exists but no
+    # publish has populated the unrelated server TTL cache.
+    monkeypatch.setattr(mqtt_pub, "_MQTT_CLIENTS", {sid: client})
+    monkeypatch.setattr(mqtt_pub, "_SERVER_CACHE", {})
+    monkeypatch.setattr(
+        system_status_api,
+        "_sse_hub",
+        SimpleNamespace(
+            _SSE_HUB_LOCK=threading.Lock(),
+            _SSE_HUB_MQTT={},
+            _SSE_HUB_SERVER_KEYS={},
+            _SSE_HUB_REQUESTED_GENERATION=0,
+            _SSE_HUB_APPLIED_GENERATION=0,
+        ),
+    )
+    system_status_api._reset_runtime_mqtt_health_cache()
+
+    payload = admin_client.get("/api/status").get_json()
+
+    assert payload["mqtt_connected"] is True
+    assert payload["mqtt_health"]["status"] == "healthy"
+
+
+def test_status_never_relabels_old_client_during_db_update_window(admin_client, app, monkeypatch):
+    """A new DB config cannot borrow CONNACK from the old client generation."""
+    from routes import system_status_api
+    from services import mqtt_pub
+
+    server = app.db.create_mqtt_server(
+        {
+            "name": "atomic-provenance",
+            "host": "broker.invalid",
+            "port": 1883,
+            "username": "irrigation",
+            "password": "old-password",
+            "enabled": 1,
+        }
+    )
+    sid = int(server["id"])
+
+    class AcceptedOldClient:
+        @staticmethod
+        def is_connected():
+            return True
+
+    old_client = AcceptedOldClient()
+    old_snapshot = SimpleNamespace(
+        server_id=sid,
+        client=old_client,
+        config_fingerprint="fp:old-password",
+        generation=11,
+    )
+    monkeypatch.setattr(mqtt_pub, "snapshot_mqtt_clients", lambda: {sid: old_snapshot}, raising=False)
+    monkeypatch.setattr(
+        mqtt_pub,
+        "mqtt_server_config_fingerprint",
+        lambda configured: f"fp:{configured.get('password')}",
+        raising=False,
+    )
+    monkeypatch.setattr(mqtt_pub, "_MQTT_CLIENTS", {sid: old_client})
+    server_cache = {sid: (app.db.get_mqtt_server(sid), time.time())}
+    monkeypatch.setattr(mqtt_pub, "_SERVER_CACHE", server_cache)
+    monkeypatch.setattr(
+        system_status_api,
+        "_sse_hub",
+        SimpleNamespace(
+            _SSE_HUB_LOCK=threading.Lock(),
+            _SSE_HUB_MQTT={},
+            _SSE_HUB_SERVER_KEYS={},
+            _SSE_HUB_REQUESTED_GENERATION=0,
+            _SSE_HUB_APPLIED_GENERATION=0,
+        ),
+    )
+    system_status_api._reset_runtime_mqtt_health_cache()
+
+    assert admin_client.get("/api/status").get_json()["mqtt_connected"] is True
+
+    assert app.db.update_mqtt_server(sid, {"password": "new-password"}) is True
+    # This is the dangerous non-atomic state from the rejected implementation:
+    # TTL config has advanced while the client instance is still the old one.
+    server_cache[sid] = (app.db.get_mqtt_server(sid), time.time())
+    rotated = admin_client.get("/api/status").get_json()
+
+    assert rotated["mqtt_connected"] is False
+    assert rotated["mqtt_health"]["status"] == "unknown"
+
+
 def test_status_runtime_health_cache_is_bounded(monkeypatch):
     from routes import system_status_api
 

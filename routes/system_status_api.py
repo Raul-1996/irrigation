@@ -98,24 +98,6 @@ def _server_health_cache_key(server: dict[str, Any], runtime_token: bytes) -> tu
     )
 
 
-def _copy_runtime_clients(lock: Any, clients: Any, server_ids: set[int]) -> dict[int, Any]:
-    """Take a non-blocking snapshot of one live-client registry."""
-    acquired = False
-    try:
-        acquired = bool(lock.acquire(blocking=False))
-        if not acquired:
-            return {}
-        return {int(sid): client for sid, client in dict(clients).items() if int(sid) in server_ids}
-    except (AttributeError, RuntimeError, TypeError, ValueError):
-        return {}
-    finally:
-        if acquired:
-            try:
-                lock.release()
-            except (AttributeError, RuntimeError):
-                pass
-
-
 def _runtime_generation_token() -> bytes:
     """Fingerprint live registries, preserving the last token during lock races."""
     global _MQTT_LAST_PUBLISHER_RUNTIME_TOKEN, _MQTT_LAST_SSE_RUNTIME_TOKEN
@@ -149,23 +131,23 @@ def _runtime_generation_token() -> bytes:
                 pass
 
     publisher_token: bytes | None = None
-    acquired = False
     try:
         from services import mqtt_pub
 
-        acquired = bool(mqtt_pub._MQTT_CLIENTS_LOCK.acquire(blocking=False))
-        if acquired:
-            publisher_token = _opaque_runtime_fingerprint(
-                [(int(sid), id(client)) for sid, client in sorted(mqtt_pub._MQTT_CLIENTS.items())]
-            )
-    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
+        snapshots = mqtt_pub.snapshot_mqtt_clients()
+        publisher_token = _opaque_runtime_fingerprint(
+            [
+                (
+                    int(sid),
+                    int(snapshot.generation),
+                    id(snapshot.client),
+                    str(snapshot.config_fingerprint),
+                )
+                for sid, snapshot in sorted(snapshots.items())
+            ]
+        )
+    except (AttributeError, ImportError, KeyError, RuntimeError, TypeError, ValueError):
         publisher_token = None
-    finally:
-        if acquired:
-            try:
-                mqtt_pub._MQTT_CLIENTS_LOCK.release()
-            except (AttributeError, NameError, RuntimeError):
-                pass
 
     with _MQTT_RUNTIME_TOKEN_LOCK:
         if sse_token is not None:
@@ -208,39 +190,18 @@ def _snapshot_runtime_mqtt_health(servers: dict[int, dict[str, Any]]) -> dict[in
                 _sse_hub._SSE_HUB_LOCK.release()
             except (AttributeError, RuntimeError):
                 pass
-    acquired = False
     try:
         from services import mqtt_pub
 
-        publisher_clients = _copy_runtime_clients(
-            mqtt_pub._MQTT_CLIENTS_LOCK,
-            mqtt_pub._MQTT_CLIENTS,
-            server_ids,
-        )
-        acquired = bool(mqtt_pub._SERVER_CACHE_LOCK.acquire(blocking=False))
-        if acquired:
-            publisher_configs = {
-                int(sid): entry[0]
-                for sid, entry in mqtt_pub._SERVER_CACHE.items()
-                if int(sid) in server_ids and isinstance(entry, tuple) and entry
-            }
-        else:
-            publisher_configs = {}
-    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
+        snapshots = mqtt_pub.snapshot_mqtt_clients()
+        publisher_clients = {
+            int(sid): snapshot.client
+            for sid, snapshot in snapshots.items()
+            if int(sid) in server_ids
+            and snapshot.config_fingerprint == mqtt_pub.mqtt_server_config_fingerprint(servers[int(sid)])
+        }
+    except (AttributeError, ImportError, KeyError, RuntimeError, TypeError, ValueError):
         publisher_clients = {}
-        publisher_configs = {}
-    finally:
-        if acquired:
-            try:
-                mqtt_pub._SERVER_CACHE_LOCK.release()
-            except (AttributeError, NameError, RuntimeError):
-                pass
-    publisher_clients = {
-        sid: client
-        for sid, client in publisher_clients.items()
-        if sid in publisher_configs
-        and _server_runtime_config(publisher_configs[sid]) == _server_runtime_config(servers[sid])
-    }
     for source in (hub_clients, publisher_clients):
         for sid, client in source.items():
             candidates.setdefault(sid, []).append(client)
