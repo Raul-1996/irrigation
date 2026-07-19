@@ -60,6 +60,11 @@ class WaterMonitor:
     def _retire_client(client) -> None:
         """Close both the MQTT socket and its network loop."""
         try:
+            client._water_monitor_retired = True
+            client._water_monitor_staged = False
+        except AttributeError:
+            pass
+        try:
             client.disconnect()
         except (ConnectionError, TimeoutError, OSError, RuntimeError, AttributeError) as exc:
             logger.debug("WaterMonitor disconnect failed during retirement: %s", exc)
@@ -98,49 +103,124 @@ class WaterMonitor:
         return self.reconfigure()
 
     def reconfigure(self) -> bool:
-        """Reload all meter bindings without leaving old subscriptions alive."""
+        """Build and atomically install a complete meter subscription generation."""
         with self._reconfigure_lock:
-            self.disable()
             if mqtt is None:
                 logger.warning("WaterMonitor reconfigure skipped: paho-mqtt not available")
                 return False
 
             try:
-                groups = db.get_groups() or []
-            except (sqlite3.Error, ConnectionError, TimeoutError, OSError):
-                logger.exception("WaterMonitor could not load group configuration")
+                bindings = self._load_bindings_strict()
+            except Exception:  # Transaction boundary: any load/validation failure preserves the live generation.
+                logger.exception("WaterMonitor configuration load/validation failed; keeping current subscriptions")
                 return False
 
-            success = True
-            for g in groups:
-                try:
-                    gid = int(g.get("id"))
-                    if gid == 999:
-                        continue
-                    if int(g.get("use_water_meter") or 0) != 1:
-                        continue
-                    topic = (g.get("water_mqtt_topic") or "").strip()
-                    sid = g.get("water_mqtt_server_id")
-                    if not topic or not sid:
-                        continue
-                    pulse = str(g.get("water_pulse_size") or "1l")
-                    liters = 100 if pulse == "100l" else 10 if pulse == "10l" else 1
-                    if not self._start_group(gid, int(sid), topic, liters):
-                        success = False
-                except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, TypeError):
-                    logger.exception("WaterMonitor start group failed")
-                    success = False
-            return success
+            staged_clients: dict[int, mqtt.Client] = {}
+            try:
+                for group_id, server_id, topic, liters, server in bindings:
+                    staged_clients[group_id] = self._build_group_client(
+                        group_id,
+                        topic,
+                        server,
+                    )
+            except Exception:  # Transaction boundary: retire every staged client before returning.
+                logger.exception("WaterMonitor generation build failed; keeping current subscriptions")
+                for client in staged_clients.values():
+                    self._retire_client(client)
+                return False
 
-    def _start_group(self, group_id: int, server_id: int, topic: str, liters: int) -> bool:
-        client = None
-        try:
+            topics = {group_id: topic for group_id, _server_id, topic, _liters, _server in bindings}
+            server_ids = {group_id: server_id for group_id, server_id, _topic, _liters, _server in bindings}
+            pulse_liters = {group_id: liters for group_id, _server_id, _topic, liters, _server in bindings}
+
+            with self._lock:
+                previous_clients = list(self._clients.values())
+                samples: dict[int, deque[tuple[float, int]]] = {}
+                for group_id, client in staged_clients.items():
+                    pending = list(getattr(client, "_water_monitor_pending_samples", ()))
+                    samples[group_id] = deque(pending, maxlen=256)
+                    client._water_monitor_staged = False
+
+                self._clients = staged_clients
+                self._topics = topics
+                self._server_ids = server_ids
+                self._pulse_liters = pulse_liters
+                self._samples = samples
+
+            retired: set[int] = set()
+            for client in previous_clients:
+                if id(client) in retired:
+                    continue
+                retired.add(id(client))
+                self._retire_client(client)
+            return True
+
+    @staticmethod
+    def _validate_server(server: dict, server_id: int) -> None:
+        if not isinstance(server, dict):
+            raise ValueError(f"MQTT server {server_id} has invalid data")
+        if "enabled" in server and int(server.get("enabled") or 0) != 1:
+            raise ValueError(f"MQTT server {server_id} is disabled")
+        port = int(server.get("port") or 1883)
+        if port < 1 or port > 65535:
+            raise ValueError(f"MQTT server {server_id} has invalid port")
+
+    def _load_bindings_strict(self) -> list[tuple[int, int, str, int, dict]]:
+        """Load and validate the whole desired generation without changing live state."""
+        load_groups = getattr(db, "get_groups_strict", None)
+        if not callable(load_groups):
+            raise RuntimeError("Database does not provide get_groups_strict()")
+
+        groups = load_groups()
+        if not isinstance(groups, list):
+            raise ValueError("Strict group loader returned invalid data")
+
+        bindings: list[tuple[int, int, str, int, dict]] = []
+        seen_group_ids: set[int] = set()
+        for group in groups:
+            if not isinstance(group, dict):
+                raise ValueError("Water meter group entry is not an object")
+
+            group_id = int(group.get("id"))
+            if group_id in seen_group_ids:
+                raise ValueError(f"Duplicate water meter group id: {group_id}")
+            seen_group_ids.add(group_id)
+            if group_id == 999:
+                continue
+
+            enabled = int(group.get("use_water_meter") or 0)
+            if enabled not in (0, 1):
+                raise ValueError(f"Group {group_id} has invalid use_water_meter value")
+            if enabled == 0:
+                continue
+
+            topic = str(group.get("water_mqtt_topic") or "").strip()
+            raw_server_id = group.get("water_mqtt_server_id")
+            if not topic or raw_server_id in (None, ""):
+                raise ValueError(f"Group {group_id} has incomplete water meter configuration")
+            server_id = int(raw_server_id)
+            if server_id <= 0:
+                raise ValueError(f"Group {group_id} has invalid MQTT server id")
+
+            pulse = str(group.get("water_pulse_size") or "1l")
+            pulse_sizes = {"1l": 1, "10l": 10, "100l": 100}
+            if pulse not in pulse_sizes:
+                raise ValueError(f"Group {group_id} has invalid water pulse size")
+
             server = db.get_mqtt_server(server_id)
             if not server:
-                logger.error("WaterMonitor MQTT server %s was not found for group %s", server_id, group_id)
-                return False
+                raise ValueError(f"MQTT server {server_id} was not found for group {group_id}")
+            self._validate_server(server, server_id)
+            bindings.append((group_id, server_id, topic, pulse_sizes[pulse], server))
+        return bindings
 
+    def _build_group_client(self, group_id: int, topic: str, server: dict):
+        client = None
+        try:
             client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            client._water_monitor_retired = False
+            client._water_monitor_staged = True
+            client._water_monitor_pending_samples = deque(maxlen=256)
             if server.get("username"):
                 client.username_pw_set(server.get("username"), server.get("password") or None)
             _configure_tls(client, server)
@@ -151,18 +231,18 @@ class WaterMonitor:
                     pulses = int("".join(ch for ch in payload if ch.isdigit() or ch == "-"))
                     timestamp = datetime.now().timestamp()
                     with self._lock:
-                        if self._clients.get(group_id) is not callback_client:
-                            return
-                        samples = self._samples.setdefault(group_id, deque(maxlen=256))
-                        samples.append((timestamp, pulses))
+                        if self._clients.get(group_id) is callback_client:
+                            samples = self._samples.setdefault(group_id, deque(maxlen=256))
+                            samples.append((timestamp, pulses))
+                        elif getattr(callback_client, "_water_monitor_staged", False):
+                            callback_client._water_monitor_pending_samples.append((timestamp, pulses))
                 except (ValueError, TypeError, KeyError):
                     logger.exception("WaterMonitor on_message failed for group %s", group_id)
 
             def _on_connect(client, userdata, connect_flags, reason_code, properties):
                 try:
-                    with self._lock:
-                        if self._clients.get(group_id) is not client:
-                            return
+                    if getattr(client, "_water_monitor_retired", False):
+                        return
                     client.subscribe(topic, qos=0)
                     logger.info("WaterMonitor group %s subscribed %s", group_id, topic)
                 except (ConnectionError, TimeoutError, OSError):
@@ -178,37 +258,12 @@ class WaterMonitor:
             client.on_disconnect = _on_disconnect
             client.connect(server.get("host") or "127.0.0.1", int(server.get("port") or 1883), 10)
             client.subscribe(topic, qos=0)
-
-            with self._lock:
-                self._clients[group_id] = client
-                self._topics[group_id] = topic
-                self._server_ids[group_id] = server_id
-                self._pulse_liters[group_id] = liters
-                self._samples[group_id] = deque(maxlen=256)
-            try:
-                client.loop_start()
-            except (ConnectionError, TimeoutError, OSError, RuntimeError):
-                with self._lock:
-                    if self._clients.get(group_id) is client:
-                        self._clients.pop(group_id, None)
-                        self._topics.pop(group_id, None)
-                        self._server_ids.pop(group_id, None)
-                        self._pulse_liters.pop(group_id, None)
-                        self._samples.pop(group_id, None)
-                raise
-            return True
-        except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, AttributeError):
-            logger.exception("WaterMonitor start failed for group %s", group_id)
+            client.loop_start()
+            return client
+        except Exception:  # The caller rolls back the rest of the staged generation.
             if client is not None:
-                with self._lock:
-                    if self._clients.get(group_id) is client:
-                        self._clients.pop(group_id, None)
-                        self._topics.pop(group_id, None)
-                        self._server_ids.pop(group_id, None)
-                        self._pulse_liters.pop(group_id, None)
-                        self._samples.pop(group_id, None)
                 self._retire_client(client)
-            return False
+            raise
 
     def get_current_reading_m3(self, group_id: int) -> float | None:
         try:
