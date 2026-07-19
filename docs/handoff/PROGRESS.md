@@ -2,7 +2,7 @@
 
 Текущий checkpoint: 2026-07-19. Ветка: `refactor/audit-2026-07`, post-review
 baseline `84f0b3df9712234a504ecbaff2e10b909c6e5975`, последний интегрированный
-main checkpoint `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+main checkpoint `28609d2a97928b83227edc1f359426bb79d3905e`.
 
 ## Текущее состояние после полного post-review
 
@@ -90,6 +90,24 @@ main checkpoint `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
    - `PR-003` ждёт structured scheduler/physical-OFF contract; `PR-042` —
      confirmation contract; `PR-043` — DB/deploy; `PR-061` — rain/scheduler
      adoption monotonic CAS; `PR-044` — отдельный status/API GET-auth owner.
+
+3. `p4-test-quality` — частичная remediation `PR-052`, root остаётся `pending`
+   - fix `74e0169d362e814c7485d51d513e91afe3ef5881`;
+   - merge `28609d2a97928b83227edc1f359426bb79d3905e`;
+   - три viewer-mutation regression теперь отключают только test bypass, требуют
+     точные `403`/`FORBIDDEN` и доказывают, что набор zone IDs в DB не изменился;
+   - opt-in E2E больше не превращает отсутствие `httpx`, connection/login error
+     или нездоровый target в skip/допустимый ответ; concurrent probes собирают
+     worker exceptions и требуют завершения и точного числа `5`/`10` ответов;
+   - независимый verdict `ACCEPT`; E2E и `mqtt_real` не запускались и не
+     засчитываются как runtime evidence;
+   - main serial: 2160 passed, 2 skipped, 17 deselected; единственный sandbox
+     AF_UNIX failure прошёл точным повтором вне sandbox; warnings отсутствуют;
+     full Ruff, renderer и `git diff --check` чисты;
+   - `PR-052` не закрыт: program-test owner commit
+     `d9a997c7f150a233ef82c13eb42662095bb91212` и deploy/CI owner commit
+     `c99058ae5202adaeeca51871bedc7a688fe49e04` ещё не интегрированы и не
+     считаются remediation evidence до serial gate.
 
 ### Reconciliation post-package reviewer residuals
 
