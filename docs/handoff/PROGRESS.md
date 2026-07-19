@@ -2,7 +2,7 @@
 
 Текущий checkpoint: 2026-07-19. Ветка: `refactor/audit-2026-07`, post-review
 baseline `84f0b3df9712234a504ecbaff2e10b909c6e5975`, последний интегрированный
-main checkpoint `28609d2a97928b83227edc1f359426bb79d3905e`.
+code checkpoint `8047d662bd3e058064146cdbf670914a15deaf85`. Push не выполнялся.
 
 ## Текущее состояние после полного post-review
 
@@ -11,14 +11,14 @@ main checkpoint `28609d2a97928b83227edc1f359426bb79d3905e`.
 - Добавлены стабильные post-review ID `PR-001…PR-068`: `PR-001…PR-059` и
   `PR-061…PR-068` — подтверждённые новые либо переоткрытые root causes,
   `PR-060` — намеренный H2 shadow-mode, не дефект.
-- Финальный реестр сейчас содержит **224 записи**: `VERIFIED_REAL` — 215,
+- Финальный реестр сейчас содержит **226 записей**: `VERIFIED_REAL` — 217,
   `VERIFIED_FALSE` — 7, `INTENTIONAL_LIMITATION` — 2, `UNVERIFIED` — 0.
-- Remediation disposition: **144 fixed · 7 deferred · 64 pending ·
-  9 not_applicable**. Из 67 post-review дефектов 3 закрыты интегрированными
-  пакетами, 64 остаются `pending`:
-  интеграция частичного owner-пакета сохраняет root открытым, пока не закрыты
-  остальные владельцы и общий regression contract; неслитый owner commit тем
-  более не считается fix.
+- Remediation disposition: **208 fixed · 9 deferred · 0 pending ·
+  9 not_applicable**. Все 67 подтверждённых `PR-*` root causes закрыты
+  интегрированным кодом и regression suites; H2 (`PR-060`) остаётся намеренным
+  shadow-mode и не считается дефектом.
+- Девять индивидуально отложенных записей имеют проверяемую причину: исторические
+  `#37`, `#56`, `#73`, `#99`, `#140`, `#141` и platform decisions `KD-001…KD-003`.
 - Reopened evidence связано с историческими `#38`, `#45`, `#50`, `#53`, `#81`,
   `#89`, `#93`, `#94`, `#100`, `#127`, `#129`, `#132`, `#149` и `#152` через
   поле `reopens`; старые записи остаются историей прежнего решения, а новые PR-ID
@@ -41,78 +41,33 @@ main checkpoint `28609d2a97928b83227edc1f359426bb79d3905e`.
 - `p4-deploy`: updater/backup/workflows/permissions/production gates.
 - `p4-telegram`: loop, stop truth, subscriptions, token/polling lifecycle.
 - `p4-frontend`: stale responses, duration/bulk/CSV, status panels, browser storage.
-- Cross-owner очереди явно записаны как `p4-monitors`, `p4-status-api`,
-  `p4-history`, `p4-performance` и `p4-test-quality`; они не считаются закрытыми
-  через соседний пакет.
+- Cross-owner пакеты `p4-monitors`, `p4-status-api`, `p4-history`,
+  `p4-performance` и `p4-test-quality` также интегрированы; multi-owner root
+  закрывался только последним необходимым пакетом.
 
 ### Интегрированные post-review пакеты
 
-1. `p4-security-secrets` — частичная remediation `PR-043`, root остаётся
-   `pending`
-   - fixes `d0fb6f1b1e481581ea05da0ba79fd94fde2cab95` и
-     `85ec3c60d977b3de49c244e4696f9733850843b6`;
-   - merge `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`;
-   - secret keys, SQLite files и runtime logs переведены на fail-closed
-     owner-only storage; bootstrap credential больше не пишется в лог и
-     сохраняется в приватный recovery-файл, bootstrap-сообщения редактируются;
-   - regression: `tests/unit/test_phase4_security_secrets.py`;
-   - serial evidence: 2090 passed, 2 skipped, 17 deselected; единственный
-     sandbox-only AF_UNIX bind failure прошёл точным повтором вне sandbox; Ruff
-     и `git diff --check` чисты;
-   - `PR-043` не закрыт: ещё нужны удаление default `1234` из DB bootstrap и
-     deploy cleanup/runtime permissions; auth cookie/trim scope закрыт следующим
-     пакетом.
-
-2. `p4-auth-http` — `PR-001`, `PR-002`, `PR-033` закрыты; `PR-003`, `PR-042`,
-   `PR-043`, `PR-061` получили partial evidence и остаются `pending`; `PR-044`
-   не входил в scope и остаётся `pending`
-   - fixes `194a44e2ab94cac8ca66459fe47dca3cf5f7e3a6`,
-     `5e0783c47028b2974b813cb3651fded379cc0fc7`,
-     `491bb5bff5b0b56aa456c5447fab71f90a585f67`,
-     `f9382ea22af08874cd377c793c613da91d3aab97`,
-     `9c971a0babf5bac1a0d94b02e0bfb126b6004b53`,
-     `b040ddd640b6e0b8c7ece40811f853050a72d48c` и
-     `b4258adc23f7de38e44e43f54512798e709ae57c`;
-   - merge `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`;
-   - anonymous control boundary разрешает только fail-safe OFF/postpone/status,
-     authenticated unsafe mutations требуют CSRF; explicit WSGI executor,
-     reserved workers и SSE lease cap сохраняют control plane; SSE/correlation
-     teardown idempotent и больше не создаёт warnings;
-   - exact regressions находятся в `tests/integration/test_phase4_auth_http.py`,
-     `tests/api/test_guest_zone_control.py` и
-     `tests/api/test_watering_rate_limit_safety.py`; inventory фиксирует nodeid
-     отдельно для каждого fixed/partial PR;
-   - независимый verdict `ACCEPT`: 135 focused + 5 auth/CSRF environment tests
-     прошли с `-W error`;
-   - main serial: 2160 passed, 2 skipped, 17 deselected; единственный sandbox
-     AF_UNIX failure прошёл точным повтором вне sandbox; SSE warnings отсутствуют;
-     full Ruff, renderer и `git diff --check` чисты;
-   - `PR-003` ждёт structured scheduler/physical-OFF contract; `PR-042` —
-     confirmation contract; `PR-043` — DB/deploy; `PR-061` — rain/scheduler
-     adoption monotonic CAS; `PR-044` — отдельный status/API GET-auth owner.
-
-3. `p4-test-quality` — частичная remediation `PR-052`, root остаётся `pending`
-   - fix `74e0169d362e814c7485d51d513e91afe3ef5881`;
-   - merge `28609d2a97928b83227edc1f359426bb79d3905e`;
-   - три viewer-mutation regression теперь отключают только test bypass, требуют
-     точные `403`/`FORBIDDEN` и доказывают, что набор zone IDs в DB не изменился;
-   - opt-in E2E больше не превращает отсутствие `httpx`, connection/login error
-     или нездоровый target в skip/допустимый ответ; concurrent probes собирают
-     worker exceptions и требуют завершения и точного числа `5`/`10` ответов;
-   - независимый verdict `ACCEPT`; E2E и `mqtt_real` не запускались и не
-     засчитываются как runtime evidence;
-   - main serial: 2160 passed, 2 skipped, 17 deselected; единственный sandbox
-     AF_UNIX failure прошёл точным повтором вне sandbox; warnings отсутствуют;
-     full Ruff, renderer и `git diff --check` чисты;
-   - `PR-052` не закрыт: program-test owner commit
-     `d9a997c7f150a233ef82c13eb42662095bb91212` и deploy/CI owner commit
-     `c99058ae5202adaeeca51871bedc7a688fe49e04` ещё не интегрированы и не
-     считаются remediation evidence до serial gate.
+- Ранее интегрированы security/auth/test-quality checkpoints:
+  `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`,
+  `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`,
+  `28609d2a97928b83227edc1f359426bb79d3905e`.
+- Финальная серия интеграции: DB `8d3db8b`, MQTT core `420b174`, scheduler
+  `b542f1f`, postpone/auth `98aa12d…75c8c44`, programs `1e2097f`, lifecycle
+  `7f658ae`, monitors `1a1be9e`, weather `f05bbf4`, history `5d247b3`, Telegram
+  `f5f6851`, topology `096487b`, status API `25a1b98`, frontend `c0a6517` и
+  native WB deploy `96a520c`; финальные интеграционные regression fixtures и
+  virtual-zone topology edge закрыты `8047d66`.
+- Точечные post-integration suites прошли для каждого пакета; deploy дополнительно
+  прошёл 27 тестов, `bash -n` и проверку versioned Telegram blob. Финальный общий
+  serial gate записывается ниже после запуска.
+- Узкие frozen exceptions использованы только для forward migrations
+  (`8d3db8b`), legacy credential fixture (`cbbe1b1`), закрытия CSS response
+  (`6456748`) и минимальных CI/deploy workflow contracts (`96a520c`).
 
 ### Reconciliation post-package reviewer residuals
 
-- Финальный read-only residual map не меняет disposition уже интегрированных
-  пакетов и не считает owner-branch commits fixes до merge и общего gate.
+- Финальный residual map сохранил стабильные ID; owner-branch commits были
+  засчитаны только после локальной интеграции и профильных regression tests.
 - Восемь независимых root causes добавлены append-only как `#217–#224`:
   - `PR-061` — monotonic и serialized postpone across HTTP/Telegram/rain;
   - `PR-062` — unbounded квадратичный `extra_times` conflict-check;
@@ -167,8 +122,8 @@ Freeze снят **только** для минимальных workflow-изме
   `PytestUnhandledThreadExceptionWarning` fatal failures.
 
 Другие workflow refactors, action/version upgrades, matrix/caching/trigger/
-permissions changes и новые deploy semantics этим решением не разрешены. До
-интеграционного commit и serial evidence `PR-024`/`PR-052` остаются `pending`.
+permissions changes этим решением не разрешены. Узкий контракт `PR-024`/`PR-052`
+интегрирован коммитом `96a520c` и закреплён deploy contract tests.
 
 ### Intentional и rejected решения post-review
 
@@ -177,6 +132,10 @@ permissions changes и новые deploy semantics этим решением н�
   сохранения freeze/rain/wind hard-safety gates.
 - `KD-001`: запуск native WB unit от root подтверждён и индивидуально deferred;
   сначала нужна privilege/device/path/capability model и migration plan.
+- `KD-002`: повторный bootstrap не имеет полного rollback code/venv/unit;
+  существующие установки обновляются transactional `update_server.sh`.
+- `KD-003`: install/update пока не имеют общего межпроцессного lock; до
+  WB-specific contention regression запуски сериализуются оператором/CI.
 - `IL-001`: Docker остаётся только local-development target; production parity
   с native WB systemd не требуется.
 - `RD-001`: гипотеза о false-positive total-duration conflict отклонена — runtime
@@ -589,42 +548,23 @@ permissions changes и новые deploy semantics этим решением н�
     - выполнен read-only caller/migration/deployment evidence review; последний
       code gate остаётся 2072 passed, 2 skipped, 17 deselected.
 
-После этих пакетов: 141 запись fixed (130 корней + одиннадцать унаследованных дублей),
-6 deferred, 0 REAL-записей pending; пять `VERIFIED_FALSE` остаются
-`not_applicable` и не исправляются.
+Этот исторический checkpoint был superseded финальной post-review интеграцией.
 
-## Осознанно отложенные категории
+## Финальная локальная точка Фаз 2–3
 
-Ровно шесть REAL-находок отложены индивидуально: #37 (cross-layer CAS
-contract), #56 (trusted-proxy boundary), #73 (live migration downgrade
-contract), #99 (неразличимая historical provenance), #140 (program-run identity
-для метрик) и #141 (неопределённая smart scheduling semantics). Полные причины
-хранятся у каждой записи inventory; blanket-defer не использовался.
-
-За рамками находок по-прежнему не выполнялись запрещённые расширения scope:
-распил scheduler/status.js, изменение semantics группы 999, включение H2,
-Docker как production target, e2e и `mqtt_real` без физического WB/брокера.
-
-## Предыдущая локальная точка Фаз 2–3 — снята post-review
-
-- финальный serial gate: 2072 passed, 2 skipped, 17 deselected; две известные
-  SSE teardown warnings не изменились;
-- `uvx ruff check .`, inventory renderer `--check` и `git diff --check` чисты;
-- все 28 package-записей проверены, fix/merge SHA обычных пакетов являются
-  ancestors текущего HEAD; 136 уникальных REAL-корней разрешены ровно один раз;
-- все 147 REAL-находок имеют `fixed` либо индивидуальный `deferred`, pending=0;
-  false-ID остались ровно #16, #31, #77, #105, #126 и не исправлялись;
-- в `db/migrations.py` за цикл вошёл только разрешённый fix #98;
-- все 27 изолированных worktrees удалены, остался один основной workspace;
-  пользовательский untracked `AGENTS.md` сохранён и не индексировался.
-
-Этот блок фиксирует доказательства прежнего HEAD, но больше не является текущим
-completion claim: полный post-review и residual reconciliation оставили 64 pending
-root causes. Новая локальная
-точка передачи будет готова только после индивидуального fixed/deferred disposition
-для каждого `VERIFIED_REAL` PR-ID (`PR-001…PR-059`, `PR-061…PR-068`), интеграции
-owner packages и повторного полного serial pytest, Ruff, inventory renderer
-`--check` и `git diff --check`.
-
-`git push` не выполнялся и по-прежнему запрещён без отдельного подтверждения:
-inventory и raw reports содержат подробные данные внутреннего аудита.
+- Inventory: 208 `fixed`, 9 индивидуально `deferred`, 0 `pending`,
+  9 `not_applicable`; blanket-defer не использовался.
+- Deferred: #37 (cross-layer CAS), #56 (trusted proxy), #73 (live downgrade),
+  #99 (неразличимая history provenance), #140 (program-run identity), #141
+  (неопределённая smart semantics), KD-001 (service privileges), KD-002
+  (bootstrap rollback) и KD-003 (deploy serialization).
+- Запрещённые расширения scope не выполнялись: scheduler/status.js не
+  распиливались, semantics группы 999 не менялась, H2 не включался, Docker не
+  объявлялся production target, hardware E2E и `mqtt_real` не запускались.
+- Финальный serial pytest с fatal `PytestUnraisableExceptionWarning` и
+  `PytestUnhandledThreadExceptionWarning`: **3305 passed, 3 skipped,
+  17 deselected** за 5:29; Ruff, renderer и diff-check подтверждаются финальным
+  статическим gate этого checkpoint.
+- Пользовательский untracked `AGENTS.md` сохранён и не индексировался.
+- `git push` не выполнялся и запрещён без отдельного подтверждения: inventory и
+  raw reports содержат подробные данные внутреннего аудита.

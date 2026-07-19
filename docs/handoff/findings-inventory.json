@@ -4804,31 +4804,18 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "decision_notes": "Post-package refinement: every HTTP, Telegram, scheduler and emergency stop/cancel caller must propagate structured unresolved physical-OFF truth. Broker ACK or logical state is insufficient, and failed OFF must preserve or re-arm hard-stop/cap retries.",
-    "partial_remediations": [
-      {
-        "package": "p4-auth-http",
-        "fix_commits": [
-          "b040ddd640b6e0b8c7ece40811f853050a72d48c",
-          "b4258adc23f7de38e44e43f54512798e709ae57c"
-        ],
-        "merge_commit": "98c0234471fe6ba2a8403a22c1cf2f2194f024ff",
-        "summary": "HTTP session-stop adapters now preserve retry jobs, propagate structured unresolved results, force fail-safe OFF and reject a failed direct MQTT fallback instead of reporting success.",
-        "tests": [
-          "tests/integration/test_phase4_auth_http.py::test_session_stop_keeps_retry_jobs_when_any_physical_off_fails",
-          "tests/integration/test_phase4_auth_http.py::test_session_stop_propagates_scheduler_unresolved_aggregate",
-          "tests/integration/test_phase4_auth_http.py::test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false",
-          "tests/integration/test_phase4_auth_http.py::test_public_stop_forces_off_retry_when_observed_state_is_not_off"
-        ],
-        "verification": "Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.",
-        "remaining": "PR-003 remains open until scheduler cancellation returns a real structured aggregate and the shared zone/scheduler/MQTT paths prove physical OFF before removing safety retries or reporting success."
-      }
-    ],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-auth-http, p4-topology-api, p4-telegram, p4-scheduler, p4-mqtt-core) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-auth-http+p4-topology-api+p4-telegram+p4-scheduler+p4-mqtt-core",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/integration/test_phase4_auth_http.py",
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/unit/test_phase2_telegram_stop.py",
+        "tests/unit/test_p4_scheduler_regressions.py",
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -4854,11 +4841,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py"
+      ]
     }
   },
   {
@@ -4884,11 +4873,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py"
+      ]
     }
   },
   {
@@ -4917,11 +4908,14 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api, p4-db-integrity) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api+p4-db-integrity",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -4947,11 +4941,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity",
+      "commit": "8d3db8b7cf444f05fc1b6df7588654476ff96518",
+      "tests": [
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -4977,11 +4973,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity",
+      "commit": "8d3db8b7cf444f05fc1b6df7588654476ff96518",
+      "tests": [
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -5010,11 +5008,13 @@
     "main_or_branch": "current_head_post_review",
     "decision_notes": "Post-package refinement: physical echo must be fresh, command-scoped, non-retained and tied to the canonical broker/report topic. Retained OFF, broker ACK, self-published base values and stored topics ending in /on must not confirm a command or remove safety jobs.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-mqtt-core",
+      "commit": "420b17463314dddfdf069500e4640a1b135bee2b",
+      "tests": [
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -5040,11 +5040,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-mqtt-core",
+      "commit": "420b17463314dddfdf069500e4640a1b135bee2b",
+      "tests": [
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -5070,11 +5072,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-mqtt-core",
+      "commit": "420b17463314dddfdf069500e4640a1b135bee2b",
+      "tests": [
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -5100,11 +5104,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-mqtt-core",
+      "commit": "420b17463314dddfdf069500e4640a1b135bee2b",
+      "tests": [
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -5132,11 +5138,13 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-lifecycle) интегрированы; закрывающий пакет p4-lifecycle устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-lifecycle",
+      "commit": "7f658ae8d589d69a0622404d8d341e702379652b",
+      "tests": [
+        "tests/unit/test_phase4_lifecycle.py"
+      ]
     }
   },
   {
@@ -5164,11 +5172,13 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-lifecycle) интегрированы; закрывающий пакет p4-lifecycle устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-lifecycle",
+      "commit": "7f658ae8d589d69a0622404d8d341e702379652b",
+      "tests": [
+        "tests/unit/test_phase4_lifecycle.py"
+      ]
     }
   },
   {
@@ -5194,11 +5204,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-scheduler) интегрированы; закрывающий пакет p4-scheduler устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-scheduler",
+      "commit": "b542f1fdd2d281ad2c5f749b92a2523db856184b",
+      "tests": [
+        "tests/unit/test_p4_scheduler_regressions.py"
+      ]
     }
   },
   {
@@ -5228,11 +5240,14 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-programs, p4-scheduler) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-programs+p4-scheduler",
+      "commit": "1e2097f78d7cd787d92be8eeca4beec514d19d72",
+      "tests": [
+        "tests/unit/test_programs_conflict_hardening.py",
+        "tests/unit/test_p4_scheduler_regressions.py"
+      ]
     }
   },
   {
@@ -5258,11 +5273,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
     }
   },
   {
@@ -5288,11 +5305,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
     }
   },
   {
@@ -5318,11 +5337,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
     }
   },
   {
@@ -5351,11 +5372,14 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather, p4-scheduler) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather+p4-scheduler",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py",
+        "tests/unit/test_p4_scheduler_regressions.py"
+      ]
     }
   },
   {
@@ -5382,11 +5406,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-auth-http, p4-scheduler) интегрированы; закрывающий пакет p4-auth-http устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-auth-http+p4-scheduler",
+      "commit": "98c0234471fe6ba2a8403a22c1cf2f2194f024ff",
+      "tests": [
+        "tests/integration/test_phase4_auth_http.py",
+        "tests/unit/test_p4_scheduler_regressions.py"
+      ]
     }
   },
   {
@@ -5413,11 +5440,15 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-deploy, p4-db-integrity) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-deploy+p4-db-integrity",
+      "commit": "96a520cf958206f01916150f925eda07e2e09624",
+      "tests": [
+        "tests/unit/test_deploy_contracts.py",
+        "tests/unit/test_deploy_failure_paths.py",
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -5443,11 +5474,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-deploy) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-deploy",
+      "commit": "96a520cf958206f01916150f925eda07e2e09624",
+      "tests": [
+        "tests/unit/test_deploy_contracts.py",
+        "tests/unit/test_deploy_failure_paths.py"
+      ]
     }
   },
   {
@@ -5474,11 +5508,14 @@
     "reopens": [],
     "decision_notes": "Frozen .github/** exception is limited to PR-024: deploy must stage update_server.sh from the exact target revision and invoke that staged artifact. Running the old/current target updater, retaining divergent inline deploy logic or performing unrelated workflow refactors is outside the authorization.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-deploy) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-deploy",
+      "commit": "96a520cf958206f01916150f925eda07e2e09624",
+      "tests": [
+        "tests/unit/test_deploy_contracts.py",
+        "tests/unit/test_deploy_failure_paths.py"
+      ]
     }
   },
   {
@@ -5506,11 +5543,13 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-mqtt-core",
+      "commit": "420b17463314dddfdf069500e4640a1b135bee2b",
+      "tests": [
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -5536,11 +5575,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-telegram) интегрированы; закрывающий пакет p4-telegram устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-telegram",
+      "commit": "f5f68519fe052f597477a12306987a6f87aa2404",
+      "tests": [
+        "tests/unit/test_phase2_telegram_stop.py"
+      ]
     }
   },
   {
@@ -5566,11 +5607,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py"
+      ]
     }
   },
   {
@@ -5597,11 +5640,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-topology-api) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-topology-api",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/api/test_topology_mutation_safety.py"
+      ]
     }
   },
   {
@@ -5627,11 +5673,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-status-api",
+      "commit": "25a1b982bf9a2bd1e166c26f371889cd1eaf75dc",
+      "tests": [
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -5658,11 +5706,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity",
+      "commit": "8d3db8b7cf444f05fc1b6df7588654476ff96518",
+      "tests": [
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -5690,11 +5740,13 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity",
+      "commit": "8d3db8b7cf444f05fc1b6df7588654476ff96518",
+      "tests": [
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -5721,11 +5773,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity, p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity+p4-programs",
+      "commit": "1e2097f78d7cd787d92be8eeca4beec514d19d72",
+      "tests": [
+        "tests/db/test_postreview_integrity.py",
+        "tests/unit/test_programs_conflict_hardening.py"
+      ]
     }
   },
   {
@@ -5784,11 +5839,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-monitors) интегрированы; закрывающий пакет p4-monitors устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-monitors",
+      "commit": "1a1be9e3a4269bbc509ddb63a13bf1e63119b6b2",
+      "tests": [
+        "tests/unit/test_monitor_mqtt_lifecycle.py"
+      ]
     }
   },
   {
@@ -5816,11 +5873,15 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-monitors, p4-weather, p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-monitors+p4-weather+p4-topology-api",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/unit/test_monitor_mqtt_lifecycle.py",
+        "tests/unit/test_phase4_weather_safety.py",
+        "tests/api/test_topology_mutation_safety.py"
+      ]
     }
   },
   {
@@ -5847,11 +5908,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-scheduler, p4-mqtt-core) интегрированы; закрывающий пакет p4-scheduler устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-scheduler+p4-mqtt-core",
+      "commit": "b542f1fdd2d281ad2c5f749b92a2523db856184b",
+      "tests": [
+        "tests/unit/test_p4_scheduler_regressions.py",
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -5880,11 +5944,13 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-programs",
+      "commit": "1e2097f78d7cd787d92be8eeca4beec514d19d72",
+      "tests": [
+        "tests/unit/test_programs_conflict_hardening.py"
+      ]
     }
   },
   {
@@ -5910,11 +5976,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
     }
   },
   {
@@ -5940,11 +6008,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
     }
   },
   {
@@ -5970,11 +6040,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py"
+      ]
     }
   },
   {
@@ -6001,11 +6073,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-programs) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-programs",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/unit/test_programs_conflict_hardening.py"
+      ]
     }
   },
   {
@@ -6031,28 +6106,15 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "reopens": [],
-    "partial_remediations": [
-      {
-        "package": "p4-auth-http",
-        "fix_commits": [
-          "5e0783c47028b2974b813cb3651fded379cc0fc7"
-        ],
-        "merge_commit": "98c0234471fe6ba2a8403a22c1cf2f2194f024ff",
-        "summary": "Old and new password edge whitespace is normalized before policy, hash and persistence checks, so padding no longer causes login lockout or bypasses the strength/blocklist policy.",
-        "tests": [
-          "tests/integration/test_phase4_auth_http.py::test_password_change_normalizes_old_and_new_edge_whitespace",
-          "tests/integration/test_phase4_auth_http.py::test_password_policy_cannot_be_bypassed_with_edge_whitespace"
-        ],
-        "verification": "Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.",
-        "remaining": "PR-042 remains open because new_password2 confirmation is still not compared by the shipped UI/backend contract; the p4-frontend portion must be integrated and regression-tested."
-      }
-    ],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-auth-http) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-auth-http",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/integration/test_phase4_auth_http.py"
+      ]
     }
   },
   {
@@ -6080,45 +6142,17 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "decision_notes": "Forward-only db/migrations.py exception is authorized solely to remove the known default 1234 bootstrap seed while preserving every existing password hash and the integrated private recovery flow. Credential reset/rotation, #73 downgrade handling and c019 rollback-specific work are excluded.",
-    "partial_remediations": [
-      {
-        "package": "p4-security-secrets",
-        "fix_commits": [
-          "d0fb6f1b1e481581ea05da0ba79fd94fde2cab95",
-          "85ec3c60d977b3de49c244e4696f9733850843b6"
-        ],
-        "merge_commit": "6905ee35554ad6216e33b3bfec4a86a4a120e6c9",
-        "summary": "Secret keys, SQLite files and runtime logs now use fail-closed owner-only storage; bootstrap credentials are written to a private recovery file instead of logs, and bootstrap log messages are redacted.",
-        "tests": [
-          "tests/unit/test_phase4_security_secrets.py"
-        ],
-        "verification": "Full serial evidence: 2090 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX bind failure passed as an exact rerun outside the sandbox. Ruff and git diff --check were clean.",
-        "remaining": "PR-043 remains open until the default 1234 database seed is removed and deploy cleanup plus runtime file permissions are integrated."
-      },
-      {
-        "package": "p4-auth-http",
-        "fix_commits": [
-          "194a44e2ab94cac8ca66459fe47dca3cf5f7e3a6",
-          "5e0783c47028b2974b813cb3651fded379cc0fc7"
-        ],
-        "merge_commit": "98c0234471fe6ba2a8403a22c1cf2f2194f024ff",
-        "summary": "An explicit SESSION_COOKIE_SECURE environment value now reaches Flask config and Set-Cookie, while the authentication/password boundary consistently trims edge whitespace before policy and hash checks.",
-        "tests": [
-          "tests/integration/test_phase4_auth_http.py::test_session_cookie_secure_environment_override_is_applied",
-          "tests/integration/test_phase4_auth_http.py::test_session_cookie_secure_override_reaches_set_cookie",
-          "tests/integration/test_phase4_auth_http.py::test_password_change_normalizes_old_and_new_edge_whitespace",
-          "tests/integration/test_phase4_auth_http.py::test_password_policy_cannot_be_bypassed_with_edge_whitespace"
-        ],
-        "verification": "Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.",
-        "remaining": "PR-043 remains open until the default 1234 database seed is removed and deploy cleanup plus runtime file permissions are integrated."
-      }
-    ],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-deploy, p4-auth-http, p4-status-api) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-deploy+p4-auth-http+p4-status-api",
+      "commit": "96a520cf958206f01916150f925eda07e2e09624",
+      "tests": [
+        "tests/unit/test_deploy_contracts.py",
+        "tests/unit/test_deploy_failure_paths.py",
+        "tests/integration/test_phase4_auth_http.py",
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -6144,11 +6178,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-status-api",
+      "commit": "25a1b982bf9a2bd1e166c26f371889cd1eaf75dc",
+      "tests": [
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -6175,11 +6211,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api, p4-performance) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api+p4-performance",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/unit/test_phase4_next_watering_bounds.py"
+      ]
     }
   },
   {
@@ -6206,11 +6245,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity, p4-scheduler) интегрированы; закрывающий пакет p4-scheduler устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity+p4-scheduler",
+      "commit": "b542f1fdd2d281ad2c5f749b92a2523db856184b",
+      "tests": [
+        "tests/db/test_postreview_integrity.py",
+        "tests/unit/test_p4_scheduler_regressions.py"
+      ]
     }
   },
   {
@@ -6240,11 +6282,13 @@
     "verified_reason": "Current HEAD path was independently traced and the concrete reproduction/impact was accepted by the post-review orchestrator.",
     "main_or_branch": "current_head_post_review",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-history) интегрированы; закрывающий пакет p4-history устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-history",
+      "commit": "5d247b336327d82d43df371d306365aadd97a910",
+      "tests": [
+        "tests/integration/test_history_time_contract.py"
+      ]
     }
   },
   {
@@ -6270,11 +6314,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py"
+      ]
     }
   },
   {
@@ -6301,11 +6347,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-topology-api) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-topology-api",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/api/test_topology_mutation_safety.py"
+      ]
     }
   },
   {
@@ -6331,11 +6380,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py"
+      ]
     }
   },
   {
@@ -6361,11 +6412,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-telegram) интегрированы; закрывающий пакет p4-telegram устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-telegram",
+      "commit": "f5f68519fe052f597477a12306987a6f87aa2404",
+      "tests": [
+        "tests/unit/test_phase2_telegram_stop.py"
+      ]
     }
   },
   {
@@ -6392,33 +6445,17 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "decision_notes": "Frozen .github/** exception is limited to PR-052: CI must run the default pytest suite and promote PytestUnraisableExceptionWarning plus PytestUnhandledThreadExceptionWarning to fatal failures. Other workflow refactors, action upgrades, matrices, caching, triggers or permissions changes are excluded.",
-    "partial_remediations": [
-      {
-        "package": "p4-test-quality",
-        "fix_commits": [
-          "74e0169d362e814c7485d51d513e91afe3ef5881"
-        ],
-        "merge_commit": "28609d2a97928b83227edc1f359426bb79d3905e",
-        "summary": "Viewer mutation regressions now require exact 403/FORBIDDEN responses with production auth guards enabled and prove that zone IDs in the database remain unchanged. Opt-in live E2E setup fails instead of skipping on missing dependencies, connection or login errors, while concurrent probes surface worker exceptions and require the exact expected result count.",
-        "tests": [
-          "tests/api/test_auth_api.py::TestGuestAccess::test_viewer_cannot_mutate",
-          "tests/api/test_coverage_boost.py::TestViewerRole::test_viewer_cannot_mutate",
-          "tests/api/test_zones_api_comprehensive.py::TestViewerAccess::test_viewer_create_attempt",
-          "tests/e2e/test_live_controller.py::TestLiveController::test_health",
-          "tests/e2e/test_live_controller.py::TestLiveController::test_scheduler_status",
-          "tests/e2e/test_concurrent.py::TestConcurrentRequests::test_concurrent_status_requests",
-          "tests/e2e/test_concurrent.py::TestConcurrentRequests::test_concurrent_zone_reads"
-        ],
-        "verification": "Independent review ACCEPT. Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed as an exact rerun outside the sandbox, no warnings remained, and full Ruff, renderer plus git diff --check were clean. E2E and mqtt_real were not executed and are not claimed as runtime evidence.",
-        "remaining": "PR-052 remains open until the program-test owner commit d9a997c7f150a233ef82c13eb42662095bb91212 and deploy/CI owner commit c99058ae5202adaeeca51871bedc7a688fe49e04 are integrated and pass the shared serial gate; neither unmerged commit is counted as remediation evidence."
-      }
-    ],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-deploy, p4-test-quality) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-deploy+p4-test-quality",
+      "commit": "96a520cf958206f01916150f925eda07e2e09624",
+      "tests": [
+        "tests/unit/test_deploy_contracts.py",
+        "tests/unit/test_deploy_failure_paths.py",
+        "tests/api/test_auth_api.py",
+        "tests/api/test_routes_deep.py"
+      ]
     }
   },
   {
@@ -6445,11 +6482,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-lifecycle, p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-lifecycle+p4-status-api",
+      "commit": "25a1b982bf9a2bd1e166c26f371889cd1eaf75dc",
+      "tests": [
+        "tests/unit/test_phase4_lifecycle.py",
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -6476,11 +6516,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api, p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api+p4-status-api",
+      "commit": "25a1b982bf9a2bd1e166c26f371889cd1eaf75dc",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -6507,11 +6550,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-auth-http) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-auth-http",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/integration/test_phase4_auth_http.py"
+      ]
     }
   },
   {
@@ -6538,11 +6584,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-weather) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-weather",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
     }
   },
   {
@@ -6569,11 +6618,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-db-integrity",
+      "commit": "8d3db8b7cf444f05fc1b6df7588654476ff96518",
+      "tests": [
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -6599,11 +6650,13 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-status-api",
+      "commit": "25a1b982bf9a2bd1e166c26f371889cd1eaf75dc",
+      "tests": [
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -6630,11 +6683,14 @@
     "main_or_branch": "current_head_post_review",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-frontend, p4-status-api) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-frontend+p4-status-api",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/unit/test_phase4_frontend_safety.py",
+        "tests/api/test_phase2_system_status.py"
+      ]
     }
   },
   {
@@ -6801,33 +6857,16 @@
     "verified_reason": "Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.",
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
-    "partial_remediations": [
-      {
-        "package": "p4-auth-http",
-        "fix_commits": [
-          "491bb5bff5b0b56aa456c5447fab71f90a585f67",
-          "f9382ea22af08874cd377c793c613da91d3aab97",
-          "b4258adc23f7de38e44e43f54512798e709ae57c"
-        ],
-        "merge_commit": "98c0234471fe6ba2a8403a22c1cf2f2194f024ff",
-        "summary": "Public and Telegram postpone now share bounded 1..3-day validation, a monotonic compare-and-extend lock and fail-closed malformed-deadline handling; an exact CAS helper prevents an expiry writer from clearing a concurrent extension.",
-        "tests": [
-          "tests/integration/test_phase4_auth_http.py::test_public_postpone_never_shortens_existing_safety_deadline",
-          "tests/integration/test_phase4_auth_http.py::test_public_postpone_requires_bounded_positive_integer_days",
-          "tests/integration/test_phase4_auth_http.py::test_concurrent_public_and_telegram_postpone_is_monotonic",
-          "tests/integration/test_phase4_auth_http.py::test_expired_postpone_cas_preserves_concurrent_longer_deadline",
-          "tests/integration/test_phase4_auth_http.py::test_apply_and_expired_clear_share_one_postpone_lock"
-        ],
-        "verification": "Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.",
-        "remaining": "PR-061 remains open because rain monitor and scheduler expiry writers still bypass the shared monotonic/CAS helpers; their integration must preserve deadline provenance and never shorten or clear a newer protection."
-      }
-    ],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-auth-http, p4-weather, p4-telegram) интегрированы; закрывающий пакет p4-telegram устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-auth-http+p4-weather+p4-telegram",
+      "commit": "f5f68519fe052f597477a12306987a6f87aa2404",
+      "tests": [
+        "tests/integration/test_phase4_auth_http.py",
+        "tests/unit/test_phase4_weather_safety.py",
+        "tests/unit/test_phase2_telegram_stop.py"
+      ]
     }
   },
   {
@@ -6854,11 +6893,13 @@
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-programs",
+      "commit": "1e2097f78d7cd787d92be8eeca4beec514d19d72",
+      "tests": [
+        "tests/unit/test_programs_conflict_hardening.py"
+      ]
     }
   },
   {
@@ -6885,11 +6926,13 @@
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-programs",
+      "commit": "1e2097f78d7cd787d92be8eeca4beec514d19d72",
+      "tests": [
+        "tests/unit/test_programs_conflict_hardening.py"
+      ]
     }
   },
   {
@@ -6918,11 +6961,14 @@
     "reopens": [],
     "decision_notes": "Forward-only db/migrations.py exception is authorized only for positive group-reference guards and default-group repair on fresh/existing DB. It does not permit a broad group-schema redesign, #73 downgrade work or c019 rollback-specific changes.",
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api, p4-db-integrity) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api+p4-db-integrity",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/db/test_postreview_integrity.py"
+      ]
     }
   },
   {
@@ -6949,11 +6995,13 @@
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py"
+      ]
     }
   },
   {
@@ -6981,11 +7029,14 @@
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api, p4-mqtt-core) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api+p4-mqtt-core",
+      "commit": "096487b682799dcb046e0a8ae032a2f788c2c971",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/unit/test_p4_mqtt_core_safety.py"
+      ]
     }
   },
   {
@@ -7013,11 +7064,14 @@
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
-      "commit": null,
-      "tests": []
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-topology-api, p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-topology-api+p4-frontend",
+      "commit": "c0a6517c7fe3ca7c26c41789e788398578848d7c",
+      "tests": [
+        "tests/api/test_topology_mutation_safety.py",
+        "tests/unit/test_phase4_frontend_safety.py"
+      ]
     }
   },
   {
@@ -7044,11 +7098,67 @@
     "main_or_branch": "post_package_reconciliation",
     "reopens": [],
     "implementation": {
-      "disposition": "pending",
-      "reason": null,
-      "package": null,
+      "disposition": "fixed",
+      "reason": "Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.",
+      "package": "p4-weather",
+      "commit": "f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a",
+      "tests": [
+        "tests/unit/test_phase4_weather_safety.py"
+      ]
+    }
+  },
+  {
+    "decision_id": "KD-002",
+    "title": "Повторный install_wb не восстанавливает code/venv/unit после промежуточного сбоя",
+    "file": "install_wb.sh",
+    "line": 508,
+    "severity": "medium",
+    "current_location": "install_wb.sh:508-636",
+    "evidence": "EXIT trap повторного bootstrap только запускает ранее активный сервис; после git reset, venv или unit mutation он не возвращает прежний commit/runtime/config.",
+    "reproduction": "На существующей установке оборвать повторный install_wb после активации target commit: trap стартует сервис уже на частично обновлённом дереве вместо восстановления предыдущего runtime.",
+    "status": "VERIFIED_REAL",
+    "implementation": {
+      "disposition": "deferred",
+      "reason": "Поддерживаемый путь обновления существующей установки теперь transactional update_server.sh. Полный rollback legacy/bootstrap migration требует отдельной on-device staging/activation модели; до неё install_wb остаётся bootstrap для свежего контроллера, а существующие установки обновляются только update_server.sh.",
+      "package": "post-review-known-deferred",
       "commit": null,
       "tests": []
-    }
+    },
+    "introduced_by_branch": false,
+    "scenario": "На существующей установке оборвать повторный install_wb после активации target commit: trap стартует сервис уже на частично обновлённом дереве вместо восстановления предыдущего runtime.",
+    "verified_by": [
+      "final integration review",
+      "/root"
+    ],
+    "verified_reason": "Mutation order and EXIT-trap coverage were traced against the integrated native bootstrap.",
+    "main_or_branch": "final_integration_review",
+    "reopens": []
+  },
+  {
+    "decision_id": "KD-003",
+    "title": "Native install и update не сериализованы общим межпроцессным lock",
+    "file": "update_server.sh",
+    "line": 466,
+    "severity": "medium",
+    "current_location": "install_wb.sh:416-636; update_server.sh:466-698",
+    "evidence": "Оба root-скрипта изменяют один service/repository/venv, но не удерживают общий flock/lockfile; два одновременных запуска могут пересечь backup, reset, venv swap и rollback.",
+    "reproduction": "Запустить два update/install процесса для одного controller root: оба проходят preflight до stop/backup и используют независимые transaction flags без общего exclusion boundary.",
+    "status": "VERIFIED_REAL",
+    "implementation": {
+      "disposition": "deferred",
+      "reason": "Нужен единый WB-supported lock path и root/systemd contention regression на целевом Debian; локальная macOS-среда не содержит flock и не доказывает device semantics. До интеграции такого контракта deploy/install invocations должны сериализоваться оператором или CI.",
+      "package": "post-review-known-deferred",
+      "commit": null,
+      "tests": []
+    },
+    "introduced_by_branch": false,
+    "scenario": "Запустить два update/install процесса для одного controller root: оба проходят preflight до stop/backup и используют независимые transaction flags без общего exclusion boundary.",
+    "verified_by": [
+      "final integration review",
+      "/root"
+    ],
+    "verified_reason": "The integrated native scripts were checked for a shared exclusion primitive and none is present.",
+    "main_or_branch": "final_integration_review",
+    "reopens": []
   }
 ]

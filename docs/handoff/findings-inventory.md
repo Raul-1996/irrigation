@@ -2,13 +2,13 @@
 
 Исторический реестр Фаз 1–3 сохранён неизменяемым префиксом #1–#152. После полного post-review текущего HEAD добавлены новые и переоткрытые корневые дефекты с отдельными стабильными PR-ID, owner packages и проверяемыми сценариями.
 
-- Всего записей: **224** (152 исторических + 72 post-review решений).
-- `VERIFIED_REAL`: **215**.
+- Всего записей: **226** (152 исторических + 74 post-review решений).
+- `VERIFIED_REAL`: **217**.
 - `VERIFIED_FALSE`: **7**.
 - `INTENTIONAL_LIMITATION`: **2**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Remediation disposition: **144 fixed · 7 deferred · 64 pending · 9 not_applicable**.
+- Remediation disposition: **208 fixed · 9 deferred · 0 pending · 9 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -52,12 +52,11 @@
 - **Переоткрывает:** #132.
 - **Owner packages:** `p4-auth-http`, `p4-topology-api`, `p4-telegram`, `p4-scheduler`, `p4-mqtt-core`.
 - **Решение оркестратора:** Post-package refinement: every HTTP, Telegram, scheduler and emergency stop/cancel caller must propagate structured unresolved physical-OFF truth. Broker ACK or logical state is insufficient, and failed OFF must preserve or re-arm hard-stop/cap retries.
-- **Partial remediation `p4-auth-http`:** HTTP session-stop adapters now preserve retry jobs, propagate structured unresolved results, force fail-safe OFF and reject a failed direct MQTT fallback instead of reporting success.
-  - Fix commits: `b040ddd640b6e0b8c7ece40811f853050a72d48c`, `b4258adc23f7de38e44e43f54512798e709ae57c`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
-  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_session_stop_keeps_retry_jobs_when_any_physical_off_fails`, `tests/integration/test_phase4_auth_http.py::test_session_stop_propagates_scheduler_unresolved_aggregate`, `tests/integration/test_phase4_auth_http.py::test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false`, `tests/integration/test_phase4_auth_http.py::test_public_stop_forces_off_retry_when_observed_state_is_not_off`.
-  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
-  - Осталось: PR-003 remains open until scheduler cancellation returns a real structured aggregate and the shared zone/scheduler/MQTT paths prove physical OFF before removing safety retries or reporting success.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-auth-http, p4-topology-api, p4-telegram, p4-scheduler, p4-mqtt-core) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-auth-http+p4-topology-api+p4-telegram+p4-scheduler+p4-mqtt-core`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/integration/test_phase4_auth_http.py`, `tests/api/test_topology_mutation_safety.py`, `tests/unit/test_phase2_telegram_stop.py`, `tests/unit/test_p4_scheduler_regressions.py`, `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #156 / PR-004 [high] `routes/zones_crud_api.py:127-152,213-250; db/zones.py:247-283,464-471; services/zone_control.py:1008-1078` — Удаление или перепривязка активной зоны теряет старый relay/master channel
 
@@ -67,7 +66,11 @@
 - **Репродукция/сценарий:** Запустить зону на broker A/topic old, выполнить PUT topic=new либо DELETE, затем fire всех stop jobs: OFF на A/old не публикуется, старый relay/master остаётся открыт.
 - **Evidence:** PUT/import меняют topic, mqtt_server_id и group_id, а DELETE удаляет строку до подтверждённого OFF. Все поздние stop/watchdog/boot paths перечитывают уже новую либо отсутствующую строку.
 - **Owner packages:** `p4-topology-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`.
 
 ### #157 / PR-005 [high] `routes/groups_api.py:52-125,171-176; db/groups.py:81-120; services/zone_control.py:934-952` — Изменение или удаление live master-valve topology оставляет старый master открытым
 
@@ -77,7 +80,11 @@
 - **Репродукция/сценарий:** При открытом master выполнить PUT use_master_valve=false/topic=new либо DELETE пустой группы: API успешен, OFF по прежнему server/topic отсутствует.
 - **Evidence:** Group PUT/Delete разрешают менять use_master_valve, server, topic и mode либо удалять группу без закрытия наблюдаемого старого actuator; последующий stop использует только новую конфигурацию.
 - **Owner packages:** `p4-topology-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`.
 
 ### #158 / PR-006 [high] `routes/mqtt_api.py:165-194; db/mqtt.py:113-134; services/zone_control.py:193-196,1061-1065` — PUT/DELETE используемого MQTT-сервера уничтожает или перенаправляет OFF path
 
@@ -88,7 +95,11 @@
 - **Evidence:** CRUD не проверяет hardware references/active state и rowcount. Delete оставляет dangling IDs, update меняет endpoint in place, а отсутствующий ID получает ложный 200/204; runtime refresh не возвращает старый OFF channel.
 - **Переоткрывает:** #53.
 - **Owner packages:** `p4-topology-api`, `p4-db-integrity`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api, p4-db-integrity) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api+p4-db-integrity`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`, `tests/db/test_postreview_integrity.py`.
 
 ### #159 / PR-007 [high] `db/migrations.py:37-50,73-81; db/zones.py:196-229,464-471; irrigation_scheduler.py:116-127` — Повторное использование zone ID передаёт replacement-зоне старую программу и историю
 
@@ -98,7 +109,11 @@
 - **Репродукция/сценарий:** Создать highest-ID зону в enabled-программе, удалить, создать новую с тем же ID и fire программы: включается topic replacement-зоны; get_zone показывает last_watering старого актива.
 - **Evidence:** zones.id — INTEGER PRIMARY KEY без AUTOINCREMENT; delete не удаляет ID из programs.zones и сохраняет zone_runs. Runtime revalidation различает активы только по числу.
 - **Owner packages:** `p4-db-integrity`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity`.
+- **Fix commit:** `8d3db8b7cf444f05fc1b6df7588654476ff96518`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`.
 
 ### #160 / PR-008 [high] `db/migrations.py:468-486,542-552; db/mqtt.py:49-71,128-134` — Повторное использование MQTT server ID молча перенаправляет hardware references
 
@@ -108,7 +123,11 @@
 - **Репродукция/сценарий:** Broker id=1 привязан к зоне; DELETE и POST нового host дают новому broker id=1, после чего start зоны публикует на новый host.
 - **Evidence:** mqtt_servers.id переиспользуется, DELETE не RESTRICT/CASCADE references зон, master и sensors. Новый server получает прежний ID, и старые ссылки начинают управлять другим host.
 - **Owner packages:** `p4-db-integrity`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity`.
+- **Fix commit:** `8d3db8b7cf444f05fc1b6df7588654476ff96518`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`.
 
 ### #161 / PR-009 [high] `services/mqtt_pub.py:421-467; services/sse_hub.py:300-395; services/observed_state.py:425-439` — Собственная MQTT-команда принимается за независимое физическое echo
 
@@ -120,7 +139,11 @@
 - **Переоткрывает:** #50.
 - **Owner packages:** `p4-mqtt-core`.
 - **Решение оркестратора:** Post-package refinement: physical echo must be fresh, command-scoped, non-retained and tied to the canonical broker/report topic. Retained OFF, broker ACK, self-published base values and stored topics ending in /on must not confirm a command or remove safety jobs.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-mqtt-core`.
+- **Fix commit:** `420b17463314dddfdf069500e4640a1b135bee2b`.
+- **Regression tests:** `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #162 / PR-010 [high] `services/sse_hub.py:300,332-378` — Неизвестный MQTT payload трактуется как OFF и снимает safety jobs
 
@@ -130,7 +153,11 @@
 - **Репродукция/сценарий:** Передать payload UNKNOWN или пустую строку для физически ON relay: DB становится off и cancel_zone_jobs вызывается.
 - **Evidence:** Есть только ON allowlist; любое другое значение попадает в OFF branch, завершает zone_run, очищает timing и отменяет stop/hard-stop.
 - **Owner packages:** `p4-mqtt-core`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-mqtt-core`.
+- **Fix commit:** `420b17463314dddfdf069500e4640a1b135bee2b`.
+- **Regression tests:** `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #163 / PR-011 [high] `services/zone_control.py:71-112,115-180,250-272,1285-1339` — Master-valve identity не включает MQTT server ID
 
@@ -140,7 +167,11 @@
 - **Репродукция/сценарий:** Две группы SID 11/22 с topic /master: emergency публикует один OFF и masters_skipped_dup_topic=1; open одной отменяет close timer другой.
 - **Evidence:** Locks, delayed-close timers, active scans и emergency dedupe keyed только normalized topic; одинаковый /master на разных brokers считается одним actuator.
 - **Owner packages:** `p4-mqtt-core`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-mqtt-core`.
+- **Fix commit:** `420b17463314dddfdf069500e4640a1b135bee2b`.
+- **Regression tests:** `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #164 / PR-012 [high] `services/zone_control.py:435-450,505-673` — Exclusive start делает make-before-break и не блокирует shared-master fault relay
 
@@ -150,7 +181,11 @@
 - **Репродукция/сценарий:** Заблокировать peer OFF: selected ON уже опубликован. Либо оставить relay группы A fault при закрытом shared master и стартовать B: master снова подаёт воду в A.
 - **Evidence:** Target master/relay получают ON до подтверждённого peer OFF; peer-set ограничен группой, поэтому fault/unconfirmed relay другой группы на том же (server,topic) master не участвует в interlock.
 - **Owner packages:** `p4-mqtt-core`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-mqtt-core`.
+- **Fix commit:** `420b17463314dddfdf069500e4640a1b135bee2b`.
+- **Regression tests:** `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #165 / PR-013 [high] `services/app_init.py:79-129,137-213; services/master_valve.py:47-75; routes/health_api.py:250-320; irrigation_scheduler.py:466-474,2463-2482` — Boot reconciliation игнорирует OFF/recovery failure и объявляет READY
 
@@ -161,7 +196,11 @@
 - **Evidence:** Failed zone/master OFF не меняют итог, _boot_sync_done ставится безусловно, complete_boot_recovery(False) игнорируется; readiness видит scheduler running даже когда он paused.
 - **Переоткрывает:** #38.
 - **Owner packages:** `p4-lifecycle`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-lifecycle) интегрированы; закрывающий пакет p4-lifecycle устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-lifecycle`.
+- **Fix commit:** `7f658ae8d589d69a0622404d8d341e702379652b`.
+- **Regression tests:** `tests/unit/test_phase4_lifecycle.py`.
 
 ### #166 / PR-014 [high] `services/shutdown.py:17-42,71-200; irrigation_scheduler.py:513-543; wb-irrigation.service:1-20` — Shutdown не подтверждает OFF, игнорирует quiesce и не соблюдает общий deadline
 
@@ -172,7 +211,11 @@
 - **Evidence:** Quiesce False игнорируется; последовательные per-message waits превышают TimeoutStopSec=45; wait_for_publish timeout без exception считается success без is_published/rc, после чего DB безусловно пишется off.
 - **Переоткрывает:** #149.
 - **Owner packages:** `p4-lifecycle`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-lifecycle) интегрированы; закрывающий пакет p4-lifecycle устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-lifecycle`.
+- **Fix commit:** `7f658ae8d589d69a0622404d8d341e702379652b`.
+- **Regression tests:** `tests/unit/test_phase4_lifecycle.py`.
 
 ### #167 / PR-015 [high] `irrigation_scheduler.py:1206-1274,1311-1369,2275-2282,2489-2513` — load_programs уничтожает восстановленные misfire и interval anchors
 
@@ -182,7 +225,11 @@
 - **Репродукция/сценарий:** Persist interval anchor 20 июля, restart 21 июля: после load_programs start_date становится 21 июля. Cron next_run_time внутри grace заменяется следующим будущим slot.
 - **Evidence:** Paused scheduler восстанавливает valid SQLAlchemyJobStore jobs, но load_programs cancel/recreate каждого job: eligible cron misfire теряется, interval start_date переякоривается на текущий день.
 - **Owner packages:** `p4-scheduler`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-scheduler) интегрированы; закрывающий пакет p4-scheduler устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-scheduler`.
+- **Fix commit:** `b542f1fdd2d281ad2c5f749b92a2523db856184b`.
+- **Regression tests:** `tests/unit/test_p4_scheduler_regressions.py`.
 
 ### #168 / PR-016 [high] `routes/programs_api.py:27-39,117-160; db/programs.py:54-149; irrigation_scheduler.py:101-127,1206-1274` — Malformed program payload сохраняется до reschedule и оставляет старый cron/опасные zones
 
@@ -193,7 +240,11 @@
 - **Evidence:** Строгого contract для time/zones/days/extra_times/enabled нет; scalar zones превращается в character IDs, malformed time падает до cancel_program, а invalid JSON может poison startup. PUT успевает commit до scheduler failure.
 - **Переоткрывает:** #127, #152.
 - **Owner packages:** `p4-programs`, `p4-scheduler`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-programs, p4-scheduler) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-programs+p4-scheduler`.
+- **Fix commit:** `1e2097f78d7cd787d92be8eeca4beec514d19d72`.
+- **Regression tests:** `tests/unit/test_programs_conflict_hardening.py`, `tests/unit/test_p4_scheduler_regressions.py`.
 
 ### #169 / PR-017 [high] `services/weather/adjustment.py:177-220,273-279` — Hard mismatch отбрасывает более холодный local sensor до freeze gate
 
@@ -203,7 +254,11 @@
 - **Репродукция/сценарий:** Fresh local -3°C, API +8°C, forecast min +6°C, hard threshold 10°C дают should_skip=False и разрешают полив.
 - **Evidence:** При delta выше hard threshold local reading целиком заменяется API, хотя freeze safety должна использовать минимум локального/forecast значения.
 - **Owner packages:** `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`.
 
 ### #170 / PR-018 [high] `services/weather/client.py:45-90; services/weather/models.py:105-140` — precipitation_24h считает осадки только с полуночи
 
@@ -213,7 +268,11 @@
 - **Репродукция/сценарий:** Дождь 10 мм накануне в 22:00 и решение сегодня в 05:00 дают precipitation_24h=0, поэтому rain safety не срабатывает.
 - **Evidence:** Forecast request не запрашивает past_days/past_hours, а parser суммирует доступные hourly samples; до конца суток в payload нет полного rolling 24h окна.
 - **Owner packages:** `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`.
 
 ### #171 / PR-019 [high] `routes/system_config_api.py:202-217; services/app_init.py:236-239; services/monitors/rain_monitor.py:24-76` — Изменение rain config не перенастраивает живой MQTT monitor
 
@@ -223,7 +282,11 @@
 - **Репродукция/сценарий:** Включить, сменить topic или отключить rain sensor через API: без restart новый config не действует, а старый subscriber продолжает останавливать/откладывать полив.
 - **Evidence:** POST пишет только БД; monitor запускается при boot, start не заменяет старого клиента. Enable/topic/server/mode не действуют, disable оставляет старую subscription активной.
 - **Owner packages:** `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`.
 
 ### #172 / PR-020 [high] `services/monitors/rain_monitor.py:150-180; routes/groups_api.py:219-230; db/programs.py:504-533` — Rain stop без provenance удаляет ручную отмену программы
 
@@ -234,7 +297,11 @@
 - **Evidence:** _on_rain_stop очищает все cancellations группы за день, не различая записи, созданные дождём и оператором; rain start не владеет этими строками.
 - **Переоткрывает:** #89.
 - **Owner packages:** `p4-weather`, `p4-scheduler`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather, p4-scheduler) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather+p4-scheduler`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`, `tests/unit/test_p4_scheduler_regressions.py`.
 
 ### #173 / PR-021 [high] `app.py:7-25; config.py:8; services/logging_setup.py:389; irrigation_scheduler.py:1311-1369` — Документированные TZ/WB_TZ не управляют runtime triggers
 
@@ -244,7 +311,11 @@
 - **Репродукция/сценарий:** На OS UTC с WB_TZ=Asia/Bishkek программа 06:00 получает фактический запуск около 12:00 controller-local.
 - **Evidence:** Logging setup выполняется до load_dotenv, устанавливает process TZ и перезаписывает WB_TZ; Cron/Interval triggers создаются без explicit scheduler timezone.
 - **Owner packages:** `p4-auth-http`, `p4-scheduler`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-auth-http, p4-scheduler) интегрированы; закрывающий пакет p4-auth-http устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-auth-http+p4-scheduler`.
+- **Fix commit:** `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
+- **Regression tests:** `tests/integration/test_phase4_auth_http.py`, `tests/unit/test_p4_scheduler_regressions.py`.
 
 ### #174 / PR-022 [high] `update_server.sh:63-90; db/logs.py:175-205` — Оба backup path могут вернуть целый, но никогда не существовавший или устаревший SQLite snapshot
 
@@ -254,7 +325,11 @@
 - **Репродукция/сценарий:** Между копиями выполнить checkpoint/commits: restore проходит integrity_check, но содержит cross-time state. Инъекция OperationalError в backup API дала success=True backup без закоммиченной WAL-строки.
 - **Evidence:** Updater последовательно копирует live main/WAL/SHM и подавляет ошибки; LogRepository после online-backup failure делает copy2 только main DB без WAL и проверяет лишь размер/integrity.
 - **Owner packages:** `p4-deploy`, `p4-db-integrity`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-deploy, p4-db-integrity) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-deploy+p4-db-integrity`.
+- **Fix commit:** `96a520cf958206f01916150f925eda07e2e09624`.
+- **Regression tests:** `tests/unit/test_deploy_contracts.py`, `tests/unit/test_deploy_failure_paths.py`, `tests/db/test_postreview_integrity.py`.
 
 ### #175 / PR-023 [high] `update_server.sh:16,104-109; AGENTS.md:5-34` — Updater восстанавливает отсутствующий venv системным Python 3.9
 
@@ -264,7 +339,11 @@
 - **Репродукция/сценарий:** Удалить/повредить venv и запустить updater: он создаёт Python 3.9 environment, затем restart переводит service в import/boot failure.
 - **Evidence:** PY_BIN default python3 и venv creation не проверяют 3.11; на WB system python=3.9.2, тогда как код импортирует datetime.UTC и использует PEP 604.
 - **Owner packages:** `p4-deploy`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-deploy) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-deploy`.
+- **Fix commit:** `96a520cf958206f01916150f925eda07e2e09624`.
+- **Regression tests:** `tests/unit/test_deploy_contracts.py`, `tests/unit/test_deploy_failure_paths.py`.
 
 ### #176 / PR-024 [high] `.github/workflows/deploy.yml:25-31; update_server.sh:1-190` — Deploy workflow обходит supported updater и маскирует failed rollout
 
@@ -275,7 +354,11 @@
 - **Evidence:** Workflow использует divergent git/pip path без authoritative backup/rollback и применяет command || echo, поэтому inactive service/failed readyz не делает job красным.
 - **Owner packages:** `p4-deploy`.
 - **Решение оркестратора:** Frozen .github/** exception is limited to PR-024: deploy must stage update_server.sh from the exact target revision and invoke that staged artifact. Running the old/current target updater, retaining divergent inline deploy logic or performing unrelated workflow refactors is outside the authorization.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-deploy) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-deploy`.
+- **Fix commit:** `96a520cf958206f01916150f925eda07e2e09624`.
+- **Regression tests:** `tests/unit/test_deploy_contracts.py`, `tests/unit/test_deploy_failure_paths.py`.
 
 ### #177 / PR-025 [high] `services/mqtt_pub.py:137-175; services/observed_state.py:264-276` — MQTT publisher после TLS setup error продолжает plaintext connect
 
@@ -286,7 +369,11 @@
 - **Evidence:** tls_set OSError/ValueError логируется, но execution проваливается в connect; tls_enabled не является fail-closed contract.
 - **Переоткрывает:** #81.
 - **Owner packages:** `p4-mqtt-core`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-mqtt-core) интегрированы; закрывающий пакет p4-mqtt-core устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-mqtt-core`.
+- **Fix commit:** `420b17463314dddfdf069500e4640a1b135bee2b`.
+- **Regression tests:** `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #178 / PR-026 [high] `services/telegram_bot.py:119-133,307-367` — Telegram handler блокирует собственный asyncio loop на десять секунд
 
@@ -296,7 +383,11 @@
 - **Репродукция/сценарий:** Вызов из same_loop занимает 10.01s, coroutine не выполняется; одно сообщение/управляющий callback получает последовательные timeout и теряет ответы.
 - **Evidence:** _submit_aiogram вызывает run_coroutine_threadsafe на _aiogram_runner._loop и синхронно future.result(10), хотя _on_message/_on_callback уже исполняются на том же loop.
 - **Owner packages:** `p4-telegram`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-telegram) интегрированы; закрывающий пакет p4-telegram устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-telegram`.
+- **Fix commit:** `f5f68519fe052f597477a12306987a6f87aa2404`.
+- **Regression tests:** `tests/unit/test_phase2_telegram_stop.py`.
 
 ### #179 / PR-027 [high] `static/js/status.js:2132-2151` — Selected-run popup наследует предыдущий режим 200%
 
@@ -306,7 +397,11 @@
 - **Репродукция/сценарий:** Открыть запуск группы, выбрать 200%, закрыть; затем selected-zones flow с ожидаемыми 15 минутами отправляет 200% и существенно увеличивает полив.
 - **Evidence:** confirmRunSelectedNext не сбрасывает runPopupMode/runPopupPct и не refresh UI; popup state остаётся от предыдущего all/group run.
 - **Owner packages:** `p4-frontend`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`.
 
 ### #180 / PR-028 [high] `static/js/zones.js:1317-1361,2043-2053; routes/zones_crud_api.py:213-250` — Bulk/CSV duration validation fail-open сохраняет опасные значения
 
@@ -316,7 +411,11 @@
 - **Репродукция/сценарий:** Bulk/CSV duration 4000, -5 или malformed доходит до import и сохраняется; network failure conflict checker не блокирует mutation, hard-stop строится по неверной длительности.
 - **Evidence:** parseInt принимает junk/out-of-range, conflict-check exception трактуется как ok, import endpoint не применяет обычный range contract и может частично выполнить batch.
 - **Owner packages:** `p4-frontend`, `p4-topology-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-topology-api) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-topology-api`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/api/test_topology_mutation_safety.py`.
 
 ### #181 / PR-029 [high] `routes/system_status_api.py:531-587; static/js/system_health.js:153-169; static/js/status.js:1122-1125` — /api/status синхронно подключается к каждому MQTT broker на каждом poll
 
@@ -326,7 +425,11 @@
 - **Репродукция/сценарий:** Настроить два blackhole brokers и открыть несколько вкладок: /api/status latency около 5N секунд, concurrent polls задерживают /readyz/OFF API и быстро растят logs.
 - **Evidence:** Последовательный Paho connect имеет фактический timeout около 5s на broker; несколько polling loops перекрываются, пишут mqtt_warn durable logs и занимают тот же малый HTTP executor.
 - **Owner packages:** `p4-status-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-status-api`.
+- **Fix commit:** `25a1b982bf9a2bd1e166c26f371889cd1eaf75dc`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py`.
 
 ### #182 / PR-030 [medium] `db/migrations.py:250-310; database.py:1-60; services/app_init.py:79-129` — Migration runner проглатывает partial schema failure и позволяет readiness
 
@@ -337,7 +440,11 @@
 - **Evidence:** Named migration methods ловят sqlite error, могут оставить частичные DDL/data changes и вернуть управление; app продолжает initialize/READY на несовместимой схеме.
 - **Owner packages:** `p4-db-integrity`.
 - **Решение оркестратора:** Решение оркестратора: db/migrations.py разрешено менять узко для identity/referential-integrity и fail-closed migration fixes только вместе с migration regression tests.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity`.
+- **Fix commit:** `8d3db8b7cf444f05fc1b6df7588654476ff96518`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`.
 
 ### #183 / PR-031 [medium] `db/base.py:100-119; db/zones.py:196-241; db/programs.py:54-95` — BUSY retry повторяет метод после уже committed INSERT
 
@@ -348,7 +455,11 @@
 - **Evidence:** Whole-method retry boundary не знает, что commit уже прошёл; BUSY в post-commit get_* повторно выполняет INSERT.
 - **Переоткрывает:** #45.
 - **Owner packages:** `p4-db-integrity`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity`.
+- **Fix commit:** `8d3db8b7cf444f05fc1b6df7588654476ff96518`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`.
 
 ### #184 / PR-032 [medium] `db/migrations.py:73-81,100-106; db/programs.py:54-95,175-182,504-533` — Повторно использованный program ID наследует same-day cancellation
 
@@ -358,7 +469,11 @@
 - **Репродукция/сценарий:** Cancel highest-ID OLD сегодня/group1, удалить и создать NEW с тем же ID: is_program_run_cancelled_for_group(NEW) возвращает true и новый run молча пропускается.
 - **Evidence:** Program IDs reusable, delete не удаляет program_cancellations, ключ которых содержит только numeric program_id/date/group.
 - **Owner packages:** `p4-db-integrity`, `p4-programs`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity, p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity+p4-programs`.
+- **Fix commit:** `1e2097f78d7cd787d92be8eeca4beec514d19d72`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`, `tests/unit/test_programs_conflict_hardening.py`.
 
 ### #185 / PR-033 [medium] `app.py:264,328-336; services/correlation.py:98-106; tests/api/test_routes_deep.py:49` — Streaming teardown повторно reset-ит уже использованный ContextVar token
 
@@ -382,7 +497,11 @@
 - **Репродукция/сценарий:** Реальный пятиаргументный callback после temp disconnect даёт temp_still_referenced=true и hum_reference_lost; start создаёт новые clients без loop_stop старого.
 - **Evidence:** VERSION2 callback принимает пятый Paho argument вместо captured sensor type: temp disconnect оставляет temp stale и очищает hum handle; restart не может остановить потерянный auto-reconnect client.
 - **Owner packages:** `p4-monitors`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-monitors) интегрированы; закрывающий пакет p4-monitors устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-monitors`.
+- **Fix commit:** `1a1be9e3a4269bbc509ddb63a13bf1e63119b6b2`.
+- **Regression tests:** `tests/unit/test_monitor_mqtt_lifecycle.py`.
 
 ### #187 / PR-035 [medium] `services/monitors/env_monitor.py:71-120; services/monitors/rain_monitor.py:24-76; services/monitors/water_monitor.py:46-74; routes/groups_api.py:52-125; routes/mqtt_api.py:118-194` — Env/water/rain MQTT monitors игнорируют TLS и live server reconfiguration
 
@@ -392,7 +511,11 @@
 - **Репродукция/сценарий:** На TLS-only broker relay commands работают, а rain/env/water остаются offline. Смена/delete broker или water topic оставляет старого subscriber влияющим до restart.
 - **Evidence:** Sensor clients делают plaintext CONNECT при tls_enabled и сохраняют старые broker/topic clients после MQTT/group CRUD; publisher/SSE refresh их не охватывает.
 - **Owner packages:** `p4-monitors`, `p4-weather`, `p4-topology-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-monitors, p4-weather, p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-monitors+p4-weather+p4-topology-api`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/unit/test_monitor_mqtt_lifecycle.py`, `tests/unit/test_phase4_weather_safety.py`, `tests/api/test_topology_mutation_safety.py`.
 
 ### #188 / PR-036 [medium] `irrigation_scheduler.py:191-224,1528-1617,1661-1668,1775-1811,2186-2273; services/zone_control.py:856-864` — Stale safety caps и отменённый pending group_seq переживают владельца activation
 
@@ -402,7 +525,11 @@
 - **Репродукция/сценарий:** Ранний manual stop, поздний новый run около старого cap deadline — cap останавливает новый activation. Cancel group_seq до callable start — следующий group start блокируется до restart.
 - **Evidence:** Zone/master cap jobs не activation-bound и не снимаются при раннем успешном завершении; group_seq claim передаётся job до start, но cancel pending job не освобождает event.
 - **Owner packages:** `p4-scheduler`, `p4-mqtt-core`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-scheduler, p4-mqtt-core) интегрированы; закрывающий пакет p4-scheduler устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-scheduler+p4-mqtt-core`.
+- **Fix commit:** `b542f1fdd2d281ad2c5f749b92a2523db856184b`.
+- **Regression tests:** `tests/unit/test_p4_scheduler_regressions.py`, `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #189 / PR-037 [medium] `db/programs.py:234-253,300-417; routes/programs_api.py:60-90,117-160` — Program conflict checker не моделирует реальные schedule/calendar/weather races
 
@@ -413,7 +540,11 @@
 - **Evidence:** Checker не знает interval/even-odd, adjacent-day overlap, candidate main-vs-own-extra и candidate weather expansion; POST check-then-insert не транзакционен, два concurrent creates проходят одинаковый snapshot.
 - **Переоткрывает:** #100, #129.
 - **Owner packages:** `p4-programs`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-programs`.
+- **Fix commit:** `1e2097f78d7cd787d92be8eeca4beec514d19d72`.
+- **Regression tests:** `tests/unit/test_programs_conflict_hardening.py`.
 
 ### #190 / PR-038 [medium] `services/weather/models.py:65-140,171-205; services/weather/service.py:113-160; services/weather/adjustment.py:267,444-466` — Weather cache/date/toggle semantics дают недостоверный коэффициент
 
@@ -423,7 +554,11 @@
 - **Репродукция/сценарий:** Старый payload 1 июля запрошен 5 июля и читается как current; cache через midnight смешивает daily dates; rain==threshold даёт should_skip false при coefficient 0; humidity toggle off даёт 50%.
 - **Evidence:** Unbounded stale fallback при отсутствии current hour выбирает idx=0; daily index 0 становится yesterday при past data/midnight; exact rain threshold расходится между should_skip и coefficient; factor_humidity=false всё равно применяет multiplier.
 - **Owner packages:** `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`.
 
 ### #191 / PR-039 [medium] `routes/weather_api.py:180-225,280-315; routes/system_config_api.py:202-217; db/settings.py:27-38,92-104` — Weather/location/rain settings частично коммитятся до полной валидации
 
@@ -433,7 +568,11 @@
 - **Репродукция/сценарий:** weather enabled=true + rain_threshold_mm=bad оставляет enabled; valid latitude + invalid longitude сохраняет latitude; rain server_id=bad сохраняет enabled/topic/type.
 - **Evidence:** Multi-key setters commit отдельно; conversion/range/write error позднего поля возвращает 500/400 после сохранения ранних enabled/topic/latitude values.
 - **Owner packages:** `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`.
 
 ### #192 / PR-040 [medium] `static/js/status.js:145-233; static/js/zones.js:38-65,1201-1238,1563-1611; static/js/history.js:182-197` — Frontend применяет stale polling/SSE responses поверх свежего состояния
 
@@ -443,7 +582,11 @@
 - **Репродукция/сценарий:** Старый zones snapshot off ждёт медленный env, SSE сообщает on/emergency, затем Promise.all commit возвращает UI в off; late history group A заменяет уже выбранную B.
 - **Evidence:** Несколько independent intervals не имеют generation/AbortController; loadData и mutation responses обходят SSE version guard, один feed success очищает shared connectionError другого.
 - **Owner packages:** `p4-frontend`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`.
 
 ### #193 / PR-041 [medium] `templates/programs.html:27-37,125-133,208-218; routes/programs_api.py:326-364; irrigation_scheduler.py:101-127` — Programs UI/ручной Run сообщают отсутствие или успех вопреки runtime
 
@@ -453,7 +596,11 @@
 - **Репродукция/сценарий:** Во время реального полива открыть Execution — «Нет активного полива». Disable program и POST /run — success message без _run_program_threaded и без zone start.
 - **Evidence:** Execution tab статичен и никогда не читает authoritative active groups; Run доступен disabled program, endpoint возвращает 200/thread, но job_run_program сразу отменяет и выходит.
 - **Owner packages:** `p4-frontend`, `p4-programs`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-programs) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-programs`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/unit/test_programs_conflict_hardening.py`.
 
 ### #194 / PR-042 [medium] `templates/settings.html:253-266; routes/system_config_api.py:88-104; routes/auth.py:57-66` — Password confirmation игнорируется, а крайние пробелы создают admin lockout
 
@@ -463,12 +610,11 @@
 - **Репродукция/сценарий:** Ввести разные confirmation либо сменить пароль на ' abcdefgh ': save success; login тем же вводом strip-ит его и возвращает 401.
 - **Evidence:** new_password2 не читается; backend хеширует exact string, login всегда strip. UI может сохранить ошибочный либо whitespace-padded password, которым затем нельзя войти.
 - **Owner packages:** `p4-frontend`, `p4-auth-http`.
-- **Partial remediation `p4-auth-http`:** Old and new password edge whitespace is normalized before policy, hash and persistence checks, so padding no longer causes login lockout or bypasses the strength/blocklist policy.
-  - Fix commits: `5e0783c47028b2974b813cb3651fded379cc0fc7`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
-  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_password_change_normalizes_old_and_new_edge_whitespace`, `tests/integration/test_phase4_auth_http.py::test_password_policy_cannot_be_bypassed_with_edge_whitespace`.
-  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
-  - Осталось: PR-042 remains open because new_password2 confirmation is still not compared by the shipped UI/backend contract; the p4-frontend portion must be integrated and regression-tested.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-auth-http) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-auth-http`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/integration/test_phase4_auth_http.py`.
 
 ### #195 / PR-043 [medium] `update_server.sh:63-89,142-155; db/settings.py:41-60; services/logging_setup.py:345-362; app.py:370-376; run.py:75-82` — Deploy/runtime permissions и cookie transport раскрывают ключи и bootstrap access
 
@@ -479,17 +625,11 @@
 - **Evidence:** Backup tar и .env становятся 0644/0755 и включают secret files; initial admin password пишется в app.log 0644; SESSION_COOKIE_SECURE env не применяется из-за prepopulated Flask key, native transport остаётся HTTP.
 - **Owner packages:** `p4-deploy`, `p4-auth-http`, `p4-status-api`.
 - **Решение оркестратора:** Forward-only db/migrations.py exception is authorized solely to remove the known default 1234 bootstrap seed while preserving every existing password hash and the integrated private recovery flow. Credential reset/rotation, #73 downgrade handling and c019 rollback-specific work are excluded.
-- **Partial remediation `p4-security-secrets`:** Secret keys, SQLite files and runtime logs now use fail-closed owner-only storage; bootstrap credentials are written to a private recovery file instead of logs, and bootstrap log messages are redacted.
-  - Fix commits: `d0fb6f1b1e481581ea05da0ba79fd94fde2cab95`, `85ec3c60d977b3de49c244e4696f9733850843b6`; merge: `6905ee35554ad6216e33b3bfec4a86a4a120e6c9`.
-  - Regression tests: `tests/unit/test_phase4_security_secrets.py`.
-  - Verification: Full serial evidence: 2090 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX bind failure passed as an exact rerun outside the sandbox. Ruff and git diff --check were clean.
-  - Осталось: PR-043 remains open until the default 1234 database seed is removed and deploy cleanup plus runtime file permissions are integrated.
-- **Partial remediation `p4-auth-http`:** An explicit SESSION_COOKIE_SECURE environment value now reaches Flask config and Set-Cookie, while the authentication/password boundary consistently trims edge whitespace before policy and hash checks.
-  - Fix commits: `194a44e2ab94cac8ca66459fe47dca3cf5f7e3a6`, `5e0783c47028b2974b813cb3651fded379cc0fc7`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
-  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_session_cookie_secure_environment_override_is_applied`, `tests/integration/test_phase4_auth_http.py::test_session_cookie_secure_override_reaches_set_cookie`, `tests/integration/test_phase4_auth_http.py::test_password_change_normalizes_old_and_new_edge_whitespace`, `tests/integration/test_phase4_auth_http.py::test_password_policy_cannot_be_bypassed_with_edge_whitespace`.
-  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
-  - Осталось: PR-043 remains open until the default 1234 database seed is removed and deploy cleanup plus runtime file permissions are integrated.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-deploy, p4-auth-http, p4-status-api) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-deploy+p4-auth-http+p4-status-api`.
+- **Fix commit:** `96a520cf958206f01916150f925eda07e2e09624`.
+- **Regression tests:** `tests/unit/test_deploy_contracts.py`, `tests/unit/test_deploy_failure_paths.py`, `tests/integration/test_phase4_auth_http.py`, `tests/api/test_phase2_system_status.py`.
 
 ### #196 / PR-044 [medium] `app.py:438-464; routes/audit_api.py:113-190; routes/system_status_api.py:176-240,682-760` — Sensitive logs/audit/scheduler GET endpoints доступны анонимно
 
@@ -499,7 +639,11 @@
 - **Репродукция/сценарий:** Без session cookie GET /api/scheduler/jobs, /api/audit и /api/logs возвращают production records вместо 401/403.
 - **Evidence:** Global policy пропускает все GET без role check; scheduler jobs/status, audit и logs содержат timing, topics, failures и operational metadata.
 - **Owner packages:** `p4-status-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-status-api`.
+- **Fix commit:** `25a1b982bf9a2bd1e166c26f371889cd1eaf75dc`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py`.
 
 ### #197 / PR-045 [medium] `static/js/status.js:182-205,1122-1125; routes/zones_crud_api.py:290-296; services/audit.py:241-275,338-354` — Frequent next-watering bulk poll не bounded и пишет durable audit каждые пять секунд
 
@@ -509,7 +653,11 @@
 - **Репродукция/сценарий:** Открыть dashboard на минуту: COUNT audit action zones_next_watering_bulk растёт примерно на 12; payload с повторёнными/огромным числом IDs умножает расчёты.
 - **Evidence:** Read-only POST проходит mutation audit: одна вкладка создаёт 17,280 INSERT+COMMIT/сутки. Endpoint принимает unbounded/duplicate IDs и poll использует mutation rate bucket.
 - **Owner packages:** `p4-topology-api`, `p4-performance`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api, p4-performance) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api+p4-performance`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`, `tests/unit/test_phase4_next_watering_bounds.py`.
 
 ### #198 / PR-046 [medium] `db/zones.py:100-137,501-506,845-911; irrigation_scheduler.py:2186-2244; services/zone_control.py:793-810` — Zone snapshots сканируют всю history, а reschedule открывает сотни SQLite connections
 
@@ -519,7 +667,11 @@
 - **Репродукция/сценарий:** 1M runs: 20 snapshots около 5.7s. На 24 зонах один reschedule открыл 351 connection, start path около 702 до MQTT ON.
 - **Evidence:** get_zones/get_zones_by_group глобально GROUP BY zone_runs без подходящего latest-ok index; reschedule_group_to_next_program делает quadratic nested repository calls и вызывается дважды на manual start.
 - **Owner packages:** `p4-db-integrity`, `p4-scheduler`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity, p4-scheduler) интегрированы; закрывающий пакет p4-scheduler устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity+p4-scheduler`.
+- **Fix commit:** `b542f1fdd2d281ad2c5f749b92a2523db856184b`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`, `tests/unit/test_p4_scheduler_regressions.py`.
 
 ### #199 / PR-047 [medium] `services/app_init.py:151-159; services/history_calc.py:101-214; routes/zones_history_api.py:77,242; static/js/history.js:341-444` — History смешивает timestamp/group/confirmation/calendar domains
 
@@ -530,7 +682,11 @@
 - **Evidence:** Boot пишет UTC в local-naive zone_runs; unconfirmed aborted считается water; even_odd NULL трактуется opposite scheduler; future slots уже savings; group report использует current zone group; browser/controller dates расходятся.
 - **Переоткрывает:** #38, #93, #94.
 - **Owner packages:** `p4-history`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-history) интегрированы; закрывающий пакет p4-history устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-history`.
+- **Fix commit:** `5d247b336327d82d43df371d306365aadd97a910`.
+- **Regression tests:** `tests/integration/test_history_time_contract.py`.
 
 ### #200 / PR-048 [medium] `static/js/zones.js:638-842,1317-1383,1926-2053; templates/zones.html:96-120` — Frontend bulk/CSV/water/null-ID contracts допускают потерю или подмену конфигурации
 
@@ -540,7 +696,11 @@
 - **Репродукция/сценарий:** id=12x обновляет zone12, =WEBSERVICE экспортируется формулой, bulk delete partial error всё равно выглядит success, изменение water digits исчезает после reload, unrelated group edit превращает null broker в #1.
 - **Evidence:** Bulk delete не подтверждает scope/результаты; CSV parseInt принимает aliases и export допускает formulas; water base digits никогда не сохраняются; null sensor/master broker IDs рендерятся первым broker и автосохраняются.
 - **Owner packages:** `p4-frontend`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`.
 
 ### #201 / PR-049 [medium] `templates/mqtt.html:262-288,311-321,340-440; routes/mqtt_api.py:383-421` — MQTT topic browser допускает prototype pollution и unbounded memory/payload growth
 
@@ -550,7 +710,11 @@
 - **Репродукция/сценарий:** Topic /devices/__proto__ изменяет Object.prototype; 20,001 /devices/* topics остаются все, один rebuild создаёт около 42k DOM elements и рост продолжается.
 - **Evidence:** Broker segments пишутся в ordinary object (__proto__/constructor); 20k prune сохраняет все normal /devices keys, payload bytes не ограничены, state не очищается, весь DOM пересобирается каждые 300ms.
 - **Owner packages:** `p4-frontend`, `p4-topology-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-topology-api) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-topology-api`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/api/test_topology_mutation_safety.py`.
 
 ### #202 / PR-050 [medium] `routes/system_config_api.py:119-174; templates/map.html:68-107; static/sw.js:65-71` — Map page и service worker неограниченно размножают media/cache entries
 
@@ -560,7 +724,11 @@
 - **Репродукция/сценарий:** 75 maps создают 75 новых cache keys на reload; десять reload добавляют примерно 216MB CacheStorage до quota eviction.
 - **Evidence:** Все timestamp map files выдаются без retention/pagination; UI добавляет Date.now query к каждому image, SW cache-first хранит каждый full URL как отдельную WebP copy.
 - **Owner packages:** `p4-frontend`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`.
 
 ### #203 / PR-051 [medium] `services/telegram_bot.py:101-133,307-362,576-603; routes/settings.py:56-78; db/telegram.py:220-250` — Telegram subscriptions/token/webhook runtime contracts неработоспособны или небезопасны
 
@@ -570,7 +738,11 @@
 - **Репродукция/сценарий:** Команды подписки показывают menu без записи; token change оставляет OLD bot; set_webhook=true даёт 500 после commit; legacy chat получает report после смены admin.
 - **Evidence:** /subscribe и /unsubscribe расположены после unconditional return; token cache/poller не reconfigure; set_webhook вызывает отсутствующий method после DB write; due query не revalidates authorization/current admin.
 - **Owner packages:** `p4-telegram`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-telegram) интегрированы; закрывающий пакет p4-telegram устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-telegram`.
+- **Fix commit:** `f5f68519fe052f597477a12306987a6f87aa2404`.
+- **Regression tests:** `tests/unit/test_phase2_telegram_stop.py`.
 
 ### #204 / PR-052 [medium] `.github/workflows/ci.yml:30; tests/api/test_auth_api.py:47; tests/unit/test_check_conflicts_v2.py:136-340; tests/api/test_routes_deep.py:49; tests/e2e/test_live_controller.py:29` — CI и ключевые auth/weather/SSE/E2E тесты имеют false-green coverage
 
@@ -581,12 +753,11 @@
 - **Evidence:** CI исключает 77 integration + 69 UI; viewer test принимает 200/401/403 при TESTING bypass; weather asserts условны/xfail; SSE close warning не failure; explicit E2E opt-in connection failure превращается в skip/all([]).
 - **Owner packages:** `p4-deploy`, `p4-test-quality`.
 - **Решение оркестратора:** Frozen .github/** exception is limited to PR-052: CI must run the default pytest suite and promote PytestUnraisableExceptionWarning plus PytestUnhandledThreadExceptionWarning to fatal failures. Other workflow refactors, action upgrades, matrices, caching, triggers or permissions changes are excluded.
-- **Partial remediation `p4-test-quality`:** Viewer mutation regressions now require exact 403/FORBIDDEN responses with production auth guards enabled and prove that zone IDs in the database remain unchanged. Opt-in live E2E setup fails instead of skipping on missing dependencies, connection or login errors, while concurrent probes surface worker exceptions and require the exact expected result count.
-  - Fix commits: `74e0169d362e814c7485d51d513e91afe3ef5881`; merge: `28609d2a97928b83227edc1f359426bb79d3905e`.
-  - Regression tests: `tests/api/test_auth_api.py::TestGuestAccess::test_viewer_cannot_mutate`, `tests/api/test_coverage_boost.py::TestViewerRole::test_viewer_cannot_mutate`, `tests/api/test_zones_api_comprehensive.py::TestViewerAccess::test_viewer_create_attempt`, `tests/e2e/test_live_controller.py::TestLiveController::test_health`, `tests/e2e/test_live_controller.py::TestLiveController::test_scheduler_status`, `tests/e2e/test_concurrent.py::TestConcurrentRequests::test_concurrent_status_requests`, `tests/e2e/test_concurrent.py::TestConcurrentRequests::test_concurrent_zone_reads`.
-  - Verification: Independent review ACCEPT. Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed as an exact rerun outside the sandbox, no warnings remained, and full Ruff, renderer plus git diff --check were clean. E2E and mqtt_real were not executed and are not claimed as runtime evidence.
-  - Осталось: PR-052 remains open until the program-test owner commit d9a997c7f150a233ef82c13eb42662095bb91212 and deploy/CI owner commit c99058ae5202adaeeca51871bedc7a688fe49e04 are integrated and pass the shared serial gate; neither unmerged commit is counted as remediation evidence.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-deploy, p4-test-quality) интегрированы; закрывающий пакет p4-deploy устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-deploy+p4-test-quality`.
+- **Fix commit:** `96a520cf958206f01916150f925eda07e2e09624`.
+- **Regression tests:** `tests/unit/test_deploy_contracts.py`, `tests/unit/test_deploy_failure_paths.py`, `tests/api/test_auth_api.py`, `tests/api/test_routes_deep.py`.
 
 ### #205 / PR-053 [medium] `routes/health_api.py:250-320,415-432; services/app_init.py:115-125; services/systemd_notify.py:1-120` — Health/metrics классифицируют paused/fault/wedged service как healthy
 
@@ -596,7 +767,11 @@
 - **Репродукция/сценарий:** Wrapper с тремя jobs даёт scheduler_jobs_total 0/running 0; одна fault zone даёт off=1; заблокировать HTTP executor — independent heartbeat продолжает уведомлять systemd.
 - **Evidence:** Scheduler metrics читают nonexistent wrapper attributes и остаются zero; все non-on states считаются off; heartbeat независим от HTTP/main plane и продолжает WATCHDOG=1 при wedge; readiness принимает paused scheduler/частичный broker health.
 - **Owner packages:** `p4-lifecycle`, `p4-status-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-lifecycle, p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-lifecycle+p4-status-api`.
+- **Fix commit:** `25a1b982bf9a2bd1e166c26f371889cd1eaf75dc`.
+- **Regression tests:** `tests/unit/test_phase4_lifecycle.py`, `tests/api/test_phase2_system_status.py`.
 
 ### #206 / PR-054 [medium] `routes/mqtt_api.py:165-194,200-365; db/mqtt.py:113-134` — MQTT diagnostics и missing-row CRUD возвращают ложный success
 
@@ -606,7 +781,11 @@
 - **Репродукция/сценарий:** Broker принимает TCP, но отказывает CONNACK: status/probe сообщает доступность. PUT несуществующего id возвращает success true, DELETE — 204.
 - **Evidence:** Probe/status могут считать TCP connect достаточным без CONNACK/auth outcome; repository update/delete не проверяют rowcount, поэтому absent PUT даёт 200 server=null, DELETE 204 и runtime refresh.
 - **Owner packages:** `p4-topology-api`, `p4-status-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api, p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api+p4-status-api`.
+- **Fix commit:** `25a1b982bf9a2bd1e166c26f371889cd1eaf75dc`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`, `tests/api/test_phase2_system_status.py`.
 
 ### #207 / PR-055 [medium] `templates/settings.html:397-409; app.py:343-349` — IP geolocation всегда блокируется CSP, а fetch timeout option не существует
 
@@ -616,7 +795,11 @@
 - **Репродукция/сценарий:** Нажать «По IP» в standards browser: CSP блокирует request/Failed to fetch и координаты не заполняются; при relaxed CSP зависший fetch не abort-ится.
 - **Evidence:** connect-src разрешает только self, но button fetch-ит https://ipapi.co/json; {timeout:5000} не является Fetch API option и не прерывает request.
 - **Owner packages:** `p4-frontend`, `p4-auth-http`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-auth-http) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-auth-http`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/integration/test_phase4_auth_http.py`.
 
 ### #208 / PR-056 [medium] `routes/programs_api.py:27; templates/programs.html:169-228; routes/zones_crud_api.py:82; static/js/status.js:405-595,1337-1382; services/weather/models.py:118-174` — Program/postpone/weather strings достигают innerHTML как stored/cached XSS
 
@@ -626,7 +809,11 @@
 - **Репродукция/сценарий:** Сохранить <img onerror=...> в program.time/postpone_until либо вернуть его из configured weather relay: открытие programs/status исполняет payload в app origin.
 - **Evidence:** Malformed program.time/color и postpone_until сохраняются verbatim; relay weather sunrise/sunset/hourly.time проходят cache/API; sinks используют innerHTML, CSP допускает inline handlers.
 - **Owner packages:** `p4-frontend`, `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-weather) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-weather`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/unit/test_phase4_weather_safety.py`.
 
 ### #209 / PR-057 [low] `db/migrations.py:1095-1160; db/zones.py:100-137` — Первый uptime после zones-table rebuild работает без idx_zones_group
 
@@ -637,7 +824,11 @@
 - **Evidence:** Rebuild migration не восстанавливает idx_zones_group; индекс появляется только при следующем init path/restart, а hot group lookups первого uptime делают table scans.
 - **Owner packages:** `p4-db-integrity`.
 - **Решение оркестратора:** Узкая правка db/migrations.py разрешена только вместе с migration regression test.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-db-integrity) интегрированы; закрывающий пакет p4-db-integrity устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-db-integrity`.
+- **Fix commit:** `8d3db8b7cf444f05fc1b6df7588654476ff96518`.
+- **Regression tests:** `tests/db/test_postreview_integrity.py`.
 
 ### #210 / PR-058 [medium] `services/reports.py:7-27; db/logs.py:122-159` — Reports today и yesterday используют одинаковое rolling 24h окно
 
@@ -647,7 +838,11 @@
 - **Репродукция/сценарий:** Запросить today и yesterday с данными по обе стороны controller-local midnight: repository получает args [1,1] и отчёты содержат идентичные rows.
 - **Evidence:** Правильный calendar range helper не используется; оба периода вызывают get_water_statistics(days=1), то есть один и тот же rolling UTC interval с разными labels.
 - **Owner packages:** `p4-status-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-status-api) интегрированы; закрывающий пакет p4-status-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-status-api`.
+- **Fix commit:** `25a1b982bf9a2bd1e166c26f371889cd1eaf75dc`.
+- **Regression tests:** `tests/api/test_phase2_system_status.py`.
 
 ### #211 / PR-059 [medium] `routes/system_status_api.py:720-790; static/js/status.js:1200-1320` — Daily water «today» строится по last snapshots, а не календарным событиям дня
 
@@ -657,7 +852,11 @@
 - **Репродукция/сценарий:** Оставить последний water snapshot вчера и открыть dashboard сегодня без новых pulses: карточка today показывает старое потребление вместо нуля/нет данных.
 - **Evidence:** Endpoint/widget используют последние доступные snapshots/rolling values как сегодняшнюю величину, не ограничивая их controller-local day; stale предыдущее значение маркируется today.
 - **Owner packages:** `p4-frontend`, `p4-status-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-frontend, p4-status-api) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-frontend+p4-status-api`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/unit/test_phase4_frontend_safety.py`, `tests/api/test_phase2_system_status.py`.
 
 ### #217 / PR-061 [high] `services/postpone.py:29-92; routes/system_config_api.py:309-341; routes/telegram.py:184-191; services/monitors/rain_monitor.py:131-168; irrigation_scheduler.py:570-589` — Публичные и фоновые postpone-каналы могут сокращать более долгую защитную отсрочку; срок не bounded и mutation не сериализована между HTTP/Telegram/rain
 
@@ -667,12 +866,11 @@
 - **Репродукция/сценарий:** Сохранить manual postpone_until=2099-12-31, вызвать rain start и rain stop: deadline сначала сокращается до конца текущего дня, затем очищается. Параллельные HTTP/Telegram/cancel writers также дают last-writer-wins вместо monotonic max.
 - **Evidence:** HTTP/Telegram service без bound и compare-and-extend перезаписывает postpone_until, rain monitor пишет deadline напрямую, а cancel/sweeper обходят общий group mutation lock. Более короткий либо rain deadline может заменить долгую manual protection и затем быть очищен как rain.
 - **Owner packages:** `p4-auth-http`, `p4-weather`, `p4-telegram`.
-- **Partial remediation `p4-auth-http`:** Public and Telegram postpone now share bounded 1..3-day validation, a monotonic compare-and-extend lock and fail-closed malformed-deadline handling; an exact CAS helper prevents an expiry writer from clearing a concurrent extension.
-  - Fix commits: `491bb5bff5b0b56aa456c5447fab71f90a585f67`, `f9382ea22af08874cd377c793c613da91d3aab97`, `b4258adc23f7de38e44e43f54512798e709ae57c`; merge: `98c0234471fe6ba2a8403a22c1cf2f2194f024ff`.
-  - Regression tests: `tests/integration/test_phase4_auth_http.py::test_public_postpone_never_shortens_existing_safety_deadline`, `tests/integration/test_phase4_auth_http.py::test_public_postpone_requires_bounded_positive_integer_days`, `tests/integration/test_phase4_auth_http.py::test_concurrent_public_and_telegram_postpone_is_monotonic`, `tests/integration/test_phase4_auth_http.py::test_expired_postpone_cas_preserves_concurrent_longer_deadline`, `tests/integration/test_phase4_auth_http.py::test_apply_and_expired_clear_share_one_postpone_lock`.
-  - Verification: Main serial: 2160 passed, 2 skipped, 17 deselected; the sole sandbox AF_UNIX failure passed exactly outside the sandbox, no SSE warnings remained, and full Ruff plus git diff --check were clean. Independent review ACCEPT: 135 focused plus 5 auth/CSRF environment tests passed with -W error.
-  - Осталось: PR-061 remains open because rain monitor and scheduler expiry writers still bypass the shared monotonic/CAS helpers; their integration must preserve deadline provenance and never shorten or clear a newer protection.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-auth-http, p4-weather, p4-telegram) интегрированы; закрывающий пакет p4-telegram устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-auth-http+p4-weather+p4-telegram`.
+- **Fix commit:** `f5f68519fe052f597477a12306987a6f87aa2404`.
+- **Regression tests:** `tests/integration/test_phase4_auth_http.py`, `tests/unit/test_phase4_weather_safety.py`, `tests/unit/test_phase2_telegram_stop.py`.
 
 ### #218 / PR-062 [medium] `routes/programs_api.py:84-91,489-521; db/programs.py:384-393,498-562` — Unbounded extra_times вызывает квадратичный conflict-check и позволяет малым запросом исчерпать CPU/RAM; preview не rate-limited
 
@@ -682,7 +880,11 @@
 - **Репродукция/сценарий:** Отправить /check-conflicts с 200 непересекающимися extra_times: CPU занят примерно 5 секунд; 300 длинных слотов создают 45150 conflict-объектов и десятки MiB памяти. Повторять запросы можно без endpoint rate limit.
 - **Evidence:** Количество extra_times не ограничено, repository сравнивает пары слотов квадратично и материализует conflict objects, а preview endpoint не имеет отдельного rate limit. Формат HH:MM допускает до 1440 уникальных слотов и более миллиона сравнений.
 - **Owner packages:** `p4-programs`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-programs`.
+- **Fix commit:** `1e2097f78d7cd787d92be8eeca4beec514d19d72`.
+- **Regression tests:** `tests/unit/test_programs_conflict_hardening.py`.
 
 ### #219 / PR-063 [medium] `routes/programs_api.py:365-425,549-583; db/programs.py:458-465` — POST/PUT программы держит глобальный mutation-lock во время внешнего weather fetch до ~21 секунды
 
@@ -692,7 +894,11 @@
 - **Репродукция/сценарий:** Заставить get_coefficient ждать network timeout и одновременно отправить два POST/PUT: первый удерживает _PROGRAM_MUTATION_LOCK во время fetch, второй не достигает DB/admission до завершения внешней сети.
 - **Evidence:** Обычный conflict check вызывает WeatherAdjustment.get_coefficient даже без weather preview, пока route держит общий program mutation lock. При stale cache сетевой Open-Meteo path имеет worst-case около 21 секунды и сериализует все program mutations.
 - **Owner packages:** `p4-programs`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-programs) интегрированы; закрывающий пакет p4-programs устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-programs`.
+- **Fix commit:** `1e2097f78d7cd787d92be8eeca4beec514d19d72`.
+- **Regression tests:** `tests/unit/test_programs_conflict_hardening.py`.
 
 ### #220 / PR-064 [medium] `routes/zones_crud_api.py:296-324,413-453; db/zones.py:196-229` — Zone POST/bulk по умолчанию сохраняет ссылку на отсутствующую группу 1
 
@@ -703,7 +909,11 @@
 - **Evidence:** Route валидирует group_id до data.setdefault(group_id, 1), а group 1 удаляема. Обычный и bulk create без явной группы поэтому обходят reference validation и сохраняют orphan group_id=1.
 - **Owner packages:** `p4-topology-api`, `p4-db-integrity`.
 - **Решение оркестратора:** Forward-only db/migrations.py exception is authorized only for positive group-reference guards and default-group repair on fresh/existing DB. It does not permit a broad group-schema redesign, #73 downgrade work or c019 rollback-specific changes.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api, p4-db-integrity) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api+p4-db-integrity`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`, `tests/db/test_postreview_integrity.py`.
 
 ### #221 / PR-065 [medium] `routes/groups_api.py:636-655; routes/zones_crud_api.py:198-245; services/zone_control.py:1008-1078` — Проверка принадлежности зоны группе перед start остаётся TOCTOU и позволяет запустить её уже в другой группе
 
@@ -713,7 +923,11 @@
 - **Репродукция/сценарий:** Поставить barrier после проверки G1 membership, перенести зону G1→G2 и продолжить start: service включает зону уже как G2, тогда как endpoint снимает schedules и пишет результат для G1.
 - **Evidence:** Membership проверяется без удержания URL-group/topology lock, после чего controller перечитывает mutable zone row. Concurrent rewire может сменить group между check и start, а route продолжит cleanup/logging в старом group context.
 - **Owner packages:** `p4-topology-api`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`.
 
 ### #222 / PR-066 [medium] `routes/groups_api.py:43-50,643-653; services/mqtt_pub.py:421-467` — Debounce/throttle фиксирует intent до результата и возвращает ложный success после failed group start либо failed in-flight MQTT publish
 
@@ -723,7 +937,11 @@
 - **Репродукция/сценарий:** Заставить первый group start завершиться ошибкой и немедленно повторить: второй запрос получает 200 «уже обрабатывается». Для MQTT задержать и провалить первый publish: concurrent duplicate возвращает True до его False result.
 - **Evidence:** Group throttle записывает timestamp до controller acceptance, а MQTT debounce публикует in-flight intent в dedup state до delivery result. Повторный caller принимает intent за успешный результат, даже если первая операция затем вернула failure.
 - **Owner packages:** `p4-topology-api`, `p4-mqtt-core`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api, p4-mqtt-core) интегрированы; закрывающий пакет p4-topology-api устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api+p4-mqtt-core`.
+- **Fix commit:** `096487b682799dcb046e0a8ae032a2f788c2c971`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`, `tests/unit/test_p4_mqtt_core_safety.py`.
 
 ### #223 / PR-067 [medium] `routes/zones_photo_api.py:162-260,268-320,329-409` — Photo/rotate API мутирует файловую систему до проверки существования зоны и валидности угла, создавая orphan/partial media
 
@@ -733,7 +951,11 @@
 - **Репродукция/сценарий:** POST валидного image для отсутствующего zone_id создаёт ZONE_<id>.webp и thumb и может вернуть success при нулевом DB update. Передать rotate angle='bad' либо unsafe/missing thumb: main уже повёрнут, когда запрос возвращает ошибку по следующему target.
 - **Evidence:** Upload обрабатывает и пишет main/thumb до авторитетной проверки существования zone/rowcount. Rotate превращает malformed angle в 90 и перезаписывает variants последовательно до проверки всех targets; поздняя ошибка оставляет уже изменённый main либо orphan files.
 - **Owner packages:** `p4-topology-api`, `p4-frontend`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-topology-api, p4-frontend) интегрированы; закрывающий пакет p4-frontend устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-topology-api+p4-frontend`.
+- **Fix commit:** `c0a6517c7fe3ca7c26c41789e788398578848d7c`.
+- **Regression tests:** `tests/api/test_topology_mutation_safety.py`, `tests/unit/test_phase4_frontend_safety.py`.
 
 ### #224 / PR-068 [low] `services/weather/adjustment.py:203-208,591-626,774; static/js/status.js:1402-1409` — Weather factor diagnostics и decision provenance противоречат фактическому skip/source selection
 
@@ -743,7 +965,11 @@
 - **Репродукция/сценарий:** При rain_24h=0, forecast_6h=10 и threshold=5 should_skip=True, но rain factor зелёный; при local/local source verdict decision history сохраняет source=open-meteo. Аналогично forecast freeze с temperature=None показывает «нет данных» при skip.
 - **Evidence:** Factor details не учитывают forecast rain/freeze branches, хотя should_skip их применяет, а _apply_source отбрасывает temp_source/hum_source и log_decision жёстко пишет open-meteo. Operator UI и history поэтому показывают причины/источник, противоположные принятому решению.
 - **Owner packages:** `p4-weather`.
-- **Disposition Фаз 2–3:** `pending`.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Все owner-пакеты (p4-weather) интегрированы; закрывающий пакет p4-weather устраняет исходный воспроизводимый сценарий и закрепляет новый fail-closed/transactional контракт профильными regression suites.
+- **Пакет:** `p4-weather`.
+- **Fix commit:** `f05bbf4ff7b9e490d3f6f11bcc7428d523a71c1a`.
+- **Regression tests:** `tests/unit/test_phase4_weather_safety.py`.
 
 ## Intentional limitations — 2
 
