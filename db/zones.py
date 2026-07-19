@@ -114,7 +114,16 @@ class ZoneRepository(BaseRepository):
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("""
-                    SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter
+                    SELECT z.*, g.name as group_name, g.use_water_meter as use_water_meter,
+                           (
+                               SELECT zr.end_utc
+                               FROM zone_runs zr
+                               WHERE zr.zone_id = z.id
+                                 AND zr.status = 'ok'
+                                 AND zr.end_utc IS NOT NULL
+                               ORDER BY zr.end_utc DESC
+                               LIMIT 1
+                           ) AS last_watering_time
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     ORDER BY z.id
@@ -124,22 +133,6 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone["group"] = zone["group_id"]
                     zones.append(zone)
-                # Single batched query — derive last_watering_time from
-                # zone_runs (idx_zone_runs_active covers it). Done after
-                # row.fetchall() so the cursor isn't held while we issue
-                # a second statement on the same connection.
-                try:
-                    cur2 = conn.execute(
-                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
-                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
-                        "GROUP BY zone_id"
-                    )
-                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
-                except sqlite3.Error as e:
-                    logger.debug("get_zones: zone_runs aggregation failed: %s", e)
-                    last_map = {}
-                for z in zones:
-                    z["last_watering_time"] = last_map.get(int(z["id"]))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон: %s", e)
@@ -157,7 +150,16 @@ class ZoneRepository(BaseRepository):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     """
-                    SELECT z.*, g.name as group_name
+                    SELECT z.*, g.name as group_name,
+                           (
+                               SELECT zr.end_utc
+                               FROM zone_runs zr
+                               WHERE zr.zone_id = z.id
+                                 AND zr.status = 'ok'
+                                 AND zr.end_utc IS NOT NULL
+                               ORDER BY zr.end_utc DESC
+                               LIMIT 1
+                           ) AS last_watering_time
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.id = ?
@@ -168,7 +170,6 @@ class ZoneRepository(BaseRepository):
                 if row:
                     zone = dict(row)
                     zone["group"] = zone["group_id"]
-                    zone["last_watering_time"] = self.get_last_watering_time(int(zone_id))
                     return zone
                 return None
         except sqlite3.Error as e:
@@ -463,12 +464,63 @@ class ZoneRepository(BaseRepository):
 
     @retry_on_busy()
     def delete_zone(self, zone_id: int) -> bool:
-        """Удалить зону."""
+        """Delete a zone while retiring its identity and schedule links.
+
+        ``zone_runs`` and water history intentionally remain untouched.  The
+        durable-ID migration prevents those retained rows from ever attaching
+        to a replacement zone.
+        """
         try:
             with self._connect() as conn:
-                conn.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM zones WHERE id = ?", (int(zone_id),)).fetchone() is None:
+                    conn.rollback()
+                    return False
+
+                program_updates: list[tuple[str, int]] = []
+                for program_id, zones_json in conn.execute("SELECT id, zones FROM programs").fetchall():
+                    try:
+                        identifiers = json.loads(zones_json or "[]")
+                    except (json.JSONDecodeError, TypeError) as error:
+                        logger.error(
+                            "Cannot safely delete zone %s: program %s has malformed zones JSON: %s",
+                            zone_id,
+                            program_id,
+                            error,
+                        )
+                        conn.rollback()
+                        return False
+                    if not isinstance(identifiers, list):
+                        logger.error(
+                            "Cannot safely delete zone %s: program %s zones is not a list",
+                            zone_id,
+                            program_id,
+                        )
+                        conn.rollback()
+                        return False
+
+                    filtered: list[Any] = []
+                    removed = False
+                    for identifier in identifiers:
+                        try:
+                            is_deleted = int(identifier) == int(zone_id)
+                        except (TypeError, ValueError):
+                            is_deleted = False
+                        if is_deleted:
+                            removed = True
+                        else:
+                            filtered.append(identifier)
+                    if removed:
+                        program_updates.append((json.dumps(filtered, ensure_ascii=False), int(program_id)))
+
+                for zones_json, program_id in program_updates:
+                    conn.execute(
+                        "UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (zones_json, program_id),
+                    )
+                cursor = conn.execute("DELETE FROM zones WHERE id = ?", (int(zone_id),))
                 conn.commit()
-                return True
+                return cursor.rowcount == 1
         except sqlite3.Error as e:
             logger.error("Ошибка удаления зоны %s: %s", zone_id, e)
             return False
@@ -484,7 +536,16 @@ class ZoneRepository(BaseRepository):
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     """
-                    SELECT z.*, g.name as group_name
+                    SELECT z.*, g.name as group_name,
+                           (
+                               SELECT zr.end_utc
+                               FROM zone_runs zr
+                               WHERE zr.zone_id = z.id
+                                 AND zr.status = 'ok'
+                                 AND zr.end_utc IS NOT NULL
+                               ORDER BY zr.end_utc DESC
+                               LIMIT 1
+                           ) AS last_watering_time
                     FROM zones z
                     LEFT JOIN groups g ON z.group_id = g.id
                     WHERE z.group_id = ?
@@ -497,18 +558,6 @@ class ZoneRepository(BaseRepository):
                     zone = dict(row)
                     zone["group"] = zone["group_id"]
                     zones.append(zone)
-                try:
-                    cur2 = conn.execute(
-                        "SELECT zone_id, MAX(end_utc) FROM zone_runs "
-                        "WHERE status = 'ok' AND end_utc IS NOT NULL "
-                        "GROUP BY zone_id"
-                    )
-                    last_map = {int(r[0]): r[1] for r in cur2.fetchall()}
-                except sqlite3.Error as e:
-                    logger.debug("get_zones_by_group: zone_runs aggregation failed: %s", e)
-                    last_map = {}
-                for z in zones:
-                    z["last_watering_time"] = last_map.get(int(z["id"]))
                 return zones
         except sqlite3.Error as e:
             logger.error("Ошибка получения зон группы %s: %s", group_id, e)
@@ -765,9 +814,10 @@ class ZoneRepository(BaseRepository):
         on-demand from ``MAX(end_utc)`` over rows with ``status='ok'`` and
         a non-NULL ``end_utc`` (i.e. the run actually finished cleanly).
 
-        The covering index ``idx_zone_runs_active(zone_id, end_utc)`` keeps
-        this O(log n) per zone. Returns ``None`` for a zone that has never
-        been watered (or whose only runs are aborted / still open).
+        The partial covering index
+        ``idx_zone_runs_last_ok(zone_id, end_utc DESC)`` keeps this O(log n)
+        per zone. Returns ``None`` for a zone that has never been watered (or
+        whose only runs are aborted / still open).
         """
         try:
             with self._connect() as conn:

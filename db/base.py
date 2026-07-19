@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
 _RETRY_ON_BUSY_ACTIVE: ContextVar[bool] = ContextVar("db_retry_on_busy_active", default=False)
+_RETRY_COMMIT_SUCCEEDED: ContextVar[bool] = ContextVar("db_retry_commit_succeeded", default=False)
 
 
 def _is_busy_error(error: sqlite3.OperationalError) -> bool:
@@ -85,16 +86,23 @@ class _RetryAwareConnection(sqlite3.Connection):
             _raise_translated(error)
 
     def commit(self) -> None:
+        had_transaction = self.in_transaction
         try:
             super().commit()
         except sqlite3.OperationalError as error:
             _raise_translated(error)
+        if had_transaction and _RETRY_ON_BUSY_ACTIVE.get():
+            _RETRY_COMMIT_SUCCEEDED.set(True)
 
     def __exit__(self, *args: Any) -> bool:
+        had_transaction = self.in_transaction
         try:
-            return bool(super().__exit__(*args))
+            result = bool(super().__exit__(*args))
         except sqlite3.OperationalError as error:
             _raise_translated(error)
+        if had_transaction and args and args[0] is None and _RETRY_ON_BUSY_ACTIVE.get():
+            _RETRY_COMMIT_SUCCEEDED.set(True)
+        return result
 
 
 def retry_on_busy(max_retries: int = 3, initial_backoff: float = 0.1) -> Callable[[F], F]:
@@ -105,12 +113,14 @@ def retry_on_busy(max_retries: int = 3, initial_backoff: float = 0.1) -> Callabl
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             for attempt in range(max_retries + 1):
                 token = _RETRY_ON_BUSY_ACTIVE.set(True)
+                commit_token = _RETRY_COMMIT_SUCCEEDED.set(False)
                 try:
                     try:
                         return func(*args, **kwargs)
                     except (_RetryableBusyError, sqlite3.OperationalError) as error:
                         original = error.original if isinstance(error, _RetryableBusyError) else error
-                        if _is_busy_error(original) and attempt < max_retries:
+                        committed = _RETRY_COMMIT_SUCCEEDED.get()
+                        if _is_busy_error(original) and not committed and attempt < max_retries:
                             time.sleep(initial_backoff * (2**attempt))
                             logger.warning("SQLite BUSY retry %d/%d for %s", attempt + 1, max_retries, func.__name__)
                         else:
@@ -118,7 +128,14 @@ def retry_on_busy(max_retries: int = 3, initial_backoff: float = 0.1) -> Callabl
                                 raise original from error
                             raise
                 finally:
+                    committed = _RETRY_COMMIT_SUCCEEDED.get()
+                    _RETRY_COMMIT_SUCCEEDED.reset(commit_token)
                     _RETRY_ON_BUSY_ACTIVE.reset(token)
+                    # Preserve the unsafe-to-retry state across nested
+                    # decorated calls: an outer operation must not replay a
+                    # durable write committed by an inner repository method.
+                    if committed and _RETRY_ON_BUSY_ACTIVE.get():
+                        _RETRY_COMMIT_SUCCEEDED.set(True)
 
         return wrapper  # type: ignore[return-value]
 

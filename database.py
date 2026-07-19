@@ -238,6 +238,9 @@ class IrrigationDB:
     def get_mqtt_server(self, server_id: int) -> dict[str, Any] | None:
         return self.mqtt.get_mqtt_server(server_id)
 
+    def get_mqtt_server_references(self, server_id: int) -> dict[str, list[Any]]:
+        return self.mqtt.get_mqtt_server_references(server_id)
+
     def create_mqtt_server(self, data: dict[str, Any]) -> dict[str, Any] | None:
         return self.mqtt.create_mqtt_server(data)
 
