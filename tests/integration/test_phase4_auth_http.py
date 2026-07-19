@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -101,6 +102,76 @@ def test_guest_can_still_apply_fail_safe_postpone(guest_client, app):
         assert app.db.get_zone(zone["id"])["postpone_until"] is not None
     finally:
         app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+
+def test_public_postpone_never_shortens_existing_safety_deadline(guest_client, app):
+    from services.api_rate_limiter import reset_all
+
+    group = app.db.create_group("monotonic public postpone")
+    zone = app.db.create_zone({"name": "already protected", "duration": 5, "group_id": group["id"]})
+    unpostponed_zone = app.db.create_zone({"name": "must remain unchanged", "duration": 5, "group_id": group["id"]})
+    postpone_until = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(zone["id"], postpone_until, "manual")
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "days": 1, "action": "postpone"},
+        )
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "POSTPONE_WOULD_SHORTEN"
+        assert app.db.get_zone(zone["id"])["postpone_until"] == postpone_until
+        assert app.db.get_zone(unpostponed_zone["id"])["postpone_until"] is None
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
+
+
+@pytest.mark.parametrize("days", [-1, 0, "1", "not-an-integer", 1.5, True, 4, 366])
+def test_public_postpone_requires_bounded_positive_integer_days(guest_client, app, days):
+    from services.api_rate_limiter import reset_all
+
+    group = app.db.create_group(f"strict postpone days {days!r}")
+    zone = app.db.create_zone({"name": "unchanged", "duration": 5, "group_id": group["id"]})
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "days": days, "action": "postpone"},
+        )
+        assert response.status_code == 400
+        assert response.get_json()["error_code"] == "INVALID_POSTPONE_DAYS"
+        assert app.db.get_zone(zone["id"])["postpone_until"] is None
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
+
+
+def test_public_postpone_can_extend_existing_safety_deadline(guest_client, app):
+    from services.api_rate_limiter import reset_all
+
+    group = app.db.create_group("extend public postpone")
+    zone = app.db.create_zone({"name": "extend protection", "duration": 5, "group_id": group["id"]})
+    previous = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
+    app.db.update_zone_postpone(zone["id"], previous, "manual")
+    app.db.set_setting_value("password_must_change", "0")
+    app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+    reset_all()
+    try:
+        response = guest_client.post(
+            "/api/postpone",
+            json={"group_id": group["id"], "days": 3, "action": "postpone"},
+        )
+        assert response.status_code == 200
+        updated = app.db.get_zone(zone["id"])["postpone_until"]
+        assert datetime.fromisoformat(updated) > datetime.fromisoformat(previous)
+    finally:
+        app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        reset_all()
 
 
 def test_admin_postpone_cancel_requires_valid_csrf_before_write(admin_client, app):

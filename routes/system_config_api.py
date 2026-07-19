@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -34,6 +35,12 @@ system_config_api_bp = Blueprint("system_config_api", __name__)
 
 # Password blocklist (TASK-013)
 _PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
+
+# The public fail-safe UI only exposes 1–3 days. Keeping the same narrow range
+# server-side prevents an unauthenticated caller from disabling irrigation for
+# an arbitrarily long period.
+_MAX_PUBLIC_POSTPONE_DAYS = 3
+_POSTPONE_MUTATION_LOCK = threading.Lock()
 
 
 # ===== Auth / Password =====
@@ -338,7 +345,51 @@ def api_postpone():
     elif action == "postpone":
         from services.postpone import postpone_group
 
-        res = postpone_group(group_id, days, source="api")
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= _MAX_PUBLIC_POSTPONE_DAYS:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": f"Количество дней должно быть целым числом от 1 до {_MAX_PUBLIC_POSTPONE_DAYS}",
+                        "error_code": "INVALID_POSTPONE_DAYS",
+                    }
+                ),
+                400,
+            )
+
+        requested_until = (datetime.now() + timedelta(days=days)).replace(
+            hour=23,
+            minute=59,
+            second=59,
+            microsecond=0,
+        )
+        with _POSTPONE_MUTATION_LOCK:
+            zones = db.get_zones() or []
+            group_zones = [z for z in zones if int(z.get("group_id") or 0) == group_id]
+            for zone in group_zones:
+                current_raw = zone.get("postpone_until")
+                if not current_raw:
+                    continue
+                try:
+                    current_until = datetime.fromisoformat(str(current_raw))
+                    would_shorten = current_until.tzinfo is not None or requested_until < current_until
+                except (TypeError, ValueError):
+                    # An unparseable persisted safety deadline must never be
+                    # overwritten by a public request: fail closed instead.
+                    would_shorten = True
+                if would_shorten:
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "message": "Новый срок не может сокращать действующую отсрочку",
+                                "error_code": "POSTPONE_WOULD_SHORTEN",
+                            }
+                        ),
+                        409,
+                    )
+
+            res = postpone_group(group_id, days, source="api")
         return jsonify(
             {
                 "success": True,
