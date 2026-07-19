@@ -98,10 +98,10 @@ def set_correlation_id(value: str) -> Token:
 def reset_correlation_id(token: Token) -> None:
     """Restore the ContextVar state captured by ``token``.
 
-    Swallows :class:`ValueError` when the context was already torn down
-    (e.g. exception during request handling left Flask in a weird state).
+    Swallows context mismatch and already-used-token errors.  Flask streaming
+    responses can tear down the same request context more than once.
     """
-    with contextlib.suppress(ValueError, LookupError):
+    with contextlib.suppress(ValueError, LookupError, RuntimeError):
         correlation_id_var.reset(token)
 
 

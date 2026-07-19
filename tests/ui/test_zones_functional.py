@@ -307,10 +307,29 @@ class TestWeatherAndNextWatering:
 class TestSSEEndpoint:
     """SSE zones endpoint exists."""
 
-    def test_sse_endpoint_responds(self, admin_client):
-        resp = admin_client.get("/api/mqtt/zones-sse")
-        # SSE returns 200 with text/event-stream
-        assert resp.status_code == 200
+    def test_sse_endpoint_responds(self, admin_client, monkeypatch):
+        import queue
+
+        import routes.zones_watering_api as route
+
+        msg_queue = queue.Queue()
+        unregistered = []
+        monkeypatch.setattr(route, "_SSE_HTTP_ACTIVE", 0)
+        monkeypatch.setattr(route._sse_hub, "ensure_hub_started", lambda: None)
+        monkeypatch.setattr(route._sse_hub, "register_client", lambda: msg_queue)
+        monkeypatch.setattr(route._sse_hub, "unregister_client", unregistered.append)
+
+        resp = admin_client.get("/api/mqtt/zones-sse", buffered=False)
+        try:
+            # Consume the handshake before explicitly closing the infinite stream.
+            assert resp.status_code == 200
+            assert next(resp.response) == b": connected\n\n"
+        finally:
+            resp.close()
+            resp.close()
+
+        assert unregistered == [msg_queue]
+        assert route._SSE_HTTP_ACTIVE == 0
 
 
 class TestPageRender:

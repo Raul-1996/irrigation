@@ -1,10 +1,8 @@
 """Security tests for SEC-003 — CSRF policy.
 
-Rationale: the original code `csrf.exempt(bp)`-ed every API blueprint. We
-now exempt only the small set of endpoints that must work for the nginx
-basic-auth guest flow. Admin-CRUD blueprints (zones CRUD, photo upload,
-programs, weather settings, MQTT config) must now carry a CSRF token on
-non-GET requests.
+Rationale: the native production deployment has no authenticating reverse
+proxy.  Only fail-safe OFF actions may bypass CSRF; actions that can start
+water flow or resume after an emergency require an admin session and CSRF.
 
 These tests use the project's `app` fixture which sets TESTING=1 and thus
 disables CSRF enforcement. We therefore validate the policy by reading
@@ -36,24 +34,17 @@ _ADMIN_ONLY_PATHS_REQUIRING_CSRF = [
 ]
 
 
-# Endpoints that MUST remain CSRF-exempt — they're the guest-controllable
-# physical-action endpoints (nginx basic-auth protects them at the proxy,
-# not via Flask session).
+# Endpoints that MUST remain CSRF-exempt — login/read-only POSTs and fail-safe
+# OFF actions which must stay reachable during an incident.
 _GUEST_PUBLIC_POSTS = [
     "/api/login",
     "/api/status",
     "/api/postpone",
     "/api/emergency-stop",
-    "/api/emergency-resume",
     "/api/zones/next-watering-bulk",
-    "/api/zones/1/start",
     "/api/zones/1/stop",
-    "/api/zones/1/mqtt/start",
     "/api/zones/1/mqtt/stop",
     "/api/groups/1/stop",
-    "/api/groups/1/start-from-first",
-    "/api/groups/1/start-zone/2",
-    "/api/groups/1/master-valve/open",
 ]
 
 
@@ -94,21 +85,15 @@ def test_guest_endpoints_are_exempt(app):
         "api_status",
         "api_postpone",
         "api_emergency_stop",
-        "api_emergency_resume",
         "api_zones_next_watering_bulk",
-        "start_zone",
         "stop_zone",
-        "api_zone_mqtt_start",
         "api_zone_mqtt_stop",
         "api_stop_group",
-        "api_start_group_from_first",
-        "api_start_zone_exclusive",
-        "api_master_valve_toggle",
     }
     missing = expected_exempt - exempt
     assert not missing, (
-        f"SEC-003 regression: these guest endpoints are NOT CSRF-exempt "
-        f"and will break the nginx-basic-auth gardener flow: {missing}. "
+        f"SEC-003 regression: these fail-safe endpoints are NOT CSRF-exempt "
+        f"and will be unavailable without an admin session: {missing}. "
         f"Current exempt set: {exempt}"
     )
 
@@ -131,6 +116,12 @@ def test_admin_crud_endpoints_are_NOT_exempt(app):
         "api_put_weather_settings",  # /api/settings/weather PUT
         "api_put_location",  # /api/settings/location PUT
         "api_create_group",  # /api/groups POST
+        "api_emergency_resume",
+        "start_zone",
+        "api_zone_mqtt_start",
+        "api_start_group_from_first",
+        "api_start_zone_exclusive",
+        "api_master_valve_toggle",
     }
     still_exempt = exempt & forbidden
     assert not still_exempt, (
