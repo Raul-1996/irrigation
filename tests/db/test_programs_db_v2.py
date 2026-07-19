@@ -1,10 +1,19 @@
 """Tests for Programs v2: new fields (type, schedule_type, interval_days, even_odd, color, enabled, extra_times)."""
 
 import os
+import sqlite3
 
 import pytest
 
 os.environ["TESTING"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _live_program_zones(test_db):
+    for index in range(1, 3):
+        zone = test_db.create_zone({"name": f"Fixture Z{index}", "duration": 10, "group_id": 1})
+        assert zone is not None
+        assert zone["id"] == index
 
 
 class TestProgramType:
@@ -201,6 +210,62 @@ class TestProgramColor:
 
         assert updated is not None
         assert updated["color"] == "#66bb6a"
+
+    @pytest.mark.parametrize(
+        "color",
+        ['" onmouseover="alert(1)', "red", "#fff", "#12345678", "#12GG34", 123456, None],
+    )
+    def test_create_rejects_noncanonical_color(self, test_db, color):
+        prog = test_db.create_program({"name": "Unsafe", "time": "06:00", "days": [0], "zones": [1], "color": color})
+
+        assert prog is None
+        assert test_db.get_programs() == []
+
+    def test_create_and_update_normalize_color_to_lowercase(self, test_db):
+        prog = test_db.create_program(
+            {"name": "Mixed case", "time": "06:00", "days": [0], "zones": [1], "color": "#AaBbCc"}
+        )
+
+        assert prog is not None
+        assert prog["color"] == "#aabbcc"
+
+        updated = test_db.update_program(prog["id"], {"color": "#DDEeFf"})
+
+        assert updated is not None
+        assert updated["color"] == "#ddeeff"
+
+    def test_update_rejects_unsafe_color_atomically(self, test_db):
+        prog = test_db.create_program(
+            {"name": "Original", "time": "06:00", "days": [0], "zones": [1], "color": "#112233"}
+        )
+        assert prog is not None
+
+        updated = test_db.update_program(
+            prog["id"],
+            {"name": "Poisoned", "color": '" onmouseover="alert(1)'},
+        )
+
+        assert updated is None
+        stored = test_db.get_program(prog["id"])
+        assert stored is not None
+        assert stored["name"] == "Original"
+        assert stored["color"] == "#112233"
+
+    def test_legacy_unsafe_color_is_sanitized_on_read(self, test_db):
+        with sqlite3.connect(test_db.db_path) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO programs (name, time, days, zones, color)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("Legacy unsafe", "06:00", "[0]", "[1]", '" onmouseover="alert(1)'),
+            )
+            program_id = cursor.lastrowid
+
+        stored = test_db.get_program(program_id)
+
+        assert stored is not None
+        assert stored["color"] == "#42a5f5"
 
 
 class TestProgramEnabled:
@@ -413,7 +478,7 @@ class TestDuplicateProgram:
         assert duplicate["schedule_type"] == original["schedule_type"]
         assert duplicate["interval_days"] == original["interval_days"]
         assert duplicate["color"] == original["color"]
-        assert duplicate["enabled"] == original["enabled"]
+        assert duplicate["enabled"] is False
         assert duplicate["extra_times"] == original["extra_times"]
         assert duplicate["zones"] == original["zones"]
 

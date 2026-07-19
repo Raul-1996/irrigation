@@ -285,18 +285,13 @@ async function runProgram(id) {
       method: 'POST',
       headers: apiHeaders(false)
     });
-
-    if (resp.ok) {
-      showToast('▶️ Полив запущен', 'success');
-      switchTab('execution');
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка запуска');
       return;
     }
-    let msg = 'Ошибка запуска';
-    try {
-      const data = await resp.json();
-      if (data && data.message) msg = data.message;
-    } catch (_) { /* ignore parse errors */ }
-    showToast(msg);
+    showToast(data.message || '⏳ Запрос на полив принят', 'success');
+    switchTab('execution');
   } catch (err) {
     console.error('Run program error:', err);
     showToast('Ошибка запуска');

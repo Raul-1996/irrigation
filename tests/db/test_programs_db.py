@@ -2,7 +2,17 @@
 
 import os
 
+import pytest
+
 os.environ["TESTING"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _live_program_zones(test_db):
+    for index in range(1, 3):
+        zone = test_db.create_zone({"name": f"Fixture Z{index}", "duration": 10, "group_id": 1})
+        assert zone is not None
+        assert zone["id"] == index
 
 
 class TestProgramCRUD:
@@ -53,8 +63,7 @@ class TestProgramCRUD:
         assert test_db.get_program(prog["id"]) is None
 
     def test_delete_program_not_found(self, test_db):
-        result = test_db.delete_program(9999)
-        assert isinstance(result, bool)
+        assert test_db.delete_program(9999) is False
 
 
 class TestProgramConflicts:

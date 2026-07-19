@@ -137,11 +137,12 @@ class TestCandidateExtraTimesConflictChecks:
         zone = app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         calls = []
 
-        def fake_check(program_id, time, zones, days):
-            calls.append(time)
-            return [{"program_id": 99}] if time == "12:00" else []
+        def fake_check(**kwargs):
+            candidate_times = [kwargs["time"], *(kwargs.get("extra_times") or [])]
+            calls.extend(candidate_times)
+            return [{"program_id": 99}] if "12:00" in candidate_times else []
 
-        monkeypatch.setattr(programs_api.db, "check_program_conflicts", fake_check)
+        monkeypatch.setattr(programs_api.db.programs, "check_program_conflicts", fake_check)
 
         response = admin_client.post(
             "/api/programs",
@@ -162,11 +163,12 @@ class TestCandidateExtraTimesConflictChecks:
         program = _create_program(app)
         calls = []
 
-        def fake_check(program_id, time, zones, days):
-            calls.append(time)
-            return [{"program_id": 99}] if time == "12:00" else []
+        def fake_check(**kwargs):
+            candidate_times = [kwargs["time"], *(kwargs.get("extra_times") or [])]
+            calls.extend(candidate_times)
+            return [{"program_id": 99}] if "12:00" in candidate_times else []
 
-        monkeypatch.setattr(programs_api.db, "check_program_conflicts", fake_check)
+        monkeypatch.setattr(programs_api.db.programs, "check_program_conflicts", fake_check)
 
         response = admin_client.put(
             f"/api/programs/{program['id']}",
@@ -181,11 +183,12 @@ class TestCandidateExtraTimesConflictChecks:
     def test_conflict_probe_checks_each_candidate_start_time(self, admin_client, monkeypatch):
         calls = []
 
-        def fake_check(program_id, time, zones, days):
-            calls.append(time)
-            return [{"program_id": 99}] if time == "18:00" else []
+        def fake_check(**kwargs):
+            candidate_times = [kwargs["time"], *(kwargs.get("extra_times") or [])]
+            calls.extend(candidate_times)
+            return [{"program_id": 99}] if "18:00" in candidate_times else []
 
-        monkeypatch.setattr(programs_api.db, "check_program_conflicts", fake_check)
+        monkeypatch.setattr(programs_api.db.programs, "check_program_conflicts", fake_check)
 
         response = admin_client.post(
             "/api/programs/check-conflicts",
@@ -226,3 +229,11 @@ class TestProgramsWizardResponseHandling:
 
         assert "${escapeHtml(z.name)}" in zone_step
         assert "<div>${z.name}</div>" not in zone_step
+
+    def test_manual_run_ui_reports_accepted_request_without_claiming_watering_started(self):
+        run_program = _between(_template_source(), "async function runProgram", "async function deleteProgram")
+
+        assert "const data = await readResponseJson(resp)" in run_program
+        assert "!resp.ok || data.success === false" in run_program
+        assert "data.message || '⏳ Запрос на полив принят'" in run_program
+        assert "Полив запущен" not in run_program
