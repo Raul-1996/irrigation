@@ -66,7 +66,9 @@ def normalize_topic(topic: str | None) -> str:
         s = "/" + s[i:]
     else:
         s = "/" + s
-    if s == "/" or s.endswith("/on"):
+    # MQTT wildcards are legal only for subscription filters, never for an
+    # actuator's concrete report/command topic. NUL is invalid in MQTT UTF-8.
+    if s == "/" or s.endswith("/on") or "+" in s or "#" in s or "\x00" in s:
         return ""
     return s
 

@@ -1,10 +1,14 @@
+import hashlib
+import json
 import logging
 import math
 import sqlite3
 import threading
 import time
 import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from typing import Callable
 
 from config import TESTING
 from constants import MASTER_VALVE_CLOSE_DELAY_SEC, MAX_MANUAL_WATERING_MIN, ZONE_CAP_DEFAULT_MIN
@@ -78,6 +82,19 @@ _PENDING_CLOSE_TIMERS = {}  # type: dict[tuple[int, str], threading.Timer]
 _PENDING_CLOSE_LOCK = threading.Lock()
 _MASTER_TOPIC_LOCKS: dict[tuple[int, str], threading.RLock] = {}
 _MASTER_TOPIC_LOCKS_LOCK = threading.Lock()
+_MASTER_ACTIVATIONS: dict[tuple[int, str], "MasterActivation"] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class MasterActivation:
+    """Durable identity of one manual physical master-valve activation."""
+
+    group_id: int
+    server_id: int
+    topic: str
+    mode: str
+    token: str
+    created_at: float
 
 
 def master_identity(server_id: object, topic: object) -> tuple[int, str]:
@@ -86,7 +103,7 @@ def master_identity(server_id: object, topic: object) -> tuple[int, str]:
     try:
         normalized = normalize_topic(str(topic or ""))
     except (ValueError, TypeError, OSError):
-        normalized = str(topic or "").strip()
+        normalized = ""
     return sid, normalized
 
 
@@ -127,6 +144,304 @@ def cancel_pending_master_close(server_id: object, topic: object | None = None) 
                 logger.debug("pending master close cancel failed identity=%s", identity)
             return True
     return False
+
+
+def _master_activation_key(identity: tuple[int, str]) -> str:
+    topic_digest = hashlib.sha256(identity[1].encode("utf-8")).hexdigest()
+    return f"safety.master_activation.{identity[0]}.{topic_digest}"
+
+
+def _load_master_activation_locked(identity: tuple[int, str]) -> MasterActivation | None:
+    cached = _MASTER_ACTIVATIONS.get(identity)
+    if cached is not None:
+        return cached
+    getter = getattr(db, "get_setting_value", None)
+    if not callable(getter):
+        return None
+    raw = getter(_master_activation_key(identity))
+    if not raw:
+        return None
+    try:
+        payload = json.loads(str(raw))
+        activation = MasterActivation(
+            group_id=int(payload["group_id"]),
+            server_id=int(payload["server_id"]),
+            topic=normalize_topic(payload["topic"]),
+            mode=str(payload["mode"]).strip().upper(),
+            token=str(payload["token"]),
+            created_at=float(payload["created_at"]),
+        )
+        uuid.UUID(hex=activation.token)
+        if (activation.server_id, activation.topic) != identity or activation.mode not in {"NC", "NO"}:
+            raise ValueError("master activation identity mismatch")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        logger.exception("invalid durable master activation identity=%s", identity)
+        return None
+    _MASTER_ACTIVATIONS[identity] = activation
+    return activation
+
+
+def _persist_master_activation_locked(activation: MasterActivation) -> bool:
+    identity = (activation.server_id, activation.topic)
+    setter = getattr(db, "set_setting_value", None)
+    if callable(setter):
+        try:
+            if setter(_master_activation_key(identity), json.dumps(asdict(activation), sort_keys=True)) is False:
+                return False
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            logger.exception("persist master activation failed identity=%s", identity)
+            return False
+    _MASTER_ACTIVATIONS[identity] = activation
+    return True
+
+
+def _clear_master_activation_locked(expected: MasterActivation) -> bool:
+    identity = (expected.server_id, expected.topic)
+    if _load_master_activation_locked(identity) != expected:
+        return False
+    setter = getattr(db, "set_setting_value", None)
+    if callable(setter):
+        try:
+            if setter(_master_activation_key(identity), None) is False:
+                return False
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            logger.exception("clear master activation failed identity=%s", identity)
+            return False
+    _MASTER_ACTIVATIONS.pop(identity, None)
+    return True
+
+
+def _cancel_master_activation_cap_locked(activation: MasterActivation) -> bool:
+    try:
+        from irrigation_scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        if scheduler is None:
+            return True
+        result = scheduler.cancel_master_valve_cap(
+            activation.group_id,
+            activation.server_id,
+            activation.topic,
+            activation.mode,
+            activation.token,
+        )
+        return result is True
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        logger.exception("cancel exact master cap failed activation=%s", activation)
+        return False
+
+
+def _complete_master_close_locked(identity: tuple[int, str], mode: str) -> bool:
+    activation = _load_master_activation_locked(identity)
+    if activation is None:
+        return True
+    if activation.mode != mode:
+        logger.error(
+            "master close mode does not match durable activation identity=%s current=%s requested=%s",
+            identity,
+            activation.mode,
+            mode,
+        )
+        return False
+    # Cancel while the physical-identity lock prevents a newer activation
+    # from replacing this token. Only then clear durable ownership.
+    if not _cancel_master_activation_cap_locked(activation):
+        return False
+    return _clear_master_activation_locked(activation)
+
+
+def activate_manual_master_open(
+    group_id: int,
+    server_id: int,
+    topic: str,
+    mode: str,
+    publish_command: Callable[[], bool],
+    *,
+    hours: int = 24,
+) -> bool:
+    """Persist UUID + plant an exact cap before one manual master OPEN."""
+    identity = master_identity(server_id, topic)
+    normalized_mode = str(mode or "NC").strip().upper()
+    if not identity[1] or normalized_mode not in {"NC", "NO"}:
+        return False
+    with master_topic_lock(*identity):
+        try:
+            activation = MasterActivation(
+                group_id=int(group_id),
+                server_id=identity[0],
+                topic=identity[1],
+                mode=normalized_mode,
+                token=uuid.uuid4().hex,
+                created_at=time.time(),
+            )
+        except (TypeError, ValueError):
+            logger.exception("manual master OPEN rejected invalid group identity group=%r", group_id)
+            return False
+        scheduler = None
+        try:
+            from irrigation_scheduler import get_scheduler
+
+            scheduler = get_scheduler()
+            if scheduler is None:
+                raise RuntimeError("scheduler unavailable")
+            planted = scheduler.schedule_master_valve_cap(
+                activation.group_id,
+                activation.server_id,
+                activation.topic,
+                activation.mode,
+                activation.token,
+                hours=int(hours),
+            )
+            if planted is not True:
+                raise RuntimeError("master cap planting rejected")
+        except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+            logger.exception("manual master OPEN blocked: exact cap unavailable activation=%s", activation)
+            return False
+        # Crash ordering: the token-unique new cap becomes durable first. The
+        # previous activation/cap remains current until this settings commit;
+        # after commit its eventual callback sees a stale token and no-ops.
+        if not _persist_master_activation_locked(activation):
+            try:
+                cancelled = scheduler.cancel_master_valve_cap(
+                    activation.group_id,
+                    activation.server_id,
+                    activation.topic,
+                    activation.mode,
+                    activation.token,
+                )
+                if cancelled is not True:
+                    logger.critical("failed to cancel uncommitted master cap activation=%s", activation)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                logger.exception("cancel uncommitted master cap raised activation=%s", activation)
+            return False
+        cancel_pending_master_close(*identity)
+        try:
+            # An ACK failure is physically uncertain: retain token/cap so its
+            # callback can still force and freshly confirm a later close.
+            return bool(publish_command())
+        except (ConnectionError, TimeoutError, OSError, RuntimeError, TypeError, ValueError):
+            logger.exception("manual master OPEN publish failed activation=%s", activation)
+            return False
+
+
+def close_master_valve_confirmed(
+    server_id: int,
+    topic: str,
+    mode: str,
+    publish_command: Callable[[], bool],
+) -> bool:
+    """Subscribe, publish CLOSE, require fresh echo, then cancel exact cap."""
+    identity = master_identity(server_id, topic)
+    normalized_mode = str(mode or "NC").strip().upper()
+    if not identity[1] or normalized_mode not in {"NC", "NO"}:
+        return False
+    close_value = "1" if normalized_mode == "NO" else "0"
+    with master_topic_lock(*identity):
+        if not state_verifier.verify_master_command(
+            identity[0],
+            identity[1],
+            close_value,
+            publish_command,
+        ):
+            return False
+        # Preserve an existing delayed-close timer as retry authority until a
+        # fresh physical CLOSED echo exists. Cancel it only inside this same
+        # master transaction so it cannot race a newer activation/timer.
+        cancel_pending_master_close(*identity)
+        return _complete_master_close_locked(identity, normalized_mode)
+
+
+def close_master_valve_if_activation(
+    group_id: int,
+    server_id: int,
+    topic: str,
+    mode: str,
+    activation_token: str,
+) -> bool:
+    """Cap callback: fresh-close only the exact still-current activation."""
+    identity = master_identity(server_id, topic)
+    normalized_mode = str(mode or "NC").strip().upper()
+    if not identity[1] or normalized_mode not in {"NC", "NO"}:
+        return False
+    try:
+        expected = MasterActivation(
+            group_id=int(group_id),
+            server_id=identity[0],
+            topic=identity[1],
+            mode=normalized_mode,
+            token=str(activation_token),
+            created_at=0.0,
+        )
+    except (TypeError, ValueError):
+        return False
+    with master_topic_lock(*identity):
+        current = _load_master_activation_locked(identity)
+        if current is None or (
+            current.group_id,
+            current.server_id,
+            current.topic,
+            current.mode,
+            current.token,
+        ) != (
+            expected.group_id,
+            expected.server_id,
+            expected.topic,
+            expected.mode,
+            expected.token,
+        ):
+            logger.info("stale master cap callback ignored identity=%s token=%s", identity, activation_token)
+            return True
+        try:
+            server = db.get_mqtt_server(identity[0])
+        except (sqlite3.Error, OSError, SecretDecryptionError, TypeError, ValueError):
+            logger.exception("master cap server unavailable identity=%s", identity)
+            return False
+        if not server:
+            return False
+        close_value = "1" if normalized_mode == "NO" else "0"
+        return close_master_valve_confirmed(
+            identity[0],
+            identity[1],
+            normalized_mode,
+            lambda: publish_mqtt_value(
+                server,
+                identity[1],
+                close_value,
+                min_interval_sec=0.0,
+                qos=2,
+                retain=True,
+                meta={"cmd": "master_cap_close", "activation": current.token},
+            ),
+        )
+
+
+def confirm_master_closed_from_echo(
+    server_id: int,
+    topic: str,
+    mode: str,
+    *,
+    received_at: float | None = None,
+) -> bool:
+    """Clear an exact manual activation only after a fresh physical echo."""
+    identity = master_identity(server_id, topic)
+    normalized_mode = str(mode or "NC").strip().upper()
+    if not identity[1] or normalized_mode not in {"NC", "NO"}:
+        return False
+    with master_topic_lock(*identity):
+        activation = _load_master_activation_locked(identity)
+        if activation is not None and received_at is not None:
+            try:
+                stale_echo = float(received_at) < activation.created_at
+            except (TypeError, ValueError):
+                return False
+            if stale_echo:
+                logger.info(
+                    "stale master CLOSED echo predates current activation identity=%s token=%s",
+                    identity,
+                    activation.token,
+                )
+                return False
+        return _complete_master_close_locked(identity, normalized_mode)
 
 
 def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
@@ -246,6 +561,9 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
                         gid,
                         t_norm,
                     )
+                    return
+                if not _complete_master_close_locked(identity, mode):
+                    logger.error("master close confirmed but exact activation cap cleanup failed identity=%s", identity)
                     return
                 logger.info("master close verified: topic=%s val=%s mode=%s gid=%s", t_norm, close_val, mode, gid)
                 # Always-on audit: delayed/auto master-valve close.
@@ -495,7 +813,15 @@ def _rain_group_blocked(group_id: int) -> bool:
         return True
 
 
-def _start_admission_blocked(group_id: int) -> bool:
+def _start_admission_blocked(group_id: int, cancel_guard: Callable[[], bool] | None = None) -> bool:
+    if cancel_guard is not None:
+        try:
+            if bool(cancel_guard()):
+                logger.warning("exclusive_start_zone blocked by scheduler cancel generation group=%s", group_id)
+                return True
+        except Exception:  # Cross-service guard boundary must fail closed.
+            logger.exception("exclusive_start_zone: scheduler cancel guard failed group=%s", group_id)
+            return True
     if _emergency_stop_active():
         logger.warning("exclusive_start_zone blocked by EMERGENCY_STOP group=%s", group_id)
         return True
@@ -542,6 +868,7 @@ def exclusive_start_zone(
     source: str = "manual",
     *,
     safety_duration_minutes: int | None = None,
+    cancel_guard: Callable[[], bool] | None = None,
 ) -> bool:
     """Start zone and stop others in its group. Returns True on success.
 
@@ -575,7 +902,7 @@ def exclusive_start_zone(
                 )
                 return False
             z = fresh_zone
-            if _start_admission_blocked(group_id):
+            if _start_admission_blocked(group_id, cancel_guard):
                 return False
             group_zones = db.get_zones_by_group(group_id) if group_id else []
             # Validate the target before touching peers, but do not expose a
@@ -639,7 +966,7 @@ def exclusive_start_zone(
 
             # Only after all peer relays are physically OFF may this activation
             # enter STARTING and open its master/target channels.
-            if _start_admission_blocked(group_id):
+            if _start_admission_blocked(group_id, cancel_guard):
                 return False
             start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             activation_token = uuid.uuid4().hex
@@ -740,6 +1067,21 @@ def exclusive_start_zone(
                     # virtual. A dangling server id, topic-only row, missing
                     # server, or undecryptable credentials is physical
                     # misconfiguration and must fail closed.
+                    if _start_admission_blocked(group_id, cancel_guard):
+                        with zone_lock(zone_id):
+                            _versioned_update(
+                                zone_id,
+                                {
+                                    "state": "off",
+                                    "commanded_state": "off",
+                                    "observed_state": "off",
+                                    "watering_start_time": None,
+                                    "command_id": None,
+                                },
+                                audit_reason="virtual_start_admission_revoked",
+                            )
+                        _finish_open_zone_run_failed(zone_id)
+                        return False
                     _versioned_update(zone_id, {"state": "on"}, audit_reason="virtual_zone_on")
                 elif not server:
                     mark_zone_command_fault(zone_id, "on", reason="missing_zone_channel")
@@ -774,7 +1116,7 @@ def exclusive_start_zone(
                     # Recheck both process-wide admission fences after all
                     # potentially slow preparation and immediately before the
                     # first physical OPEN command.
-                    if _start_admission_blocked(group_id):
+                    if _start_admission_blocked(group_id, cancel_guard):
                         state_verifier.cancel_verification(prepared_verification)
                         mark_zone_command_fault(zone_id, "on", reason="admission_revoked")
                         _finish_open_zone_run_failed(zone_id)
@@ -802,8 +1144,15 @@ def exclusive_start_zone(
                         except (ValueError, TypeError, KeyError) as e:
                             logger.debug("exclusive_start_zone: invalid master mode: %s", e)
                             mode = "NC"
+                        if mode not in {"NC", "NO"}:
+                            mode = "NC"
                         open_val = "0" if mode == "NO" else "1"
                         with master_topic_lock(msid, normalized_master):
+                            if _start_admission_blocked(group_id, cancel_guard):
+                                state_verifier.cancel_verification(prepared_verification)
+                                mark_zone_command_fault(zone_id, "on", reason="admission_revoked_before_master")
+                                _finish_open_zone_run_failed(zone_id)
+                                return False
                             cancel_pending_master_close(msid, normalized_master)
                             master_ok = publish_mqtt_value(
                                 mserver,
@@ -821,6 +1170,38 @@ def exclusive_start_zone(
                         # Do not optimistically publish physical observed truth
                         # from a command-channel ACK. SSE updates it only after
                         # the relay reports on the base topic.
+
+                    # The admission fence can flip while the master publish is
+                    # waiting for QoS ACK. Recheck under the still-held group
+                    # lock immediately before target OPEN. If revoked, freshly
+                    # confirm master CLOSE before returning.
+                    if _start_admission_blocked(group_id, cancel_guard):
+                        if use_master:
+                            close_val = "1" if mode == "NO" else "0"
+                            master_closed = close_master_valve_confirmed(
+                                int(msid),
+                                normalized_master,
+                                mode,
+                                lambda: publish_mqtt_value(
+                                    mserver,
+                                    normalized_master,
+                                    close_val,
+                                    min_interval_sec=0.0,
+                                    qos=2,
+                                    retain=True,
+                                    meta={"cmd": "master_off", "src": "admission_revoked"},
+                                ),
+                            )
+                            if not master_closed:
+                                logger.critical(
+                                    "admission revoked after master OPEN and fresh CLOSE unresolved group=%s identity=%s",
+                                    group_id,
+                                    master_identity(msid, normalized_master),
+                                )
+                        state_verifier.cancel_verification(prepared_verification)
+                        mark_zone_command_fault(zone_id, "on", reason="admission_revoked_before_target")
+                        _finish_open_zone_run_failed(zone_id)
+                        return False
 
                     published = publish_mqtt_value(
                         server,
@@ -1426,12 +1807,31 @@ def stop_all_in_group(
     skip_master_close: при True мастер-клапан вообще не планируется
     (вызывающий сам управляет закрытием — например emergency_stop_all).
 
-    Возвращает aggregate ``{success, stopped, unresolved}``; callers must not
-    report success or remove final safety jobs while ``unresolved`` is nonempty.
+    Возвращает строгий aggregate ``{success, group_id, stopped, unresolved,
+    retry_scheduled}``; callers must not report success or remove final safety
+    jobs while ``unresolved`` is nonempty. Core never owns a deferred retry.
     """
-    result = {"success": True, "stopped": [], "unresolved": []}
     try:
-        zones = db.get_zones_by_group(int(group_id))
+        normalized_group_id = int(group_id)
+    except (TypeError, ValueError):
+        return {
+            "success": False,
+            "group_id": None,
+            "stopped": [],
+            "unresolved": [],
+            "retry_scheduled": False,
+        }
+    result = {
+        "success": True,
+        "group_id": normalized_group_id,
+        "stopped": [],
+        "unresolved": [],
+        # Core performs the immediate attempt only. A scheduler consumer may
+        # truthfully flip this after it owns complete retry coverage.
+        "retry_scheduled": False,
+    }
+    try:
+        zones = db.get_zones_by_group(normalized_group_id)
         for z in zones:
             zone_id = None
             try:
@@ -1466,8 +1866,13 @@ def stop_all_in_group(
 
 def _zone_has_fresh_physical_off(zone: dict) -> bool:
     """Return physical emergency truth, not broker/logical acknowledgement."""
+    if not isinstance(zone, dict):
+        return False
     if zone.get("mqtt_server_id"):
-        return str(zone.get("observed_state") or "").lower() == "off"
+        return (
+            str(zone.get("observed_state") or "").lower() == "off"
+            and str(zone.get("commanded_state") or "").lower() == "off"
+        )
     return str(zone.get("state") or "").lower() == "off"
 
 
@@ -1499,57 +1904,63 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
         "zones_still_active_after_wait": 0,
     }
     try:
-        groups = db.get_groups() or []
+        group_snapshot = db.get_groups()
     except (sqlite3.Error, OSError):
         logger.exception("emergency_stop_all: get_groups failed")
         stats["success"] = False
         return stats
+    if not group_snapshot:
+        stats["errors"].append("groups:snapshot_empty_or_unavailable")
+        stats["success"] = False
+        return stats
+    groups = list(group_snapshot)
+    try:
+        zone_snapshot = db.get_zones()
+    except (sqlite3.Error, OSError):
+        logger.exception("emergency_stop_all: get_zones failed")
+        stats["errors"].append("zones:snapshot_unavailable")
+        stats["success"] = False
+        return stats
+    if zone_snapshot is None:
+        stats["errors"].append("zones:snapshot_unavailable")
+        stats["success"] = False
+        return stats
+    expected_zone_ids: list[int] = []
+    for zone in zone_snapshot:
+        try:
+            expected_zone_ids.append(int(zone["id"]))
+        except (KeyError, TypeError, ValueError):
+            stats["errors"].append("zones:invalid_snapshot_row")
+    expected_zone_ids = sorted(set(expected_zone_ids))
 
     stats["groups_total"] = len(groups)
     logger.info("emergency_stop_all: starting phase A — stop zones across %d groups", len(groups))
 
-    # Phase A: stop all zones in all groups WITHOUT scheduling any master close.
+    # Phase A: stop the complete zone snapshot WITHOUT scheduling any master
+    # close. Group-only iteration can silently omit orphaned/reassigned zones.
     # Master will be closed synchronously in Phase C — we do NOT want lingering
     # delay=60 timers firing later and republishing close.
-    for g in groups:
+    for zid in expected_zone_ids:
         try:
-            gid = int(g.get("id") or 0)
-        except (ValueError, TypeError):
-            continue
-        if not gid:
-            continue
-        try:
-            zones = db.get_zones_by_group(gid) or []
-        except (sqlite3.Error, OSError):
-            logger.exception("emergency_stop_all: get_zones_by_group(%s) failed", gid)
-            stats["errors"].append(f"group:{gid}:zones_unavailable")
-            continue
-        for z in zones:
-            try:
-                zid = int(z["id"])
-                stopped = stop_zone(
-                    zid,
-                    reason=reason,
-                    force=True,
-                    master_close_immediately=False,
-                    skip_master_close=True,
-                    require_observed_confirmation=True,
-                )
-                current = db.get_zone(zid) or {}
-                if stopped and _zone_has_fresh_physical_off(current):
-                    stats["zones_stopped"] += 1
-                elif zid not in stats["zones_failed"]:
-                    stats["zones_failed"].append(zid)
-                if not TESTING:
-                    time.sleep(0.02)
-            except (ValueError, TypeError, KeyError, sqlite3.Error, OSError):
-                logger.exception("emergency_stop_all: stop_zone failed (zone_id=%s)", z.get("id"))
-                try:
-                    failed_id = int(z.get("id"))
-                    if failed_id not in stats["zones_failed"]:
-                        stats["zones_failed"].append(failed_id)
-                except (ValueError, TypeError):
-                    stats["errors"].append(f"group:{gid}:invalid_zone")
+            stopped = stop_zone(
+                zid,
+                reason=reason,
+                force=True,
+                master_close_immediately=False,
+                skip_master_close=True,
+                require_observed_confirmation=True,
+            )
+            current = db.get_zone(zid)
+            if stopped and current and _zone_has_fresh_physical_off(current):
+                stats["zones_stopped"] += 1
+            elif zid not in stats["zones_failed"]:
+                stats["zones_failed"].append(zid)
+            if not TESTING:
+                time.sleep(0.02)
+        except (ValueError, TypeError, KeyError, sqlite3.Error, OSError):
+            logger.exception("emergency_stop_all: stop_zone/readback failed zone_id=%s", zid)
+            if zid not in stats["zones_failed"]:
+                stats["zones_failed"].append(zid)
 
     # Phase B: wait up to 2s for every configured relay to prove physical OFF.
     if not TESTING:
@@ -1557,16 +1968,10 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
         while time.monotonic() < deadline:
             still_active = 0
             try:
-                for g in groups:
-                    try:
-                        gid = int(g.get("id") or 0)
-                    except (ValueError, TypeError):
-                        continue
-                    if not gid:
-                        continue
-                    for z in db.get_zones_by_group(gid) or []:
-                        if not _zone_has_fresh_physical_off(z):
-                            still_active += 1
+                for zid in expected_zone_ids:
+                    current = db.get_zone(zid)
+                    if not current or not _zone_has_fresh_physical_off(current):
+                        still_active += 1
             except (sqlite3.Error, OSError):
                 logger.exception("emergency_stop_all: phase B check failed")
                 break
@@ -1576,16 +1981,10 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
         # Re-issue stop_zone(force=True) for every unresolved relay at deadline.
         try:
             stuck_zones = []
-            for g in groups:
-                try:
-                    gid = int(g.get("id") or 0)
-                except (ValueError, TypeError):
-                    continue
-                if not gid:
-                    continue
-                for z in db.get_zones_by_group(gid) or []:
-                    if not _zone_has_fresh_physical_off(z):
-                        stuck_zones.append(int(z.get("id") or 0))
+            for zid in expected_zone_ids:
+                current = db.get_zone(zid)
+                if not current or not _zone_has_fresh_physical_off(current):
+                    stuck_zones.append(zid)
             if stuck_zones:
                 logger.warning(
                     "emergency_stop_all: %d zones stuck after 2s — force-retry: %s", len(stuck_zones), stuck_zones
@@ -1603,8 +2002,8 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
                             require_observed_confirmation=True,
                         )
                         stats["zones_force_retried"] += 1
-                        current = db.get_zone(zid) or {}
-                        if stopped and _zone_has_fresh_physical_off(current):
+                        current = db.get_zone(zid)
+                        if stopped and current and _zone_has_fresh_physical_off(current):
                             if zid in stats["zones_failed"]:
                                 stats["zones_failed"].remove(zid)
                                 stats["zones_stopped"] += 1
@@ -1624,20 +2023,29 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
     confirmed_zone_ids: set[int] = set()
     unresolved_zone_ids: set[int] = set(stats["zones_failed"])
     try:
-        for g in groups:
-            gid = int(g.get("id") or 0)
-            if not gid:
-                continue
-            for current in db.get_zones_by_group(gid) or []:
-                zid = int(current.get("id") or 0)
-                if not zid:
-                    continue
-                if _zone_has_fresh_physical_off(current):
-                    confirmed_zone_ids.add(zid)
-                    unresolved_zone_ids.discard(zid)
-                else:
-                    unresolved_zone_ids.add(zid)
-    except (sqlite3.Error, OSError, ValueError, TypeError):
+        latest_snapshot = db.get_zones()
+        if latest_snapshot is None:
+            raise OSError("zone snapshot unavailable during reconciliation")
+        latest_ids = {
+            int(current["id"])
+            for current in latest_snapshot
+            if isinstance(current, dict) and current.get("id") is not None
+        }
+        initial_ids = set(expected_zone_ids)
+        if latest_ids != initial_ids:
+            stats["errors"].append("zones:partition_changed_during_emergency")
+            unresolved_zone_ids.update(latest_ids - initial_ids)
+            expected_zone_ids = sorted(initial_ids | latest_ids)
+        for zid in expected_zone_ids:
+            current = db.get_zone(zid)
+            if current and _zone_has_fresh_physical_off(current):
+                confirmed_zone_ids.add(zid)
+                unresolved_zone_ids.discard(zid)
+            else:
+                unresolved_zone_ids.add(zid)
+                if not current:
+                    stats["errors"].append(f"zone:{zid}:readback_unavailable")
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
         logger.exception("emergency_stop_all: physical zone reconciliation failed")
         stats["errors"].append("zones:physical_reconciliation_failed")
     stats["zones_stopped"] = len(confirmed_zone_ids)
@@ -1733,17 +2141,27 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
                         meta={"cmd": "master_off", "src": "emergency"},
                     ),
                 )
-            if not ok:
-                # Issue #38: command-channel publish failed. Don't mark
-                # observed=closed — SSE-hub will heal
-                # from the real relay echo if/when the close lands later.
-                stats["masters_failed_publish"] += 1
-                logger.warning(
-                    "emergency_stop_all: master close fresh-echo verification FAILED — group=%s topic=%s",
-                    gid,
-                    t_norm,
-                )
-                continue
+                if not ok:
+                    # Issue #38: command-channel publish failed. Don't mark
+                    # observed=closed — SSE-hub will heal from the real relay
+                    # echo if/when the close lands later.
+                    stats["masters_failed_publish"] += 1
+                    logger.warning(
+                        "emergency_stop_all: master close fresh-echo verification FAILED — group=%s topic=%s",
+                        gid,
+                        t_norm,
+                    )
+                    continue
+                # Confirmation and exact cap/token cleanup are one physical-
+                # identity transaction. A concurrent manual OPEN cannot replace
+                # the activation between the fresh echo and this cleanup.
+                if not _complete_master_close_locked(identity, mode):
+                    stats["masters_failed_publish"] += 1
+                    logger.error(
+                        "emergency_stop_all: master physically closed but activation-cap cleanup failed identity=%s",
+                        identity,
+                    )
+                    continue
             stats["masters_closed"] += 1
             logger.info(
                 "emergency_stop_all: master physically closed — group=%s topic=%s val=%s mode=%s",
