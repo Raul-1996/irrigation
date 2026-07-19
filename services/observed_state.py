@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from constants import OBSERVED_STATE_MAX_RETRIES, OBSERVED_STATE_TIMEOUT_SEC
+from services.locks import zone_lock
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,10 @@ class StateVerifier:
         """
         del expected  # The generation orders commands; DB commanded_state carries the value.
         zid = int(zone_id)
-        with self._generation_lock:
+        # The same activation lock guards confirmation recheck+apply below.
+        # A new generation therefore cannot slip between a stale verifier's
+        # final check and its mutation of token/jobs.
+        with zone_lock(zid), self._generation_lock:
             generation = self._generations.get(zid, 0) + 1
             self._generations[zid] = generation
         return generation
@@ -304,35 +308,58 @@ class StateVerifier:
                 return False
             client, result = opened
             try:
-                if not bool(publish_command()):
-                    return False
-                return bool(result.wait(timeout=max(0.001, float(timeout))))
+                for _attempt in range(OBSERVED_STATE_MAX_RETRIES):
+                    if not bool(publish_command()):
+                        continue
+                    if result.wait(timeout=max(0.001, float(timeout))):
+                        return True
+                return False
             finally:
                 self._close_client(client)
         except Exception:  # External DB/MQTT/callback boundary: fail closed.
             logger.exception("StateVerifier: master command verification failed server=%s topic=%s", server_id, topic)
             return False
 
-    def verify_async(self, zone_id: int, expected: str, *, generation: int | None = None) -> None:
+    def verify_async(
+        self,
+        zone_id: int,
+        expected: str,
+        *,
+        generation: int | None = None,
+        prepared: _PreparedVerification | None = None,
+    ) -> None:
         """Fire-and-forget: launch verification in a background thread."""
         from config import TESTING
 
         if generation is None:
-            generation = self.register_command(zone_id, expected)
+            generation = prepared.generation if prepared is not None else self.register_command(zone_id, expected)
         if TESTING:
+            if prepared is not None:
+                self.cancel_verification(prepared)
             return  # Skip async verification in tests
         t = threading.Thread(
             target=self._safe_verify,
-            args=(zone_id, expected, generation),
+            args=(zone_id, expected, generation, prepared),
             daemon=True,
         )
-        t.start()
+        try:
+            t.start()
+        except RuntimeError:
+            if prepared is not None:
+                self.cancel_verification(prepared)
+            raise
 
-    def _safe_verify(self, zone_id: int, expected: str, generation: int | None = None) -> None:
+    def _safe_verify(
+        self,
+        zone_id: int,
+        expected: str,
+        generation: int | None = None,
+        prepared: _PreparedVerification | None = None,
+    ) -> None:
         try:
             if generation is None:
                 generation = self.register_command(zone_id, expected)
-            self.verify(zone_id, expected, generation=generation)
+            self.verify(zone_id, expected, generation=generation, prepared=prepared)
         except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError):  # catch-all: intentional
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
@@ -363,6 +390,7 @@ class StateVerifier:
                 logger.exception("StateVerifier: cancel confirmed OFF safety jobs failed zone=%s", zone_id)
             if cleanup_ok:
                 fields["watering_start_time"] = None
+                fields["command_id"] = None
         try:
             from services.zones_state import update_zone_state
 
@@ -382,6 +410,14 @@ class StateVerifier:
                 db.mark_zone_run_confirmed(zone_id)
             except (sqlite3.Error, OSError, AttributeError):
                 logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
+
+    def _apply_confirmation_if_current(self, zone_id: int, expected: str, generation: int) -> bool:
+        """Atomically recheck generation and mutate physical truth/jobs."""
+        with zone_lock(int(zone_id)):
+            if not self._is_current(zone_id, expected, generation):
+                return False
+            self._apply_confirmation(zone_id, expected)
+            return True
 
     # ------------------------------------------------------------------
     def verify(
@@ -433,7 +469,8 @@ class StateVerifier:
 
         norm_topic = normalize_topic(topic)
         if not norm_topic:
-            return True
+            logger.error("StateVerifier: invalid/command-channel topic zone=%s topic=%r", zone_id, topic)
+            return False
 
         expected_payloads = self._expected_payloads(expected)
         if prepared is not None:
@@ -463,7 +500,7 @@ class StateVerifier:
                     else self._subscribe_and_wait(server, norm_topic, expected_payloads, timeout)
                 )
                 if confirmed:
-                    if not self._is_current(zone_id, expected, generation):
+                    if not self._apply_confirmation_if_current(zone_id, expected, generation):
                         logger.info(
                             "StateVerifier: stale confirmation ignored zone=%s expected=%s generation=%s",
                             zone_id,
@@ -472,7 +509,6 @@ class StateVerifier:
                         )
                         return False
                     logger.info("StateVerifier: zone %s confirmed '%s' on attempt %d", zone_id, expected, attempt)
-                    self._apply_confirmation(zone_id, expected)
                     return True
 
                 if not self._is_current(zone_id, expected, generation):
@@ -598,6 +634,23 @@ class StateVerifier:
         return confirmed[0]
 
     def _record_fault(
+        self,
+        zone_id: int,
+        zone: dict,
+        expected: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Serialize stale-fault suppression with new command registration."""
+        with zone_lock(int(zone_id)):
+            self._record_fault_locked(
+                zone_id,
+                zone,
+                expected,
+                generation=generation,
+            )
+
+    def _record_fault_locked(
         self,
         zone_id: int,
         zone: dict,
