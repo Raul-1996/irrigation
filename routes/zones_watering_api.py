@@ -57,6 +57,25 @@ def _acquire_sse_http_slot(limit: int):
     return _release
 
 
+def _sse_event_stream(msg_queue, close_stream):
+    """Yield one SSE stream and always transfer termination to cleanup."""
+    import queue as _q
+
+    try:
+        yield ": connected\n\n"
+        while True:
+            try:
+                data = msg_queue.get(timeout=15.0)
+            except _q.Empty:
+                yield ": ping\n\n"
+                continue
+            if data is None:
+                break
+            yield f"data: {data}\n\n"
+    finally:
+        close_stream()
+
+
 def _signal_group_session_cancel(scheduler, group_id: int) -> None:
     """Stop the sequencer advancing while physical OFF is being confirmed."""
     try:
@@ -426,19 +445,9 @@ def api_mqtt_zones_sse():
         response.headers["Retry-After"] = "5"
         return response
 
-    try:
-        _sse_hub.ensure_hub_started()
-    except (OSError, RuntimeError) as e:
-        logger.debug("SSE hub start (background): %s", e)
-
-    try:
-        msg_queue = _sse_hub.register_client()
-    except Exception:
-        release_slot()
-        raise
-
     close_lock = threading.Lock()
     stream_closed = False
+    msg_queue = None
 
     def _close_stream() -> None:
         nonlocal stream_closed
@@ -447,39 +456,36 @@ def api_mqtt_zones_sse():
                 return
             stream_closed = True
         try:
-            _sse_hub.unregister_client(msg_queue)
+            if msg_queue is not None:
+                _sse_hub.unregister_client(msg_queue)
         except Exception:
             logger.exception("SSE client unregister failed")
         finally:
             release_slot()
 
-    def _generate():
-        import queue as _q
-
+    # Until the Response is returned, this scope owns both the capacity lease
+    # and any registered queue.  Catch BaseException only across that narrow
+    # ownership-transfer window, clean up, then re-raise without swallowing.
+    try:
         try:
-            # Keep the first yield inside the cleanup scope: clients commonly
-            # close immediately after the handshake.
-            yield ": connected\n\n"
-            while True:
-                try:
-                    data = msg_queue.get(timeout=15.0)
-                except _q.Empty:
-                    yield ": ping\n\n"  # keepalive
-                    continue
-                if data is None:
-                    break  # eviction sentinel
-                yield f"data: {data}\n\n"
-        finally:
-            _close_stream()
+            _sse_hub.ensure_hub_started()
+        except (OSError, RuntimeError) as e:
+            logger.debug("SSE hub start (background): %s", e)
 
-    # The generator uses no request-local state, so wrapping it in
-    # stream_with_context is unnecessary and makes cross-context close unsafe.
-    resp = Response(_generate(), mimetype="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
-    resp.headers["X-Accel-Buffering"] = "no"
-    resp.headers["Connection"] = "keep-alive"
-    resp.call_on_close(_close_stream)
-    return resp
+        msg_queue = _sse_hub.register_client()
+        stream = _sse_event_stream(msg_queue, _close_stream)
+
+        # The generator uses no request-local state, so wrapping it in
+        # stream_with_context is unnecessary and makes cross-context close unsafe.
+        resp = Response(stream, mimetype="text/event-stream")
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"
+        resp.headers["Connection"] = "keep-alive"
+        resp.call_on_close(_close_stream)
+        return resp
+    except BaseException:
+        _close_stream()
+        raise
 
 
 # ---- Zone MQTT start/stop ----

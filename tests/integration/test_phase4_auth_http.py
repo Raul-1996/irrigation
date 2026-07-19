@@ -244,6 +244,101 @@ def test_concurrent_public_and_telegram_postpone_is_monotonic(app, monkeypatch):
     assert persisted["postpone_reason"] == "manual"
 
 
+def test_expired_postpone_cas_preserves_concurrent_longer_deadline(app):
+    from services.postpone import clear_zone_postpone_if_expired
+
+    group = app.db.create_group("postpone CAS preserve")
+    zone = app.db.create_zone({"name": "CAS protected", "duration": 5, "group_id": group["id"]})
+    observed = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
+    longer = "2099-12-31 23:59:59"
+    app.db.update_zone_postpone(zone["id"], observed, "manual")
+    app.db.update_zone_postpone(zone["id"], longer, "rain")
+
+    cleared = clear_zone_postpone_if_expired(
+        zone["id"],
+        observed,
+        datetime.now(),
+        db_facade=app.db,
+    )
+
+    assert cleared is False
+    persisted = app.db.get_zone(zone["id"])
+    assert persisted["postpone_until"] == longer
+    assert persisted["postpone_reason"] == "rain"
+
+
+@pytest.mark.parametrize("stored_deadline", [None, "", "   ", "not-a-date"])
+def test_expired_postpone_cas_fails_closed_on_unset_or_invalid_deadline(app, stored_deadline):
+    from services.postpone import clear_zone_postpone_if_expired
+
+    group = app.db.create_group(f"postpone CAS invalid {stored_deadline!r}")
+    zone = app.db.create_zone({"name": "CAS invalid", "duration": 5, "group_id": group["id"]})
+    app.db.update_zone_postpone(zone["id"], stored_deadline, "rain")
+
+    cleared = clear_zone_postpone_if_expired(
+        zone["id"],
+        stored_deadline,
+        datetime.now(),
+        db_facade=app.db,
+    )
+
+    assert cleared is False
+    persisted = app.db.get_zone(zone["id"])
+    assert persisted["postpone_until"] == stored_deadline
+    assert persisted["postpone_reason"] == "rain"
+
+
+def test_apply_and_expired_clear_share_one_postpone_lock(app, monkeypatch):
+    import services.postpone as postpone_service
+
+    group = app.db.create_group("postpone apply-clear serialization")
+    zone = app.db.create_zone({"name": "serialized CAS", "duration": 5, "group_id": group["id"]})
+    observed = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
+    app.db.update_zone_postpone(zone["id"], observed, "rain")
+    apply_snapshot = threading.Event()
+    clear_calling = threading.Event()
+    original_get_zones = postpone_service.db.get_zones
+    results: dict[str, object] = {}
+
+    def controlled_get_zones(*args, **kwargs):
+        snapshot = original_get_zones(*args, **kwargs)
+        if threading.current_thread().name == "postpone-apply":
+            apply_snapshot.set()
+            assert clear_calling.wait(1.0)
+        return snapshot
+
+    monkeypatch.setattr(postpone_service.db, "get_zones", controlled_get_zones)
+
+    def apply_deadline():
+        results["apply"] = postpone_service.postpone_group(group["id"], 3, source="api")
+
+    def clear_expired():
+        clear_calling.set()
+        results["clear"] = postpone_service.clear_zone_postpone_if_expired(
+            zone["id"],
+            observed,
+            datetime.now(),
+            db_facade=app.db,
+        )
+
+    apply_thread = threading.Thread(target=apply_deadline, name="postpone-apply")
+    apply_thread.start()
+    assert apply_snapshot.wait(1.0)
+    clear_thread = threading.Thread(target=clear_expired, name="postpone-clear")
+    clear_thread.start()
+    apply_thread.join(timeout=2.0)
+    clear_thread.join(timeout=2.0)
+
+    assert not apply_thread.is_alive()
+    assert not clear_thread.is_alive()
+    assert "apply" in results
+    assert results["clear"] is False
+    expected = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d 23:59:59")
+    persisted = app.db.get_zone(zone["id"])
+    assert persisted["postpone_until"] == expected
+    assert persisted["postpone_reason"] == "manual"
+
+
 def test_public_postpone_can_extend_existing_safety_deadline(guest_client, app):
     from services.api_rate_limiter import reset_all
 
@@ -542,6 +637,59 @@ def _start_asgi_request(asgi_app, path: str, method: str = "GET"):
 
 def _response_status(events: list[dict]) -> int:
     return next(event["status"] for event in events if event["type"] == "http.response.start")
+
+
+@pytest.mark.parametrize("failure_stage", ["ensure", "register", "generator", "response"])
+def test_sse_setup_exception_releases_lease_and_next_stream_is_accepted(app, monkeypatch, failure_stage):
+    import routes.zones_watering_api as route
+
+    monkeypatch.setattr(route, "_SSE_HTTP_ACTIVE", 0)
+    assert route._SSE_HTTP_ACTIVE == 0
+    first_queue: queue.Queue = queue.Queue()
+    next_queue: queue.Queue = queue.Queue()
+    unregistered: list[queue.Queue] = []
+    app.config.update(
+        HTTP_EXECUTOR_WORKERS=2,
+        HTTP_CONTROL_WORKER_RESERVE=1,
+        SSE_HTTP_MAX_CLIENTS=1,
+    )
+    monkeypatch.setattr(route._sse_hub, "ensure_hub_started", lambda: None)
+    monkeypatch.setattr(route._sse_hub, "unregister_client", unregistered.append)
+
+    def fail_setup(*_args, **_kwargs):
+        raise ValueError(f"forced {failure_stage} failure")
+
+    with monkeypatch.context() as fault:
+        if failure_stage == "ensure":
+            fault.setattr(route._sse_hub, "ensure_hub_started", fail_setup)
+            fault.setattr(route._sse_hub, "register_client", lambda: first_queue)
+        elif failure_stage == "register":
+            fault.setattr(route._sse_hub, "register_client", fail_setup)
+        elif failure_stage == "generator":
+            fault.setattr(route._sse_hub, "register_client", lambda: first_queue)
+            fault.setattr(route, "_sse_event_stream", fail_setup)
+        else:
+            fault.setattr(route._sse_hub, "register_client", lambda: first_queue)
+            fault.setattr(route, "Response", fail_setup)
+
+        with pytest.raises(ValueError, match=f"forced {failure_stage} failure"):
+            app.test_client().get("/api/mqtt/zones-sse", buffered=False)
+
+    assert route._SSE_HTTP_ACTIVE == 0
+    expected_after_failure = [first_queue] if failure_stage in {"generator", "response"} else []
+    assert unregistered == expected_after_failure
+
+    monkeypatch.setattr(route._sse_hub, "register_client", lambda: next_queue)
+    response = app.test_client().get("/api/mqtt/zones-sse", buffered=False)
+    try:
+        assert response.status_code == 200
+        assert next(response.response) == b": connected\n\n"
+    finally:
+        response.close()
+        response.close()
+
+    assert route._SSE_HTTP_ACTIVE == 0
+    assert unregistered == [*expected_after_failure, next_queue]
 
 
 def test_sse_response_close_is_cross_context_safe_and_idempotent(admin_client, monkeypatch, recwarn):

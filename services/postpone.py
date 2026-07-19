@@ -130,6 +130,55 @@ def apply_group_postpone_deadline(
         }
 
 
+def clear_zone_postpone_if_expired(
+    zone_id: int,
+    observed_deadline: datetime | str | None,
+    now: datetime | str,
+    *,
+    db_facade=None,
+) -> bool:
+    """CAS-clear one expired deadline without erasing a concurrent extension.
+
+    ``observed_deadline`` must be the raw value from the caller's earlier
+    snapshot.  Under the same lock used by group postpone writes, this helper
+    re-reads the zone and clears only when that exact value is still current,
+    valid, naive, and expired.  ``db_facade`` keeps scheduler instances bound
+    to their injected/test database instead of the module singleton.
+    """
+    facade = db if db_facade is None else db_facade
+    try:
+        zone_id = int(zone_id)
+        if observed_deadline is None:
+            return False
+        observed = _parse_naive_deadline(observed_deadline)
+        checked_at = _parse_naive_deadline(now)
+    except (TypeError, ValueError):
+        return False
+
+    with _POSTPONE_MUTATION_LOCK:
+        zone = facade.get_zone(zone_id)
+        if not zone:
+            return False
+        current_raw = zone.get("postpone_until")
+        if current_raw is None:
+            return False
+        try:
+            current = _parse_naive_deadline(current_raw)
+        except (TypeError, ValueError):
+            return False
+
+        # String snapshots use an exact raw-value CAS.  This rejects even a
+        # formatting/provenance rewrite that happens to parse to the same time.
+        if isinstance(observed_deadline, str):
+            if not isinstance(current_raw, str) or current_raw != observed_deadline:
+                return False
+        elif current != observed:
+            return False
+        if current > checked_at:
+            return False
+        return bool(facade.update_zone_postpone(zone_id, None, None))
+
+
 def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     """Отложить полив всех зон группы на ``days`` дней (до конца дня).
 

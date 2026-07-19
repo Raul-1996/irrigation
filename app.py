@@ -523,15 +523,19 @@ def _auth_before_request():
                     return None
                 pth = request.path or ""
                 postpone_cancel = _is_postpone_cancel_request(pth)
-                if session.get("role") == "viewer" and request.method in ["POST", "PUT", "DELETE"]:
+                logged_in = bool(session.get("logged_in"))
+                role = session.get("role")
+                is_admin = logged_in and role == "admin"
+                is_viewer = logged_in and role == "viewer"
+                if is_viewer and request.method in ["POST", "PUT", "DELETE"]:
                     if pth != "/api/login":
                         return jsonify(
                             {"success": False, "message": "viewer role: read-only access", "error_code": "FORBIDDEN"}
                         ), 403
                 is_public_action = _is_status_action(pth) and not postpone_cancel
-                if session.get("role") != "admin" and not is_public_action:
+                if not is_admin and not is_public_action:
                     return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
-                if session.get("role") == "admin" and request.method in ["POST", "PUT", "DELETE"]:
+                if is_admin and request.method in ["POST", "PUT", "DELETE"]:
                     must = db.get_setting_value("password_must_change")
                     if str(must or "0") == "1" and request.path != "/api/password":
                         return jsonify(
@@ -754,6 +758,10 @@ def _general_api_rate_limit():
     # or non-mutable paths
     skip_paths = {"/api/login", "/api/password", "/api/status", "/health", "/api/env"}
     if p in skip_paths:
+        return None
+    # Explicit OFF actions are incident-response controls.  They must reach
+    # the controller even after unrelated general mutations exhaust the bucket.
+    if any(pattern.match(p) for pattern in _ALLOWED_PUBLIC_PATTERNS):
         return None
     # Specific groups already have their own limits applied via decorators
     if "/mqtt/start" in p or "/mqtt/stop" in p:

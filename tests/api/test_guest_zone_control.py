@@ -175,3 +175,45 @@ class TestGuestEndpointAccess:
             assert resp.get_json()["error_code"] == "UNAUTHENTICATED"
         finally:
             app.config["TESTING"] = True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/zones/1/start",
+            "/api/zones/1/mqtt/start",
+            "/api/groups/1/start-from-first",
+            "/api/groups/1/start-zone/2",
+            "/api/groups/1/run-selected",
+            "/api/groups/1/skip-current",
+            "/api/groups/1/master-valve/open",
+            "/api/groups/1/master-valve/close",
+            "/api/emergency-resume",
+        ],
+    )
+    def test_stale_admin_role_without_logged_in_cannot_control(self, app, path):
+        stale_client = app.test_client()
+        with stale_client.session_transaction() as sess:
+            sess["logged_in"] = False
+            sess["role"] = "admin"
+        app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+        app.db.set_setting_value("password_must_change", "0")
+        try:
+            response = stale_client.post(path, content_type="application/json")
+            assert response.status_code == 401
+            assert response.get_json()["error_code"] == "UNAUTHENTICATED"
+        finally:
+            app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+    def test_logged_in_admin_can_resume_in_production_mode(self, admin_client, app):
+        from services.api_rate_limiter import reset_all
+
+        app.config.update(TESTING=False, WTF_CSRF_ENABLED=False, EMERGENCY_STOP=True)
+        app.db.set_setting_value("password_must_change", "0")
+        reset_all()
+        try:
+            response = admin_client.post("/api/emergency-resume", content_type="application/json")
+            assert response.status_code == 200
+            assert response.get_json()["success"] is True
+        finally:
+            app.config.update(TESTING=True, WTF_CSRF_ENABLED=False, EMERGENCY_STOP=False)
+            reset_all()
