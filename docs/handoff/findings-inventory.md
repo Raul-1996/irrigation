@@ -2,17 +2,17 @@
 
 Исторический реестр Фаз 1–3 сохранён неизменяемым префиксом #1–#152. После полного post-review текущего HEAD добавлены новые и переоткрытые корневые дефекты с отдельными стабильными PR-ID, owner packages и проверяемыми сценариями.
 
-- Всего записей: **216** (152 исторических + 64 post-review решений).
-- `VERIFIED_REAL`: **207**.
+- Всего записей: **224** (152 исторических + 72 post-review решений).
+- `VERIFIED_REAL`: **215**.
 - `VERIFIED_FALSE`: **7**.
 - `INTENTIONAL_LIMITATION`: **2**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Remediation disposition: **141 fixed · 7 deferred · 59 pending · 9 not_applicable**.
+- Remediation disposition: **141 fixed · 7 deferred · 67 pending · 9 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
-## Post-review remediation — 59
+## Post-review remediation — 67
 
 ### #153 / PR-001 [high] `app.py:142-172,398-425,438-464; run.py:75-82; routes/system_emergency_api.py:88-101` — Неаутентифицированный клиент может управлять физическим поливом
 
@@ -43,6 +43,7 @@
 - **Evidence:** stop_all_in_group/emergency callers и HTTP/Telegram adapters игнорируют False от stop_zone или fallback publish, fault исключается из active scan, а cancel_group_jobs удаляет normal/hard-stop jobs независимо от физического результата.
 - **Переоткрывает:** #132.
 - **Owner packages:** `p4-auth-http`, `p4-topology-api`, `p4-telegram`, `p4-scheduler`, `p4-mqtt-core`.
+- **Решение оркестратора:** Post-package refinement: every HTTP, Telegram, scheduler and emergency stop/cancel caller must propagate structured unresolved physical-OFF truth. Broker ACK or logical state is insufficient, and failed OFF must preserve or re-arm hard-stop/cap retries.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #156 / PR-004 [high] `routes/zones_crud_api.py:127-152,213-250; db/zones.py:247-283,464-471; services/zone_control.py:1008-1078` — Удаление или перепривязка активной зоны теряет старый relay/master channel
@@ -105,6 +106,7 @@
 - **Evidence:** Publisher сначала пишет desired value в base/report topic, permanent hub получает live self-publish и меняет observed/state/jobs до доказательства исполнения physical /on command.
 - **Переоткрывает:** #50.
 - **Owner packages:** `p4-mqtt-core`.
+- **Решение оркестратора:** Post-package refinement: physical echo must be fresh, command-scoped, non-retained and tied to the canonical broker/report topic. Retained OFF, broker ACK, self-published base values and stored topics ending in /on must not confirm a command or remove safety jobs.
 - **Disposition Фаз 2–3:** `pending`.
 
 ### #162 / PR-010 [high] `services/sse_hub.py:300,332-378` — Неизвестный MQTT payload трактуется как OFF и снимает safety jobs
@@ -622,6 +624,86 @@
 - **Owner packages:** `p4-frontend`, `p4-status-api`.
 - **Disposition Фаз 2–3:** `pending`.
 
+### #217 / PR-061 [high] `services/postpone.py:29-92; routes/system_config_api.py:309-341; routes/telegram.py:184-191; services/monitors/rain_monitor.py:131-168; irrigation_scheduler.py:570-589` — Публичные и фоновые postpone-каналы могут сокращать более долгую защитную отсрочку; срок не bounded и mutation не сериализована между HTTP/Telegram/rain
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** Сохранить manual postpone_until=2099-12-31, вызвать rain start и rain stop: deadline сначала сокращается до конца текущего дня, затем очищается. Параллельные HTTP/Telegram/cancel writers также дают last-writer-wins вместо monotonic max.
+- **Evidence:** HTTP/Telegram service без bound и compare-and-extend перезаписывает postpone_until, rain monitor пишет deadline напрямую, а cancel/sweeper обходят общий group mutation lock. Более короткий либо rain deadline может заменить долгую manual protection и затем быть очищен как rain.
+- **Owner packages:** `p4-auth-http`, `p4-weather`, `p4-telegram`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #218 / PR-062 [medium] `routes/programs_api.py:84-91,489-521; db/programs.py:384-393,498-562` — Unbounded extra_times вызывает квадратичный conflict-check и позволяет малым запросом исчерпать CPU/RAM; preview не rate-limited
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** Отправить /check-conflicts с 200 непересекающимися extra_times: CPU занят примерно 5 секунд; 300 длинных слотов создают 45150 conflict-объектов и десятки MiB памяти. Повторять запросы можно без endpoint rate limit.
+- **Evidence:** Количество extra_times не ограничено, repository сравнивает пары слотов квадратично и материализует conflict objects, а preview endpoint не имеет отдельного rate limit. Формат HH:MM допускает до 1440 уникальных слотов и более миллиона сравнений.
+- **Owner packages:** `p4-programs`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #219 / PR-063 [medium] `routes/programs_api.py:365-425,549-583; db/programs.py:458-465` — POST/PUT программы держит глобальный mutation-lock во время внешнего weather fetch до ~21 секунды
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** Заставить get_coefficient ждать network timeout и одновременно отправить два POST/PUT: первый удерживает _PROGRAM_MUTATION_LOCK во время fetch, второй не достигает DB/admission до завершения внешней сети.
+- **Evidence:** Обычный conflict check вызывает WeatherAdjustment.get_coefficient даже без weather preview, пока route держит общий program mutation lock. При stale cache сетевой Open-Meteo path имеет worst-case около 21 секунды и сериализует все program mutations.
+- **Owner packages:** `p4-programs`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #220 / PR-064 [medium] `routes/zones_crud_api.py:296-324,413-453; db/zones.py:196-229` — Zone POST/bulk по умолчанию сохраняет ссылку на отсутствующую группу 1
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** Удалить группу 1, оставить группу 999 и выполнить POST зоны без group_id: API возвращает 201, а строка получает group_id=1. CSV/bulk row без group_id воспроизводит тот же orphan.
+- **Evidence:** Route валидирует group_id до data.setdefault(group_id, 1), а group 1 удаляема. Обычный и bulk create без явной группы поэтому обходят reference validation и сохраняют orphan group_id=1.
+- **Owner packages:** `p4-topology-api`, `p4-db-integrity`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #221 / PR-065 [medium] `routes/groups_api.py:636-655; routes/zones_crud_api.py:198-245; services/zone_control.py:1008-1078` — Проверка принадлежности зоны группе перед start остаётся TOCTOU и позволяет запустить её уже в другой группе
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** Поставить barrier после проверки G1 membership, перенести зону G1→G2 и продолжить start: service включает зону уже как G2, тогда как endpoint снимает schedules и пишет результат для G1.
+- **Evidence:** Membership проверяется без удержания URL-group/topology lock, после чего controller перечитывает mutable zone row. Concurrent rewire может сменить group между check и start, а route продолжит cleanup/logging в старом group context.
+- **Owner packages:** `p4-topology-api`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #222 / PR-066 [medium] `routes/groups_api.py:43-50,643-653; services/mqtt_pub.py:421-467` — Debounce/throttle фиксирует intent до результата и возвращает ложный success после failed group start либо failed in-flight MQTT publish
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** Заставить первый group start завершиться ошибкой и немедленно повторить: второй запрос получает 200 «уже обрабатывается». Для MQTT задержать и провалить первый publish: concurrent duplicate возвращает True до его False result.
+- **Evidence:** Group throttle записывает timestamp до controller acceptance, а MQTT debounce публикует in-flight intent в dedup state до delivery result. Повторный caller принимает intent за успешный результат, даже если первая операция затем вернула failure.
+- **Owner packages:** `p4-topology-api`, `p4-mqtt-core`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #223 / PR-067 [medium] `routes/zones_photo_api.py:162-260,268-320,329-409` — Photo/rotate API мутирует файловую систему до проверки существования зоны и валидности угла, создавая orphan/partial media
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** POST валидного image для отсутствующего zone_id создаёт ZONE_<id>.webp и thumb и может вернуть success при нулевом DB update. Передать rotate angle='bad' либо unsafe/missing thumb: main уже повёрнут, когда запрос возвращает ошибку по следующему target.
+- **Evidence:** Upload обрабатывает и пишет main/thumb до авторитетной проверки существования zone/rowcount. Rotate превращает malformed angle в 90 и перезаписывает variants последовательно до проверки всех targets; поздняя ошибка оставляет уже изменённый main либо orphan files.
+- **Owner packages:** `p4-topology-api`, `p4-frontend`.
+- **Disposition Фаз 2–3:** `pending`.
+
+### #224 / PR-068 [low] `services/weather/adjustment.py:203-208,591-626,774; static/js/status.js:1402-1409` — Weather factor diagnostics и decision provenance противоречат фактическому skip/source selection
+
+- **Статус:** `VERIFIED_REAL`.
+- **Происхождение:** `post_package_reconciliation`.
+- **Верификация:** Post-package reviewer residual was independently reproduced and the final reconciliation classified it as a distinct root rather than an existing-root refinement.
+- **Репродукция/сценарий:** При rain_24h=0, forecast_6h=10 и threshold=5 should_skip=True, но rain factor зелёный; при local/local source verdict decision history сохраняет source=open-meteo. Аналогично forecast freeze с temperature=None показывает «нет данных» при skip.
+- **Evidence:** Factor details не учитывают forecast rain/freeze branches, хотя should_skip их применяет, а _apply_source отбрасывает temp_source/hum_source и log_decision жёстко пишет open-meteo. Operator UI и history поэтому показывают причины/источник, противоположные принятому решению.
+- **Owner packages:** `p4-weather`.
+- **Disposition Фаз 2–3:** `pending`.
+
 ## Intentional limitations — 2
 
 ### #212 / PR-060 [low] `services/weather/adjustment.py:550-563; irrigation_scheduler.py:774-784; docs/handoff/README.md:136-139` — H2 water-balance остаётся намеренным shadow-mode
@@ -632,6 +714,7 @@
 - **Репродукция/сценарий:** Fresh H2=150% и H1=70% оставляют scheduler duration на H1. Это ожидаемая зафиксированная семантика, не bug.
 - **Evidence:** Production scheduler использует H1; H2 рассчитывается/показывается, но по objective намеренно не подключается к physical watering до отдельного product decision и доказанного hard-safety composition.
 - **Owner packages:** `orchestrator-decision`.
+- **Решение оркестратора:** A post-package request to activate H2 in the physical scheduler was explicitly rejected: the frozen objective requires H2 to remain shadow-only, so get_effective_coefficient must not replace the production H1 path without a new product/safety decision.
 - **Disposition Фаз 2–3:** `not_applicable`.
 - **Причина disposition:** H2 намеренно остаётся shadow-mode; подключение запрещено текущим objective и требует отдельного product/safety решения.
 - **Пакет:** `orchestrator-decision`.
