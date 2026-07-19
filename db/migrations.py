@@ -4,8 +4,7 @@ import re
 import sqlite3
 from datetime import UTC
 
-from werkzeug.security import generate_password_hash
-
+from db.identity import MAX_ENTITY_ID, parse_explicit_entity_id
 from utils import encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -248,6 +247,14 @@ class MigrationRunner:
                     "durable_entity_ids_v1",
                     self._migrate_durable_entity_ids,
                 )
+                # v2 re-runs the idempotent durable-ID pass on installations
+                # that already recorded v1: it discovers additional legacy
+                # history references and installs the bounded-ID triggers.
+                self._apply_named_migration(
+                    conn,
+                    "durable_entity_ids_v2",
+                    self._migrate_durable_entity_ids,
+                )
                 self._apply_named_migration(
                     conn,
                     "program_cancellations_fk_v1",
@@ -257,6 +264,11 @@ class MigrationRunner:
                     conn,
                     "restore_runtime_indexes_v1",
                     self._migrate_restore_runtime_indexes,
+                )
+                self._apply_named_migration(
+                    conn,
+                    "mqtt_reference_integrity_v1",
+                    self._migrate_mqtt_reference_integrity,
                 )
 
                 logger.info("База данных инициализирована успешно")
@@ -270,23 +282,11 @@ class MigrationRunner:
         try:
             cursor = conn.execute("SELECT COUNT(*) FROM zones")
             if cursor.fetchone()[0] > 0:
-                cur = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", ("password_hash",))
-                if cur.fetchone() is None:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                        ("password_hash", generate_password_hash("1234", method="pbkdf2:sha256")),
-                    )
-                    conn.commit()
                 return
 
             groups = [(1, "Насос-1"), (999, "БЕЗ ПОЛИВА")]
             for group_id, name in groups:
                 conn.execute("INSERT OR IGNORE INTO groups (id, name) VALUES (?, ?)", (group_id, name))
-            conn.commit()
-            conn.execute(
-                "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
-                ("password_hash", generate_password_hash("1234", method="pbkdf2:sha256:120000")),
-            )
             conn.commit()
             logger.info("Начальные данные вставлены: группы 1 (Насос-1) и 999 (БЕЗ ПОЛИВА)")
         except sqlite3.Error as e:
@@ -479,10 +479,7 @@ class MigrationRunner:
         quoted_columns = ", ".join(f'"{column}"' for column in columns)
         conn.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
         conn.execute(create_sql)
-        conn.execute(
-            f'INSERT INTO "{temp_table}" ({quoted_columns}) '
-            f'SELECT {quoted_columns} FROM "{table}"'
-        )
+        conn.execute(f'INSERT INTO "{temp_table}" ({quoted_columns}) SELECT {quoted_columns} FROM "{table}"')
         conn.execute(f'DROP TABLE "{table}"')
         conn.execute(f'ALTER TABLE "{temp_table}" RENAME TO "{table}"')
         for schema_sql in schema_objects:
@@ -494,7 +491,7 @@ class MigrationRunner:
             normalized = int(identifier)
         except (TypeError, ValueError):
             return
-        if normalized <= 0:
+        if normalized <= 0 or normalized > MAX_ENTITY_ID:
             return
         conn.execute(
             "INSERT OR IGNORE INTO retired_entity_ids(entity, id) VALUES (?, ?)",
@@ -505,7 +502,11 @@ class MigrationRunner:
     def _backfill_retired_identifiers(cls, conn: sqlite3.Connection) -> None:
         """Preserve legacy dangling IDs so an upgrade cannot rebind them."""
 
-        for table, column in (("zone_runs", "zone_id"), ("water_usage", "zone_id")):
+        for table, column in (
+            ("zone_runs", "zone_id"),
+            ("water_usage", "zone_id"),
+            ("weather_log", "zone_id"),
+        ):
             table_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (table,),
@@ -518,6 +519,33 @@ class MigrationRunner:
                 ).fetchall()
                 for (identifier,) in rows:
                     cls._retire_identifier(conn, "zone", identifier)
+
+        for table, column in (
+            ("program_queue_log", "zone_ids"),
+            ("float_events", "paused_zones"),
+        ):
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if not table_exists:
+                continue
+            for (identifiers_json,) in conn.execute(
+                f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"
+            ).fetchall():
+                try:
+                    identifiers = json.loads(identifiers_json or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(identifiers, list):
+                    continue
+                for identifier in identifiers:
+                    try:
+                        normalized = parse_explicit_entity_id(identifier)
+                    except ValueError:
+                        continue
+                    if conn.execute("SELECT 1 FROM zones WHERE id = ?", (normalized,)).fetchone() is None:
+                        cls._retire_identifier(conn, "zone", normalized)
 
         for (zones_json,) in conn.execute("SELECT zones FROM programs").fetchall():
             try:
@@ -624,6 +652,15 @@ class MigrationRunner:
             BEGIN
                 INSERT OR IGNORE INTO retired_entity_ids(entity, id)
                 VALUES ('{entity}', OLD.id);
+            END
+        """)
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_reject_out_of_range_id")
+        conn.execute(f"""
+            CREATE TRIGGER trg_{table}_reject_out_of_range_id
+            AFTER INSERT ON {table}
+            WHEN NEW.id <= 0 OR NEW.id > {MAX_ENTITY_ID}
+            BEGIN
+                SELECT RAISE(ABORT, 'entity identifier out of range');
             END
         """)
         conn.execute(f"""
@@ -736,10 +773,119 @@ class MigrationRunner:
             "WHERE status = 'ok' AND end_utc IS NOT NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_start ON zone_runs(start_utc DESC)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start "
-            "ON zone_runs(group_id, start_utc DESC)"
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start ON zone_runs(group_id, start_utc DESC)")
+        conn.commit()
+
+    @staticmethod
+    def _migrate_mqtt_reference_integrity(conn: sqlite3.Connection) -> None:
+        """Install DB-level MQTT reference guards.
+
+        Repository preflight produces friendlier API errors, while these
+        triggers close the writer race between reference validation and MQTT
+        server deletion and protect every direct repository/settings write.
+        """
+
+        trigger_names = (
+            "trg_zones_mqtt_server_insert",
+            "trg_zones_mqtt_server_update",
+            "trg_groups_mqtt_server_insert",
+            "trg_groups_mqtt_server_update",
+            "trg_settings_mqtt_server_insert",
+            "trg_settings_mqtt_server_update",
+            "trg_mqtt_servers_restrict_referenced_delete",
         )
+        for name in trigger_names:
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+        conn.execute("""
+            CREATE TRIGGER trg_zones_mqtt_server_insert
+            BEFORE INSERT ON zones
+            WHEN NEW.mqtt_server_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.mqtt_server_id)
+            BEGIN
+                SELECT RAISE(ABORT, 'missing mqtt server reference');
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER trg_zones_mqtt_server_update
+            BEFORE UPDATE ON zones
+            WHEN NEW.mqtt_server_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.mqtt_server_id)
+            BEGIN
+                SELECT RAISE(ABORT, 'missing mqtt server reference');
+            END
+        """)
+
+        missing_group_server = " OR ".join(
+            f"(NEW.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mqtt_servers WHERE id = NEW.{column}))"
+            for column in (
+                "master_mqtt_server_id",
+                "pressure_mqtt_server_id",
+                "water_mqtt_server_id",
+                "float_mqtt_server_id",
+            )
+        )
+        conn.execute(f"""
+            CREATE TRIGGER trg_groups_mqtt_server_insert
+            BEFORE INSERT ON groups
+            WHEN {missing_group_server}
+            BEGIN
+                SELECT RAISE(ABORT, 'missing mqtt server reference');
+            END
+        """)
+        conn.execute(f"""
+            CREATE TRIGGER trg_groups_mqtt_server_update
+            BEFORE UPDATE ON groups
+            WHEN {missing_group_server}
+            BEGIN
+                SELECT RAISE(ABORT, 'missing mqtt server reference');
+            END
+        """)
+
+        setting_keys = "'rain.server_id', 'master.server_id', 'env.temp.server_id', 'env.hum.server_id'"
+        missing_setting_server = (
+            f"NEW.key IN ({setting_keys}) AND NEW.value IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM mqtt_servers WHERE CAST(id AS TEXT) = NEW.value)"
+        )
+        conn.execute(f"""
+            CREATE TRIGGER trg_settings_mqtt_server_insert
+            BEFORE INSERT ON settings
+            WHEN {missing_setting_server}
+            BEGIN
+                SELECT RAISE(ABORT, 'missing mqtt server reference');
+            END
+        """)
+        conn.execute(f"""
+            CREATE TRIGGER trg_settings_mqtt_server_update
+            BEFORE UPDATE ON settings
+            WHEN {missing_setting_server}
+            BEGIN
+                SELECT RAISE(ABORT, 'missing mqtt server reference');
+            END
+        """)
+
+        group_references = " OR ".join(
+            f"EXISTS (SELECT 1 FROM groups WHERE {column} = OLD.id)"
+            for column in (
+                "master_mqtt_server_id",
+                "pressure_mqtt_server_id",
+                "water_mqtt_server_id",
+                "float_mqtt_server_id",
+            )
+        )
+        conn.execute(f"""
+            CREATE TRIGGER trg_mqtt_servers_restrict_referenced_delete
+            BEFORE DELETE ON mqtt_servers
+            WHEN EXISTS (SELECT 1 FROM zones WHERE mqtt_server_id = OLD.id)
+              OR {group_references}
+              OR EXISTS (
+                    SELECT 1 FROM settings
+                    WHERE key IN ({setting_keys}) AND value = CAST(OLD.id AS TEXT)
+              )
+            BEGIN
+                SELECT RAISE(ABORT, 'mqtt server is referenced');
+            END
+        """)
         conn.commit()
 
     # --- All migration methods ---
@@ -969,10 +1115,7 @@ class MigrationRunner:
             "WHERE status = 'ok' AND end_utc IS NOT NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_start ON zone_runs(start_utc DESC)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start "
-            "ON zone_runs(group_id, start_utc DESC)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start ON zone_runs(group_id, start_utc DESC)")
         conn.commit()
         logger.info("Создана таблица zone_runs")
 
@@ -1742,10 +1885,7 @@ class MigrationRunner:
             "WHERE status = 'ok' AND end_utc IS NOT NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_start ON zone_runs(start_utc DESC)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start "
-            "ON zone_runs(group_id, start_utc DESC)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start ON zone_runs(group_id, start_utc DESC)")
         conn.commit()
         logger.info("Downgrade: удалена колонка source и индекс idx_zone_runs_zone_start из zone_runs")
 

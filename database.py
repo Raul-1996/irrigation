@@ -66,6 +66,11 @@ class IrrigationDB:
     def get_zones(self, **kw) -> list[dict[str, Any]]:
         return self.zones.get_zones(**kw)
 
+    def get_zones_strict(self) -> list[dict[str, Any]]:
+        """Return zones without converting SQLite failures into an empty installation."""
+
+        return self.zones.get_zones_strict()
+
     def get_zone(self, zone_id: int) -> dict[str, Any] | None:
         return self.zones.get_zone(zone_id)
 
@@ -204,6 +209,15 @@ class IrrigationDB:
         """Load groups without converting database failures into an empty list."""
         return self.groups.get_groups_strict()
 
+    def get_group_storage_snapshot(self, group_id: int) -> dict[str, Any] | None:
+        return self.groups.get_group_storage_snapshot(group_id)
+
+    def restore_group_snapshot(self, before: dict[str, Any], expected_current: dict[str, Any] | None = None) -> bool:
+        return self.groups.restore_group_snapshot(before, expected_current)
+
+    def delete_group_if_unchanged(self, expected: dict[str, Any]) -> bool:
+        return self.groups.delete_group_if_unchanged(expected)
+
     def create_group(self, name: str) -> dict[str, Any] | None:
         return self.groups.create_group(name)
 
@@ -234,6 +248,23 @@ class IrrigationDB:
     # --- MQTT ---
     def get_mqtt_servers(self) -> list[dict[str, Any]]:
         return self.mqtt.get_mqtt_servers()
+
+    def get_mqtt_servers_strict(self) -> list[dict[str, Any]]:
+        return self.mqtt.get_mqtt_servers_strict()
+
+    def get_mqtt_server_strict(self, server_id: int) -> dict[str, Any] | None:
+        return self.mqtt.get_mqtt_server_strict(server_id)
+
+    def get_mqtt_server_storage_snapshot(self, server_id: int) -> dict[str, Any] | None:
+        return self.mqtt.get_mqtt_server_storage_snapshot(server_id)
+
+    def restore_mqtt_server_snapshot(
+        self, before: dict[str, Any], expected_current: dict[str, Any] | None = None
+    ) -> bool:
+        return self.mqtt.restore_mqtt_server_snapshot(before, expected_current)
+
+    def delete_mqtt_server_if_unchanged(self, expected: dict[str, Any]) -> bool:
+        return self.mqtt.delete_mqtt_server_if_unchanged(expected)
 
     def get_mqtt_server(self, server_id: int) -> dict[str, Any] | None:
         return self.mqtt.get_mqtt_server(server_id)

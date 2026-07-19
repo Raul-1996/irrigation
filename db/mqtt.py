@@ -28,24 +28,49 @@ class MqttRepository(BaseRepository):
 
     def get_mqtt_servers(self) -> list[dict[str, Any]]:
         try:
-            with self._connect() as conn:
-                conn.row_factory = sqlite3.Row
-                cur = conn.execute("SELECT * FROM mqtt_servers ORDER BY id")
-                return [self._decrypt_mqtt_password(dict(row)) for row in cur.fetchall()]
+            return self.get_mqtt_servers_strict()
         except sqlite3.Error as e:
             logger.error("Ошибка получения MQTT серверов: %s", e)
             return []
 
+    def get_mqtt_servers_strict(self) -> list[dict[str, Any]]:
+        """Return public/decrypted server rows and propagate DB failures."""
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute("SELECT * FROM mqtt_servers ORDER BY id")
+            return [self._decrypt_mqtt_password(dict(row)) for row in cur.fetchall()]
+
     def get_mqtt_server(self, server_id: int) -> dict[str, Any] | None:
         try:
-            with self._connect() as conn:
-                conn.row_factory = sqlite3.Row
-                cur = conn.execute("SELECT * FROM mqtt_servers WHERE id = ?", (server_id,))
-                row = cur.fetchone()
-                return self._decrypt_mqtt_password(dict(row)) if row else None
+            return self.get_mqtt_server_strict(server_id)
         except sqlite3.Error as e:
             logger.error("Ошибка получения MQTT сервера %s: %s", server_id, e)
             return None
+
+    def get_mqtt_server_strict(self, server_id: int) -> dict[str, Any] | None:
+        """Return one public/decrypted server row and propagate DB failures."""
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute("SELECT * FROM mqtt_servers WHERE id = ?", (server_id,))
+            row = cur.fetchone()
+            return self._decrypt_mqtt_password(dict(row)) if row else None
+
+    def get_mqtt_server_storage_snapshot(self, server_id: int) -> dict[str, Any] | None:
+        """Return the exact at-rest row, retaining encrypted password bytes."""
+
+        return self._get_storage_snapshot("mqtt_servers", server_id)
+
+    def restore_mqtt_server_snapshot(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any] | None = None,
+    ) -> bool:
+        return self._restore_storage_snapshot("mqtt_servers", "mqtt_server", before, expected_current)
+
+    def delete_mqtt_server_if_unchanged(self, expected: dict[str, Any]) -> bool:
+        return self._delete_storage_snapshot_if_unchanged("mqtt_servers", expected)
 
     @classmethod
     def _collect_server_references(cls, conn: sqlite3.Connection, server_id: int) -> dict[str, list[Any]]:

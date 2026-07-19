@@ -173,3 +173,121 @@ class BaseRepository:
             if conn is not None:
                 conn.close()
             _raise_translated(error)
+
+    @staticmethod
+    def _storage_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+        if table not in {"groups", "mqtt_servers"}:
+            raise ValueError("unsupported snapshot table")
+        columns = tuple(str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall())
+        if not columns or "id" not in columns:
+            raise sqlite3.DatabaseError(f"snapshot table {table!r} is unavailable")
+        return columns
+
+    @staticmethod
+    def _validated_snapshot_values(snapshot: dict[str, Any], columns: tuple[str, ...]) -> tuple[Any, ...] | None:
+        if not isinstance(snapshot, dict) or set(snapshot) != set(columns):
+            return None
+        return tuple(snapshot[column] for column in columns)
+
+    @classmethod
+    def _snapshot_matches(
+        cls,
+        row: sqlite3.Row | None,
+        snapshot: dict[str, Any],
+        columns: tuple[str, ...],
+    ) -> bool:
+        values = cls._validated_snapshot_values(snapshot, columns)
+        return row is not None and values is not None and tuple(row[column] for column in columns) == values
+
+    def _get_storage_snapshot(self, table: str, row_id: int) -> dict[str, Any] | None:
+        """Read an exact at-rest row for trusted compensating transactions."""
+
+        try:
+            with self._connect() as conn:
+                self._storage_columns(conn, table)
+                row = conn.execute(f'SELECT * FROM "{table}" WHERE id = ?', (int(row_id),)).fetchone()
+                return dict(row) if row is not None else None
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            logger.error("Failed to read %s rollback snapshot: %s", table, error)
+            return None
+
+    @retry_on_busy()
+    def _restore_storage_snapshot(
+        self,
+        table: str,
+        entity: str,
+        before: dict[str, Any],
+        expected_current: dict[str, Any] | None,
+    ) -> bool:
+        """CAS-restore ``before`` or reinsert an exactly deleted durable row."""
+
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                columns = self._storage_columns(conn, table)
+                before_values = self._validated_snapshot_values(before, columns)
+                if before_values is None:
+                    conn.rollback()
+                    return False
+                row_id = int(before["id"])
+                current = conn.execute(f'SELECT * FROM "{table}" WHERE id = ?', (row_id,)).fetchone()
+                if current is None:
+                    if expected_current is not None:
+                        conn.rollback()
+                        return False
+                    conn.execute(
+                        "DELETE FROM retired_entity_ids WHERE entity = ? AND id = ?",
+                        (entity, row_id),
+                    )
+                    names = ", ".join(f'"{column}"' for column in columns)
+                    placeholders = ", ".join("?" for _ in columns)
+                    conn.execute(
+                        f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})',
+                        before_values,
+                    )
+                else:
+                    if expected_current is None or not self._snapshot_matches(current, expected_current, columns):
+                        conn.rollback()
+                        return False
+                    mutable_columns = tuple(column for column in columns if column != "id")
+                    assignments = ", ".join(f'"{column}" = ?' for column in mutable_columns)
+                    params = [before[column] for column in mutable_columns]
+                    params.append(row_id)
+                    conn.execute(f'UPDATE "{table}" SET {assignments} WHERE id = ?', params)
+                conn.commit()
+                return True
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            logger.error("Failed to restore %s rollback snapshot: %s", table, error)
+            return False
+
+    @retry_on_busy()
+    def _delete_storage_snapshot_if_unchanged(
+        self,
+        table: str,
+        expected: dict[str, Any],
+        *,
+        restrict_query: str | None = None,
+    ) -> bool:
+        """Delete a just-created row only while its full stored value matches."""
+
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                columns = self._storage_columns(conn, table)
+                if self._validated_snapshot_values(expected, columns) is None:
+                    conn.rollback()
+                    return False
+                row_id = int(expected["id"])
+                current = conn.execute(f'SELECT * FROM "{table}" WHERE id = ?', (row_id,)).fetchone()
+                if not self._snapshot_matches(current, expected, columns):
+                    conn.rollback()
+                    return False
+                if restrict_query is not None and conn.execute(restrict_query, (row_id,)).fetchone() is not None:
+                    conn.rollback()
+                    return False
+                cursor = conn.execute(f'DELETE FROM "{table}" WHERE id = ?', (row_id,))
+                conn.commit()
+                return cursor.rowcount == 1
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            logger.error("Failed to delete unchanged %s rollback snapshot: %s", table, error)
+            return False

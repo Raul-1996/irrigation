@@ -36,6 +36,30 @@ class GroupRepository(BaseRepository):
             logger.error("Ошибка получения групп: %s", e)
             return []
 
+    def get_group_storage_snapshot(self, group_id: int) -> dict[str, Any] | None:
+        """Return the exact stored row used only for compensating rollback."""
+
+        return self._get_storage_snapshot("groups", group_id)
+
+    def restore_group_snapshot(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any] | None = None,
+    ) -> bool:
+        return self._restore_storage_snapshot("groups", "group", before, expected_current)
+
+    def delete_group_if_unchanged(self, expected: dict[str, Any]) -> bool:
+        try:
+            if int(expected.get("id")) == 999:
+                return False
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return self._delete_storage_snapshot_if_unchanged(
+            "groups",
+            expected,
+            restrict_query="SELECT 1 FROM zones WHERE group_id = ? LIMIT 1",
+        )
+
     @retry_on_busy()
     def create_group(self, name: str) -> dict[str, Any] | None:
         """Создать новую группу."""

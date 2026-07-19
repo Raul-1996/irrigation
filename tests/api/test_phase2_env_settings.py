@@ -29,7 +29,14 @@ def _env_config(*, temp_topic: str, temp_server_id: object, hum_topic: str = "/h
     }
 
 
+def _create_env_servers(db) -> None:
+    first = db.create_mqtt_server({"name": "Temperature", "host": "temp-broker", "port": 1883})
+    second = db.create_mqtt_server({"name": "Humidity", "host": "hum-broker", "port": 1883})
+    assert (first["id"], second["id"]) == (1, 2)
+
+
 def test_env_post_requires_admin_and_csrf_but_get_remains_public(app, guest_client, admin_client):
+    _create_env_servers(app.db)
     _enable_native_security(app)
 
     assert guest_client.get("/api/env").status_code == 200
@@ -60,6 +67,7 @@ def test_env_post_requires_admin_and_csrf_but_get_remains_public(app, guest_clie
 
 
 def test_set_env_config_rejects_invalid_server_id_without_partial_write(test_db):
+    _create_env_servers(test_db)
     original = _env_config(temp_topic="/original/temp", temp_server_id=1, hum_topic="/original/hum")
     assert test_db.set_env_config(original) is True
 
@@ -69,6 +77,7 @@ def test_set_env_config_rejects_invalid_server_id_without_partial_write(test_db)
 
 
 def test_set_env_config_rolls_back_every_key_when_one_write_fails(test_db):
+    _create_env_servers(test_db)
     original = _env_config(temp_topic="/original/temp", temp_server_id=1, hum_topic="/original/hum")
     assert test_db.set_env_config(original) is True
 

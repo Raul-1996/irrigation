@@ -1,8 +1,10 @@
 import logging
 import os
 import sqlite3
+import stat as stat_module
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from db.base import BaseRepository, retry_on_busy
 
@@ -11,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 class LogRepository(BaseRepository):
     """Repository for logs, water_usage, water_stats, and backups."""
+
+    _REQUIRED_BACKUP_TABLES = frozenset({"zones", "groups", "programs", "settings", "migrations", "mqtt_servers"})
 
     def __init__(self, db_path: str, backup_dir: str = "backups"):
         super().__init__(db_path)
@@ -180,6 +184,9 @@ class LogRepository(BaseRepository):
         read snapshot; if both fail, backup creation fails closed.
         """
         try:
+            if not self._is_valid_backup_source(self.db_path):
+                return None
+
             os.makedirs(self.backup_dir, mode=0o700, exist_ok=True)
             os.chmod(self.backup_dir, 0o700)
 
@@ -214,26 +221,7 @@ class LogRepository(BaseRepository):
                 return None
 
             try:
-                prod_size = os.path.getsize(self.db_path)
-                bak_size = os.path.getsize(partial_path)
-            except OSError as e:
-                logger.error("Не удалось проверить размер бэкапа: %s", e)
-                self._remove_incomplete_backup(partial_path)
-                return None
-            if bak_size < prod_size * 0.5:
-                logger.error(
-                    "Backup too small: %d bytes < 50%% of %d — removing",
-                    bak_size,
-                    prod_size,
-                )
-                self._remove_incomplete_backup(partial_path)
-                return None
-
-            try:
-                with sqlite3.connect(partial_path) as backup_conn:
-                    integrity = backup_conn.execute("PRAGMA integrity_check").fetchone()
-                if integrity != ("ok",):
-                    raise sqlite3.DatabaseError(f"integrity_check returned {integrity!r}")
+                self._validate_application_database(partial_path)
                 os.replace(partial_path, backup_path)
                 self._remove_sqlite_sidecars(partial_path)
             except (sqlite3.Error, OSError) as e:
@@ -250,7 +238,7 @@ class LogRepository(BaseRepository):
 
     @staticmethod
     def _backup_via_api(source_path: str, target_path: str) -> None:
-        with sqlite3.connect(source_path, timeout=30) as source:
+        with sqlite3.connect(LogRepository._read_only_uri(source_path), timeout=30, uri=True) as source:
             source.execute("PRAGMA busy_timeout=30000")
             with sqlite3.connect(target_path, timeout=30) as target:
                 source.backup(target)
@@ -261,9 +249,47 @@ class LogRepository(BaseRepository):
 
     @staticmethod
     def _backup_via_vacuum(source_path: str, target_path: str) -> None:
-        with sqlite3.connect(source_path, timeout=30) as source:
+        with sqlite3.connect(LogRepository._read_only_uri(source_path), timeout=30, uri=True) as source:
             source.execute("PRAGMA busy_timeout=30000")
             source.execute("VACUUM INTO ?", (target_path,))
+
+    @staticmethod
+    def _read_only_uri(path: str) -> str:
+        return f"file:{quote(os.path.abspath(path), safe='/')}?mode=ro"
+
+    @classmethod
+    def _validate_application_database(cls, path: str) -> None:
+        """Validate SQLite structure and readable application tables."""
+
+        with sqlite3.connect(cls._read_only_uri(path), timeout=30, uri=True) as conn:
+            conn.execute("PRAGMA busy_timeout=30000")
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()
+            if integrity != ("ok",):
+                raise sqlite3.DatabaseError(f"integrity_check returned {integrity!r}")
+            tables = {
+                str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            }
+            missing = cls._REQUIRED_BACKUP_TABLES - tables
+            if missing:
+                raise sqlite3.DatabaseError(f"application schema is missing tables: {sorted(missing)!r}")
+            for table in sorted(cls._REQUIRED_BACKUP_TABLES):
+                conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.DatabaseError("foreign_key_check returned violations")
+
+    @classmethod
+    def _is_valid_backup_source(cls, path: str) -> bool:
+        try:
+            source_stat = os.stat(path)
+            if not stat_module.S_ISREG(source_stat.st_mode) or source_stat.st_size <= 0:
+                logger.error("Backup source is not a non-empty regular file: %s", path)
+                return False
+            cls._validate_application_database(path)
+            return True
+        except (OSError, sqlite3.Error) as e:
+            logger.error("Backup source validation failed for %s: %s", path, e)
+            return False
 
     @staticmethod
     def _remove_incomplete_backup(path: str) -> None:
