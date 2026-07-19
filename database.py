@@ -200,6 +200,10 @@ class IrrigationDB:
     def get_groups(self) -> list[dict[str, Any]]:
         return self.groups.get_groups()
 
+    def get_groups_strict(self) -> list[dict[str, Any]]:
+        """Load groups without converting database failures into an empty list."""
+        return self.groups.get_groups_strict()
+
     def create_group(self, name: str) -> dict[str, Any] | None:
         return self.groups.create_group(name)
 
@@ -211,6 +215,9 @@ class IrrigationDB:
 
     def update_group_fields(self, group_id: int, updates: dict[str, Any]) -> bool:
         return self.groups.update_group_fields(group_id, updates)
+
+    def update_group_config(self, group_id: int, updates: dict[str, Any]) -> bool:
+        return self.groups.update_group_config(group_id, updates)
 
     def get_group_use_rain(self, group_id: int) -> bool:
         return self.groups.get_group_use_rain(group_id)

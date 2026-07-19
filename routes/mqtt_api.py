@@ -30,6 +30,22 @@ _scan_sse_lock = threading.Lock()
 MAX_SCAN_SSE_PER_IP = 2
 MAX_PROBE_DURATION_SEC = 30.0
 MAX_SCAN_DURATION_SEC = 300.0
+_MQTT_RUNTIME_FIELDS = frozenset(
+    {
+        "host",
+        "port",
+        "username",
+        "password",
+        "client_id",
+        "enabled",
+        "tls_enabled",
+        "tls_ca_path",
+        "tls_cert_path",
+        "tls_key_path",
+        "tls_insecure",
+        "tls_version",
+    }
+)
 
 mqtt_api_bp = Blueprint("mqtt_api", __name__)
 
@@ -62,6 +78,79 @@ def _refresh_mqtt_runtime(server_id: int) -> None:
         sse_hub.reload_hub()
     except Exception:
         logger.exception("MQTT SSE hub reload failed for server %s", server_id)
+
+
+def _reconfigure_mqtt_monitors() -> None:
+    """Rebind long-lived meter/environment clients after broker CRUD."""
+    try:
+        from services.monitors import env_monitor, water_monitor
+
+        water_reconfigure = getattr(water_monitor, "reconfigure", None)
+        if callable(water_reconfigure) and water_reconfigure() is False:
+            logger.error("WaterMonitor rejected committed MQTT reconfiguration")
+
+        env_reconfigure = getattr(env_monitor, "reconfigure", None)
+        if callable(env_reconfigure) and env_reconfigure(db.get_env_config()) is False:
+            logger.error("EnvMonitor rejected committed MQTT reconfiguration")
+    except (ConnectionError, OSError, RuntimeError, TypeError, ValueError):
+        logger.exception("MQTT monitor reconfiguration failed after server mutation")
+
+
+def _mqtt_server_references(server_id: int) -> dict[str, list]:
+    """Return hardware mappings that must be migrated before server mutation."""
+    repository_helper = getattr(db, "get_mqtt_server_references", None)
+    if callable(repository_helper):
+        references = repository_helper(int(server_id)) or {}
+        if isinstance(references, dict):
+            return {str(kind): list(items) for kind, items in references.items() if items}
+
+    references: dict[str, list] = {}
+    for zone in db.get_zones() or []:
+        try:
+            if zone.get("mqtt_server_id") is not None and int(zone["mqtt_server_id"]) == int(server_id):
+                references.setdefault("zones", []).append(int(zone["id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    group_fields = (
+        ("master_mqtt_server_id", "groups_master"),
+        ("pressure_mqtt_server_id", "groups_pressure"),
+        ("water_mqtt_server_id", "groups_water"),
+        ("float_mqtt_server_id", "groups_float"),
+    )
+    for group in db.get_groups() or []:
+        for field, role in group_fields:
+            try:
+                if group.get(field) is not None and int(group[field]) == int(server_id):
+                    references.setdefault(role, []).append(int(group["id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    settings_refs = []
+    try:
+        rain = db.get_rain_config() or {}
+        if rain.get("server_id") is not None and int(rain["server_id"]) == int(server_id):
+            settings_refs.append("rain.server_id")
+        master = db.get_master_config() or {}
+        if master.get("server_id") is not None and int(master["server_id"]) == int(server_id):
+            settings_refs.append("master.server_id")
+        env = db.get_env_config() or {}
+        for sensor in ("temp", "hum"):
+            sensor_config = env.get(sensor) or {}
+            if sensor_config.get("server_id") is not None and int(sensor_config["server_id"]) == int(server_id):
+                settings_refs.append(f"env.{sensor}.server_id")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        logger.exception("MQTT settings reference scan failed for server %s", server_id)
+        # Fail closed: an incomplete scan is itself a blocking reference.
+        settings_refs.append("reference_scan_unavailable")
+    if settings_refs:
+        references["settings"] = settings_refs
+    return references
+
+
+def _runtime_fields_requested(data: dict) -> set[str]:
+    fields = set(data) & _MQTT_RUNTIME_FIELDS
+    if data.get("password") in (None, "***"):
+        fields.discard("password")
+    return fields
 
 
 def _new_diagnostic_client(server: dict, purpose: str):
@@ -125,9 +214,14 @@ def api_mqtt_servers_list():
 def api_mqtt_server_create():
     try:
         data = request.get_json() or {}
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "Некорректные данные сервера"}), 400
         server = db.create_mqtt_server(data)
         if not server:
             return jsonify({"success": False, "message": "Не удалось создать сервер"}), 400
+        server_id = int(server["id"])
+        _refresh_mqtt_runtime(server_id)
+        _reconfigure_mqtt_monitors()
         _mask_server_secret(server)
         return jsonify({"success": True, "server": server}), 201
     except SecretDecryptionError:
@@ -165,17 +259,34 @@ def api_mqtt_server_get(server_id: int):
 def api_mqtt_server_update(server_id: int):
     try:
         data = request.get_json() or {}
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "Некорректные данные сервера"}), 400
+        current = db.get_mqtt_server(server_id)
+        if not current:
+            return jsonify({"success": False, "message": "Сервер не найден"}), 404
+        references = _mqtt_server_references(server_id)
+        runtime_fields = _runtime_fields_requested(data)
+        if references and runtime_fields:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Сервер используется оборудованием; сначала перенесите ссылки на другой сервер",
+                    "references": references,
+                    "blocked_fields": sorted(runtime_fields),
+                }
+            ), 409
         ok = db.update_mqtt_server(server_id, data)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось обновить"}), 400
         _refresh_mqtt_runtime(server_id)
+        _reconfigure_mqtt_monitors()
         server = db.get_mqtt_server(server_id)
         _mask_server_secret(server)
         return jsonify({"success": True, "server": server})
     except SecretDecryptionError:
         logger.error("MQTT server %s updated but credentials cannot be decrypted", server_id)
         return _secret_unavailable_response()
-    except (ConnectionError, TimeoutError, OSError) as e:
+    except (ConnectionError, TimeoutError, OSError, TypeError, ValueError) as e:
         logger.error(f"Ошибка обновления MQTT сервера {server_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка обновления"}), 500
 
@@ -187,15 +298,28 @@ def api_mqtt_server_update(server_id: int):
 )
 def api_mqtt_server_delete(server_id: int):
     try:
+        server = db.get_mqtt_server(server_id)
+        if not server:
+            return jsonify({"success": False, "message": "Сервер не найден"}), 404
+        references = _mqtt_server_references(server_id)
+        if references:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Сервер используется оборудованием; сначала перенесите ссылки на другой сервер",
+                    "references": references,
+                }
+            ), 409
         ok = db.delete_mqtt_server(server_id)
         if not ok:
             return jsonify({"success": False, "message": "Не удалось удалить"}), 400
         _refresh_mqtt_runtime(server_id)
+        _reconfigure_mqtt_monitors()
         return ("", 204)
     except SecretDecryptionError:
         logger.error("MQTT server %s delete failed: stored credentials cannot be decrypted", server_id)
         return _secret_unavailable_response()
-    except (ConnectionError, TimeoutError, OSError) as e:
+    except (ConnectionError, TimeoutError, OSError, TypeError, ValueError) as e:
         logger.error(f"Ошибка удаления MQTT сервера {server_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка удаления"}), 500
 
@@ -431,10 +555,7 @@ def api_mqtt_scan_sse(server_id: int):
                 while not stop_event.is_set():
                     stop_event.wait(0.2)
                     if _t.time() - _start_ts >= MAX_SCAN_DURATION_SEC:
-                        _queue_frame(
-                            "event: end\n"
-                            + 'data: {"success": true, "reason": "scan_timeout"}\n\n'
-                        )
+                        _queue_frame("event: end\n" + 'data: {"success": true, "reason": "scan_timeout"}\n\n')
                         break
             except (ConnectionError, TimeoutError, OSError, ValueError):
                 logger.exception("MQTT scan connection failed for server %s", server_id)

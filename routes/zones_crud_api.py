@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+from contextlib import ExitStack
 
 from flask import Blueprint, jsonify, request
 
@@ -10,6 +11,7 @@ from database import db
 from services import sse_hub as _sse_hub
 from services.audit import audit_log, debug_audit
 from services.duration_conflicts import compute_duration_conflicts
+from services.locks import group_lock, zone_lock
 from services.next_watering import compute_next_watering
 from utils import to_iso_with_tz
 
@@ -35,6 +37,7 @@ _STATE_MACHINE_FIELDS = {
 # its topic maps are built once and would otherwise miss the new topic until
 # a service restart (relay echoes lost, observed_state stops updating).
 _MQTT_WIRING_FIELDS = ("topic", "mqtt_server_id")
+_ZONE_TOPOLOGY_FIELDS = ("topic", "mqtt_server_id", "group_id", "group")
 
 
 # Fields that store controller-local "YYYY-MM-DD HH:MM:SS" timestamps and are
@@ -61,6 +64,94 @@ def _zone_ts_to_iso(zone: dict | None) -> dict | None:
     return out
 
 
+def _zone_topology_is_safe(zone: dict) -> bool:
+    """Whether a zone is confirmed physically OFF and may be rewired/deleted."""
+    state = str(zone.get("state") or "off").strip().lower()
+    commanded = str(zone.get("commanded_state") or "").strip().lower()
+    observed = str(zone.get("observed_state") or "").strip().lower()
+    return state == "off" and commanded in ("", "off") and observed in ("", "off")
+
+
+def _zone_topology_changed(zone: dict, payload: dict) -> bool:
+    if "topic" in payload and (payload.get("topic") or "").strip() != (zone.get("topic") or "").strip():
+        return True
+    if "mqtt_server_id" in payload and payload.get("mqtt_server_id") != zone.get("mqtt_server_id"):
+        return True
+    return "group_id" in payload and int(payload["group_id"]) != int(zone.get("group_id") or 0)
+
+
+def _normalise_zone_payload(
+    payload: dict,
+    *,
+    group_ids: set[int],
+    mqtt_server_ids: set[int],
+    strict_duration: bool = False,
+) -> tuple[dict | None, str | None]:
+    """Validate references and canonicalise values before any DB mutation."""
+    data = dict(payload)
+
+    if "duration" in data:
+        raw_duration = data["duration"]
+        if strict_duration and (isinstance(raw_duration, bool) or not isinstance(raw_duration, int)):
+            return None, "duration must be a canonical integer in range 1..3600"
+        try:
+            duration = int(raw_duration)
+        except (TypeError, ValueError):
+            return None, "duration must be an integer in range 1..3600"
+        if duration < 1 or duration > 3600:
+            return None, "duration must be in range 1..3600"
+        data["duration"] = duration
+
+    if "name" in data:
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return None, "name must be non-empty"
+        data["name"] = name
+
+    if "group" in data and "group_id" not in data:
+        data["group_id"] = data.pop("group")
+    elif "group" in data:
+        data.pop("group")
+    if "group_id" in data:
+        try:
+            if isinstance(data["group_id"], bool):
+                raise ValueError
+            group_id = int(data["group_id"])
+        except (TypeError, ValueError):
+            return None, "group_id must be an integer"
+        if group_id not in group_ids:
+            return None, "group_id does not reference an existing group"
+        data["group_id"] = group_id
+
+    if "mqtt_server_id" in data:
+        raw_server_id = data.get("mqtt_server_id")
+        if raw_server_id in (None, ""):
+            data["mqtt_server_id"] = None
+        else:
+            try:
+                if isinstance(raw_server_id, bool):
+                    raise ValueError
+                server_id = int(raw_server_id)
+            except (TypeError, ValueError):
+                return None, "mqtt_server_id must be an integer or null"
+            if server_id not in mqtt_server_ids:
+                return None, "mqtt_server_id does not reference an existing server"
+            data["mqtt_server_id"] = server_id
+
+    if "topic" in data:
+        if data["topic"] is not None and not isinstance(data["topic"], str):
+            return None, "topic must be a string"
+        data["topic"] = (data.get("topic") or "").strip()
+
+    return data, None
+
+
+def _zone_reference_ids() -> tuple[set[int], set[int]]:
+    group_ids = {int(group["id"]) for group in (db.get_groups() or [])}
+    mqtt_server_ids = {int(server["id"]) for server in (db.get_mqtt_servers() or [])}
+    return group_ids, mqtt_server_ids
+
+
 # ---- Zone CRUD ----
 
 
@@ -80,7 +171,9 @@ def api_zone(zone_id):
         return jsonify({"success": False, "message": "Zone not found"}), 404
 
     elif request.method == "PUT":
-        data = request.get_json() or {}
+        raw_data = request.get_json() or {}
+        if not isinstance(raw_data, dict):
+            return jsonify({"success": False, "message": "invalid zone payload"}), 400
         # Reject state-machine fields in the generic CRUD endpoint — they
         # MUST go through services.zones_state.update_zone_state so audit
         # rows are emitted and the optimistic-lock state machine isn't
@@ -88,7 +181,7 @@ def api_zone(zone_id):
         # an audit-evading backdoor.  Returning 400 makes any frontend that
         # accidentally tries this path break loudly instead of silently
         # writing an unaudited transition.
-        bad_fields = sorted(set(data.keys()) & _STATE_MACHINE_FIELDS)
+        bad_fields = sorted(set(raw_data.keys()) & _STATE_MACHINE_FIELDS)
         if bad_fields:
             logger.warning(
                 "api_zone PUT rejected state-machine field(s) %s for zone %s — "
@@ -102,16 +195,22 @@ def api_zone(zone_id):
                     "message": f"state-machine fields not allowed via CRUD: {bad_fields}",
                 }
             ), 400
+        prev = db.get_zone(zone_id)
+        if not prev:
+            return ("Zone not found", 404)
         try:
-            if "duration" in data:
-                d = int(data["duration"])
-                if d < 1 or d > 3600:
-                    return jsonify({"success": False, "message": "duration must be 1..3600"}), 400
-            if "name" in data and (not str(data["name"]).strip()):
-                return jsonify({"success": False, "message": "name must be non-empty"}), 400
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Exception in api_zone: %s", e)
-            return jsonify({"success": False, "message": "invalid zone payload"}), 400
+            group_ids, mqtt_server_ids = _zone_reference_ids()
+            data, validation_error = _normalise_zone_payload(
+                raw_data,
+                group_ids=group_ids,
+                mqtt_server_ids=mqtt_server_ids,
+            )
+        except (ConnectionError, OSError, sqlite3.Error, TypeError, ValueError):
+            logger.exception("zone topology validation failed for zone %s", zone_id)
+            return jsonify({"success": False, "message": "zone topology validation unavailable"}), 409
+        if validation_error:
+            return jsonify({"success": False, "message": validation_error}), 400
+        assert data is not None
         try:
             is_csv = (request.headers.get("X-Import-Op") == "csv") or (request.args.get("source") == "csv")
         except (KeyError, TypeError, ValueError) as e:
@@ -124,8 +223,28 @@ def api_zone(zone_id):
                 )
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 logger.debug("Handled exception in api_zone: %s", e)
-        prev = db.get_zone(zone_id) if any(f in data for f in _MQTT_WIRING_FIELDS) else None
-        zone = db.update_zone(zone_id, data)
+        if any(field in data for field in _ZONE_TOPOLOGY_FIELDS):
+            group_ids_to_lock = {int(prev.get("group_id") or 0)}
+            if data.get("group_id") is not None:
+                group_ids_to_lock.add(int(data["group_id"]))
+            with ExitStack() as locks:
+                for group_id in sorted(group_id for group_id in group_ids_to_lock if group_id):
+                    locks.enter_context(group_lock(group_id))
+                locks.enter_context(zone_lock(zone_id))
+                latest = db.get_zone(zone_id)
+                if not latest:
+                    return ("Zone not found", 404)
+                if _zone_topology_changed(latest, data) and not _zone_topology_is_safe(latest):
+                    return jsonify(
+                        {
+                            "success": False,
+                            "message": "Zone topology cannot change until the relay is confirmed off",
+                        }
+                    ), 409
+                prev = latest
+                zone = db.update_zone(zone_id, data)
+        else:
+            zone = db.update_zone(zone_id, data)
         if zone:
             if is_csv:
                 try:
@@ -145,7 +264,22 @@ def api_zone(zone_id):
 
     elif request.method == "DELETE":
         prev = db.get_zone(zone_id)
-        if db.delete_zone(zone_id):
+        if not prev:
+            return ("Zone not found", 404)
+        with group_lock(int(prev.get("group_id") or 0)), zone_lock(zone_id):
+            latest = db.get_zone(zone_id)
+            if not latest:
+                return ("Zone not found", 404)
+            if not _zone_topology_is_safe(latest):
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Zone cannot be deleted until the relay is confirmed off",
+                    }
+                ), 409
+            prev = latest
+            deleted = db.delete_zone(zone_id)
+        if deleted:
             db.add_log("zone_delete", json.dumps({"zone": zone_id}))
             if prev and (prev.get("topic") or "").strip() and prev.get("mqtt_server_id"):
                 _sse_hub.reload_hub()
@@ -156,17 +290,25 @@ def api_zone(zone_id):
 @zones_crud_api_bp.route("/api/zones", methods=["POST"])
 @audit_log("zone_create")
 def api_create_zone():
-    data = request.get_json() or {}
-    try:
-        name = str(data.get("name") or "Зона").strip()
-        duration = int(data.get("duration") or 10)
-        if duration < 1 or duration > 3600:
-            return jsonify({"success": False, "message": "duration must be 1..3600"}), 400
-        if not name:
-            return jsonify({"success": False, "message": "name must be non-empty"}), 400
-    except (ValueError, TypeError, KeyError) as e:
-        logger.debug("Exception in api_create_zone: %s", e)
+    raw_data = request.get_json() or {}
+    if not isinstance(raw_data, dict):
         return jsonify({"success": False, "message": "invalid zone payload"}), 400
+    try:
+        group_ids, mqtt_server_ids = _zone_reference_ids()
+        data, validation_error = _normalise_zone_payload(
+            raw_data,
+            group_ids=group_ids,
+            mqtt_server_ids=mqtt_server_ids,
+        )
+    except (ConnectionError, OSError, sqlite3.Error, TypeError, ValueError):
+        logger.exception("zone create topology validation failed")
+        return jsonify({"success": False, "message": "zone topology validation unavailable"}), 409
+    if validation_error:
+        return jsonify({"success": False, "message": validation_error}), 400
+    assert data is not None
+    data.setdefault("name", "Зона")
+    data.setdefault("duration", 10)
+    data.setdefault("group_id", 1)
     try:
         is_csv = (request.headers.get("X-Import-Op") == "csv") or (request.args.get("source") == "csv")
     except (KeyError, TypeError, ValueError) as e:
@@ -219,16 +361,21 @@ def api_import_zones_bulk():
         zones = body.get("zones") or []
         if not isinstance(zones, list) or not zones:
             return jsonify({"success": False, "message": "Нет данных для импорта"}), 400
+        try:
+            group_ids, mqtt_server_ids = _zone_reference_ids()
+            existing_zones = {int(zone["id"]): zone for zone in (db.get_zones() or [])}
+        except (ConnectionError, OSError, sqlite3.Error, TypeError, ValueError):
+            logger.exception("zone import topology preflight failed")
+            return jsonify({"success": False, "message": "Проверка топологии недоступна"}), 409
         # B1 FIX: defence-in-depth — strip state-machine fields from the payload
         # BEFORE handing it to bulk_upsert_zones.  The DB-layer whitelist
         # (db/zones.py::_ALLOWED_UPDATE_COLUMNS) is the primary guard, but
         # filtering here keeps the audit log honest: even if a caller smuggled
         # such fields, they never reach SQL nor the audit context.
         sanitised = []
-        for z in zones:
+        for index, z in enumerate(zones):
             if not isinstance(z, dict):
-                sanitised.append(z)
-                continue
+                return jsonify({"success": False, "message": f"zones[{index}] должен быть объектом"}), 400
             stripped = {k: v for k, v in z.items() if k not in _STATE_MACHINE_FIELDS}
             if len(stripped) != len(z):
                 logger.warning(
@@ -236,8 +383,74 @@ def api_import_zones_bulk():
                     sorted(set(z.keys()) & _STATE_MACHINE_FIELDS),
                     z.get("id"),
                 )
-            sanitised.append(stripped)
-        stats = db.bulk_upsert_zones(sanitised)
+            if "id" in stripped:
+                raw_zone_id = stripped.get("id")
+                if isinstance(raw_zone_id, bool) or not isinstance(raw_zone_id, int) or raw_zone_id <= 0:
+                    return jsonify(
+                        {"success": False, "message": f"zones[{index}].id должен быть положительным целым"}
+                    ), 400
+
+            normalised, validation_error = _normalise_zone_payload(
+                stripped,
+                group_ids=group_ids,
+                mqtt_server_ids=mqtt_server_ids,
+                strict_duration=True,
+            )
+            if validation_error:
+                return jsonify({"success": False, "message": f"zones[{index}]: {validation_error}"}), 400
+            assert normalised is not None
+
+            zone_id = normalised.get("id")
+            current = existing_zones.get(int(zone_id)) if zone_id is not None else None
+            if current and _zone_topology_changed(current, normalised) and not _zone_topology_is_safe(current):
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": f"Зона {zone_id}: топологию нельзя менять до подтверждённого OFF",
+                    }
+                ), 409
+            sanitised.append(normalised)
+        zone_ids_to_lock = sorted(
+            {
+                int(zone["id"])
+                for zone in sanitised
+                if zone.get("id") is not None and any(field in zone for field in _ZONE_TOPOLOGY_FIELDS)
+            }
+        )
+        with ExitStack() as locks:
+            if zone_ids_to_lock:
+                # Group sequences hold group→zone locks. Lock every group in a
+                # stable order because one import may move zones across groups.
+                for group_id in sorted(group_ids):
+                    locks.enter_context(group_lock(group_id))
+                for zone_id in zone_ids_to_lock:
+                    locks.enter_context(zone_lock(zone_id))
+
+                for zone_data in sanitised:
+                    zone_id = zone_data.get("id")
+                    if zone_id is None or not any(field in zone_data for field in _ZONE_TOPOLOGY_FIELDS):
+                        continue
+                    current = db.get_zone(int(zone_id))
+                    if current and _zone_topology_changed(current, zone_data) and not _zone_topology_is_safe(current):
+                        return jsonify(
+                            {
+                                "success": False,
+                                "message": f"Зона {zone_id}: топологию нельзя менять до подтверждённого OFF",
+                            }
+                        ), 409
+            stats = db.bulk_upsert_zones(sanitised)
+        if not isinstance(stats, dict):
+            logger.error("zone import repository returned an invalid result")
+            return jsonify({"success": False, "message": "Импорт зон не выполнен"}), 500
+        if stats.get("success") is False or int(stats.get("failed") or 0) > 0:
+            logger.warning("zone import rolled back or failed: %s", stats)
+            return jsonify(
+                {
+                    **stats,
+                    "success": False,
+                    "message": "Импорт зон полностью отменён из-за ошибки",
+                }
+            ), 409
         try:
             db.add_log("zones_import", json.dumps({"counts": stats}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

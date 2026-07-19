@@ -1,8 +1,12 @@
 """Tests for group DB operations: CRUD, master valve."""
 
 import os
+import sqlite3
+from unittest.mock import patch
 
 os.environ["TESTING"] = "1"
+
+import pytest
 
 
 class TestGroupCRUD:
@@ -16,6 +20,14 @@ class TestGroupCRUD:
         group = test_db.create_group("Линия 2")
         assert group is not None
         assert group["name"] == "Линия 2"
+
+    def test_strict_group_loader_distinguishes_empty_result_from_read_failure(self, test_db):
+        assert test_db.get_groups_strict() == test_db.get_groups()
+
+        with patch.object(test_db.groups, "_connect", side_effect=sqlite3.OperationalError("read failed")):
+            with pytest.raises(sqlite3.OperationalError, match="read failed"):
+                test_db.get_groups_strict()
+            assert test_db.get_groups() == []
 
     def test_create_duplicate_group(self, test_db):
         test_db.create_group("Уникальная")
@@ -40,6 +52,14 @@ class TestGroupCRUD:
         # Should fail because group has zones
         # Depending on implementation it might return True or False
         assert isinstance(result, bool)
+
+    def test_missing_group_mutations_report_failure(self, test_db):
+        missing_id = 424242
+        assert test_db.update_group(missing_id, "missing") is False
+        assert test_db.update_group_fields(missing_id, {"master_mode": "NO"}) is False
+        assert test_db.update_group_config(missing_id, {"name": "missing"}) is False
+        assert test_db.set_group_use_rain(missing_id, True) is False
+        assert test_db.delete_group(missing_id) is False
 
 
 class TestGroupRain:

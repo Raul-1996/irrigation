@@ -5,7 +5,7 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from functools import wraps
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -15,6 +15,7 @@ from irrigation_scheduler import get_scheduler, init_scheduler
 from services import sse_hub as _sse_hub
 from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
+from services.locks import group_lock
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from utils import normalize_topic
 
@@ -31,6 +32,12 @@ groups_api_bp = Blueprint("groups_api", __name__)
 # Anti-flapper guard
 _GROUP_CHANGE_GUARD = {}
 _GROUP_GUARD_LOCK = threading.Lock()
+_MASTER_TOPOLOGY_FIELDS = {
+    "use_master_valve",
+    "master_mqtt_topic",
+    "master_mode",
+    "master_mqtt_server_id",
+}
 
 
 def _should_throttle_group(group_id: int, window_sec: float = GROUP_DEBOUNCE_SEC) -> bool:
@@ -43,6 +50,162 @@ def _should_throttle_group(group_id: int, window_sec: float = GROUP_DEBOUNCE_SEC
     return False
 
 
+def _serialize_group_hardware_mutation(*, always: bool = False):
+    """Serialize topology/master actions with the core group state machine."""
+
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(group_id, *args, **kwargs):
+            body = request.get_json(silent=True)
+            needs_lock = always or (isinstance(body, dict) and bool(set(body) & _MASTER_TOPOLOGY_FIELDS))
+            if needs_lock:
+                with group_lock(int(group_id)):
+                    return fn(group_id, *args, **kwargs)
+            return fn(group_id, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+def _get_group(group_id: int) -> dict | None:
+    return next(
+        (group for group in (db.get_groups() or []) if int(group.get("id") or 0) == int(group_id)),
+        None,
+    )
+
+
+def _reconfigure_water_monitor() -> None:
+    """Apply committed group topology to the long-lived meter runtime."""
+    try:
+        from services.monitors import water_monitor
+
+        reconfigure = getattr(water_monitor, "reconfigure", None)
+        if callable(reconfigure) and reconfigure() is False:
+            logger.error("WaterMonitor rejected committed group reconfiguration")
+    except (ConnectionError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        logger.exception("WaterMonitor reconfiguration failed after group mutation")
+
+
+def _zone_is_physically_safe(zone: dict) -> bool:
+    state = str(zone.get("state") or "off").strip().lower()
+    commanded = str(zone.get("commanded_state") or "").strip().lower()
+    observed = str(zone.get("observed_state") or "").strip().lower()
+    return state == "off" and commanded in ("", "off") and observed in ("", "off")
+
+
+def _master_identity(group: dict) -> tuple[int, str] | None:
+    topic = (group.get("master_mqtt_topic") or "").strip()
+    server_id = group.get("master_mqtt_server_id")
+    if not topic or not server_id:
+        return None
+    return int(server_id), normalize_topic(topic)
+
+
+def _groups_sharing_master(group: dict) -> list[dict]:
+    identity = _master_identity(group)
+    if identity is None:
+        return []
+    shared = []
+    for candidate in db.get_groups() or []:
+        try:
+            if int(candidate.get("use_master_valve") or 0) != 1:
+                continue
+            if _master_identity(candidate) == identity:
+                shared.append(candidate)
+        except (TypeError, ValueError, OSError):
+            continue
+    return shared
+
+
+def _master_has_unsafe_zone(group: dict) -> bool:
+    for shared_group in _groups_sharing_master(group):
+        zones = db.get_zones_by_group(int(shared_group["id"])) or []
+        if any(not _zone_is_physically_safe(zone) for zone in zones):
+            return True
+    return False
+
+
+def _master_command_locked(
+    server_id: int,
+    topic: str,
+    server: dict,
+    value: str,
+    *,
+    close_guard: dict | None = None,
+) -> tuple[bool, bool]:
+    """Publish under the core master identity lock and disarm delayed close."""
+    from services.zone_control import cancel_pending_master_close, master_topic_lock
+
+    # During the coordinated master-identity rollout, tolerate the prior
+    # topic-only signature while preferring the broker-aware public API.
+    try:
+        lock = master_topic_lock(int(server_id), topic)
+    except TypeError:
+        lock = master_topic_lock(topic)
+    with lock:
+        try:
+            cancel_pending_master_close(int(server_id), topic)
+        except TypeError:
+            cancel_pending_master_close(topic)
+        # A different group sharing this master can start while the caller is
+        # waiting for the master lock. Recheck under the same lock that the
+        # core open path uses, so close can never land after that open.
+        if close_guard is not None and _master_has_unsafe_zone(close_guard):
+            return False, True
+        published = _publish_mqtt_value(
+            server,
+            topic,
+            value,
+            min_interval_sec=0.0,
+            qos=2,
+            retain=True,
+        )
+        return bool(published), False
+
+
+def _close_observed_open_master(group: dict) -> tuple[bool, str | None]:
+    """Close an old, manually-open master before its DB mapping disappears."""
+    if str(group.get("master_valve_observed") or "").strip().lower() != "open":
+        return True, None
+    if _master_has_unsafe_zone(group):
+        return False, "Нельзя изменить мастер-клапан: связанная зона физически не подтверждена как OFF"
+    identity = _master_identity(group)
+    if identity is None:
+        return False, "Нельзя закрыть старый мастер-клапан: неполная MQTT-конфигурация"
+    server_id, topic = identity
+    server = db.get_mqtt_server(server_id)
+    if not server:
+        return False, "Нельзя закрыть старый мастер-клапан: MQTT-сервер не найден"
+    mode = str(group.get("master_mode") or "NC").strip().upper()
+    close_value = "1" if mode == "NO" else "0"
+    blocked = False
+    try:
+        closed, blocked = _master_command_locked(
+            server_id,
+            topic,
+            server,
+            close_value,
+            close_guard=group,
+        )
+    except (ConnectionError, ImportError, OSError, RuntimeError, TimeoutError, TypeError, ValueError):
+        logger.exception("old master close failed for group %s", group.get("id"))
+        closed = False
+    if blocked:
+        return False, "Нельзя изменить мастер-клапан: связанная зона запускается или физически не OFF"
+    if not closed:
+        return False, "Старый мастер-клапан не подтвердил закрытие"
+    if not db.update_group_fields(int(group["id"]), {"master_valve_observed": "closed"}):
+        return False, "Не удалось сохранить подтверждённое закрытие мастер-клапана"
+    try:
+        scheduler = get_scheduler()
+        if scheduler:
+            scheduler.cancel_master_valve_cap(int(group["id"]))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        logger.debug("cancel master cap after topology close failed", exc_info=True)
+    return True, None
+
+
 @groups_api_bp.route("/api/groups")
 def api_groups():
     groups = db.get_groups()
@@ -51,109 +214,106 @@ def api_groups():
 
 @groups_api_bp.route("/api/groups/<int:group_id>", methods=["PUT"])
 @audit_log("group_save", target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
+@_serialize_group_hardware_mutation()
 def api_update_group(group_id):
     data = request.get_json() or {}
-    updated = False
-    if "name" in data and db.update_group(group_id, data["name"]):
-        updated = True
-    if "use_rain_sensor" in data:
-        try:
-            ok = db.set_group_use_rain(group_id, bool(data.get("use_rain_sensor")))
-            updated = updated or ok
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Ошибка обновления use_rain_sensor группы {group_id}: {e}")
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "Некорректные данные группы"}), 400
+    current = _get_group(group_id)
+    if not current:
+        return jsonify({"success": False, "message": "Группа не найдена"}), 404
 
     fields_map = {
-        "use_master_valve": ("use_master_valve", lambda v: 1 if v else 0),
-        "master_mqtt_topic": ("master_mqtt_topic", lambda v: (v or "").strip()),
-        "master_mode": ("master_mode", lambda v: (str(v or "NC")).strip().upper()),
-        "master_mqtt_server_id": ("master_mqtt_server_id", lambda v: int(v) if v not in (None, "") else None),
-        "use_pressure_sensor": ("use_pressure_sensor", lambda v: 1 if v else 0),
-        "pressure_mqtt_topic": ("pressure_mqtt_topic", lambda v: (v or "").strip()),
-        "pressure_unit": ("pressure_unit", lambda v: (str(v or "bar")).strip()),
-        "pressure_mqtt_server_id": ("pressure_mqtt_server_id", lambda v: int(v) if v not in (None, "") else None),
-        "use_water_meter": ("use_water_meter", lambda v: 1 if v else 0),
-        "water_mqtt_topic": ("water_mqtt_topic", lambda v: (v or "").strip()),
-        "water_mqtt_server_id": ("water_mqtt_server_id", lambda v: int(v) if v not in (None, "") else None),
-        "water_pulse_size": (
-            "water_pulse_size",
-            lambda v: str(v or "1l") if str(v or "1l") in ("1l", "10l", "100l") else "1l",
-        ),
-        "water_base_value_m3": ("water_base_value_m3", lambda v: float(v) if v not in (None, "") else 0.0),
-        "water_base_pulses": ("water_base_pulses", lambda v: int(v) if v not in (None, "") else 0),
-        "master_close_delay_sec": ("master_close_delay_sec", lambda v: max(1, min(3600, int(v or 60)))),
+        "use_master_valve": lambda v: 1 if v else 0,
+        "master_mqtt_topic": lambda v: (v or "").strip(),
+        "master_mode": lambda v: str(v or "NC").strip().upper(),
+        "master_mqtt_server_id": lambda v: int(v) if v not in (None, "") else None,
+        "use_pressure_sensor": lambda v: 1 if v else 0,
+        "pressure_mqtt_topic": lambda v: (v or "").strip(),
+        "pressure_unit": lambda v: str(v or "bar").strip(),
+        "pressure_mqtt_server_id": lambda v: int(v) if v not in (None, "") else None,
+        "use_water_meter": lambda v: 1 if v else 0,
+        "water_mqtt_topic": lambda v: (v or "").strip(),
+        "water_mqtt_server_id": lambda v: int(v) if v not in (None, "") else None,
+        "water_pulse_size": lambda v: str(v or "1l") if str(v or "1l") in ("1l", "10l", "100l") else "1l",
+        "water_base_value_m3": lambda v: float(v) if v not in (None, "") else 0.0,
+        "water_base_pulses": lambda v: int(v) if v not in (None, "") else 0,
+        "master_close_delay_sec": lambda v: max(1, min(3600, int(v or 60))),
     }
     updates = {}
-    for k, (col, norm) in fields_map.items():
-        if k in data:
-            try:
-                updates[col] = norm(data.get(k))
-            except (KeyError, TypeError, ValueError) as e:
-                logger.debug("Handled exception in line_81: %s", e)
-    if updates:
+    if "name" in data:
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return jsonify({"success": False, "message": "Название группы не должно быть пустым"}), 400
+        if any(
+            int(group.get("id") or 0) != int(group_id) and str(group.get("name") or "") == name
+            for group in (db.get_groups() or [])
+        ):
+            return jsonify({"success": False, "message": "Группа с таким названием уже существует"}), 400
+        updates["name"] = name
+    if "use_rain_sensor" in data:
+        updates["use_rain_sensor"] = 1 if data.get("use_rain_sensor") else 0
+    for field, normalise in fields_map.items():
+        if field not in data:
+            continue
         try:
-            if "use_master_valve" in updates and int(updates.get("use_master_valve") or 0) == 1:
-                # Фасад IrrigationDB не имеет get_group — ищем в get_groups()
-                current = next((g for g in (db.get_groups() or []) if int(g.get("id")) == int(group_id)), {})
-                if not (updates.get("master_mqtt_topic") or current.get("master_mqtt_topic")):
-                    return jsonify({"success": False, "message": "Нужен MQTT-топик мастер-клапана"}), 400
-                sid = updates.get("master_mqtt_server_id") or current.get("master_mqtt_server_id")
-                if not sid or not db.get_mqtt_server(int(sid)):
-                    return jsonify(
-                        {"success": False, "message": "Нужен корректный MQTT-сервер для мастер-клапана"}
-                    ), 400
-            if "master_mode" in updates and updates["master_mode"] not in ("NC", "NO"):
-                return jsonify({"success": False, "message": "master_mode должен быть NC или NO"}), 400
-            if "pressure_unit" in updates:
-                if str(updates["pressure_unit"]).lower() not in ("bar", "kpa", "psi"):
-                    return jsonify({"success": False, "message": "pressure_unit должен быть bar|kPa|psi"}), 400
-        except (ConnectionError, TimeoutError, OSError) as e:
-            logger.debug("Handled exception in line_97: %s", e)
-        # Master-valve MQTT wiring changed → the SSE hub must resubscribe,
-        # otherwise it keeps listening on the old topic until service restart.
-        _mv_wiring = ("use_master_valve", "master_mqtt_topic", "master_mqtt_server_id")
+            updates[field] = normalise(data.get(field))
+        except (AttributeError, TypeError, ValueError):
+            return jsonify({"success": False, "message": f"Некорректное поле {field}"}), 400
+    if not updates:
+        return jsonify({"success": False, "message": "Нет изменений"}), 400
 
-        def _group_row():
-            return next((g for g in (db.get_groups() or []) if int(g.get("id") or 0) == int(group_id)), None)
+    if updates.get("master_mode", current.get("master_mode")) not in ("NC", "NO"):
+        return jsonify({"success": False, "message": "master_mode должен быть NC или NO"}), 400
+    if str(updates.get("pressure_unit", current.get("pressure_unit") or "bar")).lower() not in (
+        "bar",
+        "kpa",
+        "psi",
+    ):
+        return jsonify({"success": False, "message": "pressure_unit должен быть bar|kPa|psi"}), 400
 
-        prev_g = _group_row() if any(f in updates for f in _mv_wiring) else None
-        ok = db.update_group_fields(group_id, updates)
-        updated = updated or ok
-        if ok and prev_g:
-            new_g = _group_row() or {}
-            if any(new_g.get(f) != prev_g.get(f) for f in _mv_wiring):
-                _sse_hub.reload_hub()
-    if updated:
-        try:
-            payload = {"group": group_id}
-            if "name" in data:
-                payload["name"] = data["name"]
-            if "use_rain_sensor" in data:
-                payload["use_rain_sensor"] = bool(data.get("use_rain_sensor"))
-            for k in (
-                "use_master_valve",
-                "master_mqtt_topic",
-                "master_mode",
-                "master_mqtt_server_id",
-                "use_pressure_sensor",
-                "pressure_mqtt_topic",
-                "pressure_unit",
-                "pressure_mqtt_server_id",
-                "use_water_meter",
-                "water_mqtt_topic",
-                "water_mqtt_server_id",
-                "water_pulse_size",
-                "water_base_value_m3",
-                "water_base_pulses",
-                "master_close_delay_sec",
-            ):
-                if k in data:
-                    payload[k] = data.get(k)
-            db.add_log("group_edit", json.dumps(payload))
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-            logger.debug("Handled exception in line_115: %s", e)
-        return jsonify({"success": True})
-    return ("Group not found", 404)
+    for server_field in (
+        "master_mqtt_server_id",
+        "pressure_mqtt_server_id",
+        "water_mqtt_server_id",
+    ):
+        server_id = updates.get(server_field) if server_field in updates else current.get(server_field)
+        if server_field in updates and server_id is not None and not db.get_mqtt_server(int(server_id)):
+            return jsonify({"success": False, "message": f"{server_field}: MQTT-сервер не найден"}), 400
+
+    final_use_master = int(updates.get("use_master_valve", current.get("use_master_valve") or 0)) == 1
+    if final_use_master:
+        final_topic = updates.get("master_mqtt_topic", current.get("master_mqtt_topic"))
+        final_server_id = updates.get("master_mqtt_server_id", current.get("master_mqtt_server_id"))
+        if not (final_topic or "").strip():
+            return jsonify({"success": False, "message": "Нужен MQTT-топик мастер-клапана"}), 400
+        if not final_server_id or not db.get_mqtt_server(int(final_server_id)):
+            return jsonify({"success": False, "message": "Нужен корректный MQTT-сервер для мастер-клапана"}), 400
+
+    master_topology_changed = any(
+        field in updates and updates[field] != current.get(field) for field in _MASTER_TOPOLOGY_FIELDS
+    )
+    if master_topology_changed:
+        group_zones = db.get_zones_by_group(int(group_id)) or []
+        if any(not _zone_is_physically_safe(zone) for zone in group_zones):
+            return jsonify(
+                {"success": False, "message": "Топологию master valve нельзя менять до подтверждённого OFF"}
+            ), 409
+        closed, close_error = _close_observed_open_master(current)
+        if not closed:
+            return jsonify({"success": False, "message": close_error}), 409
+
+    if not db.update_group_config(int(group_id), updates):
+        return jsonify({"success": False, "message": "Не удалось обновить группу"}), 400
+
+    _reconfigure_water_monitor()
+    if master_topology_changed:
+        _sse_hub.reload_hub()
+    try:
+        db.add_log("group_edit", json.dumps({"group": group_id, **updates}))
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.debug("group edit log failed: %s", e)
+    return jsonify({"success": True})
 
 
 @groups_api_bp.route("/api/groups", methods=["POST"])
@@ -164,19 +324,40 @@ def api_create_group():
     group = db.create_group(name)
     if group:
         db.add_log("group_create", json.dumps({"group": group["id"], "name": name}))
+        _reconfigure_water_monitor()
         return jsonify(group), 201
     return jsonify({"success": False, "message": "Не удалось создать группу"}), 400
 
 
 @groups_api_bp.route("/api/groups/<int:group_id>", methods=["DELETE"])
 @audit_log("group_delete", target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
+@_serialize_group_hardware_mutation(always=True)
 def api_delete_group(group_id):
+    group = _get_group(group_id)
+    if not group:
+        return jsonify({"success": False, "message": "Группа не найдена"}), 404
+    if int(group_id) == 999:
+        # Preserve the existing group-999 API contract while performing the
+        # new topology checks for ordinary groups.
+        return jsonify(
+            {"success": False, "message": "Нельзя удалить группу: переместите или удалите зоны этой группы"}
+        ), 400
+    if db.get_zones_by_group(int(group_id)):
+        return jsonify(
+            {"success": False, "message": "Нельзя удалить группу: переместите или удалите зоны этой группы"}
+        ), 400
+    closed, close_error = _close_observed_open_master(group)
+    if not closed:
+        return jsonify({"success": False, "message": close_error}), 409
     if db.delete_group(group_id):
         db.add_log("group_delete", json.dumps({"group": group_id}))
+        _reconfigure_water_monitor()
+        if _master_identity(group) is not None:
+            _sse_hub.reload_hub()
         return ("", 204)
     return jsonify(
         {"success": False, "message": "Нельзя удалить группу: переместите или удалите зоны этой группы"}
-    ), 400
+    ), 409
 
 
 @groups_api_bp.route("/api/groups/<int:group_id>/stop", methods=["POST"])
@@ -187,9 +368,42 @@ def api_stop_group(group_id):
         try:
             from services.zone_control import stop_all_in_group as _stop_all
 
-            _stop_all(int(group_id), reason="group_stop", force=True)
-        except ImportError:
+            stop_result = _stop_all(int(group_id), reason="group_stop", force=True)
+        except Exception:
             logger.exception("group stop: stop_all_in_group failed")
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не удалось подтвердить остановку всех зон группы",
+                    "stopped": [],
+                    "unresolved": [],
+                }
+            ), 503
+
+        # Newer zone-control implementations return a confirmation aggregate.
+        # ``None`` remains accepted while older callers/branches are rolling
+        # forward, but a reported unresolved OFF is always fail-closed: the
+        # scheduler's recovery/hard-stop jobs must remain alive so they can
+        # continue trying to make the hardware safe.
+        if isinstance(stop_result, dict):
+            stopped = stop_result.get("stopped")
+            unresolved = stop_result.get("unresolved")
+            stopped = stopped if isinstance(stopped, list) else []
+            unresolved = unresolved if isinstance(unresolved, list) else []
+            if stop_result.get("success") is not True or unresolved:
+                logger.error(
+                    "group stop remains unresolved: group_id=%s unresolved=%s",
+                    group_id,
+                    unresolved,
+                )
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Не все зоны подтвердили состояние OFF",
+                        "stopped": stopped,
+                        "unresolved": unresolved,
+                    }
+                ), 503
 
         scheduler = get_scheduler()
         if scheduler:
@@ -216,23 +430,9 @@ def api_stop_group(group_id):
             except (sqlite3.Error, OSError) as e:
                 logger.debug("Handled exception in api_stop_group: %s", e)
 
-        try:
-            programs = db.get_programs() or []
-            now = datetime.now()
-            today = now.strftime("%Y-%m-%d")
-            for p in programs:
-                try:
-                    if now.weekday() not in (p.get("days") or []):
-                        continue
-                    hh, mm = map(int, str(p.get("time") or "00:00").split(":", 1))
-                    start_today = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                    if start_today <= now:
-                        db.cancel_program_run_for_group(int(p.get("id")), today, int(group_id))
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Exception in api_stop_group: %s", e)
-                    continue
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("Handled exception in line_173: %s", e)
+        # The scheduler cancellation above terminates only the active group
+        # session. Do not write a day-wide program cancellation here: it would
+        # also suppress later ``extra_times`` slots that the user did not stop.
         try:
             db.reschedule_group_to_next_program(group_id)
         except (sqlite3.Error, OSError) as e:
@@ -433,6 +633,13 @@ def api_start_zone_exclusive(group_id, zone_id):
             return jsonify(
                 {"success": False, "message": "Аварийная остановка активна. Сначала отключите аварийный режим."}
             ), 400
+        if not _get_group(int(group_id)):
+            return jsonify({"success": False, "message": "Группа не найдена"}), 404
+        zone = db.get_zone(int(zone_id))
+        if not zone:
+            return jsonify({"success": False, "message": "Зона не найдена"}), 404
+        if int(zone.get("group_id") or 0) != int(group_id):
+            return jsonify({"success": False, "message": f"Зона {zone_id} не принадлежит группе {group_id}"}), 409
         if not current_app.config.get("TESTING") and _should_throttle_group(int(group_id)):
             return jsonify({"success": True, "message": "Группа уже обрабатывается"})
         try:
@@ -462,11 +669,15 @@ def api_start_zone_exclusive(group_id, zone_id):
         f"group:{kw.get('group_id', a[0] if a else '?')}:{kw.get('action', a[1] if len(a) > 1 else '?')}"
     ),
 )
+@_serialize_group_hardware_mutation(always=True)
 def api_master_valve_toggle(group_id, action):
     try:
-        if current_app.config.get("EMERGENCY_STOP") and str(action).lower() == "open":
+        action = str(action).strip().lower()
+        if action not in {"open", "close"}:
+            return jsonify({"success": False, "message": "action должен быть open или close"}), 400
+        if current_app.config.get("EMERGENCY_STOP") and action == "open":
             return jsonify({"success": False, "message": "Аварийная остановка активна"}), 400
-        g = next((x for x in (db.get_groups() or []) if int(x.get("id")) == int(group_id)), None)
+        g = _get_group(group_id)
         if not g:
             return jsonify({"success": False, "message": "Группа не найдена"}), 404
         try:
@@ -483,83 +694,38 @@ def api_master_valve_toggle(group_id, action):
         if not server:
             return jsonify({"success": False, "message": "MQTT сервер не найден"}), 400
         mode = (g.get("master_mode") or "NC").upper().strip()
-        want_open = str(action).lower() == "open"
-        if not want_open:
-            try:
-                t_norm = normalize_topic(topic)
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("Exception in api_master_valve_toggle: %s", e)
-                t_norm = topic if topic.startswith("/") else "/" + str(topic)
-            try:
-                related_group_ids = []
-                for gg in db.get_groups() or []:
-                    try:
-                        if int(gg.get("use_master_valve") or 0) != 1:
-                            continue
-                    except (ValueError, TypeError, KeyError) as e:
-                        logger.debug("Exception in line_317: %s", e)
-                        continue
-                    t2 = (gg.get("master_mqtt_topic") or "").strip()
-                    if not t2:
-                        continue
-                    if normalize_topic(t2) == t_norm:
-                        related_group_ids.append(int(gg.get("id")))
-                if related_group_ids:
-                    for gid2 in related_group_ids:
-                        try:
-                            for z in db.get_zones_by_group(int(gid2)) or []:
-                                if str(z.get("state") or "").lower() == "on":
-                                    return jsonify(
-                                        {
-                                            "success": False,
-                                            "message": "Нельзя закрыть мастер-клапан: в одной из связанных групп идёт полив",
-                                        }
-                                    ), 400
-                        except (sqlite3.Error, OSError) as e:
-                            logger.debug("Handled exception in line_331: %s", e)
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.debug("Exception in line_333: %s", e)
-                return jsonify(
-                    {"success": False, "message": "Нельзя закрыть мастер-клапан: проверка состояния групп не выполнена"}
-                ), 400
+        want_open = action == "open"
+        if not want_open and _master_has_unsafe_zone(g):
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Нельзя закрыть мастер-клапан: связанная зона не подтверждена как OFF",
+                }
+            ), 409
         val = ("0" if want_open else "1") if mode == "NO" else ("1" if want_open else "0")
         try:
             normalized_topic = normalize_topic(topic)
-            if want_open:
-                # A zone stop may have armed a delayed master close for this
-                # shared topic.  Serialize with the close callback and disarm
-                # it before publishing OPEN so a successful manual command
-                # remains authoritative.
-                from services.zone_control import cancel_pending_master_close, master_topic_lock
-
-                with master_topic_lock(normalized_topic):
-                    cancel_pending_master_close(normalized_topic)
-                    ok = _publish_mqtt_value(
-                        server,
-                        normalized_topic,
-                        val,
-                        min_interval_sec=0.0,
-                        qos=2,
-                        retain=True,
-                    )
-            else:
-                ok = _publish_mqtt_value(
-                    server,
-                    normalized_topic,
-                    val,
-                    min_interval_sec=0.0,
-                    qos=2,
-                    retain=True,
-                )
-        except (ConnectionError, ImportError, TimeoutError, OSError):
+            ok, blocked = _master_command_locked(
+                int(server_id),
+                normalized_topic,
+                server,
+                val,
+                close_guard=None if want_open else g,
+            )
+        except (ConnectionError, ImportError, RuntimeError, TimeoutError, OSError, TypeError, ValueError):
             logger.exception("master valve publish failed")
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
+        if blocked:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Нельзя закрыть мастер-клапан: связанная зона запускается или физически не OFF",
+                }
+            ), 409
         # Issue #38: publish_mqtt_value returns False if the base topic or
         # '/on' companion delivery is not confirmed. Don't lie to the UI/DB.
         if not ok:
-            logger.warning(
-                "master valve publish returned False — gid=%s action=%s", group_id, action
-            )
+            logger.warning("master valve publish returned False — gid=%s action=%s", group_id, action)
             return jsonify({"success": False, "message": "Не удалось отправить команду"}), 500
         try:
             db.update_group_fields(int(group_id), {"master_valve_observed": ("open" if want_open else "closed")})
