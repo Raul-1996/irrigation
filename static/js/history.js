@@ -19,6 +19,7 @@
     zonesCache: [],
     groupsCache: [],
     chart: null,
+    refreshGeneration: 0,
   };
 
   // ---------- DOM helpers ----------
@@ -38,6 +39,7 @@
   }
 
   function close() {
+    state.refreshGeneration += 1;
     var ov = $('historyOverlay');
     if (ov) ov.hidden = true;
     document.body.style.overflow = '';
@@ -180,11 +182,19 @@
 
   // ---------- Refresh: fetch + render ----------
   function refresh() {
+    var generation = ++state.refreshGeneration;
     var url = buildJsonUrl();
     fetch(url, { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (data) {
+          if (!r.ok || !data || data.success === false) {
+            throw new Error((data && (data.message || data.error)) || ('HTTP ' + r.status));
+          }
+          return data;
+        });
+      })
       .then(function (data) {
-        if (!data || !data.success) { console.warn('history fetch failed', data); return; }
+        if (generation !== state.refreshGeneration) return;
         state.lastData = data;
         renderSummary();
         renderChart();
@@ -193,7 +203,12 @@
         renderFooter();
         renderTitle();
       })
-      .catch(function (err) { console.warn('history fetch error', err); });
+      .catch(function (err) {
+        if (generation !== state.refreshGeneration) return;
+        console.warn('history fetch error', err);
+        var box = $('historyRunsList');
+        if (box) box.innerHTML = '<div class="history-runs__empty">Ошибка загрузки истории: ' + safeText(err.message || 'сеть') + '</div>';
+      });
   }
 
   function buildJsonUrl() {
@@ -369,6 +384,19 @@
   }
 
   // ---------- Runs list (grouped by day, desc) ----------
+  function summarizeActualRuns(runs) {
+    return (Array.isArray(runs) ? runs : []).reduce(function (total, run) {
+      // The backend owns accounting policy. In particular, an unconfirmed
+      // aborted run stays visible in the list but must not inflate actual
+      // minutes or run counts.
+      if (!run || run.counts_as_actual !== true) return total;
+      var minutes = Number(run.duration_min);
+      total.count += 1;
+      if (Number.isFinite(minutes)) total.minutes += minutes;
+      return total;
+    }, { count: 0, minutes: 0 });
+  }
+
   function renderRuns() {
     var d = state.lastData; if (!d) return;
     var box = $('historyRunsList'); if (!box) return;
@@ -388,15 +416,9 @@
     var html = '';
     dates.forEach(function (date) {
       var dayRuns = groups[date];
-      var dayMin = 0;
-      var dayCount = 0;
-      dayRuns.forEach(function (r) {
-        // Exclude phantom waterings (status='failed') from the day totals —
-        // they remain visible as rows below, but don't inflate minutes/count.
-        if (r.status === 'failed') return;
-        dayMin += (r.duration_min || 0);
-        dayCount += 1;
-      });
+      var actual = summarizeActualRuns(dayRuns);
+      var dayMin = actual.minutes;
+      var dayCount = actual.count;
       var headExtra = dayCount > 1
         ? ' · ' + dayCount + ' запуска · ' + dayMin + ' мин'
         : '';

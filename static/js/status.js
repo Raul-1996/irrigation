@@ -51,6 +51,9 @@
     let envProbeAttempts = 0;
     let envProbeExhausted = false;
     let zonesDataRevision = 0;
+    let statusRequestGeneration = 0;
+    let zonesRequestGeneration = 0;
+    const connectionErrorFeeds = new Set();
     const pendingZoneStates = Object.create(null);
 
     function assertJsonResponse(response) {
@@ -60,6 +63,11 @@
 
     function optimisticTimestamp(timestamp) {
         return new Date(timestamp === undefined ? Date.now() : timestamp).toISOString();
+    }
+
+    function invalidateLiveDataRequests() {
+        statusRequestGeneration += 1;
+        zonesRequestGeneration += 1;
     }
 
     function rememberOptimisticZoneState(zone, state, wateringStart, plannedEnd) {
@@ -143,18 +151,29 @@
     }
     
     async function loadStatusData() {
+        var requestGeneration = ++statusRequestGeneration;
         try {
-            statusData = await api.get('/api/status');
+            var nextStatus = await fetch('/api/status?ts=' + Date.now(), { cache: 'no-store' })
+                .then(assertJsonResponse);
+            if (requestGeneration !== statusRequestGeneration) return false;
+            if (!nextStatus || typeof nextStatus !== 'object' || !Array.isArray(nextStatus.groups)) {
+                throw new Error('Invalid status response');
+            }
+            statusData = nextStatus;
             updateStatusDisplay();
-            hideConnectionError();
+            hideConnectionError('status');
             updateMqttWarnings();
+            return true;
         } catch (error) {
+            if (requestGeneration !== statusRequestGeneration) return false;
             console.error('Ошибка загрузки статуса:', error);
-            showConnectionError();
+            showConnectionError('status');
+            return false;
         }
     }
     
     async function loadZonesData() {
+        var requestGeneration = ++zonesRequestGeneration;
         var requestRevision = zonesDataRevision;
         try {
             // Fetch zones + groups in PARALLEL
@@ -166,6 +185,7 @@
                 promises.push(fetch('/api/groups').then(assertJsonResponse));
             }
             var results = await Promise.all(promises);
+            if (requestGeneration !== zonesRequestGeneration) return false;
             if (requestRevision !== zonesDataRevision) return false;
             if (!Array.isArray(results[0])) throw new Error('Invalid zones response');
             var prevNW = {};
@@ -189,6 +209,10 @@
                         body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
                     });
                     var nwData = await nwResp.json();
+                    if (!nwResp.ok || !nwData || nwData.success === false) {
+                        throw new Error((nwData && (nwData.message || nwData.error)) || 'Next watering unavailable');
+                    }
+                    if (requestGeneration !== zonesRequestGeneration) return;
                     var nwMap = {};
                     (nwData.items || []).forEach(function(it) {
                         nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
@@ -209,39 +233,88 @@
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
             try { updateWaterMeter(zonesData); } catch(e) {}
 
-            hideConnectionError();
+            hideConnectionError('zones');
             return true;
         } catch (error) {
+            if (requestGeneration !== zonesRequestGeneration) return false;
             console.error('Ошибка загрузки зон:', error);
-            showConnectionError();
+            showConnectionError('zones');
             return false;
         }
     }
 
-    function showConnectionError() {
-        if (!connectionError) {
-            connectionError = true;
-            document.getElementById('connection-status').classList.add('show');
-        }
+    function showConnectionError(feed) {
+        connectionErrorFeeds.add(feed || 'unknown');
+        connectionError = connectionErrorFeeds.size > 0;
+        var el = document.getElementById('connection-status');
+        if (!el) return;
+        var labels = { status: 'статус', zones: 'зоны', unknown: 'сервер' };
+        var failed = Array.from(connectionErrorFeeds).map(function(name) { return labels[name] || name; });
+        el.textContent = '⚠️ Нет связи: ' + failed.join(', ') + '. Проверьте подключение.';
+        el.classList.add('show');
     }
     
-    function hideConnectionError() {
-        if (connectionError) {
-            connectionError = false;
-            document.getElementById('connection-status').classList.remove('show');
+    function hideConnectionError(feed) {
+        if (feed) connectionErrorFeeds.delete(feed);
+        else connectionErrorFeeds.clear();
+        connectionError = connectionErrorFeeds.size > 0;
+        var el = document.getElementById('connection-status');
+        if (!el) return;
+        if (!connectionError) {
+            el.classList.remove('show');
+            return;
         }
+        var labels = { status: 'статус', zones: 'зоны', unknown: 'сервер' };
+        var failed = Array.from(connectionErrorFeeds).map(function(name) { return labels[name] || name; });
+        el.textContent = '⚠️ Нет связи: ' + failed.join(', ') + '. Проверьте подключение.';
+    }
+
+    function deriveMqttWarningState(data) {
+        data = data && typeof data === 'object' ? data : {};
+        const serverCount = Number(data.mqtt_servers_count || 0);
+        const enabledCount = Number(data.mqtt_enabled_count || 0);
+        const health = data.mqtt_health && typeof data.mqtt_health === 'object'
+            ? String(data.mqtt_health.status || '').trim().toLowerCase()
+            : '';
+        const noServers = !Number.isFinite(serverCount) || serverCount <= 0;
+        const hasEnabledServers = Number.isFinite(enabledCount) && enabledCount > 0;
+        const problemStates = new Set(['degraded', 'down', 'unhealthy', 'error', 'failed', 'critical', 'disconnected']);
+        let connectionProblem = false;
+
+        if (!noServers && hasEnabledServers) {
+            if (health) {
+                // "disabled" and "unknown" are explicitly not proof of a
+                // broker disconnect.  Only an authoritative unhealthy state
+                // may trigger the red connection warning.
+                connectionProblem = problemStates.has(health);
+            } else {
+                // Compatibility with older /api/status responses that did not
+                // expose mqtt_health yet.
+                connectionProblem = data.mqtt_connected === false;
+            }
+        }
+
+        return {
+            noServers: noServers,
+            connectionProblem: connectionProblem,
+            degraded: health === 'degraded',
+        };
     }
 
     function updateMqttWarnings() {
         try {
-            const noServers = !statusData || !Number(statusData.mqtt_servers_count || 0);
-            const notConnected = !noServers && (statusData && statusData.mqtt_connected === false);
+            const warningState = deriveMqttWarningState(statusData);
             const elNoServers = document.getElementById('mqtt-no-servers');
             const elNoConn = document.getElementById('mqtt-no-connection');
-            if (noServers && !mqttNoServers) { mqttNoServers = true; elNoServers.classList.add('show'); }
-            if (!noServers && mqttNoServers) { mqttNoServers = false; elNoServers.classList.remove('show'); }
-            if (notConnected && !mqttNoConnection) { mqttNoConnection = true; elNoConn.classList.add('show'); }
-            if (!notConnected && mqttNoConnection) { mqttNoConnection = false; elNoConn.classList.remove('show'); }
+            mqttNoServers = warningState.noServers;
+            mqttNoConnection = warningState.connectionProblem;
+            if (elNoServers) elNoServers.classList.toggle('show', mqttNoServers);
+            if (elNoConn) {
+                elNoConn.textContent = warningState.degraded
+                    ? '⚠️ MQTT работает нестабильно. Проверьте подключение.'
+                    : '⚠️ Нет связи с MQTT сервером. Проверьте подключение.';
+                elNoConn.classList.toggle('show', mqttNoConnection);
+            }
         } catch (e) {}
     }
     
@@ -864,7 +937,7 @@
     
     async function emergencyStop() {
         if (!confirm('Аварийная остановка всех зон?')) return;
-        
+        invalidateLiveDataRequests();
         try {
             const res = await fetch('/api/emergency-stop', { method: 'POST' });
             const data = await res.json();
@@ -882,6 +955,7 @@
     }
 
     async function resumeSchedule() {
+        invalidateLiveDataRequests();
         try {
             const res = await fetch('/api/emergency-resume', { method: 'POST' });
             const data = await res.json();
@@ -2139,6 +2213,8 @@
         _runPopupAllGroups = false;
         _runPopupSelectedZones = selectedZones;
         runPopupDur = 15;
+        runPopupMode = 'min';
+        runPopupPct = null;
         document.getElementById('runPopupTitle').textContent =
             '▶ Выбранные зоны (' + selectedZones.length + ')';
         // Hide "📋 С настройками зон" — defaults path is group-wide, ambiguous for subset.
@@ -2146,6 +2222,7 @@
         if (defBtn) defBtn.style.display = 'none';
         if (typeof initDialTicks === 'function') initDialTicks();
         if (typeof updateDial === 'function') updateDial();
+        _refreshRunPopupModeUI();
         document.getElementById('runPopupOverlay').classList.add('show');
         document.getElementById('runPopup').classList.add('show');
         if (typeof initDialDrag === 'function') setTimeout(initDialDrag, 100);

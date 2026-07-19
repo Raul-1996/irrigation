@@ -95,8 +95,9 @@
 {% endblock %}
 
 {% block extra_js %}
-<script>
+  <script>
   let statusPollTimer = null;
+  let activeMqttServerIds = new Set();
 
   function mqttErrorMessage(response, fallback) {
     if (response && typeof response === 'object') {
@@ -117,31 +118,85 @@
     return port;
   }
 
+  async function refreshActiveMqttServerIds(servers) {
+    try {
+      const [zonesResponse, groupsResponse, statusResponse] = await Promise.all([
+        fetch('/api/zones', {cache: 'no-store'}),
+        fetch('/api/groups', {cache: 'no-store'}),
+        fetch('/api/status?ts=' + Date.now(), {cache: 'no-store'})
+      ]);
+      if (!zonesResponse.ok || !groupsResponse.ok || !statusResponse.ok) throw new Error('status unavailable');
+      const [zones, groups, status] = await Promise.all([
+        zonesResponse.json(), groupsResponse.json(), statusResponse.json()
+      ]);
+      if (!Array.isArray(zones) || !Array.isArray(groups) || !status || !Array.isArray(status.groups)) {
+        throw new Error('invalid status payload');
+      }
+      const activeIds = new Set();
+      zones.filter(zone => {
+        const state = String(zone.state || '').toLowerCase();
+        return state !== '' && state !== 'off';
+      }).forEach(zone => {
+        if (zone.mqtt_server_id != null) activeIds.add(Number(zone.mqtt_server_id));
+      });
+      const activeGroupIds = new Set(status.groups
+        .filter(group => group.status === 'watering' || String(group.master_valve_state || '').toLowerCase() === 'open')
+        .map(group => Number(group.id)));
+      groups.filter(group => activeGroupIds.has(Number(group.id))).forEach(group => {
+        ['master_mqtt_server_id', 'pressure_mqtt_server_id', 'water_mqtt_server_id'].forEach(field => {
+          if (group[field] != null) activeIds.add(Number(group[field]));
+        });
+      });
+      activeMqttServerIds = activeIds;
+      return activeIds;
+    } catch (_) {
+      // Fail closed in the UI if authoritative activity cannot be checked.
+      activeMqttServerIds = new Set((servers || []).map(server => Number(server.id)));
+      showNotification('Не удалось проверить активный полив; изменение MQTT серверов временно заблокировано', 'warning');
+      return activeMqttServerIds;
+    }
+  }
+
+  async function mqttServerIsActive(id) {
+    const currentServers = Array.from(document.querySelectorAll('#servers_body .status-dot')).map(dot => ({
+      id: Number(dot.getAttribute('data-id'))
+    }));
+    const activeIds = await refreshActiveMqttServerIds(currentServers);
+    return activeIds.has(Number(id));
+  }
+
   async function loadServers() {
     try {
       const res = await api.get('/api/mqtt/servers');
+      if (!res || res.success === false || !Array.isArray(res.servers)) {
+        throw new Error(mqttErrorMessage(res, 'Некорректный ответ MQTT серверов'));
+      }
+      await refreshActiveMqttServerIds(res.servers);
       const tbody = document.getElementById('servers_body');
       tbody.innerHTML = '';
       (res.servers || []).forEach(s => {
         const tr = document.createElement('tr');
+        const hardwareLocked = activeMqttServerIds.has(Number(s.id));
+        const disabled = hardwareLocked ? 'disabled' : '';
+        const title = hardwareLocked ? 'Остановите активный полив перед изменением MQTT сервера' : '';
         tr.innerHTML = `
           <td><span class="status-dot bad" data-id="${s.id}" title="offline"></span><span class="server-id">${s.id}</span></td>
-          <td><input value="${escapeHtml(s.name || '')}" oninput="this.dataset.v=this.value"></td>
-          <td><input value="${escapeHtml(s.host || '')}" oninput="this.dataset.v=this.value"></td>
-          <td><input type="number" value="${s.port || 1883}" min="1" max="65535" step="1" oninput="this.dataset.v=this.value"></td>
-          <td><input value="${escapeHtml(s.username || '')}" oninput="this.dataset.v=this.value"></td>
-          <td><input value="${escapeHtml(s.client_id || '')}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.name || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.host || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
+          <td><input type="number" value="${s.port || 1883}" ${disabled} title="${title}" min="1" max="65535" step="1" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.username || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
+          <td><input value="${escapeHtml(s.client_id || '')}" ${disabled} title="${title}" oninput="this.dataset.v=this.value"></td>
           <td>
-            <select oninput="this.dataset.v=this.value">
+            <select ${disabled} title="${title}" oninput="this.dataset.v=this.value">
               <option value="true" ${s.enabled ? 'selected' : ''}>Да</option>
               <option value="false" ${!s.enabled ? 'selected' : ''}>Нет</option>
             </select>
           </td>
           <td>
-            <button class="btn btn-primary" onclick="updateRow(this, ${s.id})"
+            <button class="btn btn-primary" ${disabled} title="${title}" onclick="updateRow(this, ${s.id})"
                     data-audit-action="mqtt_server_update_click"
                     data-audit-target="mqtt:${s.id}">Сохранить</button>
-            <button class="btn btn-danger" onclick="deleteServer(${s.id})"
+            <button class="btn btn-danger" ${disabled} title="${title}" onclick="deleteServer(${s.id})"
                     data-audit-action="mqtt_server_delete_click"
                     data-audit-target="mqtt:${s.id}">Удалить</button>
           </td>
@@ -189,6 +244,10 @@
   }
 
   async function updateRow(btn, id) {
+    if (await mqttServerIsActive(id)) {
+      showNotification('Остановите активный полив перед изменением MQTT сервера', 'warning');
+      return;
+    }
     const tds = btn.closest('tr').querySelectorAll('td');
     const [_, name, host, port, username, client_id, enabledCell] = tds;
     const portInput = port.querySelector('input');
@@ -216,14 +275,19 @@
   }
 
   async function deleteServer(id) {
+    if (await mqttServerIsActive(id)) {
+      showNotification('Остановите активный полив перед удалением MQTT сервера', 'warning');
+      return;
+    }
     if (!confirm('Удалить сервер?')) return;
     try {
       const resp = await fetch(`/api/mqtt/servers/${id}`, { method: 'DELETE' });
-      if (resp.status === 204) {
+      const result = resp.status === 204 ? null : await resp.json().catch(() => null);
+      if (resp.ok && !(result && result.success === false)) {
         showNotification('Сервер удалён', 'success');
         loadServers();
       } else {
-        showNotification('Не удалось удалить сервер', 'error');
+        showNotification(mqttErrorMessage(result, `Не удалось удалить сервер (HTTP ${resp.status})`), 'error');
       }
     } catch (e) {
       showNotification('Ошибка удаления сервера', 'error');
@@ -265,7 +329,12 @@
   let subscribed = false;
   let scanning = false;
   let scanTimer = null;
-  let lastTopicMap = {}; // topic -> last payload
+  const MAX_TOPIC_COUNT = 5000;
+  const MAX_TOPIC_BYTES = 2 * 1024 * 1024;
+  const MAX_TOPIC_DEPTH = 64;
+  const MAX_LOG_CHARS = 200000;
+  let lastTopicMap = new Map(); // prototype-safe topic -> last payload
+  let topicStateBytes = 0;
   let expandedPaths = new Set(); // 'devices/wb-.../controls'
   let sseSource = null; // EventSource
   let rebuildTimer = null;
@@ -298,6 +367,7 @@
   }
 
   function onServerChange(){
+    resetTopicState();
     updateSelectedBadge();
     if (subscribed) startPolling();
   }
@@ -311,13 +381,61 @@
   function clearBrowser(){
     const log = document.getElementById('topicLog');
     log.textContent = '';
+    resetTopicState();
   }
 
   function appendLog(line){
     const log = document.getElementById('topicLog');
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
     log.textContent += (line + '\n\n');
+    if (log.textContent.length > MAX_LOG_CHARS) {
+      log.textContent = log.textContent.slice(-MAX_LOG_CHARS);
+    }
     if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  function topicEntryBytes(topic, payload) {
+    const text = String(topic) + '\u0000' + String(payload == null ? '' : payload);
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).byteLength;
+    return text.length * 2;
+  }
+
+  function resetTopicState(reason) {
+    lastTopicMap.clear();
+    topicStateBytes = 0;
+    pendingCount = 0;
+    expandedPaths.clear();
+    if (rebuildTimer) {
+      clearTimeout(rebuildTimer);
+      rebuildTimer = null;
+    }
+    const tree = document.getElementById('topicTree');
+    if (tree) tree.textContent = '—';
+    if (reason) appendLog(`% ${reason}`);
+  }
+
+  function storeTopicValue(topic, payload) {
+    const normalizedTopic = String(topic || '');
+    const normalizedPayload = String(payload == null ? '' : payload);
+    if (normalizedTopic.split('/').filter(Boolean).length > MAX_TOPIC_DEPTH) {
+      appendLog('% MQTT топик слишком глубоко вложен и пропущен');
+      return false;
+    }
+    const previous = lastTopicMap.get(normalizedTopic);
+    let previousBytes = previous === undefined ? 0 : topicEntryBytes(normalizedTopic, previous);
+    const nextBytes = topicEntryBytes(normalizedTopic, normalizedPayload);
+    const nextCount = lastTopicMap.has(normalizedTopic) ? lastTopicMap.size : lastTopicMap.size + 1;
+    if (nextCount > MAX_TOPIC_COUNT || topicStateBytes - previousBytes + nextBytes > MAX_TOPIC_BYTES) {
+      resetTopicState('Лимит браузера топиков достигнут; дерево сброшено');
+      previousBytes = 0;
+    }
+    if (nextBytes > MAX_TOPIC_BYTES) {
+      appendLog('% Сообщение MQTT превышает лимит и пропущено');
+      return false;
+    }
+    lastTopicMap.set(normalizedTopic, normalizedPayload);
+    topicStateBytes = topicStateBytes - previousBytes + nextBytes;
+    return true;
   }
 
   function showConnectLogs(){
@@ -338,14 +456,14 @@
   }
 
   function buildTreeFromTopics(items){
-    const root = {};
+    const root = Object.create(null);
     for (const it of items){
       const parts = (it.topic||'').split('/').filter(Boolean);
       let node = root;
       for (let i=0;i<parts.length;i++){
         const p = parts[i];
-        node.children = node.children || {};
-        node.children[p] = node.children[p] || {};
+        node.children = node.children || Object.create(null);
+        node.children[p] = node.children[p] || Object.create(null);
         if (i === parts.length-1){
           node.children[p].value = it.payload;
         }
@@ -396,7 +514,10 @@
   function toggleScan(){
     scanning = !scanning;
     document.getElementById('scanBtn').textContent = scanning ? 'Остановить сканирование' : 'Сканировать топики';
-    if (scanning) startSSE(); else stopSSE();
+    if (scanning) {
+      resetTopicState();
+      startSSE();
+    } else stopSSE();
   }
 
   function stopScanLoop(){ if (scanTimer){ clearTimeout(scanTimer); scanTimer=null; } }
@@ -419,19 +540,12 @@
         const t = (String(it.topic||''));
         const norm = t.startsWith('/') ? t : ('/' + t);
         if (displayRe.test(norm)){
-          lastTopicMap[norm] = it.payload;
+          if (!storeTopicValue(norm, it.payload)) return;
           pendingCount++;
           if (!rebuildTimer){
             rebuildTimer = setTimeout(()=>{
               rebuildTimer = null;
-              // ограничим память: если более 20k топиков, сбрасываем на devices/*
-              const entries = Object.entries(lastTopicMap);
-              if (entries.length > 20000){
-                const pruned = {};
-                for (const [k,v] of entries){ if (k.startsWith('/devices/')) pruned[k]=v; }
-                lastTopicMap = pruned;
-              }
-              const merged = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
+              const merged = Array.from(lastTopicMap, ([topic,payload])=>({topic,payload}));
               const tree = buildTreeFromTopics(merged);
               const container = document.getElementById('topicTree');
               container.innerHTML='';
@@ -471,9 +585,9 @@
           return {topic: norm, payload: it.payload};
         }).filter(it=> displayRe.test(it.topic));
         // merge into lastTopicMap (сохраняем только нужные ветки)
-        for (const it of items){ lastTopicMap[it.topic]=it.payload; }
+        for (const it of items){ storeTopicValue(it.topic, it.payload); }
         // rebuild tree from map for performance predictability
-        const mergedItems = Object.entries(lastTopicMap).map(([topic,payload])=>({topic,payload}));
+        const mergedItems = Array.from(lastTopicMap, ([topic,payload])=>({topic,payload}));
         const tree = buildTreeFromTopics(mergedItems);
         const container = document.getElementById('topicTree');
         // сохраняем текущее множество раскрытых путей (expandedPaths уже поддерживается caret-ами)

@@ -8,6 +8,18 @@ const urlsToCache = [
     '/static/icons/icon-512.png',
     '/static/icons/icon-512-maskable.png',
 ];
+const MAX_MAP_CACHE_ENTRIES = 8;
+
+async function putBoundedMapResponse(cache, request, response) {
+    if (!response || !response.ok) return;
+    await cache.put(request, response);
+    const mapKeys = (await cache.keys()).filter(key => {
+        const url = new URL(key.url);
+        return url.origin === self.location.origin && url.pathname.startsWith('/static/media/maps/');
+    });
+    const overflow = Math.max(0, mapKeys.length - MAX_MAP_CACHE_ENTRIES);
+    await Promise.all(mapKeys.slice(0, overflow).map(key => cache.delete(key)));
+}
 
 // Install event
 self.addEventListener('install', event => {
@@ -38,6 +50,7 @@ self.addEventListener('fetch', event => {
     const isNavigation = req.mode === 'navigate' || accept.includes('text/html');
     const url = new URL(req.url);
     const isApi = url.pathname.startsWith('/api/');
+    const isMapAsset = url.origin === self.location.origin && url.pathname.startsWith('/static/media/maps/');
     if (isApi) {
         // Network-first for API to avoid stale state after actions (e.g., cancel postpone)
         event.respondWith(
@@ -67,8 +80,11 @@ self.addEventListener('fetch', event => {
             return cacheResp || fetch(req).then(networkResp => {
                 // Cache a copy of non-HTML requests
                 const copy = networkResp.clone();
-                caches.open(CACHE_NAME).then(cache => cache.put(req, copy)).catch(()=>{});
-                return networkResp;
+                const cacheWrite = caches.open(CACHE_NAME).then(cache => {
+                    if (isMapAsset) return putBoundedMapResponse(cache, req, copy);
+                    if (networkResp.ok) return cache.put(req, copy);
+                }).catch(()=>{});
+                return cacheWrite.then(() => networkResp);
             });
         })
     );
