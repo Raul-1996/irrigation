@@ -237,7 +237,8 @@ class TestStartGroupSequence:
     def test_start_group_sequence(self, started_scheduler, test_db):
         test_db.create_zone({"name": "Z1", "duration": 2, "group_id": 1, "topic": "/t/1"})
         test_db.create_zone({"name": "Z2", "duration": 3, "group_id": 1, "topic": "/t/2"})
-        result = started_scheduler.start_group_sequence(1)
+        with patch("services.zone_control.db", test_db):
+            result = started_scheduler.start_group_sequence(1)
         assert result is True
 
     def test_start_group_no_zones(self, started_scheduler, test_db):
@@ -262,7 +263,8 @@ class TestStartGroupSequence:
         group = test_db.create_group("Back-compat sequence group")
         z1 = test_db.create_zone({"name": "BC1", "duration": 4, "group_id": group["id"], "topic": "/t/bc1"})
         test_db.create_zone({"name": "BC2", "duration": 6, "group_id": group["id"], "topic": "/t/bc2"})
-        result = started_scheduler.start_group_sequence(group["id"])
+        with patch("services.zone_control.db", test_db):
+            result = started_scheduler.start_group_sequence(group["id"])
         assert result is True
         # First zone goes ON in TESTING mode (legacy assertion still holds).
         assert test_db.get_zone(z1["id"])["state"] == "on"

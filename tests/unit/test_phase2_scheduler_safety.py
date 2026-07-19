@@ -83,17 +83,23 @@ def test_63_group_start_physically_stops_every_peer_before_planting_sequence(saf
     safety_scheduler.scheduler = MagicMock()
     safety_scheduler.scheduler.get_jobs.return_value = []
     safety_scheduler.scheduler.add_job.side_effect = lambda *args, **kwargs: order.append("sequence") or MagicMock()
+
+    def physical_off(*_args, **_kwargs):
+        order.append("physical-off")
+        test_db.update_zone(selected["id"], {"state": "off"})
+        test_db.update_zone(peer["id"], {"state": "off"})
+        return {
+            "success": True,
+            "group_id": group["id"],
+            "stopped": [selected["id"], peer["id"]],
+            "unresolved": [],
+            "retry_scheduled": False,
+        }
+
     with (
         patch.object(scheduler_module, "TESTING", False),
         patch("services.zone_control.db", test_db),
-        patch(
-            "services.zone_control.stop_all_in_group",
-            side_effect=lambda *a, **k: (
-                order.append("physical-off"),
-                test_db.update_zone(selected["id"], {"state": "off"}),
-                test_db.update_zone(peer["id"], {"state": "off"}),
-            ),
-        ) as stop_all,
+        patch("services.zone_control.stop_all_in_group", side_effect=physical_off) as stop_all,
     ):
         assert safety_scheduler.start_group_sequence(group["id"], zone_ids=[selected["id"]]) is True
 
@@ -102,6 +108,7 @@ def test_63_group_start_physically_stops_every_peer_before_planting_sequence(saf
         reason="group_sequence_restart",
         force=True,
         skip_master_close=True,
+        require_observed_confirmation=True,
     )
     assert order == ["physical-off", "sequence"]
 
@@ -163,7 +170,16 @@ def test_146_stop_during_group_initialization_prevents_late_sequence_job(safety_
         patch.object(scheduler_module, "TESTING", False),
         patch.object(test_db, "get_zones", side_effect=blocking_get_zones),
         patch("services.zone_control.db", test_db),
-        patch("services.zone_control.stop_all_in_group"),
+        patch(
+            "services.zone_control.stop_all_in_group",
+            return_value={
+                "success": True,
+                "group_id": group["id"],
+                "stopped": [zone["id"]],
+                "unresolved": [],
+                "retry_scheduled": False,
+            },
+        ),
     ):
         starter = threading.Thread(
             target=lambda: result.append(safety_scheduler.start_group_sequence(group["id"])), daemon=True
@@ -178,7 +194,10 @@ def test_146_stop_during_group_initialization_prevents_late_sequence_job(safety_
             starter.join(timeout=2)
 
     assert result == [False]
-    safety_scheduler.scheduler.add_job.assert_not_called()
+    assert all(
+        not str(call.kwargs.get("id") or "").startswith(f"group_seq:{group['id']}:")
+        for call in safety_scheduler.scheduler.add_job.call_args_list
+    )
     assert group["id"] not in safety_scheduler.group_cancel_events
     assert test_db.get_zone(zone["id"])["state"] == "off"
 
@@ -227,9 +246,13 @@ def test_66_87_init_stays_paused_until_explicit_boot_completion(test_db):
     try:
         with (
             patch.object(IrrigationScheduler, "start") as start,
-            patch.object(IrrigationScheduler, "cleanup_jobs_on_boot") as cleanup,
-            patch.object(IrrigationScheduler, "stop_on_boot_active_zones") as stop_active,
-            patch.object(IrrigationScheduler, "load_programs") as load,
+            patch.object(IrrigationScheduler, "cleanup_jobs_on_boot", return_value=True) as cleanup,
+            patch.object(
+                IrrigationScheduler,
+                "stop_on_boot_active_zones",
+                return_value=True,
+            ) as stop_active,
+            patch.object(IrrigationScheduler, "load_programs", return_value=True) as load,
             patch.object(IrrigationScheduler, "recover_missed_runs") as recover,
         ):
             sched = scheduler_module.init_scheduler(test_db)
@@ -240,7 +263,7 @@ def test_66_87_init_stays_paused_until_explicit_boot_completion(test_db):
         recover.assert_not_called()
 
         with (
-            patch.object(sched, "recover_missed_runs") as recover_after_sync,
+            patch.object(sched, "recover_missed_runs", return_value=True) as recover_after_sync,
             patch.object(sched.scheduler, "resume") as resume,
         ):
             assert sched.complete_boot_recovery() is True
@@ -252,20 +275,19 @@ def test_66_87_init_stays_paused_until_explicit_boot_completion(test_db):
 
 def test_30_recovery_considers_previous_local_date_when_window_crosses_midnight(safety_scheduler, test_db):
     group = test_db.create_group("midnight")
-    zones = [
-        test_db.create_zone({"name": f"z{i}", "duration": 20, "group_id": group["id"]})
-        for i in range(3)
-    ]
-    _program(test_db, [z["id"] for z in zones], time="23:30", days=[0])
+    zones = [test_db.create_zone({"name": f"z{i}", "duration": 20, "group_id": group["id"]}) for i in range(3)]
+    program = _program(test_db, [z["id"] for z in zones], time="23:30", days=[0])
     safety_scheduler._boot_interrupted_zone_ids = {zones[1]["id"]}
+    safety_scheduler._boot_interrupted_program_zones = {program["id"]: {zones[1]["id"]}}
+    safety_scheduler.start(paused=True)
 
-    with (
-        patch.object(scheduler_module, "datetime", _FixedDateTime),
-        patch.object(safety_scheduler.scheduler, "add_job") as add_job,
-    ):
-        safety_scheduler.recover_missed_runs(require_interrupted_evidence=True)
+    with patch.object(scheduler_module, "datetime", _FixedDateTime):
+        assert safety_scheduler.recover_missed_runs(require_interrupted_evidence=True) is True
 
-    assert add_job.call_args.kwargs["args"][1] == [zones[1]["id"], zones[2]["id"]]
+    intents = safety_scheduler._read_boot_recovery_intents_strict()
+    intent = next(iter(intents.values()))
+    assert intent["program_id"] == program["id"]
+    assert intent["zones"] == [zones[1]["id"], zones[2]["id"]]
 
 
 def test_88_boot_recovery_requires_evidence_of_an_interrupted_active_zone(safety_scheduler, test_db):
@@ -287,11 +309,8 @@ def test_88_boot_recovery_requires_evidence_of_an_interrupted_active_zone(safety
 def test_128_overlapping_extra_window_does_not_recover_from_later_skipped_fire(safety_scheduler, test_db):
     _FixedDateTime.value = datetime(2026, 7, 21, 6, 40)
     group = test_db.create_group("overlap")
-    zones = [
-        test_db.create_zone({"name": f"z{i}", "duration": 20, "group_id": group["id"]})
-        for i in range(3)
-    ]
-    _program(
+    zones = [test_db.create_zone({"name": f"z{i}", "duration": 20, "group_id": group["id"]}) for i in range(3)]
+    program = _program(
         test_db,
         [z["id"] for z in zones],
         time="06:00",
@@ -301,14 +320,14 @@ def test_128_overlapping_extra_window_does_not_recover_from_later_skipped_fire(s
         days=[0, 1],
     )
     safety_scheduler._boot_interrupted_zone_ids = {zones[2]["id"]}
+    safety_scheduler._boot_interrupted_program_zones = {program["id"]: {zones[2]["id"]}}
+    safety_scheduler.start(paused=True)
 
-    with (
-        patch.object(scheduler_module, "datetime", _FixedDateTime),
-        patch.object(safety_scheduler.scheduler, "add_job") as add_job,
-    ):
-        safety_scheduler.recover_missed_runs(require_interrupted_evidence=True)
+    with patch.object(scheduler_module, "datetime", _FixedDateTime):
+        assert safety_scheduler.recover_missed_runs(require_interrupted_evidence=True) is True
 
-    assert add_job.call_args.kwargs["args"][1] == [zones[2]["id"]]
+    intents = safety_scheduler._read_boot_recovery_intents_strict()
+    assert next(iter(intents.values()))["zones"] == [zones[2]["id"]]
 
 
 def test_90_scheduled_start_uses_next_real_weekday_not_today(started_safety_scheduler, test_db):
@@ -395,7 +414,10 @@ def test_110_program_honors_failed_central_start(safety_scheduler, test_db):
     ):
         safety_scheduler._run_program_threaded(110, [zone["id"]], "rejected-program")
 
-    start_zone.assert_called_once_with(zone["id"], source="program")
+    assert start_zone.call_count == 1
+    assert start_zone.call_args.args == (zone["id"],)
+    assert start_zone.call_args.kwargs["source"] == "program"
+    assert callable(start_zone.call_args.kwargs["cancel_guard"])
     hard_stop.assert_not_called()
     assert test_db.get_zone(zone["id"])["state"] == "off"
     assert zone["id"] not in safety_scheduler.active_zones
@@ -405,8 +427,9 @@ def test_110_program_does_not_overwrite_fault_reported_during_central_start(safe
     group = test_db.create_group("program-command-fault")
     zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
 
-    def fault_during_start(zone_id, *, source):
+    def fault_during_start(zone_id, *, source, cancel_guard):
         assert source == "program"
+        assert cancel_guard() is False
         test_db.update_zone(zone_id, {"state": "fault", "commanded_state": "on"})
         return True
 
@@ -458,22 +481,24 @@ def test_110_group_sequence_honors_failed_central_start(safety_scheduler, test_d
     ):
         safety_scheduler._run_group_sequence(group["id"], [zone["id"]])
 
-    start_zone.assert_called_once_with(zone["id"], source="program")
+    assert start_zone.call_count == 1
+    assert start_zone.call_args.args == (zone["id"],)
+    assert start_zone.call_args.kwargs["source"] == "program"
+    assert callable(start_zone.call_args.kwargs["cancel_guard"])
     hard_stop.assert_not_called()
     assert test_db.get_zone(zone["id"])["state"] == "off"
     assert group["id"] not in safety_scheduler.group_cancel_events
 
 
-def test_110_group_sequence_does_not_overwrite_fault_reported_during_start(
-    safety_scheduler, test_db, monkeypatch
-):
+def test_110_group_sequence_does_not_overwrite_fault_reported_during_start(safety_scheduler, test_db, monkeypatch):
     group = test_db.create_group("group-command-fault")
     zone = test_db.create_zone({"name": "off", "duration": 1, "group_id": group["id"]})
     safety_scheduler.group_cancel_events[group["id"]] = threading.Event()
     monkeypatch.setenv("SKIP_TESTING_SHORT_CIRCUIT_FOR_GROUP_SEQ", "1")
 
-    def fault_during_start(zone_id, *, source):
+    def fault_during_start(zone_id, *, source, cancel_guard):
         assert source == "program"
+        assert cancel_guard() is False
         test_db.update_zone(zone_id, {"state": "fault", "commanded_state": "on"})
         return True
 
