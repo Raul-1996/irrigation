@@ -228,11 +228,16 @@ def to_iso_with_tz(s: str | None) -> str | None:
 
 
 def normalize_topic(topic: str | None) -> str:
-    """Ensure MQTT topic starts with a single leading slash.
+    """Return one canonical MQTT *report/base* topic or ``""`` if unsafe.
 
     - Trims whitespace
     - Converts None to empty string
     - Collapses multiple leading slashes to one
+    - Rejects the root topic and every actuator command topic ending ``/on``
+
+    Callers append exactly one ``/on`` when publishing desired state.  Treating
+    an already-suffixed value as a base topic is ambiguous and can make the
+    application subscribe to or publish its own command channel.
     """
     s = str(topic or "").strip()
     if not s:
@@ -246,9 +251,10 @@ def normalize_topic(topic: str | None) -> str:
         s = "/" + s[i:]
     else:
         s = "/" + s
-    # Стрижём управляющий суффикс '/on' — используем только базовый топик
-    if s.endswith("/on"):
-        s = s[:-3]
+    # MQTT wildcards are legal only for subscription filters, never for an
+    # actuator's concrete report/command topic. NUL is invalid in MQTT UTF-8.
+    if s == "/" or s.endswith("/on") or "+" in s or "#" in s or "\x00" in s:
+        return ""
     return s
 
 

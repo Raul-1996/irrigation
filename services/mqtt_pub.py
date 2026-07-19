@@ -1,7 +1,12 @@
+import hashlib
+import hmac
+import json
 import logging
+import secrets
 import threading
 import time
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +33,44 @@ _MQTT_CLIENTS_LOCK = threading.RLock()
 _MQTT_CLIENT_CREATE_LOCKS: dict[int, threading.Lock] = {}
 _MQTT_CLIENT_USERS: dict[int, int] = {}
 _RETIRED_MQTT_CLIENTS: dict[int, tuple[int, object]] = {}
-_TOPIC_LAST_SEND: dict[tuple[int, str], tuple[str, float]] = {}
+_MQTT_CONFIG_FINGERPRINT_KEY = secrets.token_bytes(32)
+_MQTT_CLIENT_GENERATION = 0
+_TOPIC_LAST_SEND: dict[tuple[int, int, str, str], tuple[str, float]] = {}
+_TOPIC_INFLIGHT: dict[tuple[int, int, str, str, str], "_InflightPublish"] = {}
+_MQTT_SERVER_EPOCH: dict[int, int] = {}
 _TOPIC_LOCK = threading.Lock()
-_SERVER_CACHE: dict[int, tuple[dict, float]] = {}
+_SERVER_CACHE: dict[int, tuple[dict, float, int, str]] = {}
 _SERVER_CACHE_LOCK = threading.Lock()
 from constants import MQTT_CACHE_TTL_SEC
 
 _SERVER_CACHE_TTL = float(MQTT_CACHE_TTL_SEC)
+
+
+@dataclass(frozen=True, slots=True)
+class MqttClientSnapshot:
+    """Immutable point-in-time attribution for one cached publisher client."""
+
+    server_id: int
+    client: Any
+    config_fingerprint: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MqttClientProvenance:
+    client: Any
+    config_fingerprint: str
+    generation: int
+    server_epoch: int
+
+
+@dataclass(slots=True)
+class _InflightPublish:
+    completed: threading.Event = field(default_factory=threading.Event)
+    result: bool | None = None
+
+
+_MQTT_CLIENT_PROVENANCE: dict[int, _MqttClientProvenance] = {}
 
 
 def _server_key(server_id: Any) -> int:
@@ -42,6 +78,66 @@ def _server_key(server_id: Any) -> int:
         return int(server_id) if server_id is not None else 0
     except (ValueError, TypeError):
         return 0
+
+
+def _effective_mqtt_config(server: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze exactly the connection settings used to construct a client."""
+    return {
+        "host": str(server.get("host") or "127.0.0.1"),
+        "port": int(server.get("port") or 1883),
+        "username": str(server.get("username") or ""),
+        "password": str(server.get("password") or ""),
+        "client_id": str(server.get("client_id") or ""),
+        "enabled": int(server.get("enabled", 1) or 0) == 1,
+        "tls_enabled": int(server.get("tls_enabled") or 0) == 1,
+        "tls_ca_path": str(server.get("tls_ca_path") or ""),
+        "tls_cert_path": str(server.get("tls_cert_path") or ""),
+        "tls_key_path": str(server.get("tls_key_path") or ""),
+        "tls_insecure": int(server.get("tls_insecure") or 0) == 1,
+        "tls_version": str(server.get("tls_version") or "").upper().strip(),
+    }
+
+
+def _fingerprint_effective_mqtt_config(config: Mapping[str, Any]) -> str:
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return hmac.new(_MQTT_CONFIG_FINGERPRINT_KEY, canonical, hashlib.sha256).hexdigest()
+
+
+def mqtt_server_config_fingerprint(server: Mapping[str, Any]) -> str:
+    """Return an opaque process-local fingerprint of effective connection config.
+
+    A keyed digest lets status code compare current DB configuration with the
+    immutable origin of a cached client without exposing a password digest
+    that could be attacked offline.
+    """
+    return _fingerprint_effective_mqtt_config(_effective_mqtt_config(server))
+
+
+def snapshot_mqtt_clients() -> dict[int, MqttClientSnapshot]:
+    """Return a detached, internally consistent snapshot of publisher clients."""
+    with _MQTT_CLIENTS_LOCK:
+        snapshots: dict[int, MqttClientSnapshot] = {}
+        for sid, client in _MQTT_CLIENTS.items():
+            provenance = _MQTT_CLIENT_PROVENANCE.get(sid)
+            if provenance is None or provenance.client is not client:
+                # Never infer origin from the independently mutable server TTL
+                # cache. A client without matching creation metadata is not
+                # attributable and therefore cannot be reported as current.
+                continue
+            snapshots[sid] = MqttClientSnapshot(
+                server_id=sid,
+                client=client,
+                config_fingerprint=provenance.config_fingerprint,
+                generation=provenance.generation,
+            )
+        return snapshots
+
+
+def _drop_mqtt_client_provenance(sid: int, client: Any | None = None) -> None:
+    """Remove provenance only when it still belongs to ``client``."""
+    provenance = _MQTT_CLIENT_PROVENANCE.get(sid)
+    if provenance is not None and (client is None or provenance.client is client):
+        _MQTT_CLIENT_PROVENANCE.pop(sid, None)
 
 
 def _teardown_mqtt_client(client: Any, sid: int) -> None:
@@ -84,12 +180,31 @@ def _release_mqtt_client(client: Any) -> None:
         _teardown_mqtt_client(retired_client, sid)
 
 
-def _cached_client(sid: int, *, acquire: bool) -> tuple[Any | None, Any | None]:
+def _cached_client(
+    sid: int,
+    *,
+    acquire: bool,
+    expected_epoch: int,
+    expected_fingerprint: str,
+    allow_legacy_provenance: bool,
+) -> tuple[Any | None, Any | None]:
     """Return ``(usable, stale)`` while touching shared state only briefly."""
     with _MQTT_CLIENTS_LOCK:
         client = _MQTT_CLIENTS.get(sid)
         if client is None:
             return None, None
+        provenance = _MQTT_CLIENT_PROVENANCE.get(sid)
+        authority_matches = provenance is not None and (
+            provenance.client is client
+            and provenance.server_epoch == int(expected_epoch)
+            and provenance.config_fingerprint == expected_fingerprint
+        )
+        legacy_unattributed = allow_legacy_provenance and (provenance is None or provenance.client is not client)
+        if not authority_matches and not legacy_unattributed:
+            if _MQTT_CLIENTS.get(sid) is client:
+                _MQTT_CLIENTS.pop(sid, None)
+                _drop_mqtt_client_provenance(sid, client)
+            return None, client
         try:
             connected = not hasattr(client, "is_connected") or bool(client.is_connected())
         except Exception as e:
@@ -98,6 +213,7 @@ def _cached_client(sid: int, *, acquire: bool) -> tuple[Any | None, Any | None]:
         if not connected:
             if _MQTT_CLIENTS.get(sid) is client:
                 _MQTT_CLIENTS.pop(sid, None)
+                _drop_mqtt_client_provenance(sid, client)
             return None, client
         if acquire:
             client_key = id(client)
@@ -105,13 +221,37 @@ def _cached_client(sid: int, *, acquire: bool) -> tuple[Any | None, Any | None]:
         return client, None
 
 
-def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) -> Any | None:
+def get_or_create_mqtt_client(
+    server: dict[str, Any],
+    *,
+    acquire: bool = False,
+    expected_epoch: int | None = None,
+    expected_fingerprint: str | None = None,
+) -> Any | None:
+    global _MQTT_CLIENT_GENERATION
+
     if mqtt is None:
         return None
     sid = _server_key(server.get("id"))
-    client, stale = _cached_client(sid, acquire=acquire)
+    config = _effective_mqtt_config(server)
+    config_fingerprint = _fingerprint_effective_mqtt_config(config)
+    strict_authority = expected_epoch is not None or expected_fingerprint is not None
+    with _MQTT_CLIENTS_LOCK:
+        captured_epoch = _MQTT_SERVER_EPOCH.get(sid, 0) if expected_epoch is None else int(expected_epoch)
+        if _MQTT_SERVER_EPOCH.get(sid, 0) != captured_epoch:
+            return None
+    if expected_fingerprint is not None and expected_fingerprint != config_fingerprint:
+        return None
+
+    client, stale = _cached_client(
+        sid,
+        acquire=acquire,
+        expected_epoch=captured_epoch,
+        expected_fingerprint=config_fingerprint,
+        allow_legacy_provenance=not strict_authority,
+    )
     if stale is not None:
-        logger.warning("MQTT cached client sid=%s disconnected — recreating", sid)
+        logger.warning("MQTT cached client sid=%s stale/disconnected — recreating", sid)
         _retire_mqtt_client(stale, sid)
     if client is not None:
         return client
@@ -122,35 +262,49 @@ def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) 
     with _MQTT_CLIENTS_LOCK:
         create_lock = _MQTT_CLIENT_CREATE_LOCKS.setdefault(sid, threading.Lock())
     with create_lock:
-        client, stale = _cached_client(sid, acquire=acquire)
+        with _MQTT_CLIENTS_LOCK:
+            if _MQTT_SERVER_EPOCH.get(sid, 0) != captured_epoch:
+                return None
+        client, stale = _cached_client(
+            sid,
+            acquire=acquire,
+            expected_epoch=captured_epoch,
+            expected_fingerprint=config_fingerprint,
+            allow_legacy_provenance=not strict_authority,
+        )
         if stale is not None:
-            logger.warning("MQTT cached client sid=%s disconnected — recreating", sid)
+            logger.warning("MQTT cached client sid=%s stale/disconnected — recreating", sid)
             _retire_mqtt_client(stale, sid)
         if client is not None:
             return client
 
         client = None
         try:
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-            if server.get("username"):
-                client.username_pw_set(server.get("username"), server.get("password") or None)
-            try:
-                if int(server.get("tls_enabled") or 0) == 1:
+            client = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                client_id=config["client_id"],
+            )
+            if config["username"]:
+                client.username_pw_set(config["username"], config["password"] or None)
+            if config["tls_enabled"]:
+                try:
                     import ssl
 
-                    ca = server.get("tls_ca_path") or None
-                    cert = server.get("tls_cert_path") or None
-                    key = server.get("tls_key_path") or None
-                    tls_ver = (server.get("tls_version") or "").upper().strip()
+                    ca = config["tls_ca_path"] or None
+                    cert = config["tls_cert_path"] or None
+                    key = config["tls_key_path"] or None
+                    tls_ver = config["tls_version"]
                     version = ssl.PROTOCOL_TLS_CLIENT if tls_ver in ("", "TLS", "TLS_CLIENT") else ssl.PROTOCOL_TLS
                     client.tls_set(ca_certs=ca, certfile=cert, keyfile=key, tls_version=version)
-                    if int(server.get("tls_insecure") or 0) == 1:
+                    if config["tls_insecure"]:
                         client.tls_insecure_set(True)
-            except (ImportError, OSError, ValueError):
-                logger.exception("MQTT TLS setup failed for publisher")
+                except (ImportError, OSError, ValueError, RuntimeError):
+                    logger.exception("MQTT TLS setup failed for publisher; refusing plaintext fallback")
+                    _teardown_mqtt_client(client, sid)
+                    return None
 
-            host = server.get("host") or "127.0.0.1"
-            port = int(server.get("port") or 1883)
+            host = config["host"]
+            port = config["port"]
 
             def _on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties):
                 try:
@@ -179,11 +333,25 @@ def get_or_create_mqtt_client(server: dict[str, Any], *, acquire: bool = False) 
                 _teardown_mqtt_client(client, sid)
             return None
 
+        install = False
         with _MQTT_CLIENTS_LOCK:
-            _MQTT_CLIENTS[sid] = client
-            if acquire:
-                client_key = id(client)
-                _MQTT_CLIENT_USERS[client_key] = _MQTT_CLIENT_USERS.get(client_key, 0) + 1
+            if _MQTT_SERVER_EPOCH.get(sid, 0) == captured_epoch:
+                _MQTT_CLIENT_GENERATION += 1
+                _MQTT_CLIENTS[sid] = client
+                _MQTT_CLIENT_PROVENANCE[sid] = _MqttClientProvenance(
+                    client=client,
+                    config_fingerprint=config_fingerprint,
+                    generation=_MQTT_CLIENT_GENERATION,
+                    server_epoch=captured_epoch,
+                )
+                if acquire:
+                    client_key = id(client)
+                    _MQTT_CLIENT_USERS[client_key] = _MQTT_CLIENT_USERS.get(client_key, 0) + 1
+                install = True
+        if not install:
+            logger.warning("MQTT client creation superseded by invalidation sid=%s epoch=%s", sid, captured_epoch)
+            _teardown_mqtt_client(client, sid)
+            return None
         return client
 
 
@@ -191,12 +359,10 @@ def _publish_with_retries(cl: Any, topic: str, value: str, qos: int, retain: boo
     """Publish ``value`` to ``topic`` with connect-rc retries (up to 10x)
     and, for QoS≥1, broker-ack wait with backoff (up to 3x).
 
-    Returns True on confirmed delivery, False otherwise. Used for both the
-    base device topic and the Wirenboard ``/on`` command companion topic so
-    that BOTH channels get the same delivery guarantee — without this
-    symmetry the relay-command publish would silently drop on transient
-    broker hiccups while the report-channel publish would succeed (Issue
-    #38 root cause).
+    Returns True on confirmed delivery, False otherwise.  Actuator commands
+    use this for the Wirenboard ``/on`` channel; the base device topic is
+    relay-owned observed/report truth and is deliberately never written by
+    the application.
     """
     effective_qos = max(0, min(2, int(qos or 0)))
     try:
@@ -321,6 +487,7 @@ def _invalidate_client(sid: Any, *, expected_client: Any | None = None) -> None:
             return
         if cl is not None:
             _MQTT_CLIENTS.pop(key, None)
+        _drop_mqtt_client_provenance(key, cl)
     if cl is not None:
         _retire_mqtt_client(cl, key)
         logger.info("MQTT client invalidated sid=%s (recreate on next publish)", key)
@@ -329,13 +496,26 @@ def _invalidate_client(sid: Any, *, expected_client: Any | None = None) -> None:
 def invalidate_mqtt_server(server_id: Any) -> None:
     """Public runtime invalidation boundary for MQTT server CRUD."""
     sid = _server_key(server_id)
-    with _SERVER_CACHE_LOCK:
-        _SERVER_CACHE.pop(sid, None)
+    stale_client = None
+    # Epoch advance, cache eviction, and registry eviction are one authority
+    # transition. A creator that started before this point may finish its
+    # socket handshake, but its install check will fail and close that client.
+    with _MQTT_CLIENTS_LOCK:
+        _MQTT_SERVER_EPOCH[sid] = _MQTT_SERVER_EPOCH.get(sid, 0) + 1
+        stale_client = _MQTT_CLIENTS.pop(sid, None)
+        _drop_mqtt_client_provenance(sid, stale_client)
+        with _SERVER_CACHE_LOCK:
+            _SERVER_CACHE.pop(sid, None)
     with _TOPIC_LOCK:
+        # Epoch, not only config fingerprint, separates A -> B -> A rotations
+        # from an obsolete in-flight publish that still belongs to the first A
+        # client generation.
         stale_topics = [key for key in _TOPIC_LAST_SEND if key[0] == sid]
         for key in stale_topics:
             _TOPIC_LAST_SEND.pop(key, None)
-    _invalidate_client(sid)
+    if stale_client is not None:
+        _retire_mqtt_client(stale_client, sid)
+        logger.info("MQTT client invalidated sid=%s (config epoch advanced)", sid)
 
 
 def _invalidate_failed_client(sid: Any, failed_client: Any) -> None:
@@ -348,7 +528,17 @@ def _invalidate_failed_client(sid: Any, failed_client: Any) -> None:
         _invalidate_client(key)
 
 
-def _publish_one(server: dict, sid: Any, topic: str, value: str, qos: int, retain: bool) -> bool:
+def _publish_one(
+    server: dict,
+    sid: Any,
+    topic: str,
+    value: str,
+    qos: int,
+    retain: bool,
+    *,
+    server_epoch: int,
+    config_fingerprint: str,
+) -> bool:
     """Publish one topic with self-healing.
 
     On delivery failure the cached client is most likely wedged (its inflight
@@ -356,7 +546,12 @@ def _publish_one(server: dict, sid: Any, topic: str, value: str, qos: int, retai
     rebuild the client once and retry on a clean window. Without this, relay
     commands block indefinitely in ``wait_for_publish`` (mqtt-client-recovery).
     """
-    cl = get_or_create_mqtt_client(server, acquire=True)
+    cl = get_or_create_mqtt_client(
+        server,
+        acquire=True,
+        expected_epoch=server_epoch,
+        expected_fingerprint=config_fingerprint,
+    )
     if cl is None:
         logger.warning("MQTT publish: client unavailable, dropping topic=%s", topic)
         return False
@@ -368,13 +563,62 @@ def _publish_one(server: dict, sid: Any, topic: str, value: str, qos: int, retai
         return True
     logger.warning("MQTT delivery failed — recreating client sid=%s topic=%s", sid, topic)
     _invalidate_failed_client(sid, cl)
-    cl = get_or_create_mqtt_client(server, acquire=True)
+    cl = get_or_create_mqtt_client(
+        server,
+        acquire=True,
+        expected_epoch=server_epoch,
+        expected_fingerprint=config_fingerprint,
+    )
     if cl is None:
         return False
     try:
         return _publish_with_retries(cl, topic, value, qos, retain)
     finally:
         _release_mqtt_client(cl)
+
+
+def _resolve_publish_server(server: dict, sid: int | None) -> tuple[dict, int, str] | None:
+    """Resolve one server against a linearizable config epoch/cache entry."""
+    server_key = sid or 0
+    if sid is None or _db is None:
+        resolved = dict(server)
+        fingerprint = mqtt_server_config_fingerprint(resolved)
+        with _MQTT_CLIENTS_LOCK:
+            epoch = _MQTT_SERVER_EPOCH.get(server_key, 0)
+        return resolved, epoch, fingerprint
+
+    # A DB read can overlap a CRUD invalidation. Retry rather than installing
+    # the pre-invalidation row into the new generation's TTL cache.
+    for _attempt in range(4):
+        now_ts = time.time()
+        with _MQTT_CLIENTS_LOCK:
+            epoch = _MQTT_SERVER_EPOCH.get(server_key, 0)
+            with _SERVER_CACHE_LOCK:
+                cached = _SERVER_CACHE.get(sid)
+                if cached and len(cached) >= 4:
+                    cached_server, cached_at, cached_epoch, cached_fingerprint = cached[:4]
+                    actual_fingerprint = mqtt_server_config_fingerprint(cached_server)
+                    if (
+                        int(cached_epoch) == epoch
+                        and actual_fingerprint == cached_fingerprint
+                        and (now_ts - float(cached_at)) < _SERVER_CACHE_TTL
+                    ):
+                        return dict(cached_server), epoch, cached_fingerprint
+
+        current = _db.get_mqtt_server(sid)
+        if not current:
+            return None
+        resolved = dict(current)
+        fingerprint = mqtt_server_config_fingerprint(resolved)
+        with _MQTT_CLIENTS_LOCK:
+            if _MQTT_SERVER_EPOCH.get(server_key, 0) != epoch:
+                continue
+            with _SERVER_CACHE_LOCK:
+                _SERVER_CACHE[sid] = (resolved, now_ts, epoch, fingerprint)
+            return resolved, epoch, fingerprint
+
+    logger.error("MQTT server %s changed repeatedly during cache fill; publish refused", sid)
+    return None
 
 
 def publish_mqtt_value(
@@ -388,41 +632,85 @@ def publish_mqtt_value(
 ) -> bool:
     try:
         t = normalize_topic(topic)
+        if not t:
+            logger.error("MQTT publish refused invalid/base-command topic=%r", topic)
+            return False
         sid = int(server.get("id")) if server.get("id") else None
-        # normalize server via TTL cache
-        if sid is not None and _db is not None:
-            try:
-                now_ts = time.time()
-                with _SERVER_CACHE_LOCK:
-                    cached = _SERVER_CACHE.get(sid)
-                srv = None
-                if cached and (now_ts - cached[1]) < _SERVER_CACHE_TTL:
-                    srv = cached[0]
-                else:
-                    srv = _db.get_mqtt_server(sid)
-                    if srv:
-                        with _SERVER_CACHE_LOCK:
-                            _SERVER_CACHE[sid] = (srv, now_ts)
-                if srv:
-                    server = srv
-            except (ConnectionError, SecretDecryptionError, TimeoutError, OSError) as e:
-                logger.debug("Handled exception in publish_mqtt_value: %s", e)
-                if isinstance(e, SecretDecryptionError):
-                    logger.error("MQTT credentials unavailable for server %s; restore the configured secret key", sid)
-                    return False
-        key = (sid or 0, t)
+        try:
+            resolved_authority = _resolve_publish_server(server, sid)
+        except (ConnectionError, SecretDecryptionError, TimeoutError, OSError) as e:
+            logger.debug("Handled exception in publish_mqtt_value: %s", e)
+            if isinstance(e, SecretDecryptionError):
+                logger.error("MQTT credentials unavailable for server %s; restore the configured secret key", sid)
+            return False
+        if resolved_authority is None:
+            logger.error("MQTT server %s is missing or unavailable; refusing stale/virtual publish", sid)
+            return False
+        server, epoch, config_fingerprint = resolved_authority
+
+        # Wiren Board owns the base topic as its observed/report channel.  The
+        # application must write desired state only to the companion ``/on``
+        # command channel; publishing to the base topic makes our own value
+        # indistinguishable from a physical relay echo to long-lived
+        # subscribers and can falsely complete runs/cancel safety jobs.
+        t_command = t + "/on"
+        server_key = sid or 0
         now = time.time()
-        with _TOPIC_LOCK:
-            last = _TOPIC_LAST_SEND.get(key)
-            if last and last[0] == value and (now - last[1]) < min_interval_sec:
-                logger.debug(f"MQTT skip duplicate topic={t} value={value}")
-                return True
-            _TOPIC_LAST_SEND[key] = (value, now)
-        logger.debug(f"MQTT publish topic={t} value={value}")
-        # Publish to base topic with retries + (QoS≥1) broker-ack wait, and
-        # self-heal a wedged client (recreate + retry) on delivery failure.
+        wait_for: _InflightPublish | None = None
+        pending: _InflightPublish | None = None
+        with _MQTT_CLIENTS_LOCK:
+            if _MQTT_SERVER_EPOCH.get(server_key, 0) != epoch:
+                logger.warning("MQTT publish superseded before reservation sid=%s epoch=%s", server_key, epoch)
+                return False
+            with _TOPIC_LOCK:
+                key = (server_key, epoch, config_fingerprint, t_command)
+                inflight_key = (server_key, epoch, config_fingerprint, t_command, value)
+                wait_for = _TOPIC_INFLIGHT.get(inflight_key)
+                if wait_for is None:
+                    last = _TOPIC_LAST_SEND.get(key)
+                    if last and last[0] == value and (now - last[1]) < min_interval_sec:
+                        logger.debug(f"MQTT skip delivered duplicate topic={t_command} value={value}")
+                        return True
+                    pending = _InflightPublish()
+                    _TOPIC_INFLIGHT[inflight_key] = pending
+        if wait_for is not None:
+            # The first caller owns the physical publish. A concurrent duplicate
+            # must observe that same delivery result instead of treating an
+            # unconfirmed cache reservation as success.
+            wait_for.completed.wait()
+            return bool(wait_for.result)
+
+        logger.debug(f"MQTT publish command topic={t_command} value={value}")
         effective_qos = max(0, min(2, int(qos or 0)))
-        if not _publish_one(server, sid, t, value, effective_qos, retain):
+        delivered = False
+        try:
+            delivered = bool(
+                _publish_one(
+                    server,
+                    sid,
+                    t_command,
+                    value,
+                    effective_qos,
+                    retain,
+                    server_epoch=epoch,
+                    config_fingerprint=config_fingerprint,
+                )
+            )
+        finally:
+            with _MQTT_CLIENTS_LOCK:
+                epoch_is_current = _MQTT_SERVER_EPOCH.get(server_key, 0) == epoch
+                with _TOPIC_LOCK:
+                    # An invalidation may complete while the broker call is in
+                    # flight. The old caller still receives its delivery result,
+                    # but it must not repopulate the newer debounce authority.
+                    if delivered and epoch_is_current:
+                        _TOPIC_LAST_SEND[key] = (value, time.time())
+                    if _TOPIC_INFLIGHT.get(inflight_key) is pending:
+                        _TOPIC_INFLIGHT.pop(inflight_key, None)
+                    if pending is not None:
+                        pending.result = delivered
+                        pending.completed.set()
+        if not delivered:
             return False
 
         # Debug-level audit: every successful publish. Volume is high
@@ -434,37 +722,17 @@ def publish_mqtt_value(
             debug_audit(
                 action_type="mqtt_publish",
                 source="mqtt",
-                target=t,
+                target=t_command,
                 payload={
                     "value": value,
                     "qos": effective_qos,
                     "retain": bool(retain),
+                    "report_topic": t,
                     "meta": meta if isinstance(meta, dict) else None,
                 },
             )
         except Exception:
             logger.debug("debug_audit(mqtt_publish) failed", exc_info=True)
-
-        # Also publish to the control topic '/on' for Wirenboard compatibility.
-        # Issue #38: the base topic is the *report* channel; the relay only
-        # reacts to '/on'. Previously this publish was fire-and-forget — a
-        # transient broker hiccup silently dropped the command, leaving the
-        # base topic (and the UI via SSE-hub) showing 'closed' while the
-        # relay stayed open. Now we use the same retry+ack guarantee as the
-        # base topic and propagate failure to the caller.
-        t_on = t + "/on"
-        on_key = (sid or 0, t_on)
-        now2 = time.time()
-        with _TOPIC_LOCK:
-            last2 = _TOPIC_LAST_SEND.get(on_key)
-            if last2 and last2[0] == value and (now2 - last2[1]) < min_interval_sec:
-                # Skipping the duplicate suppression — base already delivered.
-                return True
-            _TOPIC_LAST_SEND[on_key] = (value, now2)
-        logger.debug(f"MQTT publish topic={t_on} value={value}")
-        if not _publish_one(server, sid, t_on, value, effective_qos, retain):
-            logger.error("MQTT publish to /on companion FAILED topic=%s", t_on)
-            return False
 
         # Optional: publish meta information to a side topic for diagnostics/idempotence
         try:
@@ -472,7 +740,11 @@ def publish_mqtt_value(
                 t_meta = t + "/meta"
                 payload_meta = ";".join([f"{k}={v}" for k, v in meta.items() if v is not None])
                 if payload_meta:
-                    cl_meta = get_or_create_mqtt_client(server)
+                    cl_meta = get_or_create_mqtt_client(
+                        server,
+                        expected_epoch=epoch,
+                        expected_fingerprint=config_fingerprint,
+                    )
                     if cl_meta is not None:
                         cl_meta.publish(t_meta, payload=payload_meta, qos=0, retain=False)
         except (ConnectionError, TimeoutError, OSError) as e:
@@ -481,7 +753,7 @@ def publish_mqtt_value(
             pass
 
         return True
-    except (ConnectionError, SecretDecryptionError, TimeoutError, OSError):
+    except (ConnectionError, SecretDecryptionError, TimeoutError, OSError, TypeError, ValueError):
         logger.exception("publish_mqtt_value failed")
         return False
 
@@ -495,6 +767,7 @@ def _shutdown_mqtt_clients() -> None:
     with _MQTT_CLIENTS_LOCK:
         clients = list(_MQTT_CLIENTS.items())
         _MQTT_CLIENTS.clear()
+        _MQTT_CLIENT_PROVENANCE.clear()
     for sid, cl in clients:
         _teardown_mqtt_client(cl, sid)
         logger.info("MQTT client disconnected for server %s", sid)

@@ -49,7 +49,7 @@ def close_all_master_valves(db, publish, retries: int = 3) -> int:
 
     ``publish`` — callable с сигнатурой ``publish_mqtt_value``; публикация
     ретраится до ``retries`` раз. Возвращает число клапанов, для которых
-    публикация была отправлена. Ошибки логируются, не пробрасываются.
+    публикация подтверждена publisher-ом. Ошибки логируются, не пробрасываются.
     """
     closed = 0
     try:
@@ -61,15 +61,21 @@ def close_all_master_valves(db, publish, retries: int = 3) -> int:
         try:
             server = db.get_mqtt_server(msid)
             if not server:
+                logger.error("master valve close skipped: server unavailable sid=%s topic=%s", msid, topic)
                 continue
             logger.info("Closing master valve sid=%s topic=%s val=%s", msid, topic, close_val)
+            delivered = False
             for attempt in range(retries):
                 ok = publish(server, topic, close_val, min_interval_sec=0.0, retain=True, qos=2)
                 if ok:
+                    delivered = True
                     break
                 time.sleep(0.2 * (attempt + 1))
+            if not delivered:
+                logger.error("master valve close unresolved sid=%s topic=%s after %s attempts", msid, topic, retries)
+                continue
             time.sleep(0.01)
             closed += 1
-        except (ConnectionError, TimeoutError, OSError):
+        except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, TypeError):
             logger.exception("master valve close failed sid=%s topic=%s", msid, topic)
     return closed
