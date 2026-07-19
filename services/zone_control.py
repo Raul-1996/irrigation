@@ -668,7 +668,7 @@ def mark_zone_command_fault(zone_id: int, expected: str, *, reason: str) -> None
     if "observed_state" in zone:
         fields["observed_state"] = "unconfirmed"
     try:
-        state_verifier.register_command(int(zone_id), expected)
+        state_verifier.invalidate_verifiers(int(zone_id))
     except (AttributeError, ValueError, TypeError):
         logger.debug("command-fault verifier invalidation failed zone=%s", zone_id)
     _update_zone_state(

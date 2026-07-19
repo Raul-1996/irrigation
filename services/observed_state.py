@@ -115,6 +115,21 @@ class StateVerifier:
             registered_at = self._generation_registered_at.get(int(zone_id))
         return float(registered_at) if registered_at is not None else None
 
+    def invalidate_verifiers(self, zone_id: int) -> int:
+        """Invalidate in-flight verifiers without inventing a new command.
+
+        Fault handling must retire a verifier that may otherwise retry or
+        apply stale state.  It must not, however, advance the MQTT receipt
+        fence: no relay command is sent by the invalidation itself, and a
+        physical report already received for the latest real command remains
+        valid evidence.
+        """
+        zid = int(zone_id)
+        with zone_lock(zid), self._generation_lock:
+            generation = self._generations.get(zid, 0) + 1
+            self._generations[zid] = generation
+        return generation
+
     @staticmethod
     def _canonical_state(value: object) -> str | None:
         return canonical_relay_state(value)

@@ -930,6 +930,69 @@ def test_queued_old_off_received_before_new_activation_cannot_complete_new_stop(
     broadcast.assert_not_called()
 
 
+def test_off_received_before_fault_invalidation_still_completes_current_stop(test_db):
+    from services import observed_state, sse_hub, zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "off-before-fault-invalidation", state="stopping")
+    command_id = "e" * 32
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "watering_start_time": "2026-07-19 12:12:00",
+        },
+    )
+    test_db.update_zone_versioned(zone["id"], {"command_id": command_id})
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    scheduler = MagicMock()
+    scheduler.cancel_zone_jobs.return_value = True
+
+    # A real OFF command establishes the receipt fence at t=100. Its physical
+    # echo is already in the SSE queue at t=110 when the temporary verifier
+    # reports failure at t=120. The fault callback must invalidate that stale
+    # verifier without pretending a newer relay command was sent.
+    with patch.object(observed_state.time, "time", return_value=100.0):
+        generation = verifier.register_command(zone["id"], "off")
+    with (
+        patch.object(observed_state.time, "time", return_value=120.0),
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "state_verifier", verifier),
+    ):
+        zone_control.mark_zone_command_fault(zone["id"], "off", reason="temporary_verifier_failure")
+
+    assert verifier._is_current(zone["id"], "off", generation) is False
+
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "state_verifier", verifier),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        sse_hub._process_mqtt_message(
+            server["id"],
+            None,
+            zone["topic"],
+            "0",
+            retained=False,
+            received_at=110.0,
+        )
+
+    after = test_db.get_zone(zone["id"])
+    assert verifier.command_registered_at(zone["id"]) == 100.0
+    assert after["state"] == "off"
+    assert after["observed_state"] == "off"
+    assert after["watering_start_time"] is None
+    assert after["command_id"] is None
+    scheduler.cancel_zone_jobs.assert_called_once_with(zone["id"], include_cap=True)
+
+
 def test_fresh_off_completes_external_activation_without_commanded_state(test_db):
     from services import sse_hub
 
