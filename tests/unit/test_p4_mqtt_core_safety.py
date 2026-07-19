@@ -28,6 +28,18 @@ def _mqtt_zone(test_db, server: dict, name: str, *, group_id: int = 1, state: st
     return test_db.get_zone(zone["id"])
 
 
+def _scheduler_group_stop_result(group_id: int, stopped: list[int]) -> dict:
+    return {
+        "success": True,
+        "group_id": group_id,
+        "aggregate_valid": True,
+        "stopped": list(stopped),
+        "unresolved": [],
+        "unverified_zone_ids": [],
+        "retry_scheduled": False,
+    }
+
+
 def test_tls_setup_failure_never_connects_plaintext():
     from services import mqtt_pub
 
@@ -991,6 +1003,98 @@ def test_off_received_before_fault_invalidation_still_completes_current_stop(tes
     assert after["watering_start_time"] is None
     assert after["command_id"] is None
     scheduler.cancel_zone_jobs.assert_called_once_with(zone["id"], include_cap=True)
+
+
+def test_orchestrated_start_accepts_exact_confirmed_target_and_peer_partition(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    group = test_db.create_group("orchestrated-confirmed-partition")
+    target = _mqtt_zone(test_db, server, "orchestrated-target", group_id=group["id"], state="off")
+    peer = _mqtt_zone(test_db, server, "orchestrated-peer", group_id=group["id"], state="on")
+    scheduler = MagicMock()
+    scheduler.cancel_group_jobs.return_value = _scheduler_group_stop_result(
+        group["id"], sorted([target["id"], peer["id"]])
+    )
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "exclusive_start_zone", return_value=True) as start,
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        status, _ctx = zone_control.start_zone_orchestrated(target["id"])
+
+    assert status == "started"
+    scheduler.cancel_group_jobs.assert_called_once_with(group["id"])
+    start.assert_called_once_with(target["id"], source="manual")
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        "aggregate_false",
+        "success_false",
+        "malformed",
+        "wrong_partition",
+        "wrong_group",
+        "bool_zone_id",
+        "unresolved",
+        "retry_scheduled",
+        "duplicate_id",
+        "exception",
+    ],
+)
+def test_orchestrated_start_rejects_unproven_target_or_peer_off(test_db, bad_result):
+    from services import zone_control
+
+    server = _server(test_db)
+    group = test_db.create_group(f"orchestrated-reject-{bad_result}")
+    target = _mqtt_zone(test_db, server, f"target-{bad_result}", group_id=group["id"], state="off")
+    peer = _mqtt_zone(test_db, server, f"peer-{bad_result}", group_id=group["id"], state="on")
+    expected_ids = sorted([target["id"], peer["id"]])
+    outcome = _scheduler_group_stop_result(group["id"], expected_ids)
+    if bad_result == "aggregate_false":
+        outcome["aggregate_valid"] = False
+    elif bad_result == "success_false":
+        outcome["success"] = False
+    elif bad_result == "malformed":
+        outcome.pop("unverified_zone_ids")
+    elif bad_result == "wrong_partition":
+        outcome["stopped"] = [target["id"]]
+    elif bad_result == "wrong_group":
+        outcome["group_id"] = group["id"] + 1
+    elif bad_result == "bool_zone_id":
+        outcome["stopped"] = [target["id"], True]
+    elif bad_result == "unresolved":
+        outcome["success"] = False
+        outcome["stopped"] = [target["id"]]
+        outcome["unresolved"] = [peer["id"]]
+    elif bad_result == "retry_scheduled":
+        outcome["retry_scheduled"] = True
+    elif bad_result == "duplicate_id":
+        outcome["stopped"] = [*expected_ids, peer["id"]]
+    scheduler = MagicMock()
+    if bad_result == "exception":
+        scheduler.cancel_group_jobs.side_effect = RuntimeError("scheduler stop failed")
+    else:
+        scheduler.cancel_group_jobs.return_value = outcome
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "exclusive_start_zone") as start,
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(test_db, "create_zone_run", wraps=test_db.create_zone_run) as create_run,
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        status, ctx = zone_control.start_zone_orchestrated(target["id"])
+
+    assert status == "failed"
+    assert "group_stop_unconfirmed" in ctx["warnings"]
+    start.assert_not_called()
+    publish.assert_not_called()
+    create_run.assert_not_called()
+    assert test_db.get_zone(target["id"])["state"] == "off"
+    assert test_db.get_zone(peer["id"])["state"] == "on"
 
 
 def test_fresh_off_completes_external_activation_without_commanded_state(test_db):

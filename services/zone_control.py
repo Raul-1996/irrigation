@@ -1250,6 +1250,50 @@ def exclusive_start_zone(
         return False
 
 
+def _scheduler_group_stop_is_complete(group_id: int, expected_zone_ids: list[int], outcome: object) -> bool:
+    """Validate the scheduler's exact physical-OFF aggregate for a new start."""
+    required_keys = {
+        "success",
+        "group_id",
+        "aggregate_valid",
+        "stopped",
+        "unresolved",
+        "unverified_zone_ids",
+        "retry_scheduled",
+    }
+    if type(outcome) is not dict or set(outcome) != required_keys:
+        return False
+    if (
+        type(outcome["success"]) is not bool
+        or type(outcome["aggregate_valid"]) is not bool
+        or type(outcome["group_id"]) is not int
+        or outcome["group_id"] != int(group_id)
+        or type(outcome["retry_scheduled"]) is not bool
+        or type(outcome["stopped"]) is not list
+        or type(outcome["unresolved"]) is not list
+        or type(outcome["unverified_zone_ids"]) is not list
+    ):
+        return False
+
+    expected = list(expected_zone_ids)
+    if any(type(zone_id) is not int or zone_id <= 0 for zone_id in expected) or len(set(expected)) != len(expected):
+        return False
+    partitions = (outcome["stopped"], outcome["unresolved"], outcome["unverified_zone_ids"])
+    flattened = [zone_id for partition in partitions for zone_id in partition]
+    if any(type(zone_id) is not int or zone_id <= 0 for zone_id in flattened):
+        return False
+    if len(flattened) != len(set(flattened)) or set(flattened) != set(expected):
+        return False
+    return (
+        outcome["success"] is True
+        and outcome["aggregate_valid"] is True
+        and outcome["retry_scheduled"] is False
+        and outcome["unresolved"] == []
+        and outcome["unverified_zone_ids"] == []
+        and outcome["stopped"] == expected
+    )
+
+
 def start_zone_orchestrated(
     zone_id: int,
     *,
@@ -1367,19 +1411,34 @@ def start_zone_orchestrated(
     # peer-off would do anyway, but we still need cancel_group_jobs for
     # the program/job-removal side effects.
     gid = int(z.get("group_id") or 0)
-    if gid:
-        try:
-            from irrigation_scheduler import get_scheduler
+    try:
+        from irrigation_scheduler import get_scheduler
 
-            sched = get_scheduler()
-            if sched:
-                sched.cancel_group_jobs(int(gid))
-            try:
-                db.reschedule_group_to_next_program(int(gid))
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("start_zone_orchestrated: reschedule_group_to_next_program failed: %s", e)
-        except (ImportError, ConnectionError, TimeoutError, OSError) as e:
-            logger.debug("start_zone_orchestrated pre-delegate housekeeping: %s", e)
+        sched = get_scheduler()
+        if not gid or sched is None:
+            logger.error("start_zone_orchestrated: scheduler OFF barrier unavailable group=%s", gid)
+            return "failed", {"warnings": [*warnings, "group_stop_unconfirmed"], "duration": None}
+        stop_outcome = sched.cancel_group_jobs(int(gid))
+        expected_zone_ids = _strict_group_zone_ids(int(gid))
+        if (
+            expected_zone_ids is None
+            or int(zone_id) not in expected_zone_ids
+            or not _scheduler_group_stop_is_complete(int(gid), expected_zone_ids, stop_outcome)
+        ):
+            logger.error(
+                "start_zone_orchestrated: scheduler OFF aggregate rejected group=%s expected=%s outcome=%r",
+                gid,
+                expected_zone_ids,
+                stop_outcome,
+            )
+            return "failed", {"warnings": [*warnings, "group_stop_unconfirmed"], "duration": None}
+        try:
+            db.reschedule_group_to_next_program(int(gid))
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("start_zone_orchestrated: reschedule_group_to_next_program failed: %s", e)
+    except Exception:
+        logger.exception("start_zone_orchestrated: scheduler OFF barrier failed group=%s", gid)
+        return "failed", {"warnings": [*warnings, "group_stop_unconfirmed"], "duration": None}
 
     # ---- Delegate to single source of truth ----
     # exclusive_start_zone does (in order, all under group/zone locks):
