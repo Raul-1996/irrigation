@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import sqlite3
 import ssl
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -67,25 +68,40 @@ class _FakeClient:
 class _FakeMQTT:
     CallbackAPIVersion = SimpleNamespace(VERSION2="v2")
 
-    def __init__(self, *, tls_error: Exception | None = None):
+    def __init__(self, *, tls_error: Exception | None = None, tls_error_at: int | None = None):
         self.clients: list[_FakeClient] = []
         self._tls_error = tls_error
+        self._tls_error_at = tls_error_at
 
     def Client(self, api_version, client_id=None):
-        client = _FakeClient(api_version, client_id, tls_error=self._tls_error)
+        client_number = len(self.clients) + 1
+        tls_error = self._tls_error if self._tls_error_at in (None, client_number) else None
+        client = _FakeClient(api_version, client_id, tls_error=tls_error)
         self.clients.append(client)
         return client
 
 
 class _FakeDB:
-    def __init__(self, servers: dict[int, dict], groups: list[dict] | None = None):
+    def __init__(
+        self,
+        servers: dict[int, dict],
+        groups: list[dict] | None = None,
+        *,
+        strict_error: Exception | None = None,
+    ):
         self.servers = servers
         self.groups = groups or []
+        self.strict_error = strict_error
 
     def get_mqtt_server(self, server_id):
         return self.servers.get(int(server_id))
 
     def get_groups(self):
+        return self.groups
+
+    def get_groups_strict(self):
+        if self.strict_error is not None:
+            raise self.strict_error
         return self.groups
 
 
@@ -230,7 +246,7 @@ def test_water_reconfigure_retires_old_binding_and_discards_stale_pulses() -> No
         assert monitor._samples == {}
 
 
-def test_water_reconfigure_closes_every_client_and_tls_failure_does_not_leak() -> None:
+def test_water_reconfigure_build_failure_preserves_live_generation() -> None:
     mod = importlib.import_module("services.monitors.water_monitor")
     good_mqtt = _FakeMQTT()
     groups = [
@@ -250,12 +266,76 @@ def test_water_reconfigure_closes_every_client_and_tls_failure_does_not_leak() -
         assert monitor.reconfigure()
         first_generation = list(good_mqtt.clients)
 
-    failing_mqtt = _FakeMQTT(tls_error=OSError("bad client cert"))
+    failing_mqtt = _FakeMQTT(tls_error=OSError("bad client cert"), tls_error_at=2)
     with patch.object(mod, "mqtt", failing_mqtt), patch.object(mod, "db", fake_db):
         assert not monitor.reconfigure()
 
-    assert all(client.disconnect_calls == 1 for client in first_generation)
-    assert all(client.loop_stop_calls == 1 for client in first_generation)
-    assert all(client.connect_calls == [] for client in failing_mqtt.clients)
-    assert all(client.loop_start_calls == 0 for client in failing_mqtt.clients)
-    assert monitor._clients == {}
+    assert all(client.disconnect_calls == 0 for client in first_generation)
+    assert all(client.loop_stop_calls == 0 for client in first_generation)
+    assert len(failing_mqtt.clients) == 2
+    assert failing_mqtt.clients[0].connect_calls == [("mqtt.example", 8883, 10)]
+    assert failing_mqtt.clients[0].loop_start_calls == 1
+    assert failing_mqtt.clients[1].connect_calls == []
+    assert failing_mqtt.clients[1].loop_start_calls == 0
+    assert all(client.disconnect_calls == 1 for client in failing_mqtt.clients)
+    assert all(client.loop_stop_calls == 1 for client in failing_mqtt.clients)
+    assert list(monitor._clients.values()) == first_generation
+
+
+def test_water_strict_load_failure_preserves_existing_subscriptions_and_samples() -> None:
+    mod = importlib.import_module("services.monitors.water_monitor")
+    fake_mqtt = _FakeMQTT()
+    groups = [
+        {
+            "id": 7,
+            "use_water_meter": 1,
+            "water_mqtt_topic": "water/pulses",
+            "water_mqtt_server_id": 1,
+            "water_pulse_size": "1l",
+        }
+    ]
+    fake_db = _FakeDB({1: _tls_server()}, groups)
+    monitor = mod.WaterMonitor()
+
+    with patch.object(mod, "mqtt", fake_mqtt), patch.object(mod, "db", fake_db):
+        assert monitor.reconfigure()
+        client = monitor._clients[7]
+        client.on_message(client, None, _Message("42", "water/pulses"))
+        assert monitor.get_raw_pulses(7) == 42
+
+        fake_db.strict_error = sqlite3.OperationalError("database is locked")
+        assert not monitor.reconfigure()
+
+    assert fake_mqtt.clients == [client]
+    assert monitor._clients[7] is client
+    assert monitor.get_raw_pulses(7) == 42
+    assert client.disconnect_calls == 0
+    assert client.loop_stop_calls == 0
+
+
+def test_water_invalid_config_is_rejected_before_live_generation_is_swapped() -> None:
+    mod = importlib.import_module("services.monitors.water_monitor")
+    fake_mqtt = _FakeMQTT()
+    groups = [
+        {
+            "id": 3,
+            "use_water_meter": 1,
+            "water_mqtt_topic": "water/valid",
+            "water_mqtt_server_id": 1,
+            "water_pulse_size": "10l",
+        }
+    ]
+    fake_db = _FakeDB({1: _tls_server()}, groups)
+    monitor = mod.WaterMonitor()
+
+    with patch.object(mod, "mqtt", fake_mqtt), patch.object(mod, "db", fake_db):
+        assert monitor.reconfigure()
+        client = monitor._clients[3]
+        groups[0]["water_mqtt_topic"] = ""
+        assert not monitor.reconfigure()
+
+    assert fake_mqtt.clients == [client]
+    assert monitor._clients[3] is client
+    assert monitor._topics[3] == "water/valid"
+    assert client.disconnect_calls == 0
+    assert client.loop_stop_calls == 0
