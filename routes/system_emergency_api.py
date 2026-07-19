@@ -70,15 +70,37 @@ def api_emergency_stop():
                 _events.publish({"type": "emergency_on", "by": "api"})
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Handled exception in api_emergency_stop: %s", e)
-        # Surface stats so UI/ops can immediately see if any master failed to publish
-        response = {"success": True, "message": "Аварийная остановка выполнена"}
-        if stats is not None:
-            response["stats"] = stats
-            if stats.get("masters_failed_publish", 0) > 0 or stats.get("zones_still_active_after_wait", 0) > 0:
-                response["warning"] = (
-                    f"masters_failed_publish={stats.get('masters_failed_publish', 0)}, "
-                    f"zones_still_active_after_wait={stats.get('zones_still_active_after_wait', 0)}"
-                )
+        # HTTP success is physical aggregate truth, not merely "the routine
+        # returned". Keep EMERGENCY_STOP armed, but surface unresolved valves
+        # and masters as a retryable service failure to every caller.
+        if stats is None:
+            response = {
+                "success": False,
+                "message": "Аварийная остановка не подтверждена",
+                "warning": "emergency_stop_all did not return physical completion stats",
+            }
+            return jsonify(response), 500
+
+        unresolved = (
+            not bool(stats.get("success"))
+            or bool(stats.get("zones_failed"))
+            or bool(stats.get("errors"))
+            or int(stats.get("masters_failed_publish") or 0) > 0
+            or int(stats.get("zones_still_active_after_wait") or 0) > 0
+        )
+        response = {
+            "success": not unresolved,
+            "message": "Аварийная остановка выполнена" if not unresolved else "Аварийная остановка требует внимания",
+            "stats": stats,
+        }
+        if unresolved:
+            response["warning"] = (
+                f"zones_failed={stats.get('zones_failed') or []}, "
+                f"errors={stats.get('errors') or []}, "
+                f"masters_failed_publish={int(stats.get('masters_failed_publish') or 0)}, "
+                f"zones_still_active_after_wait={int(stats.get('zones_still_active_after_wait') or 0)}"
+            )
+            return jsonify(response), 503
         return jsonify(response)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка аварийной остановки: {e}")

@@ -18,6 +18,7 @@ from collections import deque
 from datetime import datetime, timedelta
 
 from services.observed_state import canonical_relay_state
+from utils import normalize_topic
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,35 @@ def recently_stopped(zone_id: int, window_sec: int = 5) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _subscription_topic(topic: object) -> str:
+    """Canonical report topic; configured command ``/on`` suffix is removed."""
+    raw = str(topic or "")
+    normalizer = _normalize_topic_fn if callable(_normalize_topic_fn) else normalize_topic
+    try:
+        candidate = normalizer(raw)
+    except (ValueError, TypeError, AttributeError):
+        logger.exception("sse_hub: injected topic normalizer failed")
+        candidate = raw
+    # ``init`` keeps the normalizer injectable for application wiring, but
+    # subscription safety must not depend on a stale/test implementation that
+    # merely adds a slash and leaves the actuator command suffix intact.
+    return normalize_topic(candidate if isinstance(candidate, str) else raw)
+
+
+def _incoming_report_topic(topic: object) -> str:
+    """Normalize an incoming report topic without accepting command echoes."""
+    raw = str(topic or "").strip()
+    if not raw:
+        return ""
+    normalized = raw if raw.startswith("/") else "/" + raw
+    while normalized.startswith("//"):
+        normalized = normalized[1:]
+    if normalized.endswith("/on"):
+        logger.warning("sse_hub: ignoring actuator command-channel echo topic=%s", normalized)
+        return ""
+    return normalized
+
+
 def _rebuild_subscriptions():
     """Build zone-topic and master-valve-topic maps from the database."""
     zones = _db.get_zones()
@@ -172,7 +202,9 @@ def _rebuild_subscriptions():
         topic = (zone.get("topic") or "").strip()
         if not sid or not topic:
             continue
-        normalized = topic if str(topic).startswith("/") else "/" + str(topic)
+        normalized = _subscription_topic(topic)
+        if not normalized:
+            continue
         zone_topics.setdefault(int(sid), {}).setdefault(normalized, []).append(int(zone["id"]))
     for group in groups:
         try:
@@ -185,7 +217,9 @@ def _rebuild_subscriptions():
         sid = group.get("master_mqtt_server_id")
         if not topic or not sid:
             continue
-        normalized = topic if str(topic).startswith("/") else "/" + str(topic)
+        normalized = _subscription_topic(topic)
+        if not normalized:
+            continue
         mode = str(group.get("master_mode") or "NC").strip().upper()
         mv_topics.setdefault(int(sid), {}).setdefault(normalized, []).append((int(group["id"]), mode))
     return zone_topics, mv_topics
@@ -251,6 +285,39 @@ def _publish_counter_off(sid: int, topic: str) -> bool:
         return False
 
 
+def _cancel_zone_safety_jobs(zone_id: int) -> bool:
+    """Cancel ordinary, hard-stop and cap jobs after fresh physical OFF."""
+    try:
+        scheduler = _get_scheduler_fn() if _get_scheduler_fn else None
+        if scheduler is None:
+            return True
+        try:
+            scheduler.cancel_zone_jobs(int(zone_id), include_cap=True)
+        except TypeError:
+            # Rolling-upgrade compatibility with the pre-activation scheduler.
+            scheduler.cancel_zone_jobs(int(zone_id))
+            scheduler.cancel_zone_cap(int(zone_id))
+        return True
+    except (ValueError, TypeError, KeyError, RuntimeError, AttributeError):
+        logger.exception("sse_hub: cancel fresh-OFF safety jobs failed zone=%s", zone_id)
+        return False
+
+
+def _schedule_counter_off_safety(zone_id: int, activation_token: str) -> None:
+    """Plant a near-term retry and absolute cap for an observed unsafe ON."""
+    try:
+        scheduler = _get_scheduler_fn() if _get_scheduler_fn else None
+        if scheduler is None:
+            return
+        scheduler.schedule_zone_hard_stop(int(zone_id), datetime.now() + timedelta(seconds=5))
+        try:
+            scheduler.schedule_zone_cap(int(zone_id), activation_token=activation_token)
+        except TypeError:
+            scheduler.schedule_zone_cap(int(zone_id))
+    except (ValueError, TypeError, KeyError, RuntimeError, AttributeError):
+        logger.exception("sse_hub: schedule counter-OFF safety failed zone=%s", zone_id)
+
+
 def _audited_zone_update(zone_id: int, updates: dict) -> None:
     try:
         from services.zones_state import update_zone_state
@@ -283,7 +350,9 @@ def _finish_observed_run(zone_id: int) -> None:
 
 def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, retained: bool = False) -> None:
     """Process one decoded MQTT event away from paho's network thread."""
-    normalized = topic if str(topic).startswith("/") else "/" + str(topic)
+    normalized = _incoming_report_topic(topic)
+    if not normalized:
+        return
     zone_ids, master_groups = _message_targets(int(sid), normalized, source_client)
     if zone_ids is None:
         # The client was atomically evicted/replaced by a newer generation.
@@ -313,6 +382,9 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
         return
     relay_high = relay_state == "on"
     if master_groups:
+        if retained:
+            logger.info("sse_hub: retained master replay ignored sid=%s topic=%s", sid, normalized)
+            return
         for group_id, mode in master_groups:
             # Normally-closed: 1=open, 0=closed. Normally-open is inverted.
             is_open = (not relay_high) if mode == "NO" else relay_high
@@ -332,25 +404,47 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
             logger.debug("sse_hub: get_zone failed zone=%s: %s", zone_id, e)
             zones[int(zone_id)] = {}
 
+    active_generations = {
+        zid for zid, zone in zones.items() if str(zone.get("observed_state") or "").lower() == "unconfirmed"
+    }
+    eligible_zone_ids = [zid for zid in zones if not retained or zid not in active_generations]
     emergency = bool(_app_config and _app_config.get("EMERGENCY_STOP"))
     bounced = relay_high and any(
-        recently_stopped(zone_id, window_sec=5) or _recent_db_stop(zone, window_sec=5)
-        for zone_id, zone in zones.items()
+        recently_stopped(zone_id, window_sec=5) or _recent_db_stop(zones[zone_id], window_sec=5)
+        for zone_id in eligible_zone_ids
     )
-    counter_required = relay_high and (emergency or bounced)
+    counter_required = relay_high and bool(eligible_zone_ids) and (emergency or bounced)
     counter_handled = _publish_counter_off(int(sid), normalized) if counter_required else None
 
     for zone_id in zone_ids:
         zid = int(zone_id)
         zone = zones.get(zid, {})
+        if retained and zid in active_generations:
+            # Retained replay can predate the command currently marked
+            # unconfirmed. It must not complete that generation, rewrite an
+            # active ON, or disarm any activation-bound safety job.
+            logger.info("sse_hub: retained relay replay ignored for active generation zone=%s", zid)
+            continue
         observed_state = "on" if relay_high else "off"
         updates = {"state": observed_state, "observed_state": observed_state}
+        persisted = False
 
         if relay_high and counter_required:
-            # Broker acknowledgement is not physical OFF confirmation. Keep the
-            # observed/logical state ON until the relay's OFF echo arrives so
-            # UI/watchdogs cannot claim that an unsafe valve is already closed.
-            pass
+            # A new safety OFF generation begins at the physical ON report.
+            # Persist its activation token before planting callbacks so an
+            # immediate watchdog tick cannot mistake it for an ownerless OFF.
+            activation_token = str(zone.get("watering_start_time") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            updates.update(
+                {
+                    "state": "on",
+                    "commanded_state": "off",
+                    "observed_state": "unconfirmed",
+                    "watering_start_time": activation_token,
+                }
+            )
+            _audited_zone_update(zid, updates)
+            persisted = True
+            _schedule_counter_off_safety(zid, activation_token)
         elif relay_high:
             # Do not mark a run physically confirmed here. This permanent
             # subscriber also receives the application's live base-topic
@@ -368,6 +462,10 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
                 updates["watering_start_source"] = "remote"
                 if duration > 0:
                     updates["planned_end_time"] = (now + timedelta(minutes=duration)).strftime("%Y-%m-%d %H:%M:%S")
+                    # The scheduler captures this token when jobs are planted.
+                    # Make the activation durable before any callback exists.
+                    _audited_zone_update(zid, updates)
+                    persisted = True
                     try:
                         scheduler = _get_scheduler_fn()
                         if scheduler:
@@ -391,20 +489,15 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
             mark_zone_stopped(zid)
             if zone.get("watering_start_time"):
                 _finish_observed_run(zid)
-            updates["watering_start_time"] = None
             updates["planned_end_time"] = None
-            try:
-                scheduler = _get_scheduler_fn()
-                if scheduler:
-                    scheduler.cancel_zone_jobs(zid)
-                    scheduler.cancel_zone_cap(zid)
-            except (ValueError, TypeError, KeyError, RuntimeError) as e:
-                logger.debug("sse_hub: cancel observed-off jobs failed zone=%s: %s", zid, e)
+            if _cancel_zone_safety_jobs(zid):
+                updates["watering_start_time"] = None
 
-        try:
-            _audited_zone_update(zid, updates)
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("sse_hub: zone update failed zone=%s: %s", zid, e)
+        if not persisted:
+            try:
+                _audited_zone_update(zid, updates)
+            except (sqlite3.Error, OSError) as e:
+                logger.debug("sse_hub: zone update failed zone=%s: %s", zid, e)
 
         event = {
             "zone_id": zid,
@@ -485,6 +578,13 @@ def _server_key(server: dict) -> tuple:
         "tls_version",
     )
     return tuple(server.get(field) for field in fields)
+
+
+def _server_key_uses_tls(key: tuple) -> bool:
+    try:
+        return int(key[6] or 0) == 1
+    except (IndexError, TypeError, ValueError):
+        return False
 
 
 def _topics_for_server(zone_topics: dict, mv_topics: dict, sid: int) -> set[str]:
@@ -618,8 +718,13 @@ def _apply_rebuild(target_generation: int) -> bool:
         except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, AttributeError) as e:
             logger.warning("SSE hub MQTT client setup failed for server %s: %s", sid, e)
             # A failed replacement must not tear down a still-working previous
-            # client. Keep it until a later rebuild can establish the new one.
-            if current is not None:
+            # client in ordinary rotations. A plaintext client is never an
+            # acceptable fallback after TLS becomes required, though: retire
+            # it and leave this server unsubscribed until secure setup works.
+            tls_upgrade_failed = int(server.get("tls_enabled") or 0) == 1 and not _server_key_uses_tls(
+                old_keys.get(sid, ())
+            )
+            if current is not None and not tls_upgrade_failed:
                 candidates[sid] = current
                 candidate_keys[sid] = old_keys.get(sid, key)
 
