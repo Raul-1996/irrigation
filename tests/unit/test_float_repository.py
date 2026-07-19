@@ -89,12 +89,13 @@ class TestFloatRepositoryOps:
     def test_pause_active_zones_transitions_state(self, test_db, test_db_path):
         """pause_active_zones() flips state='on' zones to 'paused'
         with reason='float' and records pause_remaining_seconds=duration."""
+        group = test_db.create_group("Float pause group")
         # create zone in state='on'
         z = test_db.create_zone(
             {
                 "name": "FZ",
                 "duration": 120,
-                "group_id": 7,
+                "group_id": group["id"],
             }
         )
         # Set state='on' directly (create_zone default state is 'off')
@@ -105,7 +106,7 @@ class TestFloatRepositoryOps:
         from db.float import FloatRepository
 
         repo = FloatRepository(test_db_path)
-        paused = repo.pause_active_zones(group_id=7)
+        paused = repo.pause_active_zones(group_id=group["id"])
         assert z["id"] in paused
 
         after = test_db.get_zone(z["id"])

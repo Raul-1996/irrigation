@@ -6,11 +6,279 @@ import sqlite3
 from datetime import UTC
 from urllib.parse import quote
 
-from db.identity import MAX_ENTITY_ID, parse_explicit_entity_id
+from db.identity import DURABLE_ENTITIES, MAX_ENTITY_ID, parse_explicit_entity_id
 from db.schema import APPLICATION_ID, USER_VERSION
 from utils import encrypt_secret
 
 logger = logging.getLogger(__name__)
+
+
+_ColumnContract = tuple[str, int, str | None, int, int]
+_TableContract = tuple[dict[str, _ColumnContract], bool]
+_IndexContract = tuple[str, int, str, int, tuple[tuple[str, int, str], ...]]
+_TrackedIndexContract = tuple[str, int, str, int, tuple[tuple[str, int, str], ...], str | None]
+
+
+def _column(
+    declared_type: str,
+    *,
+    not_null: int = 0,
+    default: str | None = None,
+    primary_key: int = 0,
+) -> _ColumnContract:
+    return declared_type, not_null, default, primary_key, 0
+
+
+_LEGACY_ZONE_COLUMNS = {
+    "id": _column("INTEGER", primary_key=1),
+    "state": _column("TEXT", default="'off'"),
+    "name": _column("TEXT", not_null=1),
+    "icon": _column("TEXT", default="'🌿'"),
+    "duration": _column("INTEGER", default="10"),
+    "group_id": _column("INTEGER", default="1"),
+    "topic": _column("TEXT"),
+    "postpone_until": _column("TEXT"),
+    "photo_path": _column("TEXT"),
+    "created_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+    "updated_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+_LEGACY_SETTINGS_COLUMNS = {
+    "key": _column("TEXT", primary_key=1),
+    "value": _column("TEXT"),
+}
+_LEGACY_GROUP_COLUMNS = {
+    "id": _column("INTEGER", primary_key=1),
+    "name": _column("TEXT", not_null=1),
+    "created_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+    "updated_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+_LEGACY_PROGRAM_COLUMNS = {
+    "id": _column("INTEGER", primary_key=1),
+    "name": _column("TEXT", not_null=1),
+    "time": _column("TEXT", not_null=1),
+    "days": _column("TEXT", not_null=1),
+    "zones": _column("TEXT", not_null=1),
+    "created_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+    "updated_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+_LEGACY_LOG_COLUMNS = {
+    "id": _column("INTEGER", primary_key=1),
+    "type": _column("TEXT", not_null=1),
+    "details": _column("TEXT"),
+    "timestamp": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+_LEGACY_WATER_USAGE_COLUMNS = {
+    "id": _column("INTEGER", primary_key=1),
+    "zone_id": _column("INTEGER"),
+    "liters": _column("REAL"),
+    "timestamp": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+_LEGACY_MQTT_COLUMNS = {
+    "id": _column("INTEGER", primary_key=1),
+    "name": _column("TEXT", not_null=1),
+    "host": _column("TEXT", not_null=1),
+    "port": _column("INTEGER", default="1883"),
+    "username": _column("TEXT"),
+    "password": _column("TEXT"),
+    "client_id": _column("TEXT"),
+    "enabled": _column("INTEGER", default="1"),
+    "created_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+    "updated_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+_LEGACY_CANCELLATION_COLUMNS = {
+    "program_id": _column("INTEGER", not_null=1, primary_key=1),
+    "run_date": _column("TEXT", not_null=1, primary_key=2),
+    "group_id": _column("INTEGER", primary_key=3),
+    "created_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+}
+
+_LEGACY_BASE_INDEXES: dict[str, _IndexContract] = {
+    "sqlite_autoindex_groups_1": ("groups", 1, "u", 0, (("name", 0, "BINARY"),)),
+    "idx_zones_group": ("zones", 0, "c", 0, (("group_id", 0, "BINARY"),)),
+    "idx_logs_type": ("logs", 0, "c", 0, (("type", 0, "BINARY"),)),
+    "idx_logs_timestamp": ("logs", 0, "c", 0, (("timestamp", 0, "BINARY"),)),
+    "idx_water_zone": ("water_usage", 0, "c", 0, (("zone_id", 0, "BINARY"),)),
+    "idx_water_timestamp": ("water_usage", 0, "c", 0, (("timestamp", 0, "BINARY"),)),
+}
+_LEGACY_SETTINGS_INDEX: dict[str, _IndexContract] = {
+    "sqlite_autoindex_settings_1": ("settings", 1, "pk", 0, (("key", 0, "BINARY"),)),
+}
+_LEGACY_ZONE_EXTRA_INDEXES: dict[str, _IndexContract] = {
+    "idx_zones_mqtt_server": ("zones", 0, "c", 0, (("mqtt_server_id", 0, "BINARY"),)),
+    "idx_zones_topic": ("zones", 0, "c", 0, (("topic", 0, "BINARY"),)),
+}
+_LEGACY_CANCELLATION_INDEX: dict[str, _IndexContract] = {
+    "sqlite_autoindex_program_cancellations_1": (
+        "program_cancellations",
+        1,
+        "pk",
+        0,
+        (("program_id", 0, "BINARY"), ("run_date", 0, "BINARY"), ("group_id", 0, "BINARY")),
+    ),
+}
+
+
+def _legacy_schema_stage(
+    zone_columns: dict[str, _ColumnContract],
+    *,
+    include_settings: bool = True,
+    group_columns: dict[str, _ColumnContract] = _LEGACY_GROUP_COLUMNS,
+    mqtt_columns: dict[str, _ColumnContract] | None = None,
+    extra_zone_indexes: bool = False,
+    include_cancellations: bool = False,
+) -> tuple[dict[str, _TableContract], dict[str, _IndexContract]]:
+    tables: dict[str, _TableContract] = {
+        "zones": (zone_columns, False),
+        "groups": (group_columns, False),
+        "programs": (_LEGACY_PROGRAM_COLUMNS, False),
+        "logs": (_LEGACY_LOG_COLUMNS, True),
+        "water_usage": (_LEGACY_WATER_USAGE_COLUMNS, True),
+    }
+    indexes = dict(_LEGACY_BASE_INDEXES)
+    if include_settings:
+        tables["settings"] = (_LEGACY_SETTINGS_COLUMNS, False)
+        indexes.update(_LEGACY_SETTINGS_INDEX)
+    if mqtt_columns is not None:
+        tables["mqtt_servers"] = (mqtt_columns, False)
+    if extra_zone_indexes:
+        indexes.update(_LEGACY_ZONE_EXTRA_INDEXES)
+    if include_cancellations:
+        tables["program_cancellations"] = (_LEGACY_CANCELLATION_COLUMNS, False)
+        indexes.update(_LEGACY_CANCELLATION_INDEX)
+    return tables, indexes
+
+
+_ZONES_WITH_TIMER = {
+    **_LEGACY_ZONE_COLUMNS,
+    "postpone_reason": _column("TEXT"),
+    "watering_start_time": _column("TEXT"),
+}
+_ZONES_WITH_SCHEDULE = {
+    **_ZONES_WITH_TIMER,
+    "scheduled_start_time": _column("TEXT"),
+    "last_watering_time": _column("TEXT"),
+}
+_ZONES_WITH_MQTT = {**_ZONES_WITH_SCHEDULE, "mqtt_server_id": _column("INTEGER")}
+_ZONES_WITH_SOURCE = {**_ZONES_WITH_MQTT, "watering_start_source": _column("TEXT")}
+_GROUPS_WITH_RAIN = {**_LEGACY_GROUP_COLUMNS, "use_rain_sensor": _column("INTEGER", default="0")}
+_MQTT_WITH_TLS = {
+    **_LEGACY_MQTT_COLUMNS,
+    "tls_enabled": _column("INTEGER", default="0"),
+    "tls_ca_path": _column("TEXT"),
+    "tls_cert_path": _column("TEXT"),
+    "tls_key_path": _column("TEXT"),
+    "tls_insecure": _column("INTEGER", default="0"),
+    "tls_version": _column("TEXT"),
+}
+
+# Exact, monotonic schema stages emitted on the first-parent history before
+# named migration tracking was introduced in 24941f7. Column order is
+# intentionally ignored: SQLite ALTER TABLE appends columns, so a long-lived
+# database and a fresh database from the same release can have different
+# physical order while retaining the same complete contract.
+#
+# This compatibility applies to schema, not unsafe data. Identifiers above the
+# durable range and arbitrary dangling group references remain fail-closed:
+# only reserved groups 1/999 have a deterministic repair meaning.
+_PRE_NAMED_MIGRATION_STAGES = (
+    ("ea4da158", *_legacy_schema_stage(_LEGACY_ZONE_COLUMNS, include_settings=False)),
+    ("6656d668", *_legacy_schema_stage(_LEGACY_ZONE_COLUMNS)),
+    ("03b7dc41", *_legacy_schema_stage(_ZONES_WITH_TIMER)),
+    ("7b87622e", *_legacy_schema_stage(_ZONES_WITH_SCHEDULE)),
+    ("b113c94a", *_legacy_schema_stage(_ZONES_WITH_MQTT, mqtt_columns=_LEGACY_MQTT_COLUMNS)),
+    (
+        "6249f525",
+        *_legacy_schema_stage(
+            _ZONES_WITH_MQTT,
+            mqtt_columns=_LEGACY_MQTT_COLUMNS,
+            extra_zone_indexes=True,
+        ),
+    ),
+    (
+        "50e3b5d9",
+        *_legacy_schema_stage(
+            _ZONES_WITH_MQTT,
+            group_columns=_GROUPS_WITH_RAIN,
+            mqtt_columns=_LEGACY_MQTT_COLUMNS,
+            extra_zone_indexes=True,
+        ),
+    ),
+    (
+        "f1c6f8a1",
+        *_legacy_schema_stage(
+            _ZONES_WITH_SOURCE,
+            group_columns=_GROUPS_WITH_RAIN,
+            mqtt_columns=_LEGACY_MQTT_COLUMNS,
+            extra_zone_indexes=True,
+        ),
+    ),
+    (
+        "90f0ef67",
+        *_legacy_schema_stage(
+            _ZONES_WITH_SOURCE,
+            group_columns=_GROUPS_WITH_RAIN,
+            mqtt_columns=_MQTT_WITH_TLS,
+            extra_zone_indexes=True,
+        ),
+    ),
+    (
+        "01d75961",
+        *_legacy_schema_stage(
+            _ZONES_WITH_SOURCE,
+            group_columns=_GROUPS_WITH_RAIN,
+            mqtt_columns=_MQTT_WITH_TLS,
+            extra_zone_indexes=True,
+            include_cancellations=True,
+        ),
+    ),
+)
+
+
+def _schema_sql_tokens(value: object) -> tuple[str, ...]:
+    """Tokenize stored DDL while preserving the bytes of SQL literals."""
+
+    sql = str(value)
+    tokens: list[str] = []
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if character.isspace():
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            tokens.append("<COMMENT>")
+            line_end = sql.find("\n", index + 2)
+            index = len(sql) if line_end < 0 else line_end
+            continue
+        if sql.startswith("/*", index):
+            tokens.append("<COMMENT>")
+            comment_end = sql.find("*/", index + 2)
+            index = len(sql) if comment_end < 0 else comment_end + 2
+            continue
+        if character == "'":
+            literal_start = index
+            index += 1
+            while index < len(sql):
+                if sql[index] != "'":
+                    index += 1
+                    continue
+                index += 1
+                if index < len(sql) and sql[index] == "'":
+                    index += 1
+                    continue
+                break
+            tokens.append(sql[literal_start:index])
+            continue
+        if character.isalnum() or character in {"_", "$"}:
+            token_start = index
+            index += 1
+            while index < len(sql) and (sql[index].isalnum() or sql[index] in {"_", "$"}):
+                index += 1
+            tokens.append(sql[token_start:index].upper())
+            continue
+        tokens.append(character)
+        index += 1
+    return tuple(tokens)
 
 
 class MigrationRunner:
@@ -365,56 +633,456 @@ class MigrationRunner:
                 "zones": "TEXT",
             },
             "settings": {"key": "TEXT", "value": "TEXT"},
-            "migrations": {"name": "TEXT", "applied_at": "NUMERIC"},
         }
-        if not legacy_columns.keys() <= tables:
-            raise sqlite3.DatabaseError("unstamped database is not a recognizable irrigation schema")
+        if "migrations" not in tables:
+            if application_id == 0 and user_version == 0:
+                MigrationRunner._validate_pre_named_migrations_schema(conn, tables)
+                return
+            if not legacy_columns.keys() <= tables:
+                raise sqlite3.DatabaseError("unstamped database is not a recognizable irrigation schema")
+            raise sqlite3.DatabaseError("stamped database is missing the migrations table")
+        MigrationRunner._validate_tracked_historical_schema(conn, tables)
 
-        primary_keys: dict[str, tuple[str, ...]] = {}
-        for table, required_columns in legacy_columns.items():
-            table_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-            actual_columns = {str(row[1]): row for row in table_info}
-            if not required_columns.keys() <= actual_columns.keys():
-                raise sqlite3.DatabaseError(
-                    f"unstamped database table {table!r} is not a recognizable irrigation schema"
-                )
-            for column, expected_affinity in required_columns.items():
-                declared_type = str(actual_columns[column][2] or "").upper()
-                if "INT" in declared_type:
-                    affinity = "INTEGER"
-                elif any(token in declared_type for token in ("CHAR", "CLOB", "TEXT")):
-                    affinity = "TEXT"
-                elif any(token in declared_type for token in ("REAL", "FLOA", "DOUB")):
-                    affinity = "REAL"
-                elif "BLOB" in declared_type or not declared_type:
-                    affinity = "BLOB"
-                else:
-                    affinity = "NUMERIC"
-                if affinity != expected_affinity:
-                    raise sqlite3.DatabaseError(
-                        f"unstamped database table {table!r} column {column!r} "
-                        f"has affinity {affinity}, expected {expected_affinity}"
-                    )
-            primary_keys[table] = tuple(
-                str(row[1])
-                for row in sorted(
-                    (row for row in table_info if row[5]),
-                    key=lambda row: row[5],
-                )
-            )
-        expected_primary_keys = {
-            "zones": ("id",),
-            "groups": ("id",),
-            "programs": ("id",),
-            "settings": ("key",),
-            "migrations": ("name",),
+    @staticmethod
+    def _validate_pre_named_migrations_schema(conn: sqlite3.Connection, tables: set[str]) -> None:
+        """Accept exact semantic contracts emitted by proven pre-tracker releases."""
+
+        candidates = [
+            (name, table_contracts, index_contracts)
+            for name, table_contracts, index_contracts in _PRE_NAMED_MIGRATION_STAGES
+            if set(table_contracts) == tables
+        ]
+        if not candidates:
+            MigrationRunner._raise_unsupported_pre_named_schema(tables, set())
+
+        schema_rows = conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        unexpected_objects = [
+            (str(kind), str(name)) for kind, name, _table_name, _sql in schema_rows if kind not in {"table", "index"}
+        ]
+        if unexpected_objects:
+            MigrationRunner._raise_unsupported_pre_named_schema(tables, set())
+
+        table_sql = {
+            str(name): str(sql)
+            for kind, name, table_name, sql in schema_rows
+            if kind == "table" and name == table_name and sql is not None
         }
-        for table, expected_primary_key in expected_primary_keys.items():
-            if primary_keys[table] != expected_primary_key:
-                raise sqlite3.DatabaseError(
-                    f"unstamped database table {table!r} has primary key "
-                    f"{primary_keys[table]!r}, expected {expected_primary_key!r}"
+        if set(table_sql) != tables:
+            MigrationRunner._raise_unsupported_pre_named_schema(tables, set())
+
+        actual_tables: dict[str, _TableContract] = {}
+        actual_indexes: dict[str, _IndexContract] = {}
+        forbidden_table_tokens = {
+            "<COMMENT>",
+            '"',
+            "`",
+            "[",
+            "]",
+            "ASC",
+            "CHECK",
+            "COLLATE",
+            "CONSTRAINT",
+            "DEFERRABLE",
+            "DESC",
+            "FOREIGN",
+            "GENERATED",
+            "MATCH",
+            "REFERENCES",
+            "STRICT",
+            "VIRTUAL",
+            "WITHOUT",
+        }
+
+        for table in sorted(tables):
+            quoted_table = table.replace('"', '""')
+            table_info = conn.execute(f'PRAGMA table_xinfo("{quoted_table}")').fetchall()
+            columns = {
+                str(row[1]): (
+                    " ".join(str(row[2] or "").upper().split()),
+                    int(row[3]),
+                    None if row[4] is None else " ".join(str(row[4]).split()),
+                    int(row[5]),
+                    int(row[6]),
                 )
+                for row in table_info
+            }
+            tokens = _schema_sql_tokens(table_sql[table])
+            if (
+                forbidden_table_tokens.intersection(tokens)
+                or any(tokens[index : index + 2] == ("ON", "CONFLICT") for index in range(len(tokens) - 1))
+                or tokens.count("AUTOINCREMENT") > 1
+                or conn.execute(f'PRAGMA foreign_key_list("{quoted_table}")').fetchall()
+            ):
+                MigrationRunner._raise_unsupported_pre_named_schema(tables, set(actual_indexes))
+            actual_tables[table] = (columns, tokens.count("AUTOINCREMENT") == 1)
+
+            for _seq, index_name, unique, origin, partial in conn.execute(
+                f'PRAGMA index_list("{quoted_table}")'
+            ).fetchall():
+                index_name = str(index_name)
+                quoted_index = index_name.replace('"', '""')
+                key_columns = tuple(
+                    (str(row[2]), int(row[3]), str(row[4]))
+                    for row in conn.execute(f'PRAGMA index_xinfo("{quoted_index}")').fetchall()
+                    if row[5]
+                )
+                actual_indexes[index_name] = (
+                    table,
+                    int(unique),
+                    str(origin),
+                    int(partial),
+                    key_columns,
+                )
+
+        if any(
+            actual_tables == expected_tables and actual_indexes == expected_indexes
+            for _name, expected_tables, expected_indexes in candidates
+        ):
+            return
+        MigrationRunner._raise_unsupported_pre_named_schema(tables, set(actual_indexes))
+
+    @staticmethod
+    def _raise_unsupported_pre_named_schema(tables: set[str], indexes: set[str]) -> None:
+        table_names = ",".join(sorted(tables)) or "<none>"
+        index_names = ",".join(sorted(indexes)) or "<none>"
+        raise sqlite3.DatabaseError(
+            "unstamped database is not a recognizable irrigation schema: exact columns, declared types, "
+            "defaults, nullability, keys, constraints, and indexes do not match a recognized historical schema "
+            f"from the supported first-parent releases before 24941f7 (tables={table_names}; indexes={index_names}); "
+            "restore a known irrigation backup or export the data explicitly"
+        )
+
+    @staticmethod
+    def _validate_tracked_historical_schema(conn: sqlite3.Connection, tables: set[str]) -> None:
+        """Validate named-migration history before opening it writable."""
+
+        from db.logs import LogRepository, _normalize_schema_sql, _normalized_where_predicate
+
+        canonical_columns: dict[str, dict[str, _ColumnContract]] = {}
+        for table, columns in LogRepository._REQUIRED_BACKUP_COLUMNS.items():
+            primary_key_positions = {
+                column: position for position, column in enumerate(LogRepository._REQUIRED_PRIMARY_KEYS[table], start=1)
+            }
+            canonical_columns[table] = {
+                column: _column(
+                    "TIMESTAMP" if type_family == "NUMERIC" else type_family,
+                    not_null=int(not_null),
+                    default=LogRepository._REQUIRED_COLUMN_DEFAULTS.get(table, {}).get(column),
+                    primary_key=primary_key_positions.get(column, 0),
+                )
+                for column, (type_family, not_null) in columns.items()
+            }
+        # This column is present in the 24941f7 floor and is intentionally
+        # absent from the current schema after zones_drop_last_watering_time.
+        canonical_columns["zones"]["last_watering_time"] = _column("TEXT")
+
+        _base_name, base_tables, _base_indexes = next(
+            stage for stage in _PRE_NAMED_MIGRATION_STAGES if stage[0] == "01d75961"
+        )
+        tracked_base_tables = {
+            table: (dict(columns), autoincrement) for table, (columns, autoincrement) in base_tables.items()
+        }
+        tracked_base_tables["migrations"] = (
+            {
+                "name": _column("TEXT", primary_key=1),
+                "applied_at": _column("TIMESTAMP", default="CURRENT_TIMESTAMP"),
+            },
+            False,
+        )
+        required_tables = set(tracked_base_tables)
+        allowed_tables = set(canonical_columns)
+        if not required_tables <= tables or not tables <= allowed_tables:
+            missing = sorted(required_tables - tables)
+            unexpected = sorted(tables - allowed_tables)
+            MigrationRunner._raise_unsupported_tracked_schema(
+                f"table set differs from the 24941f7 floor (missing={missing!r}; unexpected={unexpected!r})"
+            )
+
+        schema_rows = conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        unexpected_objects = [
+            (str(kind), str(name))
+            for kind, name, _table_name, _sql in schema_rows
+            if kind not in {"table", "index", "trigger"}
+        ]
+        if unexpected_objects:
+            MigrationRunner._raise_unsupported_tracked_schema(f"unexpected schema objects {unexpected_objects!r}")
+
+        table_sql = {
+            str(name): str(sql)
+            for kind, name, table_name, sql in schema_rows
+            if kind == "table" and name == table_name and sql is not None
+        }
+        if set(table_sql) != tables:
+            MigrationRunner._raise_unsupported_tracked_schema("table definitions are missing or malformed")
+
+        migration_rows = conn.execute("SELECT name, typeof(name) FROM migrations").fetchall()
+        invalid_markers = sorted(
+            str(name)
+            for name, storage_type in migration_rows
+            if storage_type != "text" or str(name) not in LogRepository._REQUIRED_BACKUP_MIGRATIONS
+        )
+        if invalid_markers:
+            MigrationRunner._raise_unsupported_tracked_schema(f"unknown migration markers {invalid_markers!r}")
+        migration_markers = {str(name) for name, _storage_type in migration_rows}
+        last_watering_was_dropped = "zones_drop_last_watering_time" in migration_markers
+
+        optional_minimum_columns = {
+            table: set(columns) for table, columns in canonical_columns.items() if table not in required_tables
+        }
+        optional_minimum_columns["zone_runs"] -= {"source", "confirmed"}
+        optional_minimum_columns["bot_users"] -= {
+            "fsm_state",
+            "fsm_data",
+            "notif_critical",
+            "notif_emergency",
+            "notif_postpone",
+            "notif_zone_events",
+            "notif_rain",
+        }
+
+        forbidden_table_tokens = {
+            "<COMMENT>",
+            "ASC",
+            "CHECK",
+            "COLLATE",
+            "CONSTRAINT",
+            "DEFERRABLE",
+            "DESC",
+            "GENERATED",
+            "MATCH",
+            "STRICT",
+            "VIRTUAL",
+            "WITHOUT",
+        }
+        flexible_autoincrement_tables = {"zones", "groups", "programs", "mqtt_servers"}
+
+        for table in sorted(tables):
+            quoted_table = table.replace('"', '""')
+            table_info = conn.execute(f'PRAGMA table_xinfo("{quoted_table}")').fetchall()
+            actual_columns = {
+                str(row[1]): (
+                    " ".join(str(row[2] or "").upper().split()),
+                    int(row[3]),
+                    None if row[4] is None else " ".join(str(row[4]).split()),
+                    int(row[5]),
+                    int(row[6]),
+                )
+                for row in table_info
+            }
+            minimum_columns = (
+                set(tracked_base_tables[table][0]) if table in tracked_base_tables else optional_minimum_columns[table]
+            )
+            if table == "zones" and last_watering_was_dropped:
+                minimum_columns.remove("last_watering_time")
+            allowed_columns = canonical_columns[table]
+            if not minimum_columns <= set(actual_columns) or not set(actual_columns) <= set(allowed_columns):
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    f"table {table!r} has missing floor columns or unknown additions"
+                )
+            if table == "zones" and ("last_watering_time" in actual_columns) == last_watering_was_dropped:
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    "zones_drop_last_watering_time marker disagrees with the zones.last_watering_time artifact"
+                )
+            for column, actual_contract in actual_columns.items():
+                expected_contract = allowed_columns[column]
+                if actual_contract == expected_contract:
+                    continue
+                actual_type, actual_not_null, actual_default, actual_primary_key, actual_hidden = actual_contract
+                expected_type, expected_not_null, expected_default, expected_primary_key, expected_hidden = (
+                    expected_contract
+                )
+                if actual_type != expected_type:
+                    detail = (
+                        f"table {table!r} column {column!r} has declared type {actual_type!r}, "
+                        f"expected canonical {expected_type!r}; affinity-compatible aliases are not a supported "
+                        "migration input"
+                    )
+                elif actual_not_null != expected_not_null:
+                    qualifier = "missing" if expected_not_null else "unexpected"
+                    detail = f"table {table!r} column {column!r} has {qualifier} NOT NULL constraint"
+                elif actual_default != expected_default:
+                    detail = (
+                        f"table {table!r} column {column!r} has default {actual_default!r}, "
+                        f"expected {expected_default!r}"
+                    )
+                elif actual_primary_key != expected_primary_key:
+                    detail = (
+                        f"table {table!r} column {column!r} has primary key position {actual_primary_key}, "
+                        f"expected {expected_primary_key}"
+                    )
+                else:
+                    detail = (
+                        f"table {table!r} column {column!r} has hidden/generated state {actual_hidden}, "
+                        f"expected {expected_hidden}"
+                    )
+                MigrationRunner._raise_unsupported_tracked_schema(detail)
+
+            tokens = _schema_sql_tokens(table_sql[table])
+            autoincrement_count = tokens.count("AUTOINCREMENT")
+            expected_autoincrement = table in LogRepository._REQUIRED_AUTOINCREMENT_TABLES
+            if (
+                forbidden_table_tokens.intersection(tokens)
+                or any(tokens[index : index + 2] == ("ON", "CONFLICT") for index in range(len(tokens) - 1))
+                or autoincrement_count > 1
+                or (table not in flexible_autoincrement_tables and (autoincrement_count == 1) != expected_autoincrement)
+            ):
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    f"table {table!r} has an unsupported constraint or AUTOINCREMENT contract"
+                )
+        allowed_indexes: dict[str, _TrackedIndexContract] = {}
+        for index_name, (table, columns) in LogRepository._REQUIRED_INDEXES.items():
+            descending = LogRepository._REQUIRED_INDEX_DESCENDING.get(index_name, (False,) * len(columns))
+            predicate = LogRepository._REQUIRED_INDEX_PREDICATES.get(index_name)
+            allowed_indexes[index_name] = (
+                table,
+                0,
+                "c",
+                int(predicate is not None),
+                tuple((column, int(is_descending), "BINARY") for column, is_descending in zip(columns, descending)),
+                predicate,
+            )
+
+        base_index_contracts = {
+            **_LEGACY_BASE_INDEXES,
+            **_LEGACY_SETTINGS_INDEX,
+            **_LEGACY_ZONE_EXTRA_INDEXES,
+            **_LEGACY_CANCELLATION_INDEX,
+            "sqlite_autoindex_migrations_1": (
+                "migrations",
+                1,
+                "pk",
+                0,
+                (("name", 0, "BINARY"),),
+            ),
+        }
+        for index_name, contract in base_index_contracts.items():
+            table, unique, origin, partial, columns = contract
+            allowed_indexes[index_name] = (table, unique, origin, partial, columns, None)
+        allowed_indexes.update(
+            {
+                "sqlite_autoindex_retired_entity_ids_1": (
+                    "retired_entity_ids",
+                    1,
+                    "pk",
+                    0,
+                    (("entity", 0, "BINARY"), ("id", 0, "BINARY")),
+                    None,
+                ),
+                "sqlite_autoindex_bot_users_1": (
+                    "bot_users",
+                    1,
+                    "u",
+                    0,
+                    (("chat_id", 0, "BINARY"),),
+                    None,
+                ),
+                "sqlite_autoindex_bot_idempotency_1": (
+                    "bot_idempotency",
+                    1,
+                    "pk",
+                    0,
+                    (("token", 0, "BINARY"),),
+                    None,
+                ),
+            }
+        )
+
+        index_sql = {
+            str(name): str(sql) for kind, name, _table_name, sql in schema_rows if kind == "index" and sql is not None
+        }
+        actual_indexes: dict[str, _TrackedIndexContract] = {}
+        for table in sorted(tables):
+            quoted_table = table.replace('"', '""')
+            for _seq, index_name, unique, origin, partial in conn.execute(
+                f'PRAGMA index_list("{quoted_table}")'
+            ).fetchall():
+                index_name = str(index_name)
+                quoted_index = index_name.replace('"', '""')
+                key_columns = tuple(
+                    (str(row[2]), int(row[3]), str(row[4]))
+                    for row in conn.execute(f'PRAGMA index_xinfo("{quoted_index}")').fetchall()
+                    if row[5]
+                )
+                predicate = _normalized_where_predicate(index_sql[index_name]) if index_name in index_sql else None
+                actual_indexes[index_name] = (
+                    table,
+                    int(unique),
+                    str(origin),
+                    int(partial),
+                    key_columns,
+                    predicate,
+                )
+
+        for index_name, actual_contract in actual_indexes.items():
+            if allowed_indexes.get(index_name) != actual_contract:
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    f"index {index_name!r} is unknown or has noncanonical semantics"
+                )
+        required_base_index_names = set(base_index_contracts)
+        if last_watering_was_dropped:
+            # The historical forward table rebuild re-created the two MQTT
+            # indexes but lost idx_zones_group. The reconciliation pass below
+            # restores it idempotently before the database is stamped.
+            required_base_index_names.remove("idx_zones_group")
+        missing_base_indexes = sorted(required_base_index_names - set(actual_indexes))
+        if missing_base_indexes:
+            MigrationRunner._raise_unsupported_tracked_schema(
+                f"24941f7 floor index or unique constraint is missing: {missing_base_indexes!r}"
+            )
+        required_auto_indexes = {
+            "retired_entity_ids": "sqlite_autoindex_retired_entity_ids_1",
+            "bot_users": "sqlite_autoindex_bot_users_1",
+            "bot_idempotency": "sqlite_autoindex_bot_idempotency_1",
+        }
+        for table, index_name in required_auto_indexes.items():
+            if table in tables and index_name not in actual_indexes:
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    f"table {table!r} is missing canonical key index {index_name!r}"
+                )
+
+        required_foreign_keys = LogRepository._REQUIRED_FOREIGN_KEYS
+        for table in sorted(tables):
+            quoted_table = table.replace('"', '""')
+            actual_foreign_keys = frozenset(
+                (str(row[2]), str(row[3]), str(row[4]), str(row[5]), str(row[6]), str(row[7]))
+                for row in conn.execute(f'PRAGMA foreign_key_list("{quoted_table}")').fetchall()
+            )
+            expected_foreign_keys = required_foreign_keys.get(table, frozenset())
+            if table == "program_cancellations":
+                valid_foreign_keys = actual_foreign_keys in {frozenset(), expected_foreign_keys}
+            else:
+                valid_foreign_keys = actual_foreign_keys == expected_foreign_keys
+            if not valid_foreign_keys:
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    f"table {table!r} has invalid foreign keys {sorted(actual_foreign_keys)!r}, "
+                    f"expected {sorted(expected_foreign_keys)!r}"
+                )
+
+        trigger_rows = {
+            str(name): (str(table_name), str(sql))
+            for kind, name, table_name, sql in schema_rows
+            if kind == "trigger" and sql is not None
+        }
+        for trigger_name, (table, sql) in trigger_rows.items():
+            expected_table = LogRepository._REQUIRED_INTEGRITY_TRIGGERS.get(trigger_name)
+            expected_sql = LogRepository._REQUIRED_TRIGGER_SQL.get(trigger_name)
+            if expected_table is None or expected_sql is None:
+                MigrationRunner._raise_unsupported_tracked_schema(
+                    f"application schema has unexpected triggers: {[trigger_name]!r}"
+                )
+            if expected_table != table or _normalize_schema_sql(sql) != expected_sql:
+                MigrationRunner._raise_unsupported_tracked_schema(f"trigger {trigger_name!r} has an invalid definition")
+
+    @staticmethod
+    def _raise_unsupported_tracked_schema(detail: str) -> None:
+        raise sqlite3.DatabaseError(
+            f"tracked irrigation schema rejected before migration: {detail}; "
+            "the original file was not opened writable; restore a known backup or export the data explicitly"
+        )
 
     def _insert_initial_data(self, conn):
         """Вставить начальные данные."""
@@ -500,12 +1168,6 @@ class MigrationRunner:
         Reads existing schema, removes specified columns, recreates the table
         and copies data back. Works on all SQLite versions.
         """
-        schema_row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table,),
-        ).fetchone()
-        original_table_sql = str(schema_row[0]) if schema_row and schema_row[0] else ""
-
         cur = conn.execute(f"PRAGMA table_info({table})")
         columns_info = cur.fetchall()
         # columns_info: (cid, name, type, notnull, dflt_value, pk)
@@ -520,8 +1182,20 @@ class MigrationRunner:
             parts = [name, ctype or "TEXT"]
             if pk:
                 parts.append("PRIMARY KEY")
-                if "AUTOINCREMENT" in original_table_sql.upper() and name.lower() == "id":
-                    parts.append("AUTOINCREMENT")
+                # Check if the PK column is AUTOINCREMENT
+                # We need to check the original CREATE TABLE SQL
+                try:
+                    schema_cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,))
+                    schema_row = schema_cur.fetchone()
+                    if (
+                        schema_row
+                        and schema_row[0]
+                        and "AUTOINCREMENT" in schema_row[0].upper()
+                        and name.lower() == "id"
+                    ):
+                        parts.append("AUTOINCREMENT")
+                except sqlite3.Error:
+                    pass
             if notnull and not pk:
                 parts.append("NOT NULL")
             if dflt is not None and not pk:
@@ -532,23 +1206,73 @@ class MigrationRunner:
         defs_csv = ", ".join(col_defs)
         tmp = table + "__down_tmp"
 
-        sequence_watermark = None
-        if "AUTOINCREMENT" in original_table_sql.upper() and "id" in keep_names:
-            old_sequence = conn.execute(
-                "SELECT seq FROM sqlite_sequence WHERE name = ?",
-                (table,),
-            ).fetchone()
-            live_max = conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()
-            sequence_watermark = max(
-                int(old_sequence[0] or 0) if old_sequence else 0,
-                int(live_max[0] or 0),
-            )
-
         conn.execute(f"DROP TABLE IF EXISTS {tmp}")
         conn.execute(f"CREATE TABLE {tmp} ({defs_csv})")
         conn.execute(f"INSERT INTO {tmp} ({cols_csv}) SELECT {cols_csv} FROM {table}")
         conn.execute(f"DROP TABLE {table}")
         conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+        conn.commit()
+
+    @staticmethod
+    def _recreate_forward_table_without_columns_preserving_identity(
+        conn: sqlite3.Connection,
+        table: str,
+        drop_columns: list[str],
+    ) -> None:
+        """Forward-only rebuild that atomically preserves AUTOINCREMENT state."""
+
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        original_table_sql = str(schema_row[0]) if schema_row and schema_row[0] else ""
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        columns_info = cur.fetchall()
+        keep = [column for column in columns_info if column[1] not in drop_columns]
+        if not keep:
+            raise sqlite3.DatabaseError(f"forward rebuild cannot drop every column from {table!r}")
+
+        keep_names = [str(column[1]) for column in keep]
+        column_definitions = []
+        for column in keep:
+            _cid, name, declared_type, not_null, default, primary_key = column
+            parts = [str(name), str(declared_type or "TEXT")]
+            if primary_key:
+                parts.append("PRIMARY KEY")
+                if "AUTOINCREMENT" in original_table_sql.upper() and str(name).casefold() == "id":
+                    parts.append("AUTOINCREMENT")
+            if not_null and not primary_key:
+                parts.append("NOT NULL")
+            if default is not None and not primary_key:
+                parts.append(f"DEFAULT {default}")
+            column_definitions.append(" ".join(parts))
+
+        sequence_watermark: int | None = None
+        if "AUTOINCREMENT" in original_table_sql.upper() and "id" in keep_names:
+            sequence_rows = conn.execute(
+                "SELECT seq, typeof(seq) FROM sqlite_sequence WHERE name = ?",
+                (table,),
+            ).fetchall()
+            if len(sequence_rows) > 1:
+                raise sqlite3.DatabaseError(f"sqlite_sequence for {table} contains duplicate rows")
+            if sequence_rows:
+                sequence_value, sequence_type = sequence_rows[0]
+                if sequence_type != "integer" or not isinstance(sequence_value, int) or sequence_value < 0:
+                    raise sqlite3.DatabaseError(f"sqlite_sequence for {table} has invalid value")
+                sequence_watermark = sequence_value
+            else:
+                sequence_watermark = 0
+            live_max = int(conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0])
+            sequence_watermark = max(sequence_watermark, live_max)
+
+        columns_csv = ", ".join(keep_names)
+        definitions_csv = ", ".join(column_definitions)
+        temporary_table = f"{table}__forward_tmp"
+        conn.execute(f"DROP TABLE IF EXISTS {temporary_table}")
+        conn.execute(f"CREATE TABLE {temporary_table} ({definitions_csv})")
+        conn.execute(f"INSERT INTO {temporary_table} ({columns_csv}) SELECT {columns_csv} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {temporary_table} RENAME TO {table}")
         if sequence_watermark is not None:
             cursor = conn.execute(
                 "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
@@ -884,22 +1608,46 @@ class MigrationRunner:
             (MAX_ENTITY_ID,),
         ).fetchone()
         if invalid_live is not None:
-            raise sqlite3.DatabaseError(f"{table} contains out-of-range durable identifier {invalid_live[0]!r}")
+            raise sqlite3.DatabaseError(
+                f"{table} contains out-of-range durable identifier {invalid_live[0]!r}; "
+                f"remap live identifiers into 1..{MAX_ENTITY_ID} or export the data before upgrade"
+            )
         invalid_retired = conn.execute(
-            "SELECT id FROM retired_entity_ids WHERE entity = ? AND (id <= 0 OR id > ?) ORDER BY id LIMIT 1",
+            "SELECT id, typeof(id) FROM retired_entity_ids "
+            "WHERE entity = ? AND (typeof(id) != 'integer' OR id <= 0 OR id > ?) "
+            "ORDER BY id LIMIT 1",
             (entity, MAX_ENTITY_ID),
         ).fetchone()
         if invalid_retired is not None:
-            raise sqlite3.DatabaseError(f"retired {entity} identifier {invalid_retired[0]!r} is out of range")
-
-        sequence_row = conn.execute(
-            "SELECT seq FROM sqlite_sequence WHERE name = ?",
-            (table,),
-        ).fetchone()
-        if sequence_row is not None and not 0 <= int(sequence_row[0]) <= MAX_ENTITY_ID:
             raise sqlite3.DatabaseError(
-                f"sqlite_sequence for {table} exceeds the supported durable identifier range: {sequence_row[0]!r}"
+                f"retired {entity} identifier {invalid_retired[0]!r} has invalid storage or range"
             )
+
+        collision = conn.execute(
+            f"SELECT current.id FROM {table} current "
+            "JOIN retired_entity_ids retired ON retired.entity = ? AND retired.id = current.id "
+            "ORDER BY current.id LIMIT 1",
+            (entity,),
+        ).fetchone()
+        if collision is not None:
+            raise sqlite3.DatabaseError(f"live {entity} identifier {collision[0]!r} is also marked retired")
+
+        sequence_rows = conn.execute(
+            "SELECT seq, typeof(seq) FROM sqlite_sequence WHERE name = ?",
+            (table,),
+        ).fetchall()
+        if len(sequence_rows) > 1:
+            raise sqlite3.DatabaseError(
+                f"sqlite_sequence for {table} must contain at most one row before reconciliation"
+            )
+        if sequence_rows:
+            sequence_value, sequence_type = sequence_rows[0]
+            if sequence_type != "integer" or not isinstance(sequence_value, int):
+                raise sqlite3.DatabaseError(f"sqlite_sequence for {table} has invalid value: {sequence_value!r}")
+            if not 0 <= sequence_value <= MAX_ENTITY_ID:
+                raise sqlite3.DatabaseError(
+                    f"sqlite_sequence for {table} exceeds the supported durable identifier range: {sequence_value!r}"
+                )
 
         row = conn.execute(
             f"SELECT MAX(value) FROM ("
@@ -926,6 +1674,19 @@ class MigrationRunner:
                 PRIMARY KEY (entity, id)
             )
         """)
+        allowed_entities = tuple(entity for _table, entity in DURABLE_ENTITIES)
+        placeholders = ", ".join("?" for _ in allowed_entities)
+        invalid_retired_metadata = conn.execute(
+            "SELECT entity, id, typeof(id) FROM retired_entity_ids "
+            f"WHERE entity NOT IN ({placeholders}) OR typeof(id) != 'integer' OR id <= 0 OR id > ? "
+            "ORDER BY entity, id LIMIT 1",
+            (*allowed_entities, MAX_ENTITY_ID),
+        ).fetchone()
+        if invalid_retired_metadata is not None:
+            raise sqlite3.DatabaseError(
+                f"retired {invalid_retired_metadata[0]} identifier {invalid_retired_metadata[1]!r} "
+                f"is out of range or has invalid storage ({invalid_retired_metadata[2]!r})"
+            )
         durable_tables = ("zones", "groups", "mqtt_servers", "programs")
         rebuild_tables = []
         for table in durable_tables:
@@ -961,6 +1722,7 @@ class MigrationRunner:
                 "trg_zones_group_insert",
                 "trg_zones_group_update",
                 "trg_groups_restrict_referenced_delete",
+                "trg_groups_restrict_reserved_delete",
                 "trg_groups_reject_replacing_name",
                 "trg_groups_reject_replacing_name_update",
             ):
@@ -1162,6 +1924,40 @@ class MigrationRunner:
     def _migrate_group_reference_integrity(conn: sqlite3.Connection) -> None:
         """Require every non-legacy zone group reference to stay live."""
 
+        # IDs 1 and 999 are application-owned identities: write paths default
+        # to group 1 and group 999 represents the explicit no-watering group.
+        # Recover installations that deleted either row before the database
+        # guard existed. This must precede the generic dangling check because
+        # legacy zones may still legitimately reference the deleted default.
+        reserved_groups = ((1, "Насос-1"), (999, "БЕЗ ПОЛИВА"))
+        for group_id, name in reserved_groups:
+            group_exists = conn.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone() is not None
+            retired_exists = (
+                conn.execute(
+                    "SELECT 1 FROM retired_entity_ids WHERE entity = 'group' AND id = ?",
+                    (group_id,),
+                ).fetchone()
+                is not None
+            )
+            if group_exists:
+                if retired_exists:
+                    raise sqlite3.DatabaseError(f"live group identifier {group_id!r} is also marked retired")
+                continue
+            conn.execute(
+                "DELETE FROM retired_entity_ids WHERE entity = 'group' AND id = ?",
+                (group_id,),
+            )
+            existing_names = {str(row[0]) for row in conn.execute("SELECT name FROM groups").fetchall()}
+            recovered_name = name
+            if recovered_name in existing_names:
+                base_name = f"{name} (системная {group_id})"
+                recovered_name = base_name
+                suffix = 2
+                while recovered_name in existing_names:
+                    recovered_name = f"{base_name} {suffix}"
+                    suffix += 1
+            conn.execute("INSERT INTO groups(id, name) VALUES (?, ?)", (group_id, recovered_name))
+
         dangling = conn.execute(
             "SELECT zones.id, zones.group_id FROM zones "
             "LEFT JOIN groups ON groups.id = zones.group_id "
@@ -1169,12 +1965,16 @@ class MigrationRunner:
             "ORDER BY zones.id LIMIT 20"
         ).fetchall()
         if dangling:
-            raise RuntimeError(f"zones contain dangling group references: {dangling!r}")
+            raise RuntimeError(
+                f"zones contain dangling group references: {dangling!r}; "
+                "restore the referenced groups or explicitly remap the affected zones before upgrade"
+            )
 
         trigger_names = (
             "trg_zones_group_insert",
             "trg_zones_group_update",
             "trg_groups_restrict_referenced_delete",
+            "trg_groups_restrict_reserved_delete",
             "trg_groups_reject_replacing_name",
             "trg_groups_reject_replacing_name_update",
         )
@@ -1200,6 +2000,14 @@ class MigrationRunner:
             WHEN EXISTS (SELECT 1 FROM zones WHERE group_id = OLD.id)
             BEGIN
                 SELECT RAISE(ABORT, 'group is referenced');
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER trg_groups_restrict_reserved_delete
+            BEFORE DELETE ON groups
+            WHEN OLD.id IN (1, 999)
+            BEGIN
+                SELECT RAISE(ABORT, 'reserved group cannot be deleted');
             END
         """)
         conn.execute("""
@@ -1903,10 +2711,10 @@ class MigrationRunner:
         keep working unchanged.
 
         SQLite < 3.35 (Debian 11 / WB-244 has 3.34.1) has no native
-        ``ALTER TABLE … DROP COLUMN``, so we use the table-rebuild helper
-        :meth:`_recreate_table_without_columns` which preserves PK
-        AUTOINCREMENT and column defaults. The rebuild drops all indexes on
-        the table, so we reissue the indexes from
+        ``ALTER TABLE … DROP COLUMN``, so this forward path uses the dedicated
+        identity-preserving rebuild helper. The generic downgrade helper stays
+        unchanged. The rebuild drops all indexes on the table, so we reissue
+        the indexes from
         :meth:`_migrate_add_zones_indexes` here as well.
 
         IRREVERSIBLE: no downgrade is registered. The column is gone with
@@ -1928,7 +2736,11 @@ class MigrationRunner:
             "trg_groups_restrict_referenced_delete",
         ):
             conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-        self._recreate_table_without_columns(conn, "zones", ["last_watering_time"])
+        self._recreate_forward_table_without_columns_preserving_identity(
+            conn,
+            "zones",
+            ["last_watering_time"],
+        )
         # Table rebuild drops all indexes — reissue ours.
         # (Mirror of _migrate_add_zones_indexes; IF NOT EXISTS so the
         # call is also safe to re-run on a manually-fixed DB.)

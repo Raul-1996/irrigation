@@ -41,7 +41,7 @@ class GroupRepository(BaseRepository):
 
     def delete_group_if_unchanged(self, expected: dict[str, Any]) -> bool:
         try:
-            if int(expected.get("id")) == 999:
+            if int(expected.get("id")) in {1, 999}:
                 return False
         except (AttributeError, TypeError, ValueError):
             return False
@@ -66,9 +66,9 @@ class GroupRepository(BaseRepository):
 
     @retry_on_busy()
     def delete_group(self, group_id: int) -> bool:
-        """Удалить группу. Запрещено для группы 999 и непустых групп."""
+        """Удалить группу. Запрещено для системных и непустых групп."""
         try:
-            if group_id == 999:
+            if group_id in {1, 999}:
                 return False
             with self._connect() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM zones WHERE group_id = ?", (group_id,))

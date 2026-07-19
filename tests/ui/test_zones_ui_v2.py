@@ -164,8 +164,9 @@ class TestZonesAPIForUI:
         updated = data2.get("zone") or data2
         assert updated.get("duration") == 15
 
-    def test_zone_update_name(self, admin_client):
+    def test_zone_update_name(self, admin_client, app):
         """Update zone name (simulates bottom sheet save)."""
+        target_group = app.db.create_group("UI edit target group")
         # Create
         resp = admin_client.post(
             "/api/zones",
@@ -184,7 +185,7 @@ class TestZonesAPIForUI:
         # Update name + group
         resp2 = admin_client.put(
             f"/api/zones/{zone_id}",
-            data=json.dumps({"name": "After Edit", "group_id": 2}),
+            data=json.dumps({"name": "After Edit", "group_id": target_group["id"]}),
             content_type="application/json",
         )
         assert resp2.status_code == 200
@@ -260,16 +261,19 @@ class TestZoneCardInteractions:
         updated = data.get("zone") or data
         assert updated.get("duration") == 1
 
-    def test_change_group(self, admin_client):
+    def test_change_group(self, admin_client, app):
         """Simulate changing zone group via bottom sheet."""
+        target_group = app.db.create_group("UI card target group")
         zone_id = self._create_zone(admin_client, group=1)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"group_id": 2}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"group_id": target_group["id"]}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
         updated = data.get("zone") or data
-        assert updated.get("group_id") == 2
+        assert updated.get("group_id") == target_group["id"]
 
     def test_change_icon(self, admin_client):
         """Simulate changing zone type/icon."""
@@ -291,15 +295,16 @@ class TestZoneCardInteractions:
         # Should return some structure
         assert isinstance(data, dict)
 
-    def test_zones_filtered_by_group(self, admin_client):
+    def test_zones_filtered_by_group(self, admin_client, app):
         """Can filter zones by group_id on client side."""
+        second_group = app.db.create_group("UI filter second group")
         self._create_zone(admin_client, name="G1 Zone", group=1)
-        self._create_zone(admin_client, name="G2 Zone", group=2)
+        self._create_zone(admin_client, name="G2 Zone", group=second_group["id"])
 
         resp = admin_client.get("/api/zones")
         data = json.loads(resp.data)
         g1_zones = [z for z in data if z["group_id"] == 1]
-        g2_zones = [z for z in data if z["group_id"] == 2]
+        g2_zones = [z for z in data if z["group_id"] == second_group["id"]]
         # At least one zone in each group
         assert len(g1_zones) >= 1
         assert len(g2_zones) >= 1

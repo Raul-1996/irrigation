@@ -10,6 +10,12 @@ from typing import Any
 # Highest automatic ID.  Explicit/imported IDs must stay below this value so
 # one final signed 32-bit identifier remains available to AUTOINCREMENT.
 MAX_ENTITY_ID = 2_147_483_647
+DURABLE_ENTITIES = (
+    ("zones", "zone"),
+    ("groups", "group"),
+    ("programs", "program"),
+    ("mqtt_servers", "mqtt_server"),
+)
 _CANONICAL_DECIMAL_ID = re.compile(r"[1-9][0-9]*\Z")
 
 

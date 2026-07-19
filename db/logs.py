@@ -8,11 +8,13 @@ from typing import Any
 from urllib.parse import quote
 
 from db.base import BaseRepository, retry_on_busy
+from db.identity import DURABLE_ENTITIES as _DURABLE_ENTITIES
 from db.identity import MAX_ENTITY_ID
 from db.schema import APPLICATION_ID, USER_VERSION
 
 logger = logging.getLogger(__name__)
 
+_SQLITE_MAX_ROWID = 9_223_372_036_854_775_807
 
 _MQTT_SETTING_KEYS = (
     "rain.server_id",
@@ -26,22 +28,153 @@ _GROUP_MQTT_SERVER_COLUMNS = (
     "water_mqtt_server_id",
     "float_mqtt_server_id",
 )
-_DURABLE_ENTITIES = (
-    ("zones", "zone"),
-    ("groups", "group"),
-    ("programs", "program"),
-    ("mqtt_servers", "mqtt_server"),
-)
 
 
 def _normalize_schema_sql(value: object) -> str:
-    return " ".join(str(value).upper().split())
+    """Canonicalize SQL tokens without changing string/blob literal bytes."""
+
+    sql = str(value)
+    normalized: list[str] = []
+    whitespace_pending = False
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if character.isspace():
+            whitespace_pending = True
+            index += 1
+            continue
+        if whitespace_pending and normalized:
+            normalized.append(" ")
+        whitespace_pending = False
+
+        if character != "'":
+            normalized.append(character.upper())
+            index += 1
+            continue
+
+        # SQLite single-quoted literals escape an embedded quote by doubling
+        # it. Preserve the complete literal verbatim: trigger values and index
+        # predicates are case-sensitive application semantics, not SQL tokens.
+        literal_start = index
+        index += 1
+        while index < len(sql):
+            if sql[index] != "'":
+                index += 1
+                continue
+            index += 1
+            if index < len(sql) and sql[index] == "'":
+                index += 1
+                continue
+            break
+        normalized.append(sql[literal_start:index])
+
+    return "".join(normalized).strip()
 
 
 def _normalize_default_sql(value: object | None) -> str | None:
     if value is None:
         return None
     return " ".join(str(value).split())
+
+
+def _schema_keyword_offset(value: object, keyword: str) -> int | None:
+    """Find an unquoted SQL keyword and return its original string offset."""
+
+    sql = str(value)
+    expected = keyword.upper()
+    index = 0
+    while index < len(sql):
+        if sql.startswith("--", index):
+            line_end = sql.find("\n", index + 2)
+            index = len(sql) if line_end < 0 else line_end
+            continue
+        if sql.startswith("/*", index):
+            comment_end = sql.find("*/", index + 2)
+            index = len(sql) if comment_end < 0 else comment_end + 2
+            continue
+        if sql[index] in {"'", '"', "`", "["}:
+            opener = sql[index]
+            closer = "]" if opener == "[" else opener
+            index += 1
+            while index < len(sql):
+                if sql[index] != closer:
+                    index += 1
+                    continue
+                index += 1
+                if closer != "]" and index < len(sql) and sql[index] == closer:
+                    index += 1
+                    continue
+                break
+            continue
+        if sql[index].isalpha() or sql[index] == "_":
+            start = index
+            index += 1
+            while index < len(sql) and (sql[index].isalnum() or sql[index] in {"_", "$"}):
+                index += 1
+            if sql[start:index].upper() == expected:
+                return start
+            continue
+        index += 1
+    return None
+
+
+def _normalized_where_predicate(value: object) -> str | None:
+    sql = str(value)
+    offset = _schema_keyword_offset(sql, "WHERE")
+    if offset is None:
+        return None
+    return _normalize_schema_sql(sql[offset + len("WHERE") :])
+
+
+def _schema_sql_code(value: object) -> str:
+    """Return SQL code with comments, literals, and quoted names removed."""
+
+    sql = str(value)
+    code: list[str] = []
+    index = 0
+    while index < len(sql):
+        if sql.startswith("--", index):
+            line_end = sql.find("\n", index + 2)
+            index = len(sql) if line_end < 0 else line_end
+            code.append(" ")
+            continue
+        if sql.startswith("/*", index):
+            comment_end = sql.find("*/", index + 2)
+            index = len(sql) if comment_end < 0 else comment_end + 2
+            code.append(" ")
+            continue
+        if sql[index] in {"'", '"', "`", "["}:
+            opener = sql[index]
+            closer = "]" if opener == "[" else opener
+            index += 1
+            while index < len(sql):
+                if sql[index] != closer:
+                    index += 1
+                    continue
+                index += 1
+                if closer != "]" and index < len(sql) and sql[index] == closer:
+                    index += 1
+                    continue
+                break
+            code.append(" ")
+            continue
+        code.append(sql[index])
+        index += 1
+
+    return " ".join("".join(code).upper().split())
+
+
+def _has_canonical_autoincrement_id(create_table_sql: object) -> bool:
+    """Return whether ``id`` has the real canonical AUTOINCREMENT clause."""
+
+    normalized = _schema_sql_code(create_table_sql)
+    return (
+        re.search(
+            r"(?:\(|,)\s*ID\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\s*(?:,|\))",
+            normalized,
+        )
+        is not None
+    )
 
 
 def _required_integrity_trigger_sql() -> dict[str, str]:
@@ -207,6 +340,17 @@ def _required_integrity_trigger_sql() -> dict[str, str]:
         """,
     )
     add(
+        "trg_groups_restrict_reserved_delete",
+        """
+            CREATE TRIGGER trg_groups_restrict_reserved_delete
+            BEFORE DELETE ON groups
+            WHEN OLD.id IN (1, 999)
+            BEGIN
+                SELECT RAISE(ABORT, 'reserved group cannot be deleted');
+            END
+        """,
+    )
+    add(
         "trg_groups_reject_replacing_name",
         """
             CREATE TRIGGER trg_groups_reject_replacing_name
@@ -266,10 +410,11 @@ class LogRepository(BaseRepository):
             "audit_log",
         }
     )
-    # Required columns are an additive contract: future versions may add
-    # columns without invalidating older backups, but removing/changing one of
-    # these requires a USER_VERSION bump and an explicit recovery path.
-    # Values are (SQLite affinity, NOT NULL required).
+    # The stamped USER_VERSION describes one exact writable schema. Future
+    # columns require a version bump and an explicit recovery path; otherwise
+    # an extra NOT NULL/generated column can make every current INSERT fail.
+    # Values are (canonical type family, exact NOT NULL flag). ``NUMERIC`` is
+    # the canonical TIMESTAMP declaration used by this schema.
     _REQUIRED_BACKUP_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "zones": {
             "id": ("INTEGER", False),
@@ -541,9 +686,9 @@ class LogRepository(BaseRepository):
             "duration_ms": ("INTEGER", False),
         },
     }
-    # Every required column not listed here must have no DEFAULT clause.  Keep
-    # this separate from the additive column contract so future columns remain
-    # acceptable while defaults used by current write paths stay exact.
+    # Every canonical column not listed here must have no DEFAULT clause. Keep
+    # defaults separate from the exact named-column contract so both dimensions
+    # are reviewed explicitly when USER_VERSION changes.
     _REQUIRED_COLUMN_DEFAULTS: dict[str, dict[str, str]] = {
         "audit_log": {"ts": "CURRENT_TIMESTAMP"},
         "bot_audit": {"ts": "CURRENT_TIMESTAMP"},
@@ -762,6 +907,7 @@ class LogRepository(BaseRepository):
         "trg_zones_group_insert": "zones",
         "trg_zones_group_update": "zones",
         "trg_groups_restrict_referenced_delete": "groups",
+        "trg_groups_restrict_reserved_delete": "groups",
         "trg_groups_reject_replacing_name": "groups",
         "trg_groups_reject_replacing_name_update": "groups",
     }
@@ -806,7 +952,7 @@ class LogRepository(BaseRepository):
         "idx_zone_runs_group_start": (False, True),
     }
     _REQUIRED_INDEX_PREDICATES = {
-        "idx_zone_runs_last_ok": "STATUS = 'OK' AND END_UTC IS NOT NULL",
+        "idx_zone_runs_last_ok": "STATUS = 'ok' AND END_UTC IS NOT NULL",
     }
     # (referenced table, local column, referenced column,
     #  ON UPDATE action, ON DELETE action, MATCH mode)
@@ -987,8 +1133,7 @@ class LogRepository(BaseRepository):
             if not self._is_valid_backup_source(self.db_path):
                 return None
 
-            os.makedirs(self.backup_dir, mode=0o700, exist_ok=True)
-            os.chmod(self.backup_dir, 0o700)
+            self._ensure_private_backup_directory()
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             backup_path = os.path.join(self.backup_dir, f"irrigation_backup_{timestamp}.db")
@@ -1044,7 +1189,7 @@ class LogRepository(BaseRepository):
                     self._remove_incomplete_backup(partial_path)
                 return None
 
-            self._cleanup_old_backups()
+            self._cleanup_old_backups(protected_path=backup_path)
             logger.info("Резервная копия создана: %s", backup_path)
             return backup_path
         except OSError as e:
@@ -1089,20 +1234,29 @@ class LogRepository(BaseRepository):
         finally:
             os.close(descriptor)
 
-    @staticmethod
-    def _sqlite_affinity(declared_type: object) -> str:
-        """Return SQLite's documented type affinity for a declaration."""
+    def _ensure_private_backup_directory(self) -> None:
+        """Create the backup path and durably publish every new directory."""
 
-        normalized = str(declared_type or "").upper()
-        if "INT" in normalized:
-            return "INTEGER"
-        if any(token in normalized for token in ("CHAR", "CLOB", "TEXT")):
-            return "TEXT"
-        if "BLOB" in normalized or not normalized:
-            return "BLOB"
-        if any(token in normalized for token in ("REAL", "FLOA", "DOUB")):
-            return "REAL"
-        return "NUMERIC"
+        if not self.backup_dir:
+            raise OSError("backup directory path is empty")
+        absolute_path = os.path.abspath(self.backup_dir)
+        missing_paths: list[str] = []
+        probe = absolute_path
+        while not os.path.exists(probe):
+            missing_paths.append(probe)
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                raise OSError(f"cannot resolve backup directory parent for {absolute_path!r}")
+            probe = parent
+
+        os.makedirs(absolute_path, mode=0o700, exist_ok=True)
+        for created_path in reversed(missing_paths):
+            os.chmod(created_path, 0o700)
+            # mkdir durability lives in the containing directory, not in the
+            # newly created directory itself. Sync each parent from the first
+            # new component down to the configured leaf.
+            self._fsync_directory(os.path.dirname(created_path))
+        os.chmod(absolute_path, 0o700)
 
     @staticmethod
     def _quoted_identifier(value: str) -> str:
@@ -1111,25 +1265,67 @@ class LogRepository(BaseRepository):
     @classmethod
     def _validate_table_contract(cls, conn: sqlite3.Connection, table: str) -> None:
         quoted_table = cls._quoted_identifier(table)
-        rows = conn.execute(f"PRAGMA main.table_info({quoted_table})").fetchall()
+        rows = conn.execute(f"PRAGMA main.table_xinfo({quoted_table})").fetchall()
         columns = {str(row[1]).casefold(): row for row in rows}
         required = cls._REQUIRED_BACKUP_COLUMNS[table]
+        actual_columns = set(columns)
+        expected_columns = set(required)
+        missing_columns = sorted(expected_columns - actual_columns)
+        if missing_columns:
+            raise sqlite3.DatabaseError(f"application table {table!r} is missing columns: {missing_columns!r}")
+        unexpected_columns = sorted(actual_columns - expected_columns)
+        if unexpected_columns:
+            raise sqlite3.DatabaseError(f"application table {table!r} has unexpected columns: {unexpected_columns!r}")
 
-        missing = set(required) - set(columns)
-        if missing:
-            raise sqlite3.DatabaseError(f"application table {table!r} is missing columns: {sorted(missing)!r}")
+        table_list_row = next(
+            (
+                row
+                for row in conn.execute("PRAGMA main.table_list").fetchall()
+                if str(row[1]) == table and str(row[2]).casefold() == "table"
+            ),
+            None,
+        )
+        if (
+            table_list_row is None
+            or int(table_list_row[3]) != len(required)
+            or bool(table_list_row[4])
+            or bool(table_list_row[5])
+        ):
+            raise sqlite3.DatabaseError(f"application table {table!r} has invalid table options")
 
-        for column, (expected_affinity, require_not_null) in required.items():
+        schema_row = conn.execute(
+            "SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        schema_sql = str(schema_row[0]) if schema_row and schema_row[0] else ""
+        schema_code = _schema_sql_code(schema_sql)
+        unsupported_constraint = re.search(
+            r"\b(?:ASC|CHECK|COLLATE|CONSTRAINT|DESC|GENERATED)\b|"
+            r"\bON\s+CONFLICT\b|\bWITHOUT\s+ROWID\b|\bSTRICT\b",
+            schema_code,
+        )
+        if unsupported_constraint is not None:
+            raise sqlite3.DatabaseError(
+                f"application table {table!r} has unexpected constraint or option {unsupported_constraint.group(0)!r}"
+            )
+
+        for column, (expected_type_family, expected_not_null) in required.items():
             row = columns[column]
-            actual_affinity = cls._sqlite_affinity(row[2])
-            if actual_affinity != expected_affinity:
+            expected_declared_type = "TIMESTAMP" if expected_type_family == "NUMERIC" else expected_type_family
+            actual_declared_type = " ".join(str(row[2]).upper().split())
+            if actual_declared_type != expected_declared_type:
                 raise sqlite3.DatabaseError(
-                    f"application table {table!r} column {column!r} has affinity "
-                    f"{actual_affinity}, expected {expected_affinity}"
+                    f"application table {table!r} column {column!r} has declared type "
+                    f"{actual_declared_type!r}, expected {expected_declared_type!r}"
                 )
-            if require_not_null and not bool(row[3]):
+            if bool(row[3]) != expected_not_null:
+                qualifier = "missing" if expected_not_null else "unexpected"
                 raise sqlite3.DatabaseError(
-                    f"application table {table!r} column {column!r} is missing NOT NULL constraint"
+                    f"application table {table!r} column {column!r} has {qualifier} NOT NULL constraint"
+                )
+            if len(row) <= 6 or int(row[6]) != 0:
+                raise sqlite3.DatabaseError(
+                    f"application table {table!r} column {column!r} has invalid hidden/generated state"
                 )
             expected_default = cls._REQUIRED_COLUMN_DEFAULTS.get(table, {}).get(column)
             actual_default = _normalize_default_sql(row[4])
@@ -1149,7 +1345,7 @@ class LogRepository(BaseRepository):
             )
 
         required_unique_keys = cls._REQUIRED_UNIQUE_KEYS.get(table, frozenset())
-        actual_unique_keys: set[tuple[str, ...]] = set()
+        actual_unique_keys: list[tuple[str, ...]] = []
         for index in conn.execute(f"PRAGMA main.index_list({quoted_table})").fetchall():
             # PRIMARY KEY indexes are already covered by the exact PK contract.
             if not bool(index[2]) or str(index[3]).casefold() == "pk":
@@ -1174,27 +1370,40 @@ class LogRepository(BaseRepository):
                 raise sqlite3.DatabaseError(
                     f"application index {index_name!r} has invalid unexpected unique constraint on table {table!r}"
                 )
-            actual_unique_keys.add(index_columns)
-        missing_unique = required_unique_keys - actual_unique_keys
+            actual_unique_keys.append(index_columns)
+        if len(actual_unique_keys) != len(set(actual_unique_keys)):
+            raise sqlite3.DatabaseError(f"application table {table!r} has duplicate unexpected unique constraints")
+        missing_unique = required_unique_keys - set(actual_unique_keys)
         if missing_unique:
             raise sqlite3.DatabaseError(
                 f"application table {table!r} is missing unique constraint: {sorted(missing_unique)!r}"
             )
 
         if table in cls._REQUIRED_AUTOINCREMENT_TABLES:
-            row = conn.execute(
-                "SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = ?",
-                (table,),
-            ).fetchone()
-            schema_sql = str(row[0]) if row and row[0] else ""
             # AUTOINCREMENT is meaningful only on an INTEGER PRIMARY KEY.  The
             # PRAGMA checks above prove that ``id`` is that sole key; this
-            # token check proves durable rowid reuse protection is enabled.
-            if re.search(r"\bAUTOINCREMENT\b", schema_sql, flags=re.IGNORECASE) is None:
+            # grammar-aware check proves rowid reuse protection is enabled.
+            if not _has_canonical_autoincrement_id(schema_sql):
                 raise sqlite3.DatabaseError(f"application table {table!r} is missing AUTOINCREMENT constraint")
+        elif re.search(r"\bAUTOINCREMENT\b", schema_code) is not None:
+            raise sqlite3.DatabaseError(f"application table {table!r} has unexpected AUTOINCREMENT constraint")
 
     @classmethod
     def _validate_integrity_constraints(cls, conn: sqlite3.Connection) -> None:
+        allowed_entities = tuple(entity for _table, entity in _DURABLE_ENTITIES)
+        placeholders = ", ".join("?" for _ in allowed_entities)
+        invalid_retired_metadata = conn.execute(
+            "SELECT entity, id, typeof(id) FROM retired_entity_ids "
+            f"WHERE entity NOT IN ({placeholders}) OR typeof(id) != 'integer' OR id <= 0 OR id > ? "
+            "ORDER BY entity, id LIMIT 1",
+            (*allowed_entities, MAX_ENTITY_ID),
+        ).fetchone()
+        if invalid_retired_metadata is not None:
+            raise sqlite3.DatabaseError(
+                f"retired {invalid_retired_metadata[0]} identifier {invalid_retired_metadata[1]!r} "
+                f"is out of range or has invalid storage ({invalid_retired_metadata[2]!r})"
+            )
+
         for table, entity in _DURABLE_ENTITIES:
             invalid_live = conn.execute(
                 f"SELECT id FROM {table} WHERE id <= 0 OR id > ? ORDER BY id LIMIT 1",
@@ -1202,19 +1411,26 @@ class LogRepository(BaseRepository):
             ).fetchone()
             if invalid_live is not None:
                 raise sqlite3.DatabaseError(f"{table} contains out-of-range durable identifier {invalid_live[0]!r}")
-            invalid_retired = conn.execute(
-                "SELECT id FROM retired_entity_ids WHERE entity = ? AND (id <= 0 OR id > ?) ORDER BY id LIMIT 1",
-                (entity, MAX_ENTITY_ID),
+            collision = conn.execute(
+                f"SELECT current.id FROM {table} current "
+                "JOIN retired_entity_ids retired ON retired.entity = ? AND retired.id = current.id "
+                "ORDER BY current.id LIMIT 1",
+                (entity,),
             ).fetchone()
-            if invalid_retired is not None:
-                raise sqlite3.DatabaseError(f"retired {entity} identifier {invalid_retired[0]!r} is out of range")
-            sequence_row = conn.execute(
-                "SELECT seq FROM sqlite_sequence WHERE name = ?",
+            if collision is not None:
+                raise sqlite3.DatabaseError(f"live {entity} identifier {collision[0]!r} is also marked retired")
+            sequence_rows = conn.execute(
+                "SELECT seq, typeof(seq) FROM sqlite_sequence WHERE name = ?",
                 (table,),
-            ).fetchone()
-            if sequence_row is None or not isinstance(sequence_row[0], int):
+            ).fetchall()
+            if len(sequence_rows) != 1:
+                raise sqlite3.DatabaseError(
+                    f"sqlite_sequence for {table} must contain exactly one row, found {len(sequence_rows)}"
+                )
+            sequence_value, sequence_type = sequence_rows[0]
+            if sequence_type != "integer" or not isinstance(sequence_value, int):
                 raise sqlite3.DatabaseError(f"sqlite_sequence for {table} is missing or invalid")
-            sequence = int(sequence_row[0])
+            sequence = int(sequence_value)
             if not 0 <= sequence <= MAX_ENTITY_ID:
                 raise sqlite3.DatabaseError(
                     f"sqlite_sequence for {table} is outside the supported durable identifier range: {sequence!r}"
@@ -1230,6 +1446,38 @@ class LogRepository(BaseRepository):
                 raise sqlite3.DatabaseError(
                     f"sqlite_sequence for {table} is below its durable identifier high-water mark"
                 )
+
+        missing_reserved_group = conn.execute(
+            "SELECT required.id FROM (SELECT 1 AS id UNION ALL SELECT 999) required "
+            "LEFT JOIN groups ON groups.id = required.id WHERE groups.id IS NULL ORDER BY required.id LIMIT 1"
+        ).fetchone()
+        if missing_reserved_group is not None:
+            raise sqlite3.DatabaseError(f"application reserved group {missing_reserved_group[0]!r} is missing")
+
+        durable_tables = {table for table, _entity in _DURABLE_ENTITIES}
+        for table in sorted(cls._REQUIRED_AUTOINCREMENT_TABLES - durable_tables):
+            sequence_rows = conn.execute(
+                "SELECT seq, typeof(seq) FROM sqlite_sequence WHERE name = ?",
+                (table,),
+            ).fetchall()
+            if len(sequence_rows) > 1:
+                raise sqlite3.DatabaseError(
+                    f"sqlite_sequence for {table} must contain at most one row, found {len(sequence_rows)}"
+                )
+            live_max = int(conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0])
+            if not sequence_rows:
+                if live_max:
+                    raise sqlite3.DatabaseError(f"sqlite_sequence for non-empty table {table} is missing")
+                continue
+            sequence_value, sequence_type = sequence_rows[0]
+            if (
+                sequence_type != "integer"
+                or not isinstance(sequence_value, int)
+                or not 0 <= sequence_value < _SQLITE_MAX_ROWID
+            ):
+                raise sqlite3.DatabaseError(f"sqlite_sequence for {table} has invalid value {sequence_value!r}")
+            if sequence_value < live_max:
+                raise sqlite3.DatabaseError(f"sqlite_sequence for {table} is below its live identifier high-water mark")
 
         dangling_groups = conn.execute(
             "SELECT zones.id, zones.group_id FROM zones "
@@ -1250,9 +1498,11 @@ class LogRepository(BaseRepository):
         if cancellation_pk != ("program_id", "run_date", "group_id"):
             raise sqlite3.DatabaseError("program_cancellations has an invalid primary key")
 
-        for table, required_foreign_keys in cls._REQUIRED_FOREIGN_KEYS.items():
+        for table in sorted(cls._REQUIRED_BACKUP_TABLES):
+            required_foreign_keys = cls._REQUIRED_FOREIGN_KEYS.get(table, frozenset())
             quoted_table = cls._quoted_identifier(table)
-            actual_foreign_keys = {
+            foreign_key_rows = conn.execute(f"PRAGMA main.foreign_key_list({quoted_table})").fetchall()
+            actual_foreign_key_list = [
                 (
                     str(row[2]).casefold(),
                     str(row[3]).casefold(),
@@ -1261,28 +1511,48 @@ class LogRepository(BaseRepository):
                     str(row[6]).upper(),
                     str(row[7]).upper(),
                 )
-                for row in conn.execute(f"PRAGMA main.foreign_key_list({quoted_table})").fetchall()
-            }
+                for row in foreign_key_rows
+            ]
+            actual_foreign_keys = set(actual_foreign_key_list)
             table_sql_row = conn.execute(
                 "SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = ?",
                 (table,),
             ).fetchone()
             table_sql = str(table_sql_row[0]) if table_sql_row and table_sql_row[0] else ""
             unsupported_clause = re.search(
-                r"\b(?:MATCH\s+(?:FULL|PARTIAL|SIMPLE)|(?:NOT\s+)?DEFERRABLE)\b",
-                table_sql,
-                flags=re.IGNORECASE,
+                r"\b(?:MATCH\s+[A-Z_][A-Z0-9_$]*|(?:NOT\s+)?DEFERRABLE)\b",
+                _schema_sql_code(table_sql),
             )
             missing_foreign_keys = required_foreign_keys - actual_foreign_keys
             if missing_foreign_keys:
                 raise sqlite3.DatabaseError(
                     f"application table {table!r} is missing foreign keys: {sorted(missing_foreign_keys)!r}"
                 )
-            if actual_foreign_keys != required_foreign_keys or unsupported_clause is not None:
+            if (
+                len(actual_foreign_key_list) != len(actual_foreign_keys)
+                or actual_foreign_keys != required_foreign_keys
+                or unsupported_clause is not None
+            ):
                 raise sqlite3.DatabaseError(
                     f"application table {table!r} has invalid foreign keys {sorted(actual_foreign_keys)!r}, "
                     f"expected {sorted(required_foreign_keys)!r}"
                 )
+
+        persisted_tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        for table in sorted(persisted_tables - cls._REQUIRED_BACKUP_TABLES):
+            quoted_table = cls._quoted_identifier(table)
+            incoming_app_references = [
+                tuple(row)
+                for row in conn.execute(f"PRAGMA main.foreign_key_list({quoted_table})").fetchall()
+                if str(row[2]).casefold() in cls._REQUIRED_BACKUP_TABLES
+            ]
+            if incoming_app_references:
+                raise sqlite3.DatabaseError(f"extra table {table!r} has unsupported references to application tables")
 
         triggers = {
             str(row[0]): (str(row[1]), row[2])
@@ -1299,6 +1569,9 @@ class LogRepository(BaseRepository):
             normalized_trigger_sql = _normalize_schema_sql(trigger_row[1])
             if normalized_trigger_sql != cls._REQUIRED_TRIGGER_SQL[trigger]:
                 raise sqlite3.DatabaseError(f"application integrity trigger {trigger!r} has an invalid definition")
+        unexpected_triggers = sorted(set(triggers) - set(cls._REQUIRED_INTEGRITY_TRIGGERS))
+        if unexpected_triggers:
+            raise sqlite3.DatabaseError(f"application schema has unexpected triggers: {unexpected_triggers!r}")
 
         indexes = {
             str(row[0]): (str(row[1]), row[2])
@@ -1306,6 +1579,13 @@ class LogRepository(BaseRepository):
                 "SELECT name, tbl_name, sql FROM main.sqlite_master WHERE type = 'index'"
             ).fetchall()
         }
+        unexpected_indexes = sorted(
+            name
+            for name, (table, sql) in indexes.items()
+            if table in cls._REQUIRED_BACKUP_TABLES and sql and name not in cls._REQUIRED_INDEXES
+        )
+        if unexpected_indexes:
+            raise sqlite3.DatabaseError(f"application schema has unexpected indexes: {unexpected_indexes!r}")
         for index_name, (expected_table, expected_columns) in cls._REQUIRED_INDEXES.items():
             index_row = indexes.get(index_name)
             if index_row is None or index_row[0] != expected_table or not index_row[1]:
@@ -1335,9 +1615,7 @@ class LogRepository(BaseRepository):
                 (False,) * len(expected_columns),
             )
             expected_predicate = cls._REQUIRED_INDEX_PREDICATES.get(index_name)
-            normalized_index_sql = _normalize_schema_sql(index_row[1])
-            marker = " WHERE "
-            actual_predicate = normalized_index_sql.split(marker, 1)[1] if marker in normalized_index_sql else None
+            actual_predicate = _normalized_where_predicate(index_row[1])
             expected_partial = expected_predicate is not None
             invalid_flags = (
                 metadata is None
@@ -1397,6 +1675,11 @@ class LogRepository(BaseRepository):
                 raise sqlite3.DatabaseError(
                     f"application schema is missing migration markers: {sorted(missing_migrations)!r}"
                 )
+            unexpected_migrations = migrations - cls._REQUIRED_BACKUP_MIGRATIONS
+            if unexpected_migrations:
+                raise sqlite3.DatabaseError(
+                    f"application schema has unexpected migration markers: {sorted(unexpected_migrations)!r}"
+                )
             cls._validate_integrity_constraints(conn)
 
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -1443,8 +1726,8 @@ class LogRepository(BaseRepository):
             except OSError as e:
                 logger.error("Не удалось удалить sidecar бэкапа %s: %s", sidecar, e)
 
-    def _cleanup_old_backups(self, keep_count: int = 7):
-        """Удалить старые резервные копии."""
+    def _cleanup_old_backups(self, keep_count: int = 7, protected_path: str | None = None):
+        """Удалить старые копии, не затрагивая только что опубликованную."""
         deleted_any = False
         try:
             backup_files = []
@@ -1454,8 +1737,13 @@ class LogRepository(BaseRepository):
                     backup_files.append((file_path, os.path.getmtime(file_path)))
 
             backup_files.sort(key=lambda x: x[1])
+            protected = os.path.abspath(protected_path) if protected_path is not None else None
+            delete_count = max(0, len(backup_files) - keep_count)
+            deletion_candidates = [
+                item for item in backup_files if protected is None or os.path.abspath(item[0]) != protected
+            ]
 
-            for file_path, _ in backup_files[:-keep_count]:
+            for file_path, _ in deletion_candidates[:delete_count]:
                 os.remove(file_path)
                 deleted_any = True
                 logger.info("Удалена старая резервная копия: %s", file_path)
