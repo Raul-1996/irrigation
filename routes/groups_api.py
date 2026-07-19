@@ -118,6 +118,14 @@ def _strict_zones() -> list[dict]:
     return loader() if callable(loader) else db.get_zones()
 
 
+def _strict_group_zone_ids(group_id: int) -> list[int]:
+    return sorted(
+        int(zone["id"])
+        for zone in (_strict_zones() or [])
+        if int(zone.get("group_id") or 0) == int(group_id)
+    )
+
+
 def _get_group_strict(group_id: int) -> dict | None:
     return next(
         (group for group in (_strict_groups() or []) if int(group.get("id") or 0) == int(group_id)),
@@ -736,26 +744,9 @@ def api_delete_group(group_id):
 
 @groups_api_bp.route("/api/groups/<int:group_id>/stop", methods=["POST"])
 @audit_log("group_stop", target_extractor=lambda *a, **kw: f"group:{kw.get('group_id', a[0] if a else '?')}")
-@_serialize_group_hardware_mutation(always=True)
 def api_stop_group(group_id):
     """Stop all zones in group."""
     try:
-        try:
-            expected_zone_ids = sorted(
-                int(zone["id"])
-                for zone in (_strict_zones() or [])
-                if int(zone.get("group_id") or 0) == int(group_id)
-            )
-        except (ConnectionError, OSError, RuntimeError, sqlite3.Error, KeyError, TypeError, ValueError):
-            logger.exception("group stop inventory unavailable group=%s", group_id)
-            return jsonify(
-                {
-                    "success": False,
-                    "message": "Не удалось проверить состав группы",
-                    "stopped": [],
-                    "unresolved": [],
-                }
-            ), 503
         try:
             scheduler = get_scheduler()
             cancel_group_jobs = getattr(scheduler, "cancel_group_jobs", None)
@@ -764,6 +755,11 @@ def api_stop_group(group_id):
             stop_result = cancel_group_jobs(int(group_id))
         except Exception:
             logger.exception("group stop: scheduler cancellation failed")
+            try:
+                expected_zone_ids = _strict_group_zone_ids(int(group_id))
+            except (ConnectionError, OSError, RuntimeError, sqlite3.Error, KeyError, TypeError, ValueError):
+                logger.exception("group stop inventory unavailable after cancellation failure group=%s", group_id)
+                expected_zone_ids = []
             return jsonify(
                 {
                     "success": False,
@@ -771,6 +767,20 @@ def api_stop_group(group_id):
                     "stopped": [],
                     "unresolved": expected_zone_ids,
                     "unverified_zone_ids": expected_zone_ids,
+                }
+            ), 503
+
+        try:
+            expected_zone_ids = _strict_group_zone_ids(int(group_id))
+        except (ConnectionError, OSError, RuntimeError, sqlite3.Error, KeyError, TypeError, ValueError):
+            logger.exception("group stop inventory unavailable group=%s", group_id)
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не удалось проверить состав группы",
+                    "stopped": [],
+                    "unresolved": [],
+                    "unverified_zone_ids": [],
                 }
             ), 503
 

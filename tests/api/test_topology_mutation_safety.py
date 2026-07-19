@@ -1,6 +1,7 @@
 """Regression tests for fail-closed hardware topology mutations."""
 
 import sqlite3
+import threading
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -1081,6 +1082,60 @@ class TestGroupStopConfirmationSafety:
         assert response.status_code == 503
         assert response.get_json()["unverified_zone_ids"] == [zone["id"]]
         core_stop.assert_not_called()
+
+    def test_route_does_not_hold_group_lock_while_scheduler_waits_for_runner_ack(self, admin_client, app):
+        from services.locks import group_lock
+
+        group = _group(app)
+        zone = _zone(app, group["id"], topic="")
+        scheduler = Mock()
+        lock_acquired = threading.Event()
+        probe_thread = None
+
+        def cancel_group_jobs(_group_id):
+            nonlocal probe_thread
+
+            def probe_group_lock():
+                with group_lock(group["id"]):
+                    lock_acquired.set()
+
+            probe_thread = threading.Thread(target=probe_group_lock, daemon=True)
+            probe_thread.start()
+            if not lock_acquired.wait(0.5):
+                raise RuntimeError("route held group lock across runner acknowledgement")
+            return self._result(group["id"], stopped=[zone["id"]])
+
+        scheduler.cancel_group_jobs.side_effect = cancel_group_jobs
+        with patch("routes.groups_api.get_scheduler", return_value=scheduler):
+            response = admin_client.post(f"/api/groups/{group['id']}/stop")
+
+        if probe_thread is not None:
+            probe_thread.join(timeout=1)
+        assert response.status_code == 200
+        assert lock_acquired.is_set()
+
+    def test_scheduler_barrier_precedes_route_inventory_and_still_runs_if_inventory_fails(self, admin_client, app):
+        group = _group(app)
+        events = []
+        scheduler = Mock()
+
+        def cancel_group_jobs(_group_id):
+            events.append("cancel")
+            return self._result(group["id"])
+
+        def fail_inventory():
+            events.append("inventory")
+            raise sqlite3.OperationalError("strict inventory unavailable")
+
+        scheduler.cancel_group_jobs.side_effect = cancel_group_jobs
+        with (
+            patch("routes.groups_api.get_scheduler", return_value=scheduler),
+            patch("routes.groups_api._strict_zones", side_effect=fail_inventory),
+        ):
+            response = admin_client.post(f"/api/groups/{group['id']}/stop")
+
+        assert response.status_code == 503
+        assert events == ["cancel", "inventory"]
 
     @pytest.mark.parametrize("observed_state", ["on", "unconfirmed"])
     def test_unresolved_off_keeps_recovery_jobs_and_returns_503(self, admin_client, app, observed_state):
