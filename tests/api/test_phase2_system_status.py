@@ -732,3 +732,93 @@ def test_status_water_today_reports_unavailable_instead_of_confirmed_zero(admin_
         "per_zone": [],
         "error_code": "WATER_REPORT_UNAVAILABLE",
     }
+
+
+def test_status_rain_sensor_disabled_has_no_false_health_fault(admin_client, app, monkeypatch):
+    from routes import system_status_api
+
+    app.db.set_rain_config({"enabled": False})
+    monkeypatch.setattr(system_status_api.rain_monitor, "sensor_online", True, raising=False)
+    monkeypatch.setattr(system_status_api.rain_monitor, "get_sensor_state", lambda: "rain", raising=False)
+
+    payload = admin_client.get("/api/status").get_json()
+
+    assert payload["rain_enabled"] is False
+    assert payload["rain_sensor"] == "выключен"
+    assert payload["rain_sensor_online"] is False
+    assert payload["rain_sensor_state"] == "disabled"
+    assert payload["rain_sensor_health"] == {"status": "disabled", "error_code": None}
+    assert not any(str(fault.get("type", "")).startswith("rain_sensor_") for fault in payload["system_health"]["faults"])
+
+
+def test_status_rain_sensor_offline_is_degraded_not_dry(admin_client, app, monkeypatch):
+    from routes import system_status_api
+
+    app.db.set_rain_config({"enabled": True})
+    monkeypatch.setattr(system_status_api.rain_monitor, "sensor_online", False, raising=False)
+    monkeypatch.setattr(system_status_api.rain_monitor, "is_rain", False)
+    monkeypatch.setattr(system_status_api.rain_monitor, "get_sensor_state", lambda: "offline", raising=False)
+
+    payload = admin_client.get("/api/status").get_json()
+
+    assert payload["rain_sensor"] == "нет связи"
+    assert payload["rain_sensor_online"] is False
+    assert payload["rain_sensor_state"] == "offline"
+    assert payload["rain_sensor_health"] == {
+        "status": "degraded",
+        "error_code": "RAIN_SENSOR_OFFLINE",
+    }
+    assert any(
+        fault.get("type") == "rain_sensor_offline"
+        and fault.get("severity") == "warning"
+        and fault.get("error_code") == "RAIN_SENSOR_OFFLINE"
+        for fault in payload["system_health"]["faults"]
+    )
+
+
+def test_status_rain_sensor_online_without_payload_is_unknown_not_dry(admin_client, app, monkeypatch):
+    from routes import system_status_api
+
+    app.db.set_rain_config({"enabled": True})
+    monkeypatch.setattr(system_status_api.rain_monitor, "sensor_online", True, raising=False)
+    monkeypatch.setattr(system_status_api.rain_monitor, "is_rain", None)
+    monkeypatch.setattr(system_status_api.rain_monitor, "get_sensor_state", lambda: "unknown", raising=False)
+
+    payload = admin_client.get("/api/status").get_json()
+
+    assert payload["rain_sensor"] == "нет данных"
+    assert payload["rain_sensor_online"] is True
+    assert payload["rain_sensor_state"] == "unknown"
+    assert payload["rain_sensor_health"] == {
+        "status": "degraded",
+        "error_code": "RAIN_SENSOR_DATA_UNAVAILABLE",
+    }
+    assert any(
+        fault.get("type") == "rain_sensor_data_unavailable"
+        and fault.get("severity") == "warning"
+        and fault.get("error_code") == "RAIN_SENSOR_DATA_UNAVAILABLE"
+        for fault in payload["system_health"]["faults"]
+    )
+
+
+def test_status_rain_sensor_proxies_fresh_dry_and_rain_truth(admin_client, app, monkeypatch):
+    from routes import system_status_api
+
+    app.db.set_rain_config({"enabled": True})
+    monkeypatch.setattr(system_status_api.rain_monitor, "sensor_online", True, raising=False)
+    state = {"value": "dry"}
+    monkeypatch.setattr(
+        system_status_api.rain_monitor,
+        "get_sensor_state",
+        lambda: state["value"],
+        raising=False,
+    )
+
+    dry = admin_client.get("/api/status").get_json()
+    state["value"] = "rain"
+    rain = admin_client.get("/api/status").get_json()
+
+    assert (dry["rain_sensor_state"], dry["rain_sensor"]) == ("dry", "дождя нет")
+    assert dry["rain_sensor_health"] == {"status": "healthy", "error_code": None}
+    assert (rain["rain_sensor_state"], rain["rain_sensor"]) == ("rain", "идёт дождь")
+    assert rain["rain_sensor_health"] == {"status": "healthy", "error_code": None}

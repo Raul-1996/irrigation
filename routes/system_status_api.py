@@ -60,6 +60,61 @@ _MQTT_CONNECTION_FIELDS = (
     "tls_version",
 )
 
+_RAIN_SENSOR_LABELS = {
+    "disabled": "выключен",
+    "offline": "нет связи",
+    "unknown": "нет данных",
+    "rain": "идёт дождь",
+    "dry": "дождя нет",
+}
+_RAIN_SENSOR_STATES = frozenset(_RAIN_SENSOR_LABELS)
+
+
+def _rain_runtime_snapshot(enabled: bool) -> dict[str, Any]:
+    """Expose only the monitor's fail-closed runtime truth.
+
+    The permanent monitor owns connection/readiness/freshness semantics. The
+    status endpoint must not reinterpret a stale ``is_rain=False`` as dry.
+    """
+    if not enabled:
+        state = "disabled"
+        online = False
+    else:
+        online = bool(getattr(rain_monitor, "sensor_online", False))
+        get_sensor_state = getattr(rain_monitor, "get_sensor_state", None)
+        try:
+            state = str(get_sensor_state()).strip().lower() if callable(get_sensor_state) else "offline"
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            state = "offline"
+
+        if state not in _RAIN_SENSOR_STATES:
+            state = "unknown" if online else "offline"
+        if state == "disabled":
+            # Configuration is enabled but the runtime is not: this is a
+            # connectivity failure, not a genuinely disabled sensor.
+            state = "offline"
+        if not online or state == "offline":
+            online = False
+            state = "offline"
+
+    error_code = None
+    health_status = "healthy"
+    if state == "disabled":
+        health_status = "disabled"
+    elif state == "offline":
+        health_status = "degraded"
+        error_code = "RAIN_SENSOR_OFFLINE"
+    elif state == "unknown":
+        health_status = "degraded"
+        error_code = "RAIN_SENSOR_DATA_UNAVAILABLE"
+
+    return {
+        "online": online,
+        "state": state,
+        "label": _RAIN_SENSOR_LABELS[state],
+        "health": {"status": health_status, "error_code": error_code},
+    }
+
 
 def _reset_runtime_mqtt_health_cache() -> None:
     """Clear process-local health state (also used for deterministic tests)."""
@@ -862,17 +917,7 @@ def api_status():
             }
         )
 
-    if not rain_cfg.get("enabled"):
-        rain_sensor_status = "выключен"
-    else:
-        try:
-            if hasattr(rain_monitor, "is_rain") and rain_monitor.is_rain is not None:
-                rain_sensor_status = "идёт дождь" if rain_monitor.is_rain else "дождя нет"
-            else:
-                rain_sensor_status = "дождя нет"
-        except (ValueError, TypeError, RuntimeError) as e:
-            logger.debug("Exception in line_831: %s", e)
-            rain_sensor_status = "дождя нет"
+    rain_runtime = _rain_runtime_snapshot(bool(rain_cfg.get("enabled")))
 
     env_cfg = db.get_env_config()
     temp_enabled = bool(env_cfg.get("temp", {}).get("enabled"))
@@ -937,6 +982,21 @@ def api_status():
                 )
     except (KeyError, TypeError, ValueError) as e:
         logger.debug("api_status: fault aggregation failed: %s", e)
+
+    rain_error_code = rain_runtime["health"].get("error_code")
+    if rain_error_code:
+        rain_offline = rain_error_code == "RAIN_SENSOR_OFFLINE"
+        faults.append(
+            {
+                "type": "rain_sensor_offline" if rain_offline else "rain_sensor_data_unavailable",
+                "severity": "warning",
+                "error_code": rain_error_code,
+                "zone_id": None,
+                "zone_name": None,
+                "reason": "Нет связи с датчиком дождя" if rain_offline else "Нет актуальных данных датчика дождя",
+                "since": None,
+            }
+        )
 
     if mqtt_secret_unavailable:
         faults.append(
@@ -1008,7 +1068,10 @@ def api_status():
             "temperature": temperature,
             "humidity": humidity,
             "rain_enabled": bool(rain_cfg.get("enabled")),
-            "rain_sensor": rain_sensor_status,
+            "rain_sensor": rain_runtime["label"],
+            "rain_sensor_online": rain_runtime["online"],
+            "rain_sensor_state": rain_runtime["state"],
+            "rain_sensor_health": rain_runtime["health"],
             "groups": groups_status,
             "emergency_stop": current_app.config.get("EMERGENCY_STOP", False),
             "is_admin": is_admin,
