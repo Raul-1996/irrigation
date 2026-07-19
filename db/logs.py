@@ -1,6 +1,5 @@
 import logging
 import os
-import shutil
 import sqlite3
 from datetime import datetime
 from typing import Any
@@ -173,33 +172,53 @@ class LogRepository(BaseRepository):
             return {"total_liters": 0, "avg_daily": 0, "zone_usage": [], "period_days": days}
 
     def create_backup(self) -> str | None:
-        """Создать резервную копию базы данных."""
-        try:
-            if not os.path.exists(self.backup_dir):
-                os.makedirs(self.backup_dir)
+        """Create a WAL-consistent, validated SQLite snapshot.
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        Copying only the main ``.db`` file is never a valid fallback while
+        WAL mode is active: committed pages may still live exclusively in
+        ``-wal``. Both strategies below ask SQLite itself for one coherent
+        read snapshot; if both fail, backup creation fails closed.
+        """
+        try:
+            os.makedirs(self.backup_dir, mode=0o700, exist_ok=True)
+            os.chmod(self.backup_dir, 0o700)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             backup_path = os.path.join(self.backup_dir, f"irrigation_backup_{timestamp}.db")
+            partial_path = backup_path + ".partial"
 
             try:
-                with sqlite3.connect(self.db_path) as src_conn:
-                    with sqlite3.connect(backup_path) as dst_conn:
-                        src_conn.backup(dst_conn)
+                self._backup_via_api(self.db_path, partial_path)
+            except (sqlite3.Error, OSError) as api_error:
+                logger.warning("SQLite backup API failed, trying VACUUM INTO: %s", api_error)
+                self._remove_incomplete_backup(partial_path)
                 try:
-                    with self._connect() as c:
-                        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                        c.commit()
-                except sqlite3.Error as e:
-                    logger.debug("WAL checkpoint after backup: %s", e)
-            except sqlite3.Error as e:
-                logger.debug("VACUUM backup failed, using copy: %s", e)
-                shutil.copy2(self.db_path, backup_path)
+                    self._backup_via_vacuum(self.db_path, partial_path)
+                except (sqlite3.Error, OSError) as vacuum_error:
+                    logger.error(
+                        "Both WAL-consistent backup methods failed (backup=%s, vacuum=%s)",
+                        api_error,
+                        vacuum_error,
+                    )
+                    self._remove_incomplete_backup(partial_path)
+                    return None
+
+            try:
+                # The containing directory is private throughout creation;
+                # chmod before validation/rename makes the final file 0600
+                # even if the process was started with a permissive umask.
+                os.chmod(partial_path, 0o600)
+            except OSError as e:
+                logger.error("Не удалось защитить права бэкапа %s: %s", partial_path, e)
+                self._remove_incomplete_backup(partial_path)
+                return None
 
             try:
                 prod_size = os.path.getsize(self.db_path)
-                bak_size = os.path.getsize(backup_path)
+                bak_size = os.path.getsize(partial_path)
             except OSError as e:
                 logger.error("Не удалось проверить размер бэкапа: %s", e)
+                self._remove_incomplete_backup(partial_path)
                 return None
             if bak_size < prod_size * 0.5:
                 logger.error(
@@ -207,10 +226,19 @@ class LogRepository(BaseRepository):
                     bak_size,
                     prod_size,
                 )
-                try:
-                    os.remove(backup_path)
-                except OSError as e:
-                    logger.error("Не удалось удалить подозрительный бэкап %s: %s", backup_path, e)
+                self._remove_incomplete_backup(partial_path)
+                return None
+
+            try:
+                with sqlite3.connect(partial_path) as backup_conn:
+                    integrity = backup_conn.execute("PRAGMA integrity_check").fetchone()
+                if integrity != ("ok",):
+                    raise sqlite3.DatabaseError(f"integrity_check returned {integrity!r}")
+                os.replace(partial_path, backup_path)
+                self._remove_sqlite_sidecars(partial_path)
+            except (sqlite3.Error, OSError) as e:
+                logger.error("Backup validation failed: %s", e)
+                self._remove_incomplete_backup(partial_path)
                 return None
 
             self._cleanup_old_backups()
@@ -219,6 +247,44 @@ class LogRepository(BaseRepository):
         except OSError as e:
             logger.error("Ошибка создания резервной копии: %s", e)
             return None
+
+    @staticmethod
+    def _backup_via_api(source_path: str, target_path: str) -> None:
+        with sqlite3.connect(source_path, timeout=30) as source:
+            source.execute("PRAGMA busy_timeout=30000")
+            with sqlite3.connect(target_path, timeout=30) as target:
+                source.backup(target)
+                # backup() also copies the source journal-mode header. Convert
+                # the finished snapshot back to a standalone main DB through
+                # SQLite itself so restore never depends on sidecar files.
+                target.execute("PRAGMA journal_mode=DELETE")
+
+    @staticmethod
+    def _backup_via_vacuum(source_path: str, target_path: str) -> None:
+        with sqlite3.connect(source_path, timeout=30) as source:
+            source.execute("PRAGMA busy_timeout=30000")
+            source.execute("VACUUM INTO ?", (target_path,))
+
+    @staticmethod
+    def _remove_incomplete_backup(path: str) -> None:
+        LogRepository._remove_sqlite_sidecars(path)
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.error("Не удалось удалить незавершённый бэкап %s: %s", path, e)
+
+    @staticmethod
+    def _remove_sqlite_sidecars(path: str) -> None:
+        for suffix in ("-wal", "-shm"):
+            sidecar = path + suffix
+            try:
+                os.remove(sidecar)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.error("Не удалось удалить sidecar бэкапа %s: %s", sidecar, e)
 
     def _cleanup_old_backups(self, keep_count: int = 7):
         """Удалить старые резервные копии."""

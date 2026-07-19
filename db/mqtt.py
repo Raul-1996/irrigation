@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 class MqttRepository(BaseRepository):
     """Repository for MQTT server CRUD + encrypt/decrypt passwords."""
 
+    _SERVER_SETTING_KEYS = (
+        "rain.server_id",
+        "master.server_id",
+        "env.temp.server_id",
+        "env.hum.server_id",
+    )
+
     @staticmethod
     def _decrypt_mqtt_password(server: dict[str, Any]) -> dict[str, Any]:
         """Decrypt MQTT password if it's stored encrypted (ENC: prefix)."""
@@ -39,6 +46,69 @@ class MqttRepository(BaseRepository):
         except sqlite3.Error as e:
             logger.error("Ошибка получения MQTT сервера %s: %s", server_id, e)
             return None
+
+    @classmethod
+    def _collect_server_references(cls, conn: sqlite3.Connection, server_id: int) -> dict[str, list[Any]]:
+        sid = int(server_id)
+        references: dict[str, list[Any]] = {
+            "zones": [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM zones WHERE mqtt_server_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+            ],
+            "groups_master": [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM groups WHERE master_mqtt_server_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+            ],
+            "groups_pressure": [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM groups WHERE pressure_mqtt_server_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+            ],
+            "groups_water": [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM groups WHERE water_mqtt_server_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+            ],
+            "groups_float": [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM groups WHERE float_mqtt_server_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+            ],
+            "settings": [],
+        }
+        placeholders = ", ".join("?" for _ in cls._SERVER_SETTING_KEYS)
+        for key, value in conn.execute(
+            f"SELECT key, value FROM settings WHERE key IN ({placeholders}) ORDER BY key",
+            cls._SERVER_SETTING_KEYS,
+        ).fetchall():
+            try:
+                if int(value) == sid:
+                    references["settings"].append(str(key))
+            except (TypeError, ValueError):
+                continue
+        return references
+
+    def get_mqtt_server_references(self, server_id: int) -> dict[str, list[Any]]:
+        """Return structured hardware/config references to ``server_id``."""
+
+        try:
+            with self._connect() as conn:
+                return self._collect_server_references(conn, server_id)
+        except sqlite3.Error as e:
+            logger.error("Ошибка получения ссылок MQTT сервера %s: %s", server_id, e)
+            raise
 
     @retry_on_busy()
     def create_mqtt_server(self, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -111,7 +181,7 @@ class MqttRepository(BaseRepository):
             assignments.append("updated_at = CURRENT_TIMESTAMP")
             params.append(server_id)
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     f"""
                     UPDATE mqtt_servers
                     SET {", ".join(assignments)}
@@ -120,18 +190,34 @@ class MqttRepository(BaseRepository):
                     params,
                 )
                 conn.commit()
-                return True
+                return cursor.rowcount == 1
         except sqlite3.Error as e:
             logger.error("Ошибка обновления MQTT сервера %s: %s", server_id, e)
             return False
 
     @retry_on_busy()
     def delete_mqtt_server(self, server_id: int) -> bool:
+        """Delete only an existing, completely unreferenced server.
+
+        Hardware/config references are RESTRICT rather than SET NULL or
+        CASCADE: silently disconnecting a zone or rebinding it to a later row
+        is unsafe. ``BEGIN IMMEDIATE`` makes the reference check and DELETE a
+        single writer transaction.
+        """
         try:
             with self._connect() as conn:
-                conn.execute("DELETE FROM mqtt_servers WHERE id = ?", (server_id,))
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM mqtt_servers WHERE id = ?", (int(server_id),)).fetchone() is None:
+                    conn.rollback()
+                    return False
+                references = self._collect_server_references(conn, server_id)
+                if any(references.values()):
+                    logger.warning("MQTT server %s delete restricted by references: %s", server_id, references)
+                    conn.rollback()
+                    return False
+                cursor = conn.execute("DELETE FROM mqtt_servers WHERE id = ?", (int(server_id),))
                 conn.commit()
-                return True
+                return cursor.rowcount == 1
         except sqlite3.Error as e:
             logger.error("Ошибка удаления MQTT сервера %s: %s", server_id, e)
             return False

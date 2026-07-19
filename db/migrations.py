@@ -1,6 +1,6 @@
-import contextlib
 import json
 import logging
+import re
 import sqlite3
 from datetime import UTC
 
@@ -35,7 +35,7 @@ class MigrationRunner:
                 # Create tables
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS zones (
-                        id INTEGER PRIMARY KEY,
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
                         state TEXT DEFAULT 'off',
                         name TEXT NOT NULL,
                         icon TEXT DEFAULT '🌿',
@@ -63,7 +63,7 @@ class MigrationRunner:
                 """)
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS groups (
-                        id INTEGER PRIMARY KEY,
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL UNIQUE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -71,7 +71,7 @@ class MigrationRunner:
                 """)
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS programs (
-                        id INTEGER PRIMARY KEY,
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL,
                         time TEXT NOT NULL,
                         days TEXT NOT NULL,
@@ -102,7 +102,8 @@ class MigrationRunner:
                         run_date TEXT NOT NULL,
                         group_id INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (program_id, run_date, group_id)
+                        PRIMARY KEY (program_id, run_date, group_id),
+                        FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
                     )
                 """)
 
@@ -239,6 +240,24 @@ class MigrationRunner:
                     "programs_canonical_even_odd",
                     self._migrate_canonical_even_odd,
                 )
+                # Durable identity / integrity hardening. These migrations are
+                # intentionally last: legacy columns and history tables must
+                # exist before dangling identifiers can be discovered.
+                self._apply_named_migration(
+                    conn,
+                    "durable_entity_ids_v1",
+                    self._migrate_durable_entity_ids,
+                )
+                self._apply_named_migration(
+                    conn,
+                    "program_cancellations_fk_v1",
+                    self._migrate_program_cancellations_fk,
+                )
+                self._apply_named_migration(
+                    conn,
+                    "restore_runtime_indexes_v1",
+                    self._migrate_restore_runtime_indexes,
+                )
 
                 logger.info("База данных инициализирована успешно")
 
@@ -277,8 +296,9 @@ class MigrationRunner:
         """Применить именованную миграцию ровно один раз.
 
         Имя записывается в ``migrations`` ТОЛЬКО после успешного ``func(conn)``:
-        упавшая миграция логируется, НЕ помечается применённой (повторится на
-        следующем старте) и не валит инициализацию приложения.
+        упавшая миграция НЕ помечается применённой и прерывает инициализацию.
+        Продолжать запуск на частично обновлённой схеме опаснее, чем оставить
+        сервис неготовым и повторить идемпотентную миграцию после исправления.
         """
         try:
             cur = conn.execute("SELECT name FROM migrations WHERE name = ? LIMIT 1", (name,))
@@ -286,19 +306,22 @@ class MigrationRunner:
                 return
         except sqlite3.Error as e:
             logger.error("Ошибка проверки миграции %s: %s", name, e)
-            return
+            raise
         try:
             func(conn)
         except Exception:
-            logger.exception("Ошибка применения миграции %s — не помечена применённой, будет повторена", name)
-            with contextlib.suppress(sqlite3.Error):
+            logger.exception("Ошибка применения миграции %s — инициализация прервана", name)
+            try:
                 conn.rollback()
-            return
+            except sqlite3.Error:
+                logger.exception("Не удалось откатить упавшую миграцию %s", name)
+            raise
         try:
             conn.execute("INSERT OR REPLACE INTO migrations(name) VALUES (?)", (name,))
             conn.commit()
         except sqlite3.Error as e:
             logger.error("Ошибка фиксации миграции %s: %s", name, e)
+            raise
 
     def rollback_migration(self, name: str) -> bool:
         """Rollback (downgrade) a single named migration.
@@ -403,6 +426,322 @@ class MigrationRunner:
         """
         return [column for column, decl in columns if cls._add_column_if_missing(conn, table, column, decl)]
 
+    @staticmethod
+    def _ensure_autoincrement_identity(conn: sqlite3.Connection, table: str) -> None:
+        """Rebuild ``table.id`` with AUTOINCREMENT without losing its schema.
+
+        Plain ``INTEGER PRIMARY KEY`` may reuse the deleted highest rowid.
+        That is unsafe for identifiers retained in schedules, history and
+        hardware configuration.  The rebuild copies every column and restores
+        user-created indexes/triggers whose SQL SQLite exposes.
+        """
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if not row or not row[0]:
+            raise RuntimeError(f"required table {table!r} is missing")
+        old_sql = str(row[0])
+        id_match = re.search(r"\bid\s+INTEGER\s+PRIMARY\s+KEY(?:\s+AUTOINCREMENT)?", old_sql, re.IGNORECASE)
+        if id_match is None:
+            raise RuntimeError(f"{table}.id is not an INTEGER PRIMARY KEY")
+        if "AUTOINCREMENT" in id_match.group(0).upper():
+            return
+
+        schema_objects = [
+            str(item[0])
+            for item in conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL "
+                "ORDER BY type, name",
+                (table,),
+            ).fetchall()
+        ]
+        columns = [str(item[1]) for item in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if not columns:
+            raise RuntimeError(f"required table {table!r} has no columns")
+
+        temp_table = f"{table}__durable_id"
+        create_sql = re.sub(
+            rf"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"{re.escape(table)}\"|{re.escape(table)})",
+            f'CREATE TABLE "{temp_table}"',
+            old_sql,
+            count=1,
+        )
+        create_sql = re.sub(
+            r"\bid\s+INTEGER\s+PRIMARY\s+KEY(?!\s+AUTOINCREMENT)",
+            "id INTEGER PRIMARY KEY AUTOINCREMENT",
+            create_sql,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        quoted_columns = ", ".join(f'"{column}"' for column in columns)
+        conn.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+        conn.execute(create_sql)
+        conn.execute(
+            f'INSERT INTO "{temp_table}" ({quoted_columns}) '
+            f'SELECT {quoted_columns} FROM "{table}"'
+        )
+        conn.execute(f'DROP TABLE "{table}"')
+        conn.execute(f'ALTER TABLE "{temp_table}" RENAME TO "{table}"')
+        for schema_sql in schema_objects:
+            conn.execute(schema_sql)
+
+    @staticmethod
+    def _retire_identifier(conn: sqlite3.Connection, entity: str, identifier: object) -> None:
+        try:
+            normalized = int(identifier)
+        except (TypeError, ValueError):
+            return
+        if normalized <= 0:
+            return
+        conn.execute(
+            "INSERT OR IGNORE INTO retired_entity_ids(entity, id) VALUES (?, ?)",
+            (entity, normalized),
+        )
+
+    @classmethod
+    def _backfill_retired_identifiers(cls, conn: sqlite3.Connection) -> None:
+        """Preserve legacy dangling IDs so an upgrade cannot rebind them."""
+
+        for table, column in (("zone_runs", "zone_id"), ("water_usage", "zone_id")):
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if table_exists:
+                rows = conn.execute(
+                    f"SELECT DISTINCT source.{column} FROM {table} source "
+                    f"LEFT JOIN zones current ON current.id = source.{column} "
+                    f"WHERE source.{column} IS NOT NULL AND current.id IS NULL"
+                ).fetchall()
+                for (identifier,) in rows:
+                    cls._retire_identifier(conn, "zone", identifier)
+
+        for (zones_json,) in conn.execute("SELECT zones FROM programs").fetchall():
+            try:
+                identifiers = json.loads(zones_json or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(identifiers, list):
+                continue
+            for identifier in identifiers:
+                try:
+                    exists = conn.execute("SELECT 1 FROM zones WHERE id = ?", (int(identifier),)).fetchone()
+                except (TypeError, ValueError):
+                    continue
+                if exists is None:
+                    cls._retire_identifier(conn, "zone", identifier)
+
+        group_sources = (
+            ("zone_runs", "group_id"),
+            ("program_queue_log", "group_id"),
+            ("float_events", "group_id"),
+            ("program_cancellations", "group_id"),
+            ("zones", "group_id"),
+        )
+        for table, column in group_sources:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if not table_exists:
+                continue
+            for (identifier,) in conn.execute(
+                f"SELECT DISTINCT source.{column} FROM {table} source "
+                f"LEFT JOIN groups current ON current.id = source.{column} "
+                f"WHERE source.{column} IS NOT NULL AND current.id IS NULL"
+            ).fetchall():
+                cls._retire_identifier(conn, "group", identifier)
+
+        mqtt_candidates: set[int] = set()
+
+        def add_mqtt_candidate(value: object) -> None:
+            try:
+                mqtt_candidates.add(int(value))
+            except (TypeError, ValueError):
+                logger.warning("Ignoring malformed legacy MQTT server reference %r", value)
+
+        zone_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(zones)").fetchall()}
+        if "mqtt_server_id" in zone_columns:
+            for (value,) in conn.execute(
+                "SELECT DISTINCT mqtt_server_id FROM zones WHERE mqtt_server_id IS NOT NULL"
+            ).fetchall():
+                add_mqtt_candidate(value)
+        group_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(groups)").fetchall()}
+        for column in (
+            "master_mqtt_server_id",
+            "pressure_mqtt_server_id",
+            "water_mqtt_server_id",
+            "float_mqtt_server_id",
+        ):
+            if column in group_columns:
+                for (value,) in conn.execute(
+                    f"SELECT DISTINCT {column} FROM groups WHERE {column} IS NOT NULL"
+                ).fetchall():
+                    add_mqtt_candidate(value)
+        setting_keys = (
+            "rain.server_id",
+            "master.server_id",
+            "env.temp.server_id",
+            "env.hum.server_id",
+        )
+        placeholders = ", ".join("?" for _ in setting_keys)
+        for (value,) in conn.execute(
+            f"SELECT value FROM settings WHERE key IN ({placeholders}) AND value IS NOT NULL",
+            setting_keys,
+        ).fetchall():
+            add_mqtt_candidate(value)
+        for identifier in mqtt_candidates:
+            if conn.execute("SELECT 1 FROM mqtt_servers WHERE id = ?", (identifier,)).fetchone() is None:
+                cls._retire_identifier(conn, "mqtt_server", identifier)
+
+        for (identifier,) in conn.execute(
+            "SELECT DISTINCT cancellations.program_id FROM program_cancellations cancellations "
+            "LEFT JOIN programs current ON current.id = cancellations.program_id "
+            "WHERE current.id IS NULL"
+        ).fetchall():
+            cls._retire_identifier(conn, "program", identifier)
+        queue_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'program_queue_log'"
+        ).fetchone()
+        if queue_exists:
+            for (identifier,) in conn.execute(
+                "SELECT DISTINCT history.program_id FROM program_queue_log history "
+                "LEFT JOIN programs current ON current.id = history.program_id "
+                "WHERE current.id IS NULL"
+            ).fetchall():
+                cls._retire_identifier(conn, "program", identifier)
+
+    @staticmethod
+    def _install_retired_id_triggers(conn: sqlite3.Connection, table: str, entity: str) -> None:
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_retire_id")
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_reject_retired_id")
+        conn.execute(f"""
+            CREATE TRIGGER trg_{table}_retire_id
+            AFTER DELETE ON {table}
+            BEGIN
+                INSERT OR IGNORE INTO retired_entity_ids(entity, id)
+                VALUES ('{entity}', OLD.id);
+            END
+        """)
+        conn.execute(f"""
+            CREATE TRIGGER trg_{table}_reject_retired_id
+            BEFORE INSERT ON {table}
+            WHEN EXISTS (
+                SELECT 1 FROM retired_entity_ids
+                WHERE entity = '{entity}' AND id = NEW.id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'retired identifier cannot be reused');
+            END
+        """)
+
+    @staticmethod
+    def _advance_autoincrement_sequence(conn: sqlite3.Connection, table: str, entity: str) -> None:
+        row = conn.execute(
+            f"SELECT MAX(value) FROM ("
+            f"SELECT COALESCE(MAX(id), 0) AS value FROM {table} "
+            "UNION ALL "
+            "SELECT COALESCE(MAX(id), 0) AS value FROM retired_entity_ids WHERE entity = ?"
+            ")",
+            (entity,),
+        ).fetchone()
+        high_watermark = int(row[0] or 0)
+        cursor = conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+            (high_watermark, table),
+        )
+        if cursor.rowcount == 0:
+            conn.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)", (table, high_watermark))
+
+    def _migrate_durable_entity_ids(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS retired_entity_ids (
+                entity TEXT NOT NULL,
+                id INTEGER NOT NULL,
+                retired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (entity, id)
+            )
+        """)
+        for table in ("zones", "groups", "mqtt_servers", "programs"):
+            self._ensure_autoincrement_identity(conn, table)
+
+        self._backfill_retired_identifiers(conn)
+        for table, entity in (
+            ("zones", "zone"),
+            ("groups", "group"),
+            ("mqtt_servers", "mqtt_server"),
+            ("programs", "program"),
+        ):
+            self._install_retired_id_triggers(conn, table, entity)
+            self._advance_autoincrement_sequence(conn, table, entity)
+        conn.commit()
+
+    @staticmethod
+    def _migrate_program_cancellations_fk(conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'program_cancellations'"
+        ).fetchone()
+        if not row or not row[0]:
+            raise RuntimeError("required table 'program_cancellations' is missing")
+        normalized = " ".join(str(row[0]).upper().split())
+        if "REFERENCES PROGRAMS(ID) ON DELETE CASCADE" in normalized:
+            return
+
+        orphan_count = conn.execute(
+            "SELECT COUNT(*) FROM program_cancellations cancellations "
+            "LEFT JOIN programs current ON current.id = cancellations.program_id "
+            "WHERE current.id IS NULL"
+        ).fetchone()[0]
+        conn.execute("DROP TABLE IF EXISTS program_cancellations__fk")
+        conn.execute("""
+            CREATE TABLE program_cancellations__fk (
+                program_id INTEGER NOT NULL,
+                run_date TEXT NOT NULL,
+                group_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (program_id, run_date, group_id),
+                FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            INSERT INTO program_cancellations__fk(program_id, run_date, group_id, created_at)
+            SELECT cancellations.program_id, cancellations.run_date,
+                   cancellations.group_id, cancellations.created_at
+            FROM program_cancellations cancellations
+            JOIN programs current ON current.id = cancellations.program_id
+        """)
+        conn.execute("DROP TABLE program_cancellations")
+        conn.execute("ALTER TABLE program_cancellations__fk RENAME TO program_cancellations")
+        violations = conn.execute("PRAGMA foreign_key_check(program_cancellations)").fetchall()
+        if violations:
+            raise RuntimeError(f"program_cancellations FK violations after migration: {violations!r}")
+        conn.commit()
+        if orphan_count:
+            logger.warning(
+                "Removed %s orphan program cancellation rows; retired program IDs remain tombstoned",
+                orphan_count,
+            )
+
+    @staticmethod
+    def _migrate_restore_runtime_indexes(conn: sqlite3.Connection) -> None:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_group ON zones(group_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_mqtt_server ON zones(mqtt_server_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_topic ON zones(topic)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zone_runs_last_ok "
+            "ON zone_runs(zone_id, end_utc DESC) "
+            "WHERE status = 'ok' AND end_utc IS NOT NULL"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_start ON zone_runs(start_utc DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start "
+            "ON zone_runs(group_id, start_utc DESC)"
+        )
+        conn.commit()
+
     # --- All migration methods ---
 
     def _migrate_days_format(self, conn):
@@ -466,7 +805,7 @@ class MigrationRunner:
     def _migrate_add_mqtt_servers(self, conn):
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mqtt_servers (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 host TEXT NOT NULL,
                 port INTEGER DEFAULT 1883,
@@ -624,6 +963,16 @@ class MigrationRunner:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_zone ON zone_runs(zone_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_group ON zone_runs(group_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_active ON zone_runs(zone_id, end_utc)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zone_runs_last_ok "
+            "ON zone_runs(zone_id, end_utc DESC) "
+            "WHERE status = 'ok' AND end_utc IS NOT NULL"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_start ON zone_runs(start_utc DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start "
+            "ON zone_runs(group_id, start_utc DESC)"
+        )
         conn.commit()
         logger.info("Создана таблица zone_runs")
 
@@ -1094,6 +1443,7 @@ class MigrationRunner:
         # call is also safe to re-run on a manually-fixed DB.)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_mqtt_server ON zones(mqtt_server_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_topic ON zones(topic)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zones_group ON zones(group_id)")
         conn.commit()
         logger.info("Dropped zones.last_watering_time (single source of truth = zone_runs)")
 
@@ -1386,6 +1736,16 @@ class MigrationRunner:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_zone ON zone_runs(zone_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_group ON zone_runs(group_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_active ON zone_runs(zone_id, end_utc)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zone_runs_last_ok "
+            "ON zone_runs(zone_id, end_utc DESC) "
+            "WHERE status = 'ok' AND end_utc IS NOT NULL"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_zone_runs_start ON zone_runs(start_utc DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zone_runs_group_start "
+            "ON zone_runs(group_id, start_utc DESC)"
+        )
         conn.commit()
         logger.info("Downgrade: удалена колонка source и индекс idx_zone_runs_zone_start из zone_runs")
 
