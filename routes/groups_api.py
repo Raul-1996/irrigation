@@ -1049,6 +1049,14 @@ def api_start_zone_exclusive(group_id, zone_id):
             "GROUP_DEBOUNCE_IN_TESTS"
         )
         with group_lock(int(group_id)):
+            # The unlocked preflight is only a fast rejection. Topology edits
+            # serialize on this group lock, so re-read membership while it is
+            # held before the controller can consume the mutable zone row.
+            zone = db.get_zone(int(zone_id))
+            if not zone:
+                return jsonify({"success": False, "message": "Зона не найдена"}), 404
+            if int(zone.get("group_id") or 0) != int(group_id):
+                return jsonify({"success": False, "message": f"Зона {zone_id} не принадлежит группе {group_id}"}), 409
             if debounce_enabled and _group_change_is_throttled(int(group_id)):
                 latest = db.get_zone(int(zone_id)) or {}
                 state = str(latest.get("state") or "").strip().lower()

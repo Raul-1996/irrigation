@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -758,6 +759,42 @@ class TestGroupTopologyMutationSafety:
             response = admin_client.post(f"/api/groups/{first['id']}/start-zone/{zone['id']}")
 
         assert response.status_code == 409
+        start.assert_not_called()
+
+    def test_start_zone_rechecks_membership_after_waiting_for_group_lock(self, admin_client, app):
+        import routes.groups_api as groups_api
+
+        first = _group(app, "Start URL group")
+        second = _group(app, "Concurrent destination")
+        zone = _zone(app, first["id"], topic="")
+        route_reached_lock = threading.Event()
+        move_committed = threading.Event()
+        real_group_lock = groups_api.group_lock
+
+        def move_zone_between_preflight_and_lock():
+            assert route_reached_lock.wait(1)
+            assert app.db.update_zone(zone["id"], {"group_id": second["id"]})
+            move_committed.set()
+
+        mover = threading.Thread(target=move_zone_between_preflight_and_lock, daemon=True)
+        mover.start()
+
+        @contextmanager
+        def barrier_group_lock(group_id):
+            route_reached_lock.set()
+            assert move_committed.wait(1)
+            with real_group_lock(group_id):
+                yield
+
+        with (
+            patch("routes.groups_api.group_lock", side_effect=barrier_group_lock),
+            patch("services.zone_control.start_zone_orchestrated") as start,
+        ):
+            response = admin_client.post(f"/api/groups/{first['id']}/start-zone/{zone['id']}")
+
+        mover.join(timeout=1)
+        assert response.status_code == 409
+        assert app.db.get_zone(zone["id"])["group_id"] == second["id"]
         start.assert_not_called()
 
 

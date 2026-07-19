@@ -86,6 +86,23 @@ class TestZoneCrudOwnership:
         assert response.status_code == 400
         assert not any(zone["name"] == "No default group" for zone in app.db.get_zones())
 
+    @pytest.mark.parametrize("source", ["bulk", "csv"])
+    def test_import_default_group_is_validated_before_any_mutation(self, admin_client, app, source):
+        headers = {"X-Import-Op": "csv"} if source == "csv" else None
+        with (
+            patch.object(app.db, "get_groups_strict", return_value=[{"id": 999}], create=True),
+            patch.object(app.db, "bulk_upsert_zones") as bulk_upsert,
+        ):
+            response = admin_client.post(
+                "/api/zones/import",
+                json={"zones": [{"name": "No default group", "duration": 10}]},
+                headers=headers,
+            )
+
+        assert response.status_code == 400
+        assert "group_id" in response.get_json()["message"]
+        bulk_upsert.assert_not_called()
+
     @pytest.mark.parametrize("field", ["photo_path", "photo_thumb"])
     @pytest.mark.parametrize("method", ["create", "update", "import"])
     def test_photo_metadata_is_rejected_outside_photo_api(self, admin_client, app, field, method):

@@ -507,6 +507,11 @@ def api_import_zones_bulk():
                 seen_zone_ids.add(raw_zone_id)
             zone_id = stripped.get("id")
             current = existing_zones.get(int(zone_id)) if zone_id is not None else None
+            if current is None:
+                # Repository create defaults to group 1. Materialise that
+                # default before validation so bulk/CSV cannot create an
+                # orphan when the system group is unavailable.
+                stripped.setdefault("group_id", 1)
 
             normalised, validation_error = _normalise_zone_payload(
                 stripped,
