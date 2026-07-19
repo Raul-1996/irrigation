@@ -138,15 +138,23 @@ def test_install_and_update_purge_retired_telegram_file_logs_before_activation()
 
 def test_deploy_requires_telegram_runtime_retirement_before_pii_cleanup():
     update_guard = 'require_retired_telegram_runtime_commit "$REPO_DIR_REAL" "$RESOLVED_TARGET"'
+    install_preflight_guard = (
+        'require_retired_telegram_runtime_commit "$TARGET_VALIDATION_REPO" "$INSTALL_TARGET_COMMIT"'
+    )
     install_guard = 'require_retired_telegram_runtime_tree "$APP_DIR"'
     assert update_guard in UPDATE
+    assert install_preflight_guard in INSTALL
     assert install_guard in INSTALL
     assert UPDATE.index(update_guard) < UPDATE.index("UPDATE_SUCCEEDED=0")
+    assert INSTALL.index(install_preflight_guard) < INSTALL.index('retire_telegram_file_logs "$ACTIVE_APP_DIR"')
+    assert INSTALL.index(install_preflight_guard) < INSTALL.index('retire_telegram_file_logs "$ACTIVE_DATA_DIR"')
     assert INSTALL.index(install_guard) < INSTALL.index('retire_telegram_file_logs "$APP_DIR"')
     assert INSTALL.index(install_guard) < INSTALL.index('systemctl restart "$SERVICE_NAME"')
     for script in (INSTALL, UPDATE):
-        assert "logging[.]FileHandler" in script
-        assert "telegram[.]txt" in script
+        assert "TELEGRAM_LOG_RETIREMENT_BLOB=a686879844b5293a943c0804f79950ff6984ec8c" in script
+        assert 'ls-tree "$target_commit" -- services' in script
+        assert 'ls-tree "$target_commit" -- services/telegram_bot.py' in script
+        assert "logging[.]FileHandler" not in script
 
 
 def test_ci_runs_the_complete_default_selected_suite():

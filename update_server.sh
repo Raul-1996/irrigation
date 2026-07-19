@@ -18,6 +18,9 @@ BACKUP_BASE=${BACKUP_BASE:-}
 BACKUP_KEEP=${BACKUP_KEEP:-10}
 ENV_FILE=${ENV_FILE:-/opt/wb-irrigation/.env}
 NONINTERACTIVE=${NONINTERACTIVE:-0}
+# Versioned security contract introduced by Telegram runtime commit 3cd8c0e.
+# Any legitimate edit to that runtime must deliberately update this allowlist.
+readonly TELEGRAM_LOG_RETIREMENT_BLOB=a686879844b5293a943c0804f79950ff6984ec8c
 
 usage() {
   cat <<EOF
@@ -182,20 +185,33 @@ ensure_logrotate_ready() {
 require_retired_telegram_runtime_commit() {
   local repository=$1
   local target_commit=$2
-  local matches
-  local grep_status
+  local services_entry
+  local services_mode services_type services_object services_path
+  local runtime_entry
+  local runtime_mode runtime_type runtime_object runtime_path
 
-  if matches=$(git -C "$repository" grep -n -E \
-    -e 'logging[.]FileHandler' -e 'telegram[.]txt' \
-    "$target_commit" -- services/telegram_bot.py); then
-    err "Target commit still creates the retired Telegram file log"
-    err "$matches"
+  if ! services_entry=$(git -C "$repository" ls-tree "$target_commit" -- services); then
+    err "Could not inspect services in target commit $target_commit"
     return 1
-  else
-    grep_status=$?
   fi
-  if [[ "$grep_status" != "1" ]]; then
-    err "Could not verify Telegram logging in target commit $target_commit"
+  read -r services_mode services_type services_object services_path <<<"$services_entry"
+  if [[ "$services_mode" != "040000" || "$services_type" != "tree" || "$services_path" != "services" ]]; then
+    err "Target commit does not contain a tracked regular services tree"
+    return 1
+  fi
+
+  if ! runtime_entry=$(git -C "$repository" ls-tree "$target_commit" -- services/telegram_bot.py); then
+    err "Could not inspect Telegram runtime in target commit $target_commit"
+    return 1
+  fi
+  read -r runtime_mode runtime_type runtime_object runtime_path <<<"$runtime_entry"
+  if [[ "$runtime_type" != "blob" || "$runtime_path" != "services/telegram_bot.py" \
+    || ("$runtime_mode" != "100644" && "$runtime_mode" != "100755") ]]; then
+    err "Target commit lacks a tracked regular Telegram runtime"
+    return 1
+  fi
+  if [[ "$runtime_object" != "$TELEGRAM_LOG_RETIREMENT_BLOB" ]]; then
+    err "Target Telegram runtime does not satisfy the versioned file-log retirement contract"
     return 1
   fi
 }

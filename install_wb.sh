@@ -26,6 +26,9 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE=/opt/wb-irrigation/.env
 PY_VERSION=${PY_VERSION:-3.11}
 NONINTERACTIVE=${NONINTERACTIVE:-0}
+# Versioned security contract introduced by Telegram runtime commit 3cd8c0e.
+# Any legitimate edit to that runtime must deliberately update this allowlist.
+readonly TELEGRAM_LOG_RETIREMENT_BLOB=a686879844b5293a943c0804f79950ff6984ec8c
 
 usage(){
   cat <<EOF
@@ -142,28 +145,80 @@ ensure_logrotate_ready() {
   fi
 }
 
+require_retired_telegram_runtime_commit() {
+  local repository=$1
+  local target_commit=$2
+  local services_entry
+  local services_mode services_type services_object services_path
+  local runtime_entry
+  local runtime_mode runtime_type runtime_object runtime_path
+
+  if ! services_entry=$(git -C "$repository" ls-tree "$target_commit" -- services); then
+    err "Не удалось проверить services в target commit $target_commit"
+    return 1
+  fi
+  read -r services_mode services_type services_object services_path <<<"$services_entry"
+  if [[ "$services_mode" != "040000" || "$services_type" != "tree" || "$services_path" != "services" ]]; then
+    err "Target commit не содержит обычное отслеживаемое дерево services"
+    return 1
+  fi
+
+  if ! runtime_entry=$(git -C "$repository" ls-tree "$target_commit" -- services/telegram_bot.py); then
+    err "Не удалось проверить Telegram runtime в target commit $target_commit"
+    return 1
+  fi
+  read -r runtime_mode runtime_type runtime_object runtime_path <<<"$runtime_entry"
+  if [[ "$runtime_type" != "blob" || "$runtime_path" != "services/telegram_bot.py" \
+    || ("$runtime_mode" != "100644" && "$runtime_mode" != "100755") ]]; then
+    err "Target commit не содержит обычный отслеживаемый Telegram runtime"
+    return 1
+  fi
+  if [[ "$runtime_object" != "$TELEGRAM_LOG_RETIREMENT_BLOB" ]]; then
+    err "Telegram runtime не выполняет версионированный контракт отказа от файлового лога"
+    return 1
+  fi
+}
+
 require_retired_telegram_runtime_tree() {
   local application_root=$1
   local application_root_real
+  local repository_root
+  local repository_root_real
+  local target_commit
+  local services_path
+  local services_path_real
   local telegram_source
-  local matches
-  local grep_status
+  local telegram_source_real
+  local working_blob
 
   application_root_real=$(cd "$application_root" && pwd -P) || return 1
-  telegram_source="$application_root_real/services/telegram_bot.py"
-  if [[ ! -f "$telegram_source" || -L "$telegram_source" ]]; then
-    err "Не найден канонический Telegram runtime: $telegram_source"
+  if ! repository_root=$(git -C "$application_root_real" rev-parse --show-toplevel); then
+    err "Не удалось найти Git root для $application_root_real"
     return 1
   fi
-  if matches=$(grep -n -E -e 'logging[.]FileHandler' -e 'telegram[.]txt' "$telegram_source"); then
-    err "Telegram runtime всё ещё создаёт устаревший файловый лог"
-    err "$matches"
+  repository_root_real=$(cd "$repository_root" && pwd -P) || return 1
+  if [[ "$repository_root_real" != "$application_root_real" ]]; then
+    err "Telegram runtime находится вне канонического корня приложения"
     return 1
-  else
-    grep_status=$?
   fi
-  if [[ "$grep_status" != "1" ]]; then
-    err "Не удалось проверить Telegram runtime: $telegram_source"
+  target_commit=$(git -C "$application_root_real" rev-parse --verify HEAD)
+  require_retired_telegram_runtime_commit "$application_root_real" "$target_commit"
+
+  services_path="$application_root_real/services"
+  telegram_source="$services_path/telegram_bot.py"
+  if [[ -L "$services_path" || ! -d "$services_path" || -L "$telegram_source" || ! -f "$telegram_source" ]]; then
+    err "Telegram runtime или компонент его пути не является обычным файлом: $telegram_source"
+    return 1
+  fi
+  services_path_real=$(cd "$services_path" && pwd -P) || return 1
+  telegram_source_real=$(readlink -f "$telegram_source") || return 1
+  if [[ "$services_path_real" != "$services_path" || "$telegram_source_real" != "$telegram_source" ]]; then
+    err "Telegram runtime выходит за пределы канонического дерева приложения"
+    return 1
+  fi
+  working_blob=$(git -C "$application_root_real" hash-object -- "$telegram_source")
+  if [[ "$working_blob" != "$TELEGRAM_LOG_RETIREMENT_BLOB" ]]; then
+    err "Рабочий Telegram runtime отличается от проверенного versioned blob"
     return 1
   fi
 }
@@ -433,6 +488,22 @@ if [[ ! -d /mnt/data ]]; then
   mkdir -p "$(dirname "$DATA_DIR")"
 fi
 
+ACTIVE_APP_DIR=$(readlink -f "$APP_LINK" 2>/dev/null || true)
+ACTIVE_DATA_DIR=$(readlink -f "$DATA_DIR" 2>/dev/null || true)
+TARGET_VALIDATION_REPO=""
+INSTALL_TARGET_COMMIT=""
+if [[ -n "$ACTIVE_APP_DIR" && -d "$ACTIVE_APP_DIR/.git" ]]; then
+  TARGET_VALIDATION_REPO=$ACTIVE_APP_DIR
+elif [[ -n "$ACTIVE_DATA_DIR" && -d "$ACTIVE_DATA_DIR/.git" ]]; then
+  TARGET_VALIDATION_REPO=$ACTIVE_DATA_DIR
+fi
+if [[ -n "$TARGET_VALIDATION_REPO" ]]; then
+  info "Проверяю target runtime до остановки сервиса и очистки PII"
+  git -C "$TARGET_VALIDATION_REPO" fetch --quiet origin "$BRANCH"
+  INSTALL_TARGET_COMMIT=$(git -C "$TARGET_VALIDATION_REPO" rev-parse --verify 'FETCH_HEAD^{commit}')
+  require_retired_telegram_runtime_commit "$TARGET_VALIDATION_REPO" "$INSTALL_TARGET_COMMIT"
+fi
+
 # На повторной установке не меняем живое дерево под работающим процессом.
 # Если дальнейший шаг упадёт, EXIT-trap вернёт ранее активный сервис.
 SERVICE_WAS_ACTIVE=0
@@ -456,11 +527,9 @@ if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
   systemctl stop "$SERVICE_NAME"
 fi
 
-ACTIVE_APP_DIR=$(readlink -f "$APP_LINK" 2>/dev/null || true)
 if [[ -n "$ACTIVE_APP_DIR" && -d "$ACTIVE_APP_DIR/.git" ]]; then
   retire_telegram_file_logs "$ACTIVE_APP_DIR"
 fi
-ACTIVE_DATA_DIR=$(readlink -f "$DATA_DIR" 2>/dev/null || true)
 if [[ -n "$ACTIVE_DATA_DIR" && "$ACTIVE_DATA_DIR" != "$ACTIVE_APP_DIR" && -d "$ACTIVE_DATA_DIR/.git" ]]; then
   retire_telegram_file_logs "$ACTIVE_DATA_DIR"
 fi
@@ -469,12 +538,17 @@ migrate_legacy_app_tree
 
 mkdir -p "$(dirname "$DATA_DIR")"
 if [[ -d "${DATA_DIR}/.git" ]]; then
-  info "Репо уже клонирован в ${DATA_DIR}, делаю pull"
-  git -C "${DATA_DIR}" fetch --all -q
-  git -C "${DATA_DIR}" reset --hard "origin/${BRANCH}" -q
+  if [[ -z "$INSTALL_TARGET_COMMIT" ]]; then
+    err "Target commit не был проверен до изменения существующей установки"
+    exit 1
+  fi
+  info "Активирую заранее проверенный commit в ${DATA_DIR}"
+  git -C "${DATA_DIR}" reset --hard "$INSTALL_TARGET_COMMIT" -q
 else
   info "Клонирую ${REPO_URL} → ${DATA_DIR}"
   git clone -b "${BRANCH}" "${REPO_URL}" "${DATA_DIR}"
+  INSTALL_TARGET_COMMIT=$(git -C "$DATA_DIR" rev-parse --verify HEAD)
+  require_retired_telegram_runtime_commit "$DATA_DIR" "$INSTALL_TARGET_COMMIT"
 fi
 
 if [[ "$APP_LINK" == "$DATA_DIR" ]]; then

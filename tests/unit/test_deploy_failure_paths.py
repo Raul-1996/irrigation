@@ -2,6 +2,7 @@
 
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -279,6 +280,13 @@ def test_retired_log_cleanup_fails_closed_on_enumeration_io_error(tmp_path):
 
 
 def test_deploy_guards_require_runtime_file_handler_removal(tmp_path):
+    safe_blob = "a686879844b5293a943c0804f79950ff6984ec8c"
+    safe_source = subprocess.check_output(
+        ["git", "cat-file", "blob", safe_blob],
+        cwd=ROOT,
+    )
+    assert b"handler previously created services/logs/telegram.txt" in safe_source
+
     repository = tmp_path / "repo"
     telegram_source = repository / "services" / "telegram_bot.py"
     telegram_source.parent.mkdir(parents=True)
@@ -286,49 +294,119 @@ def test_deploy_guards_require_runtime_file_handler_removal(tmp_path):
     subprocess.run(["git", "config", "user.email", "deploy-test@example.invalid"], cwd=repository, check=True)
     subprocess.run(["git", "config", "user.name", "Deploy Test"], cwd=repository, check=True)
 
+    def commit_runtime(message: str) -> str:
+        subprocess.run(["git", "add", "-A"], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", message], cwd=repository, check=True)
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+
+    telegram_source.write_bytes(safe_source)
+    subprocess.run(["git", "add", "services/telegram_bot.py"], cwd=repository, check=True)
+    safe_commit = commit_runtime("versioned Telegram retirement runtime")
+    tracked_blob = subprocess.check_output(
+        ["git", "rev-parse", f"{safe_commit}:services/telegram_bot.py"],
+        cwd=repository,
+        text=True,
+    ).strip()
+    assert tracked_blob == safe_blob
+
     telegram_source.write_text(
         'import logging\nlogging.FileHandler("services/logs/telegram.txt")\n',
         encoding="utf-8",
     )
-    subprocess.run(["git", "add", "services/telegram_bot.py"], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "legacy file log"], cwd=repository, check=True)
-    legacy_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    actual_handler_commit = commit_runtime("actual legacy handler")
 
     telegram_source.write_text(
-        'import logging\nlogger = logging.getLogger("telegram")\n',
+        "from logging import FileHandler as Handler\n"
+        "from os.path import join\n"
+        'name = "".join(("telegram", ".txt"))\n'
+        'Handler(join("services", "logs", name))\n',
         encoding="utf-8",
     )
-    subprocess.run(["git", "add", "services/telegram_bot.py"], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "retire file log"], cwd=repository, check=True)
-    retired_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    aliased_handler_commit = commit_runtime("aliased composed legacy handler")
 
-    legacy_tree = tmp_path / "legacy-tree"
-    retired_tree = tmp_path / "retired-tree"
-    for tree, source in (
-        (legacy_tree, 'import logging\nlogging.FileHandler("services/logs/telegram.txt")\n'),
-        (retired_tree, 'import logging\nlogger = logging.getLogger("telegram")\n'),
-    ):
-        tree_source = tree / "services" / "telegram_bot.py"
-        tree_source.parent.mkdir(parents=True)
-        tree_source.write_text(source, encoding="utf-8")
+    telegram_source.unlink()
+    (repository / "services" / "placeholder.py").write_text("# runtime absent\n", encoding="utf-8")
+    absent_runtime_commit = commit_runtime("missing Telegram runtime")
+
+    subprocess.run(["git", "rm", "-qr", "services"], cwd=repository, check=True)
+    (repository / "services").symlink_to("outside-services", target_is_directory=True)
+    tracked_services_symlink_commit = commit_runtime("tracked services symlink")
+
+    subprocess.run(["git", "rm", "-q", "services"], cwd=repository, check=True)
+    (repository / "services").mkdir()
+    outside_runtime = tmp_path / "outside-telegram.py"
+    outside_runtime.write_bytes(safe_source)
+    (repository / "services" / "telegram_bot.py").symlink_to(outside_runtime)
+    tracked_runtime_symlink_commit = commit_runtime("tracked runtime symlink")
 
     _bash(
         f"""
         source {shlex.quote(str(UPDATE))}
-        if require_retired_telegram_runtime_commit \
-          {shlex.quote(str(repository))} {shlex.quote(legacy_commit)}; then
-          exit 97
-        fi
         require_retired_telegram_runtime_commit \
-          {shlex.quote(str(repository))} {shlex.quote(retired_commit)}
+          {shlex.quote(str(repository))} {shlex.quote(safe_commit)}
+        for unsafe_commit in \
+          {shlex.quote(actual_handler_commit)} \
+          {shlex.quote(aliased_handler_commit)} \
+          {shlex.quote(absent_runtime_commit)} \
+          {shlex.quote(tracked_services_symlink_commit)} \
+          {shlex.quote(tracked_runtime_symlink_commit)}; do
+          if require_retired_telegram_runtime_commit \
+            {shlex.quote(str(repository))} "$unsafe_commit"; then
+            exit 97
+          fi
+        done
         """
     )
+
+    subprocess.run(["git", "reset", "--hard", "-q", safe_commit], cwd=repository, check=True)
+    logs_dir = repository / "services" / "logs"
+    logs_dir.mkdir()
+    retired_log = logs_dir / "telegram.txt"
+    retired_log.write_text("PII must remain when the target guard fails\n", encoding="utf-8")
     _bash(
         f"""
         source {shlex.quote(str(INSTALL))}
-        if require_retired_telegram_runtime_tree {shlex.quote(str(legacy_tree))}; then
+        require_retired_telegram_runtime_tree {shlex.quote(str(repository))}
+        if require_retired_telegram_runtime_commit \
+          {shlex.quote(str(repository))} {shlex.quote(actual_handler_commit)}; then
+          retire_telegram_file_logs {shlex.quote(str(repository))}
           exit 98
         fi
-        require_retired_telegram_runtime_tree {shlex.quote(str(retired_tree))}
+        [[ -f {shlex.quote(str(retired_log))} ]]
+        """
+    )
+
+    relocated_services = tmp_path / "relocated-services"
+    shutil.move(str(repository / "services"), relocated_services)
+    (repository / "services").symlink_to(relocated_services, target_is_directory=True)
+    _bash(
+        f"""
+        source {shlex.quote(str(INSTALL))}
+        if require_retired_telegram_runtime_tree {shlex.quote(str(repository))}; then
+          exit 99
+        fi
+        """
+    )
+    (repository / "services").unlink()
+    shutil.move(str(relocated_services), repository / "services")
+
+    telegram_source = repository / "services" / "telegram_bot.py"
+    telegram_source.unlink()
+    telegram_source.symlink_to(outside_runtime)
+    _bash(
+        f"""
+        source {shlex.quote(str(INSTALL))}
+        if require_retired_telegram_runtime_tree {shlex.quote(str(repository))}; then
+          exit 100
+        fi
+        """
+    )
+    telegram_source.unlink()
+    _bash(
+        f"""
+        source {shlex.quote(str(INSTALL))}
+        if require_retired_telegram_runtime_tree {shlex.quote(str(repository))}; then
+          exit 101
+        fi
         """
     )
