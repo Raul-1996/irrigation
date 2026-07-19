@@ -12,10 +12,10 @@ def fetch_inline_and_external_css(client, page_path: str) -> str:
     media queries must now fetch every linked stylesheet via the test client
     and concatenate them with the HTML body so existing assertions still match.
     """
-    resp = client.get(page_path)
-    if resp.status_code != 200:
-        return resp.data.decode("utf-8", errors="replace")
-    html = resp.data.decode("utf-8", errors="replace")
+    with client.get(page_path) as resp:
+        if resp.status_code != 200:
+            return resp.data.decode("utf-8", errors="replace")
+        html = resp.data.decode("utf-8", errors="replace")
     pieces = [html]
     for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
         # Normalise to a path the test client can fetch
@@ -23,9 +23,9 @@ def fetch_inline_and_external_css(client, page_path: str) -> str:
             continue
         path = href if href.startswith("/") else "/" + href.lstrip("./")
         try:
-            css_resp = client.get(path)
-            if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
+            with client.get(path) as css_resp:
+                if css_resp.status_code == 200:
+                    pieces.append(css_resp.data.decode("utf-8", errors="replace"))
         except (OSError, ValueError):
             continue
     return "\n".join(pieces)
