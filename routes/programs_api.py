@@ -30,7 +30,24 @@ MAX_EXTRA_TIMES = 24
 _TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _DEFAULT_PROGRAM_COLOR = "#42a5f5"
+# Production Hypercorn is configured with one worker.  This lock is the
+# application-level transaction boundary joining a committed program row to
+# its scheduler reconciliation; every route which mutates either side must
+# hold it until both sides have reached a truthful terminal result.
 _PROGRAM_MUTATION_LOCK = threading.RLock()
+_PROGRAM_WRITE_FIELDS = (
+    "name",
+    "time",
+    "days",
+    "zones",
+    "type",
+    "schedule_type",
+    "interval_days",
+    "even_odd",
+    "color",
+    "enabled",
+    "extra_times",
+)
 
 
 def _is_hhmm(value: object) -> bool:
@@ -258,10 +275,63 @@ def _interval_anchor_unavailable_response():
     )
 
 
+def _program_schedule_failed_response(
+    *,
+    rollback_succeeded: bool | None = None,
+    schedule_restored: bool | None = None,
+):
+    payload = {
+        "success": False,
+        "message": "Failed to apply program schedule",
+        "error_code": "PROGRAM_SCHEDULE_FAILED",
+    }
+    if rollback_succeeded is not None:
+        payload["rollback_succeeded"] = rollback_succeeded
+    if schedule_restored is not None:
+        payload["schedule_restored"] = schedule_restored
+    return jsonify(payload), 503
+
+
+def _program_write_snapshot(program: dict) -> dict:
+    """Return only repository-owned fields needed to restore a prior row."""
+    return {field: program.get(field) for field in _PROGRAM_WRITE_FIELDS}
+
+
 def _schedule_admitted_program(scheduler: object, program: dict, anchors: dict[str, datetime] | None) -> object:
+    kwargs: dict[str, object] = {}
     if program.get("schedule_type") == "interval":
-        return scheduler.schedule_program(program["id"], program, interval_anchors=anchors)
-    return scheduler.schedule_program(program["id"], program)
+        kwargs["interval_anchors"] = anchors
+    fingerprint = getattr(scheduler, "program_schedule_fingerprint", None)
+    if callable(fingerprint):
+        kwargs["expected_fingerprint"] = fingerprint(program["id"], program)
+    return scheduler.schedule_program(program["id"], program, **kwargs)
+
+
+def _reconcile_program_schedule(
+    scheduler: object | None,
+    program: dict,
+    anchors: dict[str, datetime] | None,
+) -> bool:
+    if scheduler is None:
+        # Disabled state is self-enforcing at timer fire.  Enabled mutations
+        # require a live scheduler in production; isolated API tests
+        # intentionally exercise repository contracts without starting one.
+        return not program.get("enabled", True) or current_app.testing
+    return _schedule_admitted_program(scheduler, program, anchors) is not False
+
+
+def _restore_program_row(program_id: int, previous: dict) -> dict | None:
+    try:
+        return db.update_program(program_id, _program_write_snapshot(previous))
+    except ProgramZonesNotFoundError:
+        logger.exception("Не удалось откатить программу %s: её зоны изменились", program_id)
+        return None
+
+
+def _cancel_program_schedule(scheduler: object | None, program_id: int) -> bool:
+    if scheduler is None:
+        return current_app.testing
+    return scheduler.cancel_program(program_id) is not False
 
 
 def _interval_anchor_context(
@@ -417,8 +487,16 @@ def api_program(prog_id):
                 preserve_candidate_anchor=preserve_candidate_anchor,
             )
             scheduler_anchors = _scheduler_interval_anchor_map(effective_data, candidate_anchors)
-            if effective_data.get("schedule_type") == "interval" and scheduler_anchors is None:
+            if (
+                effective_data.get("enabled")
+                and effective_data.get("schedule_type") == "interval"
+                and scheduler_anchors is None
+            ):
                 return _interval_anchor_unavailable_response()
+            previous_scheduler_anchors = _scheduler_interval_anchor_map(
+                current_program,
+                stored_anchors.get(prog_id, {}),
+            )
             try:
                 conflicts = _check_candidate_conflicts(
                     program_id=prog_id,
@@ -448,28 +526,66 @@ def api_program(prog_id):
                 program = db.update_program(prog_id, normalized)
             except ProgramZonesNotFoundError as error:
                 return _missing_program_zones_response(error)
-        if program:
-            db.add_log("prog_edit", json.dumps({"prog": prog_id, "changes": normalized}))
+            if program is None:
+                return ("Program not found", 404)
+
+            scheduler = get_scheduler()
             try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    _schedule_admitted_program(scheduler, program, scheduler_anchors)
-            except (KeyError, TypeError, ValueError) as e:
-                logger.error(f"Ошибка перепланирования программы {prog_id}: {e}")
-            return jsonify(program)
-        return ("Program not found", 404)
+                schedule_applied = _reconcile_program_schedule(scheduler, program, scheduler_anchors)
+            except Exception:
+                logger.exception("Ошибка перепланирования программы %s", prog_id)
+                schedule_applied = False
+            if not schedule_applied:
+                if not program.get("enabled"):
+                    # As with PATCH disable, the persisted fail-safe state is
+                    # preferable to rolling back to an enabled program when
+                    # jobstore cancellation reports failure.
+                    return _program_schedule_failed_response()
+
+                restored = _restore_program_row(prog_id, current_program)
+                schedule_restored = False
+                if restored is not None:
+                    if not (
+                        restored.get("enabled")
+                        and restored.get("schedule_type") == "interval"
+                        and previous_scheduler_anchors is None
+                    ):
+                        try:
+                            schedule_restored = _reconcile_program_schedule(
+                                scheduler,
+                                restored,
+                                previous_scheduler_anchors,
+                            )
+                        except Exception:
+                            logger.exception("Не удалось восстановить расписание программы %s", prog_id)
+                else:
+                    logger.critical("Откат строки программы %s после scheduler failure не выполнен", prog_id)
+                    try:
+                        _cancel_program_schedule(scheduler, prog_id)
+                    except Exception:
+                        logger.exception("Не удалось fail-safe отменить программу %s", prog_id)
+                return _program_schedule_failed_response(
+                    rollback_succeeded=restored is not None,
+                    schedule_restored=schedule_restored if restored is not None else None,
+                )
+
+        db.add_log("prog_edit", json.dumps({"prog": prog_id, "changes": normalized}))
+        return jsonify(program)
 
     elif request.method == "DELETE":
-        if db.delete_program(prog_id):
-            db.add_log("prog_delete", json.dumps({"prog": prog_id}))
+        with _PROGRAM_MUTATION_LOCK:
+            if not db.delete_program(prog_id):
+                return jsonify({"success": False, "message": "Program not found"}), 404
+            scheduler = get_scheduler()
             try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    scheduler.cancel_program(prog_id)
-            except (ValueError, KeyError, RuntimeError) as e:
-                logger.error(f"Ошибка отмены программы {prog_id} в планировщике: {e}")
-            return ("", 204)
-        return jsonify({"success": False, "message": "Program not found"}), 404
+                schedule_cancelled = _cancel_program_schedule(scheduler, prog_id)
+            except Exception:
+                logger.exception("Ошибка отмены программы %s в планировщике", prog_id)
+                schedule_cancelled = False
+            if not schedule_cancelled:
+                return _program_schedule_failed_response()
+        db.add_log("prog_delete", json.dumps({"prog": prog_id}))
+        return ("", 204)
 
 
 @programs_api_bp.route("/api/programs", methods=["POST"])
@@ -490,7 +606,11 @@ def api_create_program():
             preserve_candidate_anchor=False,
         )
         scheduler_anchors = _scheduler_interval_anchor_map(effective_data, candidate_anchors)
-        if effective_data.get("schedule_type") == "interval" and scheduler_anchors is None:
+        if (
+            effective_data.get("enabled")
+            and effective_data.get("schedule_type") == "interval"
+            and scheduler_anchors is None
+        ):
             return _interval_anchor_unavailable_response()
         try:
             conflicts = _check_candidate_conflicts(
@@ -521,16 +641,27 @@ def api_create_program():
             program = db.create_program(normalized)
         except ProgramZonesNotFoundError as error:
             return _missing_program_zones_response(error)
-    if program:
-        db.add_log("prog_create", json.dumps({"prog": program["id"], "name": program["name"]}))
+        if program is None:
+            return ("Error creating program", 400)
+
+        scheduler = get_scheduler()
         try:
-            scheduler = get_scheduler()
-            if scheduler:
-                _schedule_admitted_program(scheduler, program, scheduler_anchors)
-        except (KeyError, TypeError, ValueError) as e:
-            logger.error(f"Ошибка планирования новой программы {program['id']}: {e}")
-        return jsonify(program), 201
-    return ("Error creating program", 400)
+            schedule_applied = _reconcile_program_schedule(scheduler, program, scheduler_anchors)
+        except Exception:
+            logger.exception("Ошибка планирования новой программы %s", program["id"])
+            schedule_applied = False
+        if not schedule_applied:
+            rollback_succeeded = db.delete_program(program["id"])
+            try:
+                _cancel_program_schedule(scheduler, program["id"])
+            except Exception:
+                logger.exception("Не удалось очистить jobs отклонённой программы %s", program["id"])
+            if not rollback_succeeded:
+                logger.critical("Не удалось удалить программу %s после scheduler failure", program["id"])
+            return _program_schedule_failed_response(rollback_succeeded=rollback_succeeded)
+
+    db.add_log("prog_create", json.dumps({"prog": program["id"], "name": program["name"]}))
+    return jsonify(program), 201
 
 
 @programs_api_bp.route("/api/programs/check-conflicts", methods=["POST"])
@@ -678,6 +809,7 @@ def api_toggle_program_enabled(prog_id):
             return jsonify({"success": False, "message": "color must use strict #RRGGBB format"}), 400
 
         scheduler_anchors = None
+        previous_scheduler_anchors = None
         with _PROGRAM_MUTATION_LOCK:
             current_program = db.get_program(prog_id)
             if current_program is None:
@@ -707,6 +839,10 @@ def api_toggle_program_enabled(prog_id):
                 scheduler_anchors = _scheduler_interval_anchor_map(effective, candidate_anchors)
                 if effective.get("schedule_type") == "interval" and scheduler_anchors is None:
                     return _interval_anchor_unavailable_response()
+                previous_scheduler_anchors = _scheduler_interval_anchor_map(
+                    current_program,
+                    stored_anchors.get(prog_id, {}),
+                )
                 try:
                     conflicts = _check_candidate_conflicts(
                         program_id=prog_id,
@@ -740,19 +876,51 @@ def api_toggle_program_enabled(prog_id):
                 program = db.update_program(prog_id, {"enabled": enabled})
             except ProgramZonesNotFoundError as error:
                 return _missing_program_zones_response(error)
-        if program:
-            db.add_log("prog_toggle", json.dumps({"prog": prog_id, "enabled": enabled}))
+            if program is None:
+                return jsonify({"success": False, "message": "Program not found"}), 404
+
+            scheduler = get_scheduler()
             try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    if program.get("enabled"):
-                        _schedule_admitted_program(scheduler, program, scheduler_anchors)
-                    else:
-                        scheduler.cancel_program(prog_id)
-            except (KeyError, TypeError, ValueError, RuntimeError) as e:
-                logger.error(f"Ошибка перепланирования программы {prog_id} после toggle: {e}")
-            return jsonify({"success": True, "program": program})
-        return jsonify({"success": False, "message": "Program not found"}), 404
+                schedule_applied = _reconcile_program_schedule(scheduler, program, scheduler_anchors)
+            except Exception:
+                logger.exception("Ошибка перепланирования программы %s после toggle", prog_id)
+                schedule_applied = False
+            if not schedule_applied:
+                if not enabled:
+                    # Persisting enabled=0 is already the fail-safe state.  A
+                    # timer callback revalidates it even if jobstore removal is
+                    # temporarily unavailable.
+                    return _program_schedule_failed_response()
+
+                restored = _restore_program_row(prog_id, current_program)
+                schedule_restored = False
+                if restored is not None:
+                    if not (
+                        restored.get("enabled")
+                        and restored.get("schedule_type") == "interval"
+                        and previous_scheduler_anchors is None
+                    ):
+                        try:
+                            schedule_restored = _reconcile_program_schedule(
+                                scheduler,
+                                restored,
+                                previous_scheduler_anchors,
+                            )
+                        except Exception:
+                            logger.exception("Не удалось восстановить расписание программы %s", prog_id)
+                else:
+                    logger.critical("Откат enabled программы %s после scheduler failure не выполнен", prog_id)
+                    try:
+                        _cancel_program_schedule(scheduler, prog_id)
+                    except Exception:
+                        logger.exception("Не удалось fail-safe отменить программу %s", prog_id)
+                return _program_schedule_failed_response(
+                    rollback_succeeded=restored is not None,
+                    schedule_restored=schedule_restored if restored is not None else None,
+                )
+
+        db.add_log("prog_toggle", json.dumps({"prog": prog_id, "enabled": enabled}))
+        return jsonify({"success": True, "program": program})
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка toggle enabled для программы {prog_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка обновления программы"}), 500

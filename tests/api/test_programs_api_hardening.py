@@ -255,6 +255,16 @@ class TestStrictProgramJson:
 
 
 class TestProgramMutationGuards:
+    def test_enabled_reconcile_without_scheduler_fails_outside_testing(self, app):
+        previous_testing = app.config["TESTING"]
+        with app.app_context():
+            app.config["TESTING"] = False
+            try:
+                assert programs_api._reconcile_program_schedule(None, {"enabled": True}, None) is False
+                assert programs_api._reconcile_program_schedule(None, {"enabled": False}, None) is True
+            finally:
+                app.config["TESTING"] = previous_testing
+
     def test_patch_enabled_honors_password_change_requirement(self, admin_client, app):
         zone_id = _zone(app)
         original = app.db.create_program(_payload(zone_id))
@@ -397,8 +407,406 @@ class TestProgramMutationGuards:
         assert response.get_json()["program"]["enabled"] is False
         assert scheduled == []
 
+    def test_put_keeps_db_commit_and_scheduler_replacement_in_one_serial_order(self, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(
+            _payload(
+                zone_id,
+                schedule_type="interval",
+                interval_days=3,
+                days=[],
+                extra_times=[],
+            )
+        )
+        assert original is not None
+
+        a_schedule_entered = threading.Event()
+        release_a_schedule = threading.Event()
+        b_request_started = threading.Event()
+        b_db_read = threading.Event()
+        schedule_order = []
+        responses = {}
+        active_anchor = {"main": datetime(2030, 1, 1, 6, 0, tzinfo=UTC)}
+        active_job = {}
+
+        original_get_program = programs_api.db.get_program
+
+        def observed_get_program(program_id):
+            if threading.current_thread().name == "program-put-b":
+                b_db_read.set()
+            return original_get_program(program_id)
+
+        class BlockingScheduler:
+            scheduler = SimpleNamespace(timezone=UTC)
+
+            def get_program_interval_anchors(self, _program_id):
+                return dict(active_anchor)
+
+            def program_schedule_fingerprint(self, _program_id, program):
+                return f"{program['name']}:{program['time']}"
+
+            def schedule_program(self, _program_id, program, **kwargs):
+                if program["name"] == "A":
+                    a_schedule_entered.set()
+                    assert release_a_schedule.wait(timeout=3)
+                schedule_order.append((program["name"], kwargs))
+                active_anchor.update(kwargs["interval_anchors"])
+                active_job.update(
+                    {
+                        "name": program["name"],
+                        "anchor": kwargs["interval_anchors"]["main"],
+                        "fingerprint": kwargs["expected_fingerprint"],
+                    }
+                )
+                return True
+
+        monkeypatch.setattr(programs_api.db, "get_program", observed_get_program)
+        scheduler = BlockingScheduler()
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: scheduler)
+
+        def update(name, time_value):
+            if name == "B":
+                b_request_started.set()
+            client = app.test_client()
+            responses[name] = client.put(
+                f"/api/programs/{original['id']}",
+                json={"name": name, "time": time_value},
+            )
+
+        thread_a = threading.Thread(target=update, args=("A", "07:00"), name="program-put-a")
+        thread_b = threading.Thread(target=update, args=("B", "08:00"), name="program-put-b")
+        thread_a.start()
+        assert a_schedule_entered.wait(timeout=3)
+        thread_b.start()
+        assert b_request_started.wait(timeout=3)
+        try:
+            assert not b_db_read.wait(timeout=0.2), "B reached the DB while A's schedule replacement was pending"
+            assert original_get_program(original["id"])["name"] == "A"
+        finally:
+            release_a_schedule.set()
+            thread_a.join(timeout=3)
+            thread_b.join(timeout=3)
+
+        assert not thread_a.is_alive()
+        assert not thread_b.is_alive()
+        assert responses["A"].status_code == 200
+        assert responses["B"].status_code == 200
+        assert [name for name, _kwargs in schedule_order] == ["A", "B"]
+        assert schedule_order[0][1]["interval_anchors"]["main"].strftime("%H:%M") == "07:00"
+        assert schedule_order[0][1]["expected_fingerprint"] == "A:07:00"
+        assert schedule_order[1][1]["interval_anchors"]["main"].strftime("%H:%M") == "08:00"
+        assert schedule_order[1][1]["expected_fingerprint"] == "B:08:00"
+        assert original_get_program(original["id"])["name"] == "B"
+        assert active_job["name"] == "B"
+        assert active_job["anchor"].strftime("%H:%M") == "08:00"
+        assert active_job["fingerprint"] == "B:08:00"
+
+    def test_delete_waits_for_pending_put_scheduler_replacement(self, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, extra_times=[]))
+        assert original is not None
+        schedule_entered = threading.Event()
+        release_schedule = threading.Event()
+        delete_started = threading.Event()
+        delete_reached_db = threading.Event()
+        responses = {}
+        real_delete_program = programs_api.db.delete_program
+
+        def observed_delete_program(program_id):
+            if threading.current_thread().name == "program-delete":
+                delete_reached_db.set()
+            return real_delete_program(program_id)
+
+        class BlockingScheduler:
+            def schedule_program(self, *_args, **_kwargs):
+                schedule_entered.set()
+                assert release_schedule.wait(timeout=3)
+                return True
+
+            def cancel_program(self, _program_id):
+                return True
+
+        scheduler = BlockingScheduler()
+        monkeypatch.setattr(programs_api.db, "delete_program", observed_delete_program)
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: scheduler)
+
+        def update():
+            client = app.test_client()
+            responses["put"] = client.put(f"/api/programs/{original['id']}", json={"name": "Updated"})
+
+        def delete():
+            delete_started.set()
+            client = app.test_client()
+            responses["delete"] = client.delete(f"/api/programs/{original['id']}")
+
+        update_thread = threading.Thread(target=update, name="program-put")
+        delete_thread = threading.Thread(target=delete, name="program-delete")
+        update_thread.start()
+        assert schedule_entered.wait(timeout=3)
+        delete_thread.start()
+        assert delete_started.wait(timeout=3)
+        try:
+            assert not delete_reached_db.wait(timeout=0.2), "DELETE bypassed pending PUT schedule replacement"
+            assert app.db.get_program(original["id"])["name"] == "Updated"
+        finally:
+            release_schedule.set()
+            update_thread.join(timeout=3)
+            delete_thread.join(timeout=3)
+
+        assert not update_thread.is_alive()
+        assert not delete_thread.is_alive()
+        assert responses["put"].status_code == 200
+        assert responses["delete"].status_code == 204
+        assert app.db.get_program(original["id"]) is None
+
+    def test_delete_cancel_failure_returns_503_instead_of_false_success(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, extra_times=[]))
+        assert original is not None
+
+        class RejectingScheduler:
+            def cancel_program(self, _program_id):
+                return False
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: RejectingScheduler())
+
+        response = admin_client.delete(f"/api/programs/{original['id']}")
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "PROGRAM_SCHEDULE_FAILED"
+        assert app.db.get_program(original["id"]) is None
+
+    def test_post_scheduler_failure_returns_503_and_removes_created_program(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+
+        class RejectingScheduler:
+            def schedule_program(self, *_args, **_kwargs):
+                return False
+
+            def cancel_program(self, _program_id):
+                return None
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: RejectingScheduler())
+
+        response = admin_client.post("/api/programs", json=_payload(zone_id, extra_times=[]))
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "PROGRAM_SCHEDULE_FAILED"
+        assert app.db.get_programs() == []
+
+    def test_put_scheduler_failure_returns_503_and_restores_previous_program(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(
+            _payload(
+                zone_id,
+                name="Before",
+                time="06:00",
+                schedule_type="interval",
+                interval_days=3,
+                days=[],
+                extra_times=[],
+            )
+        )
+        assert original is not None
+        old_anchor = datetime(2030, 1, 1, 6, 0, tzinfo=UTC)
+        calls = []
+
+        class RejectingScheduler:
+            scheduler = SimpleNamespace(timezone=UTC)
+
+            def get_program_interval_anchors(self, _program_id):
+                return {"main": old_anchor}
+
+            def program_schedule_fingerprint(self, _program_id, program):
+                return f"{program['name']}:{program['time']}"
+
+            def schedule_program(self, _program_id, program, **kwargs):
+                calls.append((program, kwargs))
+                return program["time"] == "06:00"
+
+        scheduler = RejectingScheduler()
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: scheduler)
+
+        response = admin_client.put(
+            f"/api/programs/{original['id']}",
+            json={"name": "After", "time": "07:00"},
+        )
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "PROGRAM_SCHEDULE_FAILED"
+        assert response.get_json()["rollback_succeeded"] is True
+        assert response.get_json()["schedule_restored"] is True
+        restored = app.db.get_program(original["id"])
+        assert restored is not None
+        assert restored["name"] == "Before"
+        assert restored["time"] == "06:00"
+        assert [program["time"] for program, _kwargs in calls] == ["07:00", "06:00"]
+        assert calls[0][1]["expected_fingerprint"] == "After:07:00"
+        assert calls[1][1]["expected_fingerprint"] == "Before:06:00"
+        assert calls[1][1]["interval_anchors"] == {"main": old_anchor}
+
+    def test_put_reports_failed_rollback_and_cancels_on_scheduler_failure(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, name="Before", extra_times=[]))
+        assert original is not None
+        real_update_program = programs_api.db.update_program
+        update_calls = 0
+        cancelled = []
+
+        def fail_only_rollback(program_id, changes):
+            nonlocal update_calls
+            update_calls += 1
+            if update_calls == 1:
+                return real_update_program(program_id, changes)
+            return None
+
+        class RejectingScheduler:
+            def schedule_program(self, *_args, **_kwargs):
+                return False
+
+            def cancel_program(self, program_id):
+                cancelled.append(program_id)
+                return True
+
+        monkeypatch.setattr(programs_api.db, "update_program", fail_only_rollback)
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: RejectingScheduler())
+
+        response = admin_client.put(f"/api/programs/{original['id']}", json={"name": "After"})
+
+        assert response.status_code == 503
+        assert response.get_json()["rollback_succeeded"] is False
+        assert cancelled == [original["id"]]
+        assert app.db.get_program(original["id"])["name"] == "After"
+
+    def test_put_disable_failure_keeps_fail_safe_disabled_state(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, enabled=True, extra_times=[]))
+        assert original is not None
+
+        class RejectingScheduler:
+            def schedule_program(self, *_args, **_kwargs):
+                return False
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: RejectingScheduler())
+
+        response = admin_client.put(
+            f"/api/programs/{original['id']}",
+            json={"enabled": False},
+        )
+
+        assert response.status_code == 503
+        assert app.db.get_program(original["id"])["enabled"] is False
+
+    def test_enable_scheduler_failure_returns_503_and_restores_disabled_state(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, enabled=False, extra_times=[]))
+        assert original is not None
+
+        class RejectingScheduler:
+            def schedule_program(self, *_args, **_kwargs):
+                return False
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: RejectingScheduler())
+
+        response = admin_client.patch(f"/api/programs/{original['id']}/enabled", json={"enabled": True})
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "PROGRAM_SCHEDULE_FAILED"
+        assert app.db.get_program(original["id"])["enabled"] is False
+
+    def test_disable_scheduler_failure_returns_503_but_keeps_fail_safe_disabled_state(
+        self,
+        admin_client,
+        app,
+        monkeypatch,
+    ):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, enabled=True, extra_times=[]))
+        assert original is not None
+
+        class RejectingScheduler:
+            def schedule_program(self, *_args, **_kwargs):
+                return False
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: RejectingScheduler())
+
+        response = admin_client.patch(f"/api/programs/{original['id']}/enabled", json={"enabled": False})
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "PROGRAM_SCHEDULE_FAILED"
+        assert app.db.get_program(original["id"])["enabled"] is False
+
 
 class TestIntervalAnchorContracts:
+    def test_missing_interval_anchor_does_not_block_put_disable(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        program = app.db.create_program(
+            _payload(
+                zone_id,
+                schedule_type="interval",
+                interval_days=3,
+                days=[],
+                extra_times=[],
+            )
+        )
+        assert program is not None
+        scheduled = []
+
+        class FakeScheduler:
+            scheduler = SimpleNamespace(timezone=UTC)
+
+            def get_program_interval_anchors(self, _program_id):
+                return {}
+
+            def schedule_program(self, *args, **kwargs):
+                scheduled.append((args, kwargs))
+                return True
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: FakeScheduler())
+
+        response = admin_client.put(f"/api/programs/{program['id']}", json={"enabled": False})
+
+        assert response.status_code == 200
+        assert response.get_json()["enabled"] is False
+        assert len(scheduled) == 1
+        assert scheduled[0][1]["interval_anchors"] is None
+
+    def test_missing_old_interval_anchor_does_not_block_repair_to_weekdays(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        program = app.db.create_program(
+            _payload(
+                zone_id,
+                schedule_type="interval",
+                interval_days=3,
+                days=[],
+                extra_times=[],
+            )
+        )
+        assert program is not None
+        scheduled = []
+
+        class FakeScheduler:
+            scheduler = SimpleNamespace(timezone=UTC)
+
+            def get_program_interval_anchors(self, _program_id):
+                return {}
+
+            def schedule_program(self, *args, **kwargs):
+                scheduled.append((args, kwargs))
+                return True
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: FakeScheduler())
+
+        response = admin_client.put(
+            f"/api/programs/{program['id']}",
+            json={"schedule_type": "weekdays", "days": [0]},
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["schedule_type"] == "weekdays"
+        assert len(scheduled) == 1
+        assert "interval_anchors" not in scheduled[0][1]
+
     def test_missing_stored_interval_anchor_blocks_candidate_visibly(self, admin_client, app, monkeypatch):
         zone_id = _zone(app)
         stored = app.db.create_program(
