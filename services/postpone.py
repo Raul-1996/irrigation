@@ -258,66 +258,104 @@ def _postpone_group_zone_ids(group_zones: list[dict]) -> list[int]:
     return sorted(set(zone_ids))
 
 
-def _normalize_postpone_stop_result(result, *, group_id: int, fallback_unresolved: list[int]) -> dict:
-    """Validate the central structured stop result and fail closed."""
+def _invalid_postpone_stop_result(group_id: int, expected_zone_ids: list[int]) -> dict:
+    """Return an explicit third bucket when physical evidence is unusable.
+
+    ``unresolved`` is reserved for zones that a valid central aggregate
+    explicitly classified.  Relabelling missing, overlapping, or malformed
+    evidence as unresolved would invent physical/retry ownership.  Such zones
+    therefore remain ``unverified_zone_ids`` and no retry is claimed.
+    """
+    return {
+        "success": False,
+        "aggregate_valid": False,
+        "stopped": [],
+        "unresolved": [],
+        "unverified_zone_ids": list(expected_zone_ids),
+        "retry_scheduled": False,
+        "group_id": int(group_id),
+        "error_code": "POSTPONE_STOP_UNAVAILABLE",
+    }
+
+
+def _strict_zone_id_list(value) -> list[int] | None:
+    """Parse an aggregate list without coercing, de-duplicating, or guessing."""
+    if not isinstance(value, list):
+        return None
+    if any(type(zone_id) is not int for zone_id in value):
+        return None
+    if len(value) != len(set(value)):
+        return None
+    return sorted(value)
+
+
+def _normalize_postpone_stop_result(
+    result,
+    *,
+    group_id: int,
+    expected_zone_ids: list[int],
+    require_proof_fields: bool,
+) -> dict:
+    """Strictly validate one complete, disjoint physical stop aggregate.
+
+    Scheduler results carry the canonical seven-field proof shape.  The lower
+    level zone-control boundary carries the same physical/retry truth but does
+    not add the two derived proof fields.  In both cases, success must exactly
+    match an empty unresolved bucket and every expected zone must occur once in
+    exactly one physical bucket.
+    """
+    invalid = _invalid_postpone_stop_result(group_id, expected_zone_ids)
     if not isinstance(result, dict):
-        return {
-            "success": False,
-            "stopped": [],
-            "unresolved": list(fallback_unresolved),
-            "group_id": int(group_id),
-            "error_code": "POSTPONE_STOP_UNAVAILABLE",
-        }
-    raw_stopped = result.get("stopped", [])
-    raw_unresolved = result.get("unresolved", [])
-    if not isinstance(raw_stopped, (list, tuple, set)) or not isinstance(raw_unresolved, (list, tuple, set)):
-        return {
-            "success": False,
-            "stopped": [],
-            "unresolved": list(fallback_unresolved),
-            "group_id": int(group_id),
-            "error_code": "POSTPONE_STOP_UNAVAILABLE",
-        }
-    try:
-        result_group_id = int(result.get("group_id", group_id))
-        stopped = sorted({int(zone_id) for zone_id in raw_stopped})
-        unresolved = sorted({int(zone_id) for zone_id in raw_unresolved})
-    except (TypeError, ValueError):
-        return {
-            "success": False,
-            "stopped": [],
-            "unresolved": list(fallback_unresolved),
-            "group_id": int(group_id),
-            "error_code": "POSTPONE_STOP_UNAVAILABLE",
-        }
-    if result_group_id != int(group_id):
-        return {
-            "success": False,
-            "stopped": [],
-            "unresolved": list(fallback_unresolved),
-            "group_id": int(group_id),
-            "error_code": "POSTPONE_STOP_UNAVAILABLE",
-        }
-    expected = set(fallback_unresolved)
-    reported = set(stopped) | set(unresolved)
-    if reported - expected:
-        return {
-            "success": False,
-            "stopped": [],
-            "unresolved": list(fallback_unresolved),
-            "group_id": int(group_id),
-            "error_code": "POSTPONE_STOP_UNAVAILABLE",
-        }
-    missing = expected - reported
-    unresolved = sorted(set(unresolved) | missing)
-    stopped = [zone_id for zone_id in stopped if zone_id not in unresolved]
-    success = result.get("success") is True and not unresolved
-    if not success and not unresolved:
-        unresolved = list(fallback_unresolved)
+        return invalid
+    required_keys = {
+        "success",
+        "group_id",
+        "stopped",
+        "unresolved",
+        "retry_scheduled",
+    }
+    if require_proof_fields:
+        required_keys |= {"aggregate_valid", "unverified_zone_ids"}
+    if set(result) != required_keys:
+        return invalid
+
+    result_group_id = result.get("group_id")
+    success = result.get("success")
+    retry_scheduled = result.get("retry_scheduled")
+    if (
+        type(result_group_id) is not int
+        or result_group_id != int(group_id)
+        or type(success) is not bool
+        or type(retry_scheduled) is not bool
+    ):
+        return invalid
+
+    if require_proof_fields and result.get("aggregate_valid") is False:
+        return invalid
+    if require_proof_fields and (result.get("aggregate_valid") is not True or result.get("unverified_zone_ids") != []):
+        return invalid
+
+    stopped = _strict_zone_id_list(result.get("stopped"))
+    unresolved = _strict_zone_id_list(result.get("unresolved"))
+    if stopped is None or unresolved is None:
+        return invalid
+    stopped_set = set(stopped)
+    unresolved_set = set(unresolved)
+    expected = set(expected_zone_ids)
+    if stopped_set & unresolved_set or stopped_set | unresolved_set != expected:
+        return invalid
+    if success != (not unresolved):
+        return invalid
+    if retry_scheduled and not unresolved:
+        return invalid
+
     return {
         "success": success,
+        "aggregate_valid": True,
         "stopped": stopped,
         "unresolved": unresolved,
+        "unverified_zone_ids": [],
+        "retry_scheduled": retry_scheduled,
         "group_id": int(group_id),
         "error_code": None if success else "POSTPONE_STOP_PENDING",
     }
@@ -328,78 +366,136 @@ def _stop_group_for_postpone(group_id: int, group_zones: list[dict]) -> dict:
 
     The scheduler is the primary owner because it can atomically set the
     sequence cancel-event before issuing OFF commands and preserve/replant
-    hard-stop and cap retries for unresolved zones.  A central zone-control
-    fallback is used only when no scheduler instance exists, and only after its
-    public session-cancellation primitive succeeds.
+    hard-stop and cap retries for unresolved zones.  When no scheduler exists,
+    the fallback always attempts an immediate central confirmed OFF but refuses
+    overall success unless the public session-quiesce boundary also succeeds.
     """
-    # If the structured owner is missing or malformed, every zone in the
-    # original complete snapshot is unresolved.  Guessing from stale logical
-    # state could omit a concurrent/physically active relay.
-    fallback_unresolved = _postpone_group_zone_ids(group_zones)
+    # Preserve the complete original scope.  If evidence is malformed, these
+    # IDs go to the explicit unverified bucket rather than being relabelled
+    # from stale DB state as stopped or scheduler-owned unresolved.
+    expected_zone_ids = _postpone_group_zone_ids(group_zones)
     try:
         from irrigation_scheduler import get_scheduler
 
         scheduler = get_scheduler()
     except ImportError:
         scheduler = None
-    except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError):
+    except (
+        AttributeError,
+        ConnectionError,
+        TimeoutError,
+        RuntimeError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ):
         logger.exception("postpone_group: scheduler lookup failed group=%s", group_id)
-        return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+        scheduler = None
 
     if scheduler is not None:
         cancel_group_jobs = getattr(scheduler, "cancel_group_jobs", None)
         if not callable(cancel_group_jobs):
             logger.error("postpone_group: scheduler has no structured cancel_group_jobs group=%s", group_id)
-            return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+            return _invalid_postpone_stop_result(group_id, expected_zone_ids)
         try:
             result = cancel_group_jobs(int(group_id), master_close_immediately=True)
-        except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+        except (
+            AttributeError,
+            ConnectionError,
+            TimeoutError,
+            RuntimeError,
+            OSError,
+            sqlite3.Error,
+            TypeError,
+            ValueError,
+            KeyError,
+        ):
             logger.exception("postpone_group: structured scheduler stop failed group=%s", group_id)
             result = None
         return _normalize_postpone_stop_result(
             result,
             group_id=group_id,
-            fallback_unresolved=fallback_unresolved,
+            expected_zone_ids=expected_zone_ids,
+            require_proof_fields=True,
         )
 
     try:
-        from services.zone_control import cancel_group_program_execution, stop_all_in_group
+        import irrigation_scheduler
+        from services import zone_control
     except ImportError:
         logger.exception("postpone_group: central zone-control stop unavailable group=%s", group_id)
-        return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+        return _invalid_postpone_stop_result(group_id, expected_zone_ids)
 
+    quiesce_group_session = getattr(irrigation_scheduler, "quiesce_group_session", None)
     try:
-        session_cancelled = cancel_group_program_execution(int(group_id))
-    except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError, KeyError):
-        logger.exception("postpone_group: fallback session cancellation failed group=%s", group_id)
-        session_cancelled = False
-    if session_cancelled is not True:
-        logger.error("postpone_group: fallback session cancellation unresolved group=%s", group_id)
-        return _normalize_postpone_stop_result(None, group_id=group_id, fallback_unresolved=fallback_unresolved)
+        session_quiesced = callable(quiesce_group_session) and quiesce_group_session(int(group_id)) is True
+    except (
+        AttributeError,
+        ConnectionError,
+        TimeoutError,
+        RuntimeError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        KeyError,
+    ):
+        logger.exception("postpone_group: fallback session quiesce failed group=%s", group_id)
+        session_quiesced = False
+    if not session_quiesced:
+        logger.error("postpone_group: fallback session quiesce unresolved group=%s", group_id)
 
+    # Immediate safety is independent of session-quiesce availability.  Always
+    # attempt a central confirmed OFF, while refusing overall success until the
+    # sequencing owner is also proven quiescent.
+    stop_all_in_group = getattr(zone_control, "stop_all_in_group", None)
     try:
-        result = stop_all_in_group(
-            int(group_id),
-            reason="postpone",
-            force=True,
-            master_close_immediately=True,
-            require_observed_confirmation=True,
+        result = (
+            stop_all_in_group(
+                int(group_id),
+                reason="postpone",
+                force=True,
+                master_close_immediately=True,
+                require_observed_confirmation=True,
+            )
+            if callable(stop_all_in_group)
+            else None
         )
-    except (AttributeError, RuntimeError, OSError, sqlite3.Error, TypeError, ValueError, KeyError):
+    except (
+        AttributeError,
+        ConnectionError,
+        TimeoutError,
+        RuntimeError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        KeyError,
+    ):
         logger.exception("postpone_group: fallback confirmed stop failed group=%s", group_id)
         result = None
-    return _normalize_postpone_stop_result(
+    normalized = _normalize_postpone_stop_result(
         result,
         group_id=group_id,
-        fallback_unresolved=fallback_unresolved,
+        expected_zone_ids=expected_zone_ids,
+        require_proof_fields=False,
     )
+    physical_stop_confirmed = normalized["success"] is True
+    normalized["physical_stop_confirmed"] = physical_stop_confirmed
+    normalized["session_quiesced"] = session_quiesced
+    if not session_quiesced:
+        normalized["success"] = False
+        normalized["error_code"] = "POSTPONE_SESSION_NOT_QUIESCED"
+    return normalized
 
 
 def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
     """Отложить полив всех зон группы на ``days`` дней (до конца дня).
 
     Срок сохраняется до попытки остановки. Возвращает физически правдивый
-    structured result: ``success/pending/stopped/unresolved/error_code`` плюс
+    структурированный результат: buckets подтверждённых, unresolved и
+    unverified зон, владение retry, общий ``success/pending/error_code``,
     ``postpone_until`` и ``postpone_date``. При неподтверждённом OFF срок
     остаётся установлен, а ``success`` равен ``False``.
     """
@@ -423,8 +519,19 @@ def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
                 "until": postpone_until,
                 "source": source,
                 "success": stop_result["success"],
+                "aggregate_valid": stop_result["aggregate_valid"],
                 "stopped": stop_result["stopped"],
                 "unresolved": stop_result["unresolved"],
+                "unverified_zone_ids": stop_result["unverified_zone_ids"],
+                "retry_scheduled": stop_result["retry_scheduled"],
+                "session_quiesced": stop_result.get(
+                    "session_quiesced",
+                    stop_result["aggregate_valid"] is True,
+                ),
+                "physical_stop_confirmed": stop_result.get(
+                    "physical_stop_confirmed",
+                    stop_result["success"] is True,
+                ),
             }
         ),
     )
@@ -435,6 +542,11 @@ def postpone_group(group_id: int, days: int, source: str = "api") -> dict:
         "group_id": group_id,
         "stopped": stop_result["stopped"],
         "unresolved": stop_result["unresolved"],
+        "unverified_zone_ids": stop_result["unverified_zone_ids"],
+        "aggregate_valid": stop_result["aggregate_valid"],
+        "retry_scheduled": stop_result["retry_scheduled"],
+        "session_quiesced": stop_result.get("session_quiesced", stop_result["aggregate_valid"] is True),
+        "physical_stop_confirmed": stop_result.get("physical_stop_confirmed", stop_result["success"] is True),
         "postpone_until": postpone_until,
         "postpone_date": postpone_date,
     }

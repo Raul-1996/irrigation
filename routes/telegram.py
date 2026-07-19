@@ -186,14 +186,30 @@ def _do_group_postpone(group_id: int, days: int) -> str:
         from services.postpone import postpone_group
 
         res = postpone_group(int(group_id), int(days), source="telegram")
-        if res.get("success") is not True or res.get("unresolved"):
+        if res.get("success") is not True:
             unresolved = ", ".join(str(zone_id) for zone_id in res.get("unresolved", []))
-            suffix = f" Зоны без подтверждения: {unresolved}." if unresolved else ""
-            return (
-                f"⏳ Отсрочка установлена до {res['postpone_until']}, "
-                f"но физическое выключение пока не подтверждено.{suffix} "
+            unverified = ", ".join(str(zone_id) for zone_id in res.get("unverified_zone_ids", []))
+            error_code = res.get("error_code")
+            if error_code == "POSTPONE_STOP_UNAVAILABLE":
+                detail = "результат физического подтверждения недоступен."
+                if unverified:
+                    detail += f" Зоны без проверенного результата: {unverified}."
+            elif error_code == "POSTPONE_SESSION_NOT_QUIESCED":
+                detail = "сессия полива не остановлена гарантированно."
+                if unresolved:
+                    detail += f" Зоны без подтверждения OFF: {unresolved}."
+                if unverified:
+                    detail += f" Зоны без проверенного результата: {unverified}."
+            else:
+                detail = "физическое выключение пока не подтверждено."
+                if unresolved:
+                    detail += f" Зоны без подтверждения: {unresolved}."
+            retry_detail = (
                 "Защитные повторы продолжаются."
+                if res.get("retry_scheduled") is True
+                else "Владелец защитного повтора не подтверждён; требуется немедленная проверка."
             )
+            return f"⏳ Отсрочка установлена до {res['postpone_until']}, но {detail} {retry_detail}"
         return f"⏰ Полив отложен на {int(days)} дн. до {res['postpone_until']}"
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Exception in _do_group_postpone: %s", e)

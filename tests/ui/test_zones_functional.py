@@ -225,8 +225,11 @@ class TestGroupOperations:
                 {
                     "cancel_group_jobs": lambda self, group_id, **kwargs: {
                         "success": True,
+                        "aggregate_valid": True,
                         "stopped": [z["id"] for z in app.db.get_zones_by_group(group_id)],
                         "unresolved": [],
+                        "unverified_zone_ids": [],
+                        "retry_scheduled": False,
                         "group_id": group_id,
                     }
                 },
