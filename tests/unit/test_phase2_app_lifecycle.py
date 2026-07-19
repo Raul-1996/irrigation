@@ -16,6 +16,7 @@ def test_initialize_completes_scheduler_boot_only_after_off_reconciliation(test_
     events = []
     scheduler = MagicMock()
     scheduler.complete_boot_recovery.side_effect = lambda: events.append("complete_boot_recovery") or True
+    scheduler.boot_recovery_handoff_is_durable.return_value = True
     flask_app = MagicMock()
     flask_app.config = {"TESTING": False}
 
@@ -35,7 +36,7 @@ def test_initialize_completes_scheduler_boot_only_after_off_reconciliation(test_
         app_init.initialize_app(flask_app, test_db, start_watchdog_fn=MagicMock())
 
     scheduler.complete_boot_recovery.assert_called_once_with()
-    assert events == ["init", "boot_sync", "complete_boot_recovery", "monitors"]
+    assert events == ["boot_sync", "init", "complete_boot_recovery", "monitors"]
 
 
 def test_boot_aborts_crash_open_run_before_forced_zone_stop(test_db):
@@ -61,11 +62,9 @@ def test_boot_aborts_crash_open_run_before_forced_zone_stop(test_db):
     assert stale_run_id is not None
     test_db.mark_zone_run_confirmed(int(zone["id"]))
 
-    import services.mqtt_pub as mqtt_pub
     from services import app_init
 
-    with patch.object(mqtt_pub, "publish_mqtt_value", return_value=True):
-        assert app_init._boot_sync(MagicMock(), test_db) is True
+    assert app_init._boot_sync(MagicMock(), test_db) is True
 
     assert test_db.get_open_zone_run(int(zone["id"])) is None
     with sqlite3.connect(test_db.db_path) as conn:
@@ -124,6 +123,5 @@ def test_shutdown_quiesces_scheduler_before_final_retained_off(test_db):
     assert 0 < scheduler.quiesce.call_args.kwargs["timeout_seconds"] <= 3
     assert events[0] == "quiesced"
     assert events[1:] == [
-        ("/devices/test/controls/K1", "0", 2, True),
         ("/devices/test/controls/K1/on", "0", 2, True),
     ]

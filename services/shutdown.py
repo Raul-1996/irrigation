@@ -6,9 +6,9 @@ Must never raise, never hang, never break existing functionality.
 
 import logging
 import queue
-import sqlite3
 import threading
 import time
+from datetime import datetime
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> bool:
 
     - Idempotent: safe to call from both signal handler and atexit.
     - Never raises — all errors are logged as warnings and return ``False``.
-    - Updates a zone to ``off`` only after both retained OFF publications are
+    - Updates a zone to ``off`` only after its retained actuator command is
       acknowledged by Paho.
 
     Args:
@@ -154,19 +154,33 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> bool:
         return False
 
     try:
+        from services.lifecycle_storage import (
+            persist_confirmed_shutdown_off,
+            run_bounded,
+            strict_snapshot,
+        )
         from services.mqtt_pub import get_or_create_mqtt_client
         from utils import normalize_topic
     except ImportError:
-        logger.warning("Shutdown: cannot import mqtt_pub / utils")
+        logger.warning("Shutdown: cannot import lifecycle storage / mqtt_pub / utils")
         return False
 
-    # ── fetch zones ─────────────────────────────────────────────────
-    zones = []
-    try:
-        zones = db.get_zones() or []
-    except (sqlite3.Error, OSError, Exception) as exc:
-        logger.warning("Shutdown: cannot read zones: %s", exc)
+    # ── strict bounded topology snapshot ────────────────────────────
+    db_path = getattr(db, "db_path", None)
+    if not isinstance(db_path, str) or not db_path:
+        logger.error("Shutdown: strict lifecycle snapshot unavailable: db_path missing")
         return False
+    snapshot_ok, snapshot, snapshot_error = run_bounded(
+        lambda: strict_snapshot(db_path, deadline=deadline),
+        deadline=deadline,
+        name="strict topology snapshot",
+    )
+    if not snapshot_ok or snapshot is None:
+        logger.error("Shutdown: %s", snapshot_error or "strict topology snapshot failed")
+        return False
+    zones = snapshot.zones
+    groups = snapshot.groups
+    servers = snapshot.servers
 
     # ── build physical OFF tasks ────────────────────────────────────
     failures: list[str] = []
@@ -182,45 +196,65 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> bool:
             topic_raw = str(zone.get("topic") or "").strip()
             if not sid_raw and not topic_raw:
                 current_state = str(zone.get("state") or "").lower()
-                zone_results[zone_id] = (
-                    (True, None)
-                    if current_state == "off"
-                    else (False, f"active state {current_state!r} has no MQTT mapping")
-                )
+                if current_state != "off":
+                    zone_results[zone_id] = (False, f"active state {current_state!r} has no MQTT mapping")
+                    continue
+
+                def normalize_unmapped_off(
+                    zid: int = zone_id,
+                    state: str = current_state,
+                ) -> tuple[bool, str | None]:
+                    end_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    persist_confirmed_shutdown_off(
+                        db_path,
+                        zid,
+                        current_state=state,
+                        deadline=deadline,
+                        end_local=end_local,
+                        end_monotonic=time.monotonic(),
+                    )
+                    return True, None
+
+                tasks.append((f"zone:{zone_id}", normalize_unmapped_off))
                 continue
             if not sid_raw or not topic_raw:
                 zone_results[zone_id] = (False, "incomplete MQTT mapping")
                 continue
-            server = db.get_mqtt_server(int(sid_raw))
+            server = servers.get(int(sid_raw))
             if not server:
                 zone_results[zone_id] = (False, "MQTT server missing")
                 continue
             topic = normalize_topic(topic_raw)
-        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             failures.append(f"zone[{index}]: {type(exc).__name__}")
             continue
 
         def turn_zone_off(
             mqtt_server: dict = server,
             mqtt_topic: str = topic,
+            zid: int = zone_id,
+            current_state: str = str(zone.get("state") or "").lower(),
         ) -> tuple[bool, str | None]:
             client = get_or_create_mqtt_client(mqtt_server)
             if client is None:
                 return False, "MQTT client unavailable"
-            for target in (mqtt_topic, mqtt_topic + "/on"):
-                info = client.publish(target, payload="0", qos=2, retain=True)
-                ok, reason = _confirmed_publish(info, deadline=deadline)
-                if not ok:
-                    return False, f"{target}: {reason}"
+            target = mqtt_topic + "/on"
+            info = client.publish(target, payload="0", qos=2, retain=True)
+            ok, reason = _confirmed_publish(info, deadline=deadline)
+            if not ok:
+                return False, f"{target}: {reason}"
+            end_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            persist_confirmed_shutdown_off(
+                db_path,
+                zid,
+                current_state=current_state,
+                deadline=deadline,
+                end_local=end_local,
+                end_monotonic=time.monotonic(),
+            )
             return True, None
 
         tasks.append((f"zone:{zone_id}", turn_zone_off))
-
-    try:
-        groups = db.get_groups() or []
-    except (sqlite3.Error, OSError, Exception):
-        groups = []
-        failures.append("groups read failed")
 
     seen_masters: dict[tuple[int, str], str] = {}
     for index, group in enumerate(groups):
@@ -242,11 +276,11 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> bool:
                     failures.append(f"master group:{group_id or index}: conflicting close mode")
                 continue
             seen_masters[key] = close_value
-            server = db.get_mqtt_server(sid)
+            server = servers.get(sid)
             if not server:
                 failures.append(f"master:{sid}:{topic}: MQTT server missing")
                 continue
-        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             failures.append(f"master group:{index}: {type(exc).__name__}")
             continue
 
@@ -258,11 +292,11 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> bool:
             client = get_or_create_mqtt_client(mqtt_server)
             if client is None:
                 return False, "MQTT client unavailable"
-            for target in (mqtt_topic, mqtt_topic + "/on"):
-                info = client.publish(target, payload=value, qos=2, retain=True)
-                ok, reason = _confirmed_publish(info, deadline=deadline)
-                if not ok:
-                    return False, f"{target}: {reason}"
+            target = mqtt_topic + "/on"
+            info = client.publish(target, payload=value, qos=2, retain=True)
+            ok, reason = _confirmed_publish(info, deadline=deadline)
+            if not ok:
+                return False, f"{target}: {reason}"
             return True, None
 
         tasks.append((f"master:{sid}:{topic}", close_master))
@@ -277,50 +311,13 @@ def shutdown_all_zones_off(timeout_sec: float = 10, db=None) -> bool:
     if time.monotonic() > deadline and not pending:
         failures.append("global shutdown deadline exceeded")
 
-    # ── update DB only for zones whose OFF was confirmed ────────────
-    try:
-        from services.zones_state import update_zone_state
-    except ImportError:
-        update_zone_state = None
-
     confirmed_zones = 0
-    for zone_id, zone in zone_by_id.items():
+    for zone_id in zone_by_id:
         ok, reason = zone_results.get(zone_id, (False, "global deadline exceeded"))
         if not ok:
             failures.append(f"zone:{zone_id}: {reason or 'failed'}")
             continue
-        updates = {
-            "commanded_state": "off",
-            "watering_start_time": None,
-            "planned_end_time": None,
-        }
-        if str(zone.get("state") or "").lower() != "fault":
-            updates["state"] = "off"
-        try:
-            if update_zone_state is None:
-                updated = db.update_zone(zone_id, updates)
-                if updated is None:
-                    raise sqlite3.OperationalError("zone update returned None")
-            else:
-                update_zone_state(
-                    zone_id,
-                    updates,
-                    audit_reason="graceful_shutdown_confirmed",
-                    db=db,
-                )
-                persisted = db.get_zone(zone_id)
-                expected_state = "fault" if str(zone.get("state") or "").lower() == "fault" else "off"
-                if (
-                    not persisted
-                    or str(persisted.get("state") or "").lower() != expected_state
-                    or str(persisted.get("commanded_state") or "").lower() != "off"
-                    or persisted.get("watering_start_time") is not None
-                    or persisted.get("planned_end_time") is not None
-                ):
-                    raise sqlite3.OperationalError("confirmed state update did not persist")
-            confirmed_zones += 1
-        except (sqlite3.Error, OSError, ValueError, TypeError, AttributeError) as exc:
-            failures.append(f"zone:{zone_id}: DB update {type(exc).__name__}")
+        confirmed_zones += 1
 
     success = not failures
     _shutdown_result = success

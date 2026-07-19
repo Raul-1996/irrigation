@@ -57,8 +57,8 @@ class TestShutdownAllZones:
 
             shutdown_all_zones(db=test_db)
 
-        # 2 zones * 2 topics (base + /on) = 4
-        assert mock_client.publish.call_count == 4
+        # One actuator command topic (/on) per zone; never write report/base.
+        assert mock_client.publish.call_count == 2
 
     def test_shutdown_idempotent(self, test_db):
         """Should only run once."""
@@ -150,4 +150,4 @@ class TestShutdownAllZones:
 
             shutdown_all_zones(db=test_db)
 
-        assert mock_client.publish.call_count == 2  # Only Z2
+        assert mock_client.publish.call_count == 1  # Only Z2 actuator /on
