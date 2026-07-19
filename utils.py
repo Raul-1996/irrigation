@@ -1,4 +1,5 @@
 import base64
+import binascii
 import logging
 import os
 import secrets
@@ -6,6 +7,136 @@ import stat
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+_PRIVATE_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
+_PRIVATE_DIR_MODE = stat.S_IRWXU
+_SAFE_OPEN_FLAGS = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+class SecretKeyConfigurationError(RuntimeError):
+    """A configured key is missing or damaged and must be restored.
+
+    Silently replacing such a key would invalidate Flask sessions or make
+    encrypted MQTT/Telegram credentials unrecoverable.  Messages raised by
+    this class deliberately identify only the key source, never its material.
+    """
+
+
+def ensure_private_directory(directory: str | os.PathLike[str]) -> None:
+    """Create *directory* as 0700 and harden an existing leaf directory.
+
+    ``mode=`` passed to :func:`os.makedirs` is still filtered by the process
+    umask and does not reliably cover intermediate directories.  Create every
+    missing component explicitly and chmod it before it can hold a secret.
+    Existing ancestors are left alone; only the requested leaf is hardened.
+    """
+
+    directory_path = os.path.abspath(os.fspath(directory))
+    missing: list[str] = []
+    cursor = directory_path
+    while not os.path.lexists(cursor):
+        missing.append(cursor)
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+
+    for path in reversed(missing):
+        try:
+            os.mkdir(path, _PRIVATE_DIR_MODE)
+        except FileExistsError:
+            pass
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(f"Private storage path is not a directory: {path}")
+        os.chmod(path, _PRIVATE_DIR_MODE, follow_symlinks=False)
+
+    info = os.lstat(directory_path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(f"Private storage path is not a directory: {directory_path}")
+    os.chmod(directory_path, _PRIVATE_DIR_MODE, follow_symlinks=False)
+
+
+def _ensure_private_parent(file_path: str | os.PathLike[str]) -> None:
+    parent = os.path.dirname(os.path.abspath(os.fspath(file_path)))
+    if not os.path.lexists(parent):
+        ensure_private_directory(parent)
+
+
+def ensure_private_file(file_path: str | os.PathLike[str], *, create: bool = False) -> None:
+    """Harden a regular file to 0600, optionally creating it without a race."""
+
+    path = os.fspath(file_path)
+    if create:
+        _ensure_private_parent(path)
+    flags = os.O_RDWR | _SAFE_OPEN_FLAGS
+    if create:
+        flags |= os.O_CREAT
+    descriptor = os.open(path, flags, _PRIVATE_FILE_MODE)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"Private storage path is not a regular file: {path}")
+        os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+    finally:
+        os.close(descriptor)
+
+
+def read_private_file(file_path: str | os.PathLike[str]) -> bytes:
+    """Read a regular file only after constraining it to owner read/write."""
+
+    path = os.fspath(file_path)
+    descriptor = os.open(path, os.O_RDONLY | _SAFE_OPEN_FLAGS)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"Private storage path is not a regular file: {path}")
+        os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+
+
+def create_private_file(file_path: str | os.PathLike[str], data: bytes) -> None:
+    """Atomically create a new 0600 file without exposing partial material."""
+
+    path = os.path.abspath(os.fspath(file_path))
+    _ensure_private_parent(path)
+    temporary_path = os.path.join(
+        os.path.dirname(path),
+        f".{os.path.basename(path)}.{secrets.token_hex(8)}.tmp",
+    )
+    descriptor = os.open(
+        temporary_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _SAFE_OPEN_FLAGS,
+        _PRIVATE_FILE_MODE,
+    )
+    try:
+        try:
+            os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError(f"Unable to persist private file: {path}")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        # A hard link publishes the fully-written inode only if the target is
+        # still absent.  Concurrent workers therefore either create the key or
+        # receive FileExistsError and load the winner's complete key.
+        os.link(temporary_path, path, follow_symlinks=False)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
 
 
 def to_iso_with_tz(s: str | None) -> str | None:
@@ -98,31 +229,52 @@ def _get_secret_key() -> bytes:
     2. File .irrig_secret_key (raw 32 bytes)
     3. Generate new random 32 bytes, persist to file
     """
-    _SECRET_KEY_FILE = ".irrig_secret_key"
+    secret_key_file = ".irrig_secret_key"
 
     # 1. Check environment variable
-    key = os.getenv("IRRIG_SECRET_KEY")
-    if key:
+    configured_key = os.getenv("IRRIG_SECRET_KEY")
+    if configured_key:
         try:
-            return base64.urlsafe_b64decode(key + "===")
-        except (ValueError, TypeError) as e:
-            logger.debug("Handled exception in _get_secret_key: %s", e)
+            encoded = configured_key.strip().encode("ascii")
+            padding = b"=" * (-len(encoded) % 4)
+            decoded = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+        except (binascii.Error, UnicodeEncodeError, ValueError) as error:
+            raise SecretKeyConfigurationError(
+                "IRRIG_SECRET_KEY is invalid; restore a valid base64-encoded 32-byte key"
+            ) from error
+        if len(decoded) != 32:
+            raise SecretKeyConfigurationError(
+                "IRRIG_SECRET_KEY is invalid; restore a valid base64-encoded 32-byte key"
+            )
+        return decoded
 
     # 2. Try reading from file
     try:
-        with open(_SECRET_KEY_FILE, "rb") as f:
-            data = f.read()
-        if len(data) >= 32:
-            return data[:32]
+        data = read_private_file(secret_key_file)
     except FileNotFoundError:
-        logging.getLogger(__name__).debug("Secret key file not found, will generate new one")
+        data = None
+
+    if data is not None:
+        if len(data) != 32:
+            raise SecretKeyConfigurationError(
+                "Encryption secret key file is invalid; restore the original 32-byte key"
+            )
+        return data
 
     # 3. Generate new key and persist
     new_key = secrets.token_bytes(32)
-    with open(_SECRET_KEY_FILE, "wb") as f:
-        f.write(new_key)
-    os.chmod(_SECRET_KEY_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-    return new_key
+    try:
+        create_private_file(secret_key_file, new_key)
+        return new_key
+    except FileExistsError:
+        # A second worker won the first-start race.  Never overwrite its key:
+        # all workers must converge on the same persisted material.
+        persisted = read_private_file(secret_key_file)
+        if len(persisted) != 32:
+            raise SecretKeyConfigurationError(
+                "Encryption secret key file is invalid; restore the original 32-byte key"
+            ) from None
+        return persisted
 
 
 def encrypt_secret(plaintext: str | None) -> str | None:
