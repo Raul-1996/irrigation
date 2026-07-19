@@ -7,6 +7,13 @@ import pytest
 from db.programs import ProgramRepository
 
 
+@pytest.fixture(autouse=True)
+def _live_program_zone(test_db):
+    zone = test_db.create_zone({"name": "Fixture zone", "duration": 15, "group_id": 1})
+    assert zone is not None
+    assert zone["id"] == 1
+
+
 def _create_zone(test_db, *, group_id: int = 1, duration: int = 15) -> int:
     zone = test_db.create_zone(
         {
@@ -86,9 +93,7 @@ def test_update_program_rejects_json_null_list_fields_atomically(test_db, invali
 
 def test_conflict_check_ignores_disabled_programs(test_db):
     zone_id = _create_zone(test_db)
-    disabled = test_db.create_program(
-        _program_data(name="Disabled", zones=[zone_id], enabled=False)
-    )
+    disabled = test_db.create_program(_program_data(name="Disabled", zones=[zone_id], enabled=False))
     assert disabled is not None
 
     conflicts = test_db.check_program_conflicts(
@@ -125,9 +130,7 @@ def test_conflict_check_includes_stored_extra_times_for_group_999(test_db):
 
 def test_conflict_check_accepts_candidate_extra_times(test_db):
     zone_id = _create_zone(test_db)
-    existing = test_db.create_program(
-        _program_data(name="Morning", time="06:00", zones=[zone_id])
-    )
+    existing = test_db.create_program(_program_data(name="Morning", time="06:00", zones=[zone_id]))
     assert existing is not None
 
     conflicts = ProgramRepository(test_db.db_path).check_program_conflicts(

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, current_app, jsonify, request
 
 from database import db
+from db.programs import ProgramZonesNotFoundError
 from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
 from services.audit import audit_log, debug_audit
@@ -25,12 +26,35 @@ VALID_PROGRAM_TYPES = ("time-based", "smart")
 VALID_SCHEDULE_TYPES = ("weekdays", "interval", "even-odd")
 MIN_INTERVAL_DAYS = 1
 MAX_INTERVAL_DAYS = 30
+MAX_EXTRA_TIMES = 24
 _TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
+_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+_DEFAULT_PROGRAM_COLOR = "#42a5f5"
 _PROGRAM_MUTATION_LOCK = threading.RLock()
 
 
 def _is_hhmm(value: object) -> bool:
     return isinstance(value, str) and _TIME_RE.fullmatch(value) is not None
+
+
+def _normalize_color(value: object) -> str | None:
+    if not isinstance(value, str) or _COLOR_RE.fullmatch(value) is None:
+        return None
+    return value.lower()
+
+
+def _missing_program_zones_response(error: ProgramZonesNotFoundError):
+    return (
+        jsonify(
+            {
+                "success": False,
+                "message": "One or more program zones no longer exist",
+                "error_code": "PROGRAM_ZONES_NOT_FOUND",
+                "missing_zone_ids": error.missing_zone_ids,
+            }
+        ),
+        409,
+    )
 
 
 def _normalize_program_payload(
@@ -50,6 +74,7 @@ def _normalize_program_payload(
             "days": [],
             "extra_times": [],
             "enabled": True,
+            "color": _DEFAULT_PROGRAM_COLOR,
             **data,
         }
     else:
@@ -84,6 +109,8 @@ def _normalize_program_payload(
     extra_times = effective.get("extra_times", [])
     if not isinstance(extra_times, list) or any(not _is_hhmm(slot) for slot in extra_times):
         return {}, effective, "extra_times must be a list of strict HH:MM strings"
+    if len(extra_times) > MAX_EXTRA_TIMES:
+        return {}, effective, f"extra_times must contain at most {MAX_EXTRA_TIMES} entries"
     if len(extra_times) != len(set(extra_times)):
         return {}, effective, "extra_times must not contain duplicates"
     if effective["time"] in extra_times:
@@ -93,6 +120,11 @@ def _normalize_program_payload(
     enabled = effective.get("enabled", True)
     if not isinstance(enabled, bool):
         return {}, effective, "enabled must be a JSON boolean"
+
+    color = _normalize_color(effective.get("color", _DEFAULT_PROGRAM_COLOR))
+    if color is None:
+        return {}, effective, "color must use strict #RRGGBB format"
+    effective["color"] = color
 
     program_type = effective.get("type", "time-based")
     if not isinstance(program_type, str) or program_type not in VALID_PROGRAM_TYPES:
@@ -148,6 +180,7 @@ def _normalize_program_payload(
         "schedule_type",
         "interval_days",
         "even_odd",
+        "color",
     ):
         if creating or field in data:
             if field in effective:
@@ -177,7 +210,9 @@ def _slot_anchor_map(program: dict, scheduler_anchors: dict[str, object]) -> dic
 
 def _next_candidate_interval_anchors(program: dict, scheduler: object | None) -> dict[str, object]:
     timezone = getattr(getattr(scheduler, "scheduler", None), "timezone", None)
-    now = datetime.now(timezone) if timezone is not None else datetime.now()
+    if timezone is None:
+        timezone = datetime.now().astimezone().tzinfo
+    now = datetime.now(timezone)
     result: dict[str, object] = {}
     slots = [program["time"], *(program.get("extra_times") or [])]
     for slot in slots:
@@ -187,6 +222,46 @@ def _next_candidate_interval_anchors(program: dict, scheduler: object | None) ->
             anchor += timedelta(days=1)
         result[slot] = anchor
     return result
+
+
+def _scheduler_interval_anchor_map(program: dict, candidate_anchors: dict[str, object]) -> dict[str, datetime] | None:
+    """Translate admitted time-keyed anchors to the scheduler's stable keys."""
+    if program.get("schedule_type") != "interval":
+        return None
+    result: dict[str, datetime] = {}
+    slots = [("main", program.get("time"))]
+    slots.extend((f"extra:{index}", slot) for index, slot in enumerate(program.get("extra_times") or []))
+    for scheduler_key, slot in slots:
+        anchor = candidate_anchors.get(slot)
+        if (
+            not _is_hhmm(slot)
+            or not isinstance(anchor, datetime)
+            or anchor.tzinfo is None
+            or anchor.utcoffset() is None
+            or anchor.strftime("%H:%M") != slot
+        ):
+            return None
+        result[scheduler_key] = anchor
+    return result
+
+
+def _interval_anchor_unavailable_response():
+    return (
+        jsonify(
+            {
+                "success": False,
+                "message": "Authoritative interval anchors are unavailable",
+                "error_code": "INTERVAL_ANCHOR_UNAVAILABLE",
+            }
+        ),
+        503,
+    )
+
+
+def _schedule_admitted_program(scheduler: object, program: dict, anchors: dict[str, datetime] | None) -> object:
+    if program.get("schedule_type") == "interval":
+        return scheduler.schedule_program(program["id"], program, interval_anchors=anchors)
+    return scheduler.schedule_program(program["id"], program)
 
 
 def _interval_anchor_context(
@@ -233,7 +308,8 @@ def _check_candidate_conflicts(
     stored_interval_anchors: dict[int, dict[str, object]] | None = None,
     weather_factor: int | None = None,
     include_weather: bool = False,
-) -> list[dict]:
+    return_details: bool = False,
+) -> list[dict] | dict:
     """Check the primary and every candidate extra start through the facade.
 
     The public ``IrrigationDB`` facade exposes the legacy one-start-at-a-time
@@ -257,8 +333,22 @@ def _check_candidate_conflicts(
             weather_factor=weather_factor,
             include_weather=include_weather,
             raise_on_error=True,
+            detailed=return_details,
         )
-        return result.get("conflicts", []) if isinstance(result, dict) else list(result or [])
+        if isinstance(result, dict):
+            details = {
+                "has_conflicts": bool(result.get("conflicts")),
+                "conflicts": list(result.get("conflicts") or []),
+                "current_weather_coefficient": int(result.get("current_weather_coefficient", 100)),
+            }
+        else:
+            conflicts = list(result or [])
+            details = {
+                "has_conflicts": bool(conflicts),
+                "conflicts": conflicts,
+                "current_weather_coefficient": 100,
+            }
+        return details if return_details else details["conflicts"]
 
     candidate_times = [time_value, *(extra_times if isinstance(extra_times, list) else [])]
     conflicts = []
@@ -279,7 +369,12 @@ def _check_candidate_conflicts(
             if conflict not in conflicts:
                 conflicts.append(conflict)
 
-    return conflicts
+    details = {
+        "has_conflicts": bool(conflicts),
+        "conflicts": conflicts,
+        "current_weather_coefficient": 100,
+    }
+    return details if return_details else conflicts
 
 
 @programs_api_bp.route("/api/programs")
@@ -321,6 +416,9 @@ def api_program(prog_id):
                 effective_data,
                 preserve_candidate_anchor=preserve_candidate_anchor,
             )
+            scheduler_anchors = _scheduler_interval_anchor_map(effective_data, candidate_anchors)
+            if effective_data.get("schedule_type") == "interval" and scheduler_anchors is None:
+                return _interval_anchor_unavailable_response()
             try:
                 conflicts = _check_candidate_conflicts(
                     program_id=prog_id,
@@ -346,13 +444,16 @@ def api_program(prog_id):
                         "message": "Обнаружены конфликты программ",
                     }
                 )
-            program = db.update_program(prog_id, normalized)
+            try:
+                program = db.update_program(prog_id, normalized)
+            except ProgramZonesNotFoundError as error:
+                return _missing_program_zones_response(error)
         if program:
             db.add_log("prog_edit", json.dumps({"prog": prog_id, "changes": normalized}))
             try:
                 scheduler = get_scheduler()
                 if scheduler:
-                    scheduler.schedule_program(program["id"], program)
+                    _schedule_admitted_program(scheduler, program, scheduler_anchors)
             except (KeyError, TypeError, ValueError) as e:
                 logger.error(f"Ошибка перепланирования программы {prog_id}: {e}")
             return jsonify(program)
@@ -388,6 +489,9 @@ def api_create_program():
             effective_data,
             preserve_candidate_anchor=False,
         )
+        scheduler_anchors = _scheduler_interval_anchor_map(effective_data, candidate_anchors)
+        if effective_data.get("schedule_type") == "interval" and scheduler_anchors is None:
+            return _interval_anchor_unavailable_response()
         try:
             conflicts = _check_candidate_conflicts(
                 program_id=None,
@@ -413,13 +517,16 @@ def api_create_program():
                     "message": "Обнаружены конфликты программ",
                 }
             )
-        program = db.create_program(normalized)
+        try:
+            program = db.create_program(normalized)
+        except ProgramZonesNotFoundError as error:
+            return _missing_program_zones_response(error)
     if program:
         db.add_log("prog_create", json.dumps({"prog": program["id"], "name": program["name"]}))
         try:
             scheduler = get_scheduler()
             if scheduler:
-                scheduler.schedule_program(program["id"], program)
+                _schedule_admitted_program(scheduler, program, scheduler_anchors)
         except (KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка планирования новой программы {program['id']}: {e}")
         return jsonify(program), 201
@@ -427,6 +534,7 @@ def api_create_program():
 
 
 @programs_api_bp.route("/api/programs/check-conflicts", methods=["POST"])
+@rate_limit("program-conflicts", max_requests=30, window_sec=60)
 def check_program_conflicts():
     """Check watering program conflicts."""
     try:
@@ -487,7 +595,7 @@ def check_program_conflicts():
             effective,
             preserve_candidate_anchor=preserve_candidate_anchor,
         )
-        conflicts = _check_candidate_conflicts(
+        conflict_result = _check_candidate_conflicts(
             program_id,
             effective["time"],
             effective["zones"],
@@ -500,7 +608,9 @@ def check_program_conflicts():
             stored_anchors,
             weather_factor,
             include_weather,
+            return_details=True,
         )
+        conflicts = conflict_result["conflicts"]
         # Debug-level trace — this is read-only intent, useful for triaging
         # "why did the UI block save" without flooding audit_log in prod.
         try:
@@ -518,7 +628,7 @@ def check_program_conflicts():
             )
         except Exception:
             logger.debug("check_program_conflicts: debug_audit failed", exc_info=True)
-        return jsonify({"success": True, "conflicts": conflicts, "has_conflicts": len(conflicts) > 0})
+        return jsonify({"success": True, **conflict_result})
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка проверки конфликтов программ: {e}")
         return jsonify({"success": False, "message": "Ошибка проверки конфликтов"}), 500
@@ -530,15 +640,13 @@ def check_program_conflicts():
 def api_duplicate_program(prog_id):
     """Duplicate program (create copy with '(копия)' suffix)."""
     try:
-        new_program = db.duplicate_program(prog_id)
+        with _PROGRAM_MUTATION_LOCK:
+            try:
+                new_program = db.duplicate_program(prog_id)
+            except ProgramZonesNotFoundError as error:
+                return _missing_program_zones_response(error)
         if new_program:
             db.add_log("prog_duplicate", json.dumps({"original": prog_id, "copy": new_program["id"]}))
-            try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    scheduler.schedule_program(new_program["id"], new_program)
-            except (KeyError, TypeError, ValueError) as e:
-                logger.error(f"Ошибка планирования дубликата программы {new_program['id']}: {e}")
             return jsonify({"success": True, "program": new_program}), 201
         return jsonify({"success": False, "message": "Program not found"}), 404
     except (sqlite3.Error, OSError) as e:
@@ -566,18 +674,82 @@ def api_toggle_program_enabled(prog_id):
         enabled = data.get("enabled")
         if not isinstance(enabled, bool):
             return jsonify({"success": False, "message": "enabled must be a JSON boolean"}), 400
+        if "color" in data and _normalize_color(data["color"]) is None:
+            return jsonify({"success": False, "message": "color must use strict #RRGGBB format"}), 400
 
-        program = db.update_program(prog_id, {"enabled": enabled})
+        scheduler_anchors = None
+        with _PROGRAM_MUTATION_LOCK:
+            current_program = db.get_program(prog_id)
+            if current_program is None:
+                return jsonify({"success": False, "message": "Program not found"}), 404
+
+            if enabled:
+                _normalized, effective, validation_error = _normalize_program_payload(
+                    current_program,
+                    creating=True,
+                )
+                if validation_error:
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "message": validation_error,
+                                "error_code": "PROGRAM_INVALID_STATE",
+                            }
+                        ),
+                        409,
+                    )
+                candidate_anchors, stored_anchors = _interval_anchor_context(
+                    prog_id,
+                    effective,
+                    preserve_candidate_anchor=bool(current_program.get("enabled")),
+                )
+                scheduler_anchors = _scheduler_interval_anchor_map(effective, candidate_anchors)
+                if effective.get("schedule_type") == "interval" and scheduler_anchors is None:
+                    return _interval_anchor_unavailable_response()
+                try:
+                    conflicts = _check_candidate_conflicts(
+                        program_id=prog_id,
+                        time_value=effective["time"],
+                        zones=effective["zones"],
+                        days=effective["days"],
+                        extra_times=effective.get("extra_times"),
+                        schedule_type=effective["schedule_type"],
+                        interval_days=effective.get("interval_days"),
+                        even_odd=effective.get("even_odd"),
+                        candidate_interval_anchors=candidate_anchors,
+                        stored_interval_anchors=stored_anchors,
+                    )
+                except (sqlite3.Error, OSError) as error:
+                    logger.error("Ошибка серверной проверки конфликтов (enable): %s", error)
+                    return jsonify({"success": False, "message": "Ошибка проверки конфликтов"}), 503
+                if conflicts:
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "has_conflicts": True,
+                                "conflicts": conflicts,
+                                "message": "Обнаружены конфликты программ",
+                            }
+                        ),
+                        409,
+                    )
+
+            try:
+                program = db.update_program(prog_id, {"enabled": enabled})
+            except ProgramZonesNotFoundError as error:
+                return _missing_program_zones_response(error)
         if program:
             db.add_log("prog_toggle", json.dumps({"prog": prog_id, "enabled": enabled}))
             try:
                 scheduler = get_scheduler()
                 if scheduler:
                     if program.get("enabled"):
-                        scheduler.schedule_program(prog_id, program)
+                        _schedule_admitted_program(scheduler, program, scheduler_anchors)
                     else:
                         scheduler.cancel_program(prog_id)
-            except (KeyError, TypeError, ValueError) as e:
+            except (KeyError, TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Ошибка перепланирования программы {prog_id} после toggle: {e}")
             return jsonify({"success": True, "program": program})
         return jsonify({"success": False, "message": "Program not found"}), 404

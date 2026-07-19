@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -112,6 +112,146 @@ class TestStrictProgramJson:
 
         assert response.status_code == 400
         assert app.db.get_program(original["id"])["enabled"] is True
+
+    @pytest.mark.parametrize(
+        "color",
+        [
+            '" onmouseover="alert(1)',
+            "red",
+            "#fff",
+            "#12345678",
+            "#12GG34",
+            123456,
+            None,
+        ],
+    )
+    def test_post_rejects_noncanonical_color_before_persist(self, admin_client, app, color):
+        zone_id = _zone(app)
+
+        response = admin_client.post("/api/programs", json=_payload(zone_id, color=color))
+
+        assert response.status_code == 400
+        assert response.get_json()["success"] is False
+        assert app.db.get_programs() == []
+
+    def test_post_normalizes_hex_color_to_lowercase(self, admin_client, app):
+        zone_id = _zone(app)
+
+        response = admin_client.post("/api/programs", json=_payload(zone_id, color="#AaBbCc"))
+
+        assert response.status_code == 201
+        assert response.get_json()["color"] == "#aabbcc"
+        assert app.db.get_program(response.get_json()["id"])["color"] == "#aabbcc"
+
+    def test_unsafe_put_color_is_rejected_before_db_and_scheduler_mutation(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, color="#112233"))
+        assert original is not None
+        scheduled = []
+        monkeypatch.setattr(
+            programs_api,
+            "get_scheduler",
+            lambda: SimpleNamespace(schedule_program=lambda *args: scheduled.append(args)),
+        )
+
+        response = admin_client.put(
+            f"/api/programs/{original['id']}",
+            json={"color": '" onmouseover="alert(1)'},
+        )
+
+        assert response.status_code == 400
+        assert app.db.get_program(original["id"])["color"] == "#112233"
+        assert scheduled == []
+
+    def test_unsafe_color_on_enabled_patch_blocks_all_mutation(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, color="#112233", enabled=True))
+        assert original is not None
+        scheduled = []
+        monkeypatch.setattr(
+            programs_api,
+            "get_scheduler",
+            lambda: SimpleNamespace(schedule_program=lambda *args: scheduled.append(args)),
+        )
+
+        response = admin_client.patch(
+            f"/api/programs/{original['id']}/enabled",
+            json={"enabled": False, "color": '" onmouseover="alert(1)'},
+        )
+
+        assert response.status_code == 400
+        assert app.db.get_program(original["id"])["enabled"] is True
+        assert app.db.get_program(original["id"])["color"] == "#112233"
+        assert scheduled == []
+
+    def test_stale_put_zone_returns_structured_conflict_without_mutation(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id))
+        assert original is not None
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE programs SET zones = '[]' WHERE id = ?", (original["id"],))
+            conn.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
+            conn.commit()
+        scheduled = []
+        monkeypatch.setattr(
+            programs_api,
+            "get_scheduler",
+            lambda: SimpleNamespace(schedule_program=lambda *args: scheduled.append(args)),
+        )
+
+        response = admin_client.put(
+            f"/api/programs/{original['id']}",
+            json={"name": "Stale editor", "zones": [zone_id]},
+        )
+
+        assert response.status_code == 409
+        assert response.get_json() == {
+            "success": False,
+            "message": "One or more program zones no longer exist",
+            "error_code": "PROGRAM_ZONES_NOT_FOUND",
+            "missing_zone_ids": [zone_id],
+        }
+        stored = app.db.get_program(original["id"])
+        assert stored is not None
+        assert stored["name"] == "Morning"
+        assert stored["zones"] == []
+        assert scheduled == []
+
+    def test_post_missing_zone_returns_structured_conflict_without_write(self, admin_client, app):
+        response = admin_client.post("/api/programs", json=_payload(999999, extra_times=[]))
+
+        assert response.status_code == 409
+        assert response.get_json()["error_code"] == "PROGRAM_ZONES_NOT_FOUND"
+        assert response.get_json()["missing_zone_ids"] == [999999]
+        assert app.db.get_programs() == []
+
+    def test_post_rejects_unbounded_extra_times(self, admin_client, app):
+        zone_id = _zone(app)
+        extra_times = [f"00:{minute:02d}" for minute in range(25)]
+
+        response = admin_client.post("/api/programs", json=_payload(zone_id, extra_times=extra_times))
+
+        assert response.status_code == 400
+        assert "at most 24" in response.get_json()["message"]
+        assert app.db.get_programs() == []
+
+    def test_legacy_unsafe_color_is_never_returned_by_api(self, admin_client, app):
+        zone_id = _zone(app)
+        with sqlite3.connect(app.db.db_path) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO programs (name, time, days, zones, color)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("Legacy unsafe", "06:00", "[0]", f"[{zone_id}]", '" onmouseover="alert(1)'),
+            )
+            program_id = int(cursor.lastrowid)
+
+        response = admin_client.get(f"/api/programs/{program_id}")
+
+        assert response.status_code == 200
+        assert response.get_json()["color"] == "#42a5f5"
 
 
 class TestProgramMutationGuards:
@@ -220,6 +360,43 @@ class TestProgramMutationGuards:
         assert response.get_json()["success"] is False
         assert app.db.get_programs() == []
 
+    def test_reenable_runs_conflict_admission_before_mutation(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        disabled = app.db.create_program(_payload(zone_id, name="Disabled", enabled=False, extra_times=[]))
+        active = app.db.create_program(_payload(zone_id, name="Active", enabled=True, extra_times=[]))
+        assert disabled is not None and active is not None
+        scheduled = []
+        monkeypatch.setattr(
+            programs_api,
+            "get_scheduler",
+            lambda: SimpleNamespace(schedule_program=lambda *args, **kwargs: scheduled.append((args, kwargs))),
+        )
+
+        response = admin_client.patch(f"/api/programs/{disabled['id']}/enabled", json={"enabled": True})
+
+        assert response.status_code == 409
+        assert response.get_json()["has_conflicts"] is True
+        assert response.get_json()["conflicts"][0]["program_id"] == active["id"]
+        assert app.db.get_program(disabled["id"])["enabled"] is False
+        assert scheduled == []
+
+    def test_duplicate_is_created_disabled_without_scheduling(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        original = app.db.create_program(_payload(zone_id, name="Original", enabled=True, extra_times=[]))
+        assert original is not None
+        scheduled = []
+        monkeypatch.setattr(
+            programs_api,
+            "get_scheduler",
+            lambda: SimpleNamespace(schedule_program=lambda *args, **kwargs: scheduled.append((args, kwargs))),
+        )
+
+        response = admin_client.post(f"/api/programs/{original['id']}/duplicate")
+
+        assert response.status_code == 201
+        assert response.get_json()["program"]["enabled"] is False
+        assert scheduled == []
+
 
 class TestIntervalAnchorContracts:
     def test_missing_stored_interval_anchor_blocks_candidate_visibly(self, admin_client, app, monkeypatch):
@@ -267,16 +444,17 @@ class TestIntervalAnchorContracts:
         )
         assert stored is not None
         today = date.today()
-        monday = today + timedelta(days=(7 - today.weekday()) % 7)
+        monday_date = today + timedelta(days=(7 - today.weekday()) % 7)
+        monday = datetime(monday_date.year, monday_date.month, monday_date.day, 6, tzinfo=UTC)
 
         class FakeScheduler:
-            scheduler = SimpleNamespace(timezone=None)
+            scheduler = SimpleNamespace(timezone=UTC)
 
             def get_program_interval_anchors(self, program_id):
                 assert program_id == stored["id"]
                 return {"main": monday}
 
-            def schedule_program(self, *args):
+            def schedule_program(self, *args, **kwargs):
                 return None
 
         monkeypatch.setattr(programs_api, "get_scheduler", lambda: FakeScheduler())
@@ -300,6 +478,80 @@ class TestIntervalAnchorContracts:
 
         assert response.status_code == 201
         assert response.get_json()["name"] == "Candidate Tuesday"
+
+    def test_admitted_interval_anchor_is_passed_unchanged_to_scheduler(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        anchor = datetime(2030, 1, 2, 6, 0, tzinfo=UTC)
+        candidate_anchors = {"06:00": anchor}
+        checked = []
+        scheduled = []
+
+        class FakeScheduler:
+            scheduler = SimpleNamespace(timezone=UTC)
+
+            def schedule_program(self, *args, **kwargs):
+                scheduled.append((args, kwargs))
+                return True
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: FakeScheduler())
+        monkeypatch.setattr(
+            programs_api,
+            "_interval_anchor_context",
+            lambda *args, **kwargs: (candidate_anchors, {}),
+        )
+
+        def capture_conflicts(**kwargs):
+            checked.append(kwargs["candidate_interval_anchors"])
+            return []
+
+        monkeypatch.setattr(programs_api, "_check_candidate_conflicts", capture_conflicts)
+
+        response = admin_client.post(
+            "/api/programs",
+            json=_payload(
+                zone_id,
+                schedule_type="interval",
+                interval_days=3,
+                days=[],
+                extra_times=[],
+            ),
+        )
+
+        assert response.status_code == 201
+        assert checked == [candidate_anchors]
+        assert scheduled[0][1]["interval_anchors"] == {"main": anchor}
+        assert scheduled[0][1]["interval_anchors"]["main"] is anchor
+
+    def test_unchanged_interval_put_fails_closed_without_authoritative_anchor(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        program = app.db.create_program(
+            _payload(
+                zone_id,
+                name="Stored interval",
+                schedule_type="interval",
+                interval_days=3,
+                days=[],
+                extra_times=[],
+            )
+        )
+        assert program is not None
+
+        class FakeScheduler:
+            scheduler = SimpleNamespace(timezone=UTC)
+
+            def get_program_interval_anchors(self, _program_id):
+                return {}
+
+            def schedule_program(self, *args, **kwargs):
+                raise AssertionError("program without authoritative anchors must not be scheduled")
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: FakeScheduler())
+
+        response = admin_client.put(f"/api/programs/{program['id']}", json={"name": "Renamed"})
+
+        assert response.status_code == 503
+        assert response.get_json()["error_code"] == "INTERVAL_ANCHOR_UNAVAILABLE"
+        assert app.db.get_program(program["id"])["name"] == "Stored interval"
 
 
 class TestWeatherConflictContract:
@@ -332,6 +584,63 @@ class TestWeatherConflictContract:
         assert body["has_conflicts"] is True
         assert body["conflicts"][0]["program_id"] == stored["id"]
         assert body["conflicts"][0]["level"] == "warning"
+
+    def test_conflict_preview_preserves_current_weather_coefficient(self, admin_client, app):
+        zone_id = _zone(app)
+        with sqlite3.connect(app.db.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO weather_decisions (date, time, coefficient, decision, mode)
+                VALUES ('2030-01-01', '06:00:00', 137, 'adjust', 'auto')
+                """
+            )
+
+        response = admin_client.post(
+            "/api/programs/check-conflicts",
+            json={"time": "06:00", "days": [0], "zones": [zone_id]},
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["current_weather_coefficient"] == 137
+
+    def test_conflict_preview_rejects_unbounded_extra_times(self, admin_client, app):
+        zone_id = _zone(app)
+
+        response = admin_client.post(
+            "/api/programs/check-conflicts",
+            json={
+                "time": "06:00",
+                "days": [0],
+                "zones": [zone_id],
+                "extra_times": [f"00:{minute:02d}" for minute in range(25)],
+            },
+        )
+
+        assert response.status_code == 400
+        assert "at most 24" in response.get_json()["message"]
+
+    def test_ordinary_create_and_update_do_not_fetch_weather_under_mutation_lock(self, admin_client, app, monkeypatch):
+        zone_id = _zone(app)
+        calls = []
+
+        def forbidden_weather_lookup(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("ordinary mutation admission must not fetch weather")
+
+        import services.weather_adjustment as weather_adjustment
+
+        monkeypatch.setattr(weather_adjustment, "get_weather_adjustment", forbidden_weather_lookup)
+
+        create_response = admin_client.post("/api/programs", json=_payload(zone_id, extra_times=[]))
+
+        assert create_response.status_code == 201
+        update_response = admin_client.put(
+            f"/api/programs/{create_response.get_json()['id']}",
+            json={"name": "Updated without weather lookup"},
+        )
+
+        assert update_response.status_code == 200
+        assert calls == []
 
 
 class TestMutationRowcountContracts:

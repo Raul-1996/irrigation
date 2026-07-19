@@ -3,6 +3,7 @@ import logging
 import re
 import sqlite3
 from datetime import date, datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
@@ -10,9 +11,20 @@ from db.base import BaseRepository, retry_on_busy
 logger = logging.getLogger(__name__)
 
 _TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
+_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+_DEFAULT_PROGRAM_COLOR = "#42a5f5"
+_MAX_EXTRA_TIMES = 24
 _VALID_PROGRAM_TYPES = {"time-based", "smart"}
 _VALID_SCHEDULE_TYPES = {"weekdays", "interval", "even-odd"}
 _CONFLICT_HORIZON_DAYS = 930
+
+
+class ProgramZonesNotFoundError(RuntimeError):
+    """A program mutation referenced zone IDs which are no longer live."""
+
+    def __init__(self, missing_zone_ids: list[int]) -> None:
+        self.missing_zone_ids = sorted(set(missing_zone_ids))
+        super().__init__(f"Program zones no longer exist: {self.missing_zone_ids}")
 
 
 def _time_minutes(value: object) -> int | None:
@@ -20,6 +32,12 @@ def _time_minutes(value: object) -> int | None:
         return None
     hours, minutes = value.split(":")
     return int(hours) * 60 + int(minutes)
+
+
+def _normalize_color(value: object) -> str | None:
+    if not isinstance(value, str) or _COLOR_RE.fullmatch(value) is None:
+        return None
+    return value.lower()
 
 
 def _read_json_list(value: object) -> list[Any]:
@@ -51,6 +69,8 @@ def _read_time_list(value: object) -> list[str]:
     for item in _read_json_list(value):
         if _time_minutes(item) is not None and item not in result:
             result.append(item)
+            if len(result) == _MAX_EXTRA_TIMES:
+                break
     return result
 
 
@@ -79,6 +99,7 @@ class ProgramRepository(BaseRepository):
             slot for slot in _read_time_list(program.get("extra_times", "[]")) if slot != program.get("time")
         ]
         program["enabled"] = bool(program.get("enabled", 1))
+        program["color"] = _normalize_color(program.get("color")) or _DEFAULT_PROGRAM_COLOR
         if program.get("schedule_type") == "even_odd":
             program["schedule_type"] = "even-odd"
         return program
@@ -118,7 +139,11 @@ class ProgramRepository(BaseRepository):
 
         if "extra_times" in normalized:
             extra_times = normalized["extra_times"]
-            if not isinstance(extra_times, list) or any(_time_minutes(item) is None for item in extra_times):
+            if (
+                not isinstance(extra_times, list)
+                or len(extra_times) > _MAX_EXTRA_TIMES
+                or any(_time_minutes(item) is None for item in extra_times)
+            ):
                 return None
             if len(extra_times) != len(set(extra_times)):
                 return None
@@ -140,6 +165,13 @@ class ProgramRepository(BaseRepository):
                 return None
         if "even_odd" in normalized and normalized["even_odd"] not in (None, "even", "odd"):
             return None
+        if "color" in normalized:
+            color = _normalize_color(normalized["color"])
+            if color is None:
+                return None
+            normalized["color"] = color
+        elif create:
+            normalized["color"] = _DEFAULT_PROGRAM_COLOR
         schedule_type = normalized.get("schedule_type", "weekdays")
         if schedule_type == "interval" and normalized.get("interval_days") is None:
             return None
@@ -148,6 +180,17 @@ class ProgramRepository(BaseRepository):
             if not isinstance(enabled, bool) and enabled not in (0, 1):
                 return None
         return normalized
+
+    @staticmethod
+    def _require_live_zones(conn: sqlite3.Connection, zone_ids: list[int]) -> None:
+        if not zone_ids:
+            return
+        placeholders = ", ".join("?" for _ in zone_ids)
+        rows = conn.execute(f"SELECT id FROM zones WHERE id IN ({placeholders})", zone_ids).fetchall()
+        live_ids = {int(row["id"]) for row in rows}
+        missing = [zone_id for zone_id in zone_ids if zone_id not in live_ids]
+        if missing:
+            raise ProgramZonesNotFoundError(missing)
 
     def get_programs(self) -> list[dict[str, Any]]:
         """Получить все программы."""
@@ -183,6 +226,8 @@ class ProgramRepository(BaseRepository):
             return None
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._require_live_zones(conn, normalized["zones"])
                 # v2 fields with defaults
                 cursor = conn.execute(
                     """
@@ -199,14 +244,18 @@ class ProgramRepository(BaseRepository):
                         normalized.get("schedule_type", "weekdays"),
                         normalized.get("interval_days"),
                         normalized.get("even_odd"),
-                        normalized.get("color", "#42a5f5"),
+                        normalized["color"],
                         1 if normalized.get("enabled", True) else 0,
                         json.dumps(normalized["extra_times"]),
                     ),
                 )
-                program_id = cursor.lastrowid
+                program_id = int(cursor.lastrowid)
+                row = conn.execute("SELECT * FROM programs WHERE id = ?", (program_id,)).fetchone()
+                if row is None:
+                    return None
+                program = self._decode_program_row(row)
                 conn.commit()
-                return self.get_program(program_id)
+                return program
         except (sqlite3.Error, KeyError, TypeError, ValueError) as e:
             logger.error("Ошибка создания программы: %s", e)
             return None
@@ -214,20 +263,25 @@ class ProgramRepository(BaseRepository):
     @retry_on_busy()
     def update_program(self, program_id: int, program_data: dict[str, Any]) -> dict[str, Any] | None:
         """Обновить программу."""
-        current = self.get_program(program_id)
-        if current is None:
+        if not isinstance(program_data, dict):
             return None
-        effective = self._normalize_write_payload({**current, **program_data}, create=True)
-        if effective is None:
-            logger.warning("Отказ обновления программы %s: неканонические поля", program_id)
-            return None
-        normalized = {
-            field: effective[field]
-            for field in program_data
-            if field in effective and field not in ("id", "created_at", "updated_at")
-        }
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM programs WHERE id = ?", (program_id,)).fetchone()
+                if row is None:
+                    return None
+                current = self._decode_program_row(row)
+                effective = self._normalize_write_payload({**current, **program_data}, create=True)
+                if effective is None:
+                    logger.warning("Отказ обновления программы %s: неканонические поля", program_id)
+                    return None
+                self._require_live_zones(conn, effective["zones"])
+                normalized = {
+                    field: effective[field]
+                    for field in program_data
+                    if field in effective and field not in ("id", "created_at", "updated_at")
+                }
                 # Build dynamic UPDATE based on provided fields
                 updates = []
                 params = []
@@ -270,7 +324,8 @@ class ProgramRepository(BaseRepository):
                     params.append(json.dumps(normalized["extra_times"]))
 
                 if not updates:
-                    return self.get_program(program_id)
+                    conn.commit()
+                    return current
 
                 updates.append("updated_at = CURRENT_TIMESTAMP")
                 sql = f"UPDATE programs SET {', '.join(updates)} WHERE id = ?"
@@ -279,8 +334,12 @@ class ProgramRepository(BaseRepository):
                 cursor = conn.execute(sql, params)
                 if cursor.rowcount != 1:
                     return None
+                row = conn.execute("SELECT * FROM programs WHERE id = ?", (program_id,)).fetchone()
+                if row is None:
+                    return None
+                program = self._decode_program_row(row)
                 conn.commit()
-                return self.get_program(program_id)
+                return program
         except (sqlite3.Error, KeyError, TypeError, ValueError) as e:
             logger.error("Ошибка обновления программы %s: %s", program_id, e)
             return None
@@ -312,6 +371,10 @@ class ProgramRepository(BaseRepository):
             # Копируем все поля кроме id, created_at, updated_at
             copy_data = {k: v for k, v in original.items() if k not in ("id", "created_at", "updated_at")}
             copy_data["name"] = original["name"] + " (копия)"
+            # A byte-for-byte enabled copy necessarily conflicts with its
+            # source. Copies are drafts and require explicit admission on
+            # re-enable through the API.
+            copy_data["enabled"] = False
 
             return self.create_program(copy_data)
         except (KeyError, TypeError, ValueError) as e:
@@ -333,6 +396,7 @@ class ProgramRepository(BaseRepository):
         candidate_interval_anchors: dict[str, object] | None = None,
         stored_interval_anchors: dict[int, dict[str, object]] | None = None,
         raise_on_error: bool = False,
+        detailed: bool = False,
     ) -> Any:
         """Return schedule-aware overlaps with stored programs and own slots.
 
@@ -342,7 +406,7 @@ class ProgramRepository(BaseRepository):
         scheduler triggers. Missing anchors are modeled fail-closed as a
         possible daily occurrence and marked ``anchor_unknown``.
         """
-        v2 = weather_factor is not None or include_weather
+        v2 = detailed or weather_factor is not None or include_weather
         current_coeff = 100
         empty_v2 = {"has_conflicts": False, "conflicts": [], "current_weather_coefficient": current_coeff}
 
@@ -455,14 +519,19 @@ class ProgramRepository(BaseRepository):
                     query += " WHERE " + " AND ".join(conditions)
                 stored_programs = [dict(row) for row in conn.execute(query, params).fetchall()]
 
-                try:
-                    from services.weather_adjustment import get_weather_adjustment
-
-                    adjustment = get_weather_adjustment(self.db_path)
-                    if adjustment and adjustment.is_enabled():
-                        current_coeff = int(adjustment.get_coefficient())
-                except Exception:
-                    logger.debug("Не удалось прочитать текущий погодный коэффициент", exc_info=True)
+                # Conflict admission for ordinary POST/PUT is a hot path held
+                # under the process mutation lock. It must never trigger the
+                # weather provider's network retry path. Detailed previews use
+                # the last coefficient already applied and persisted locally.
+                if v2:
+                    try:
+                        row = conn.execute(
+                            "SELECT coefficient FROM weather_decisions ORDER BY id DESC LIMIT 1"
+                        ).fetchone()
+                        if row and row["coefficient"] is not None:
+                            current_coeff = max(0, min(1000, int(row["coefficient"])))
+                    except (sqlite3.Error, ValueError, TypeError):
+                        current_coeff = 100
 
                 if include_weather and weather_factor is None:
                     try:
@@ -495,71 +564,88 @@ class ProgramRepository(BaseRepository):
                 v2_conflicts: list[dict[str, Any]] = []
                 factor = max(100, int(weather_factor or 100))
 
-                # A program invocation is single-session: its own main and extra
-                # starts must not overlap, even before it is inserted into DB.
-                unique_slots = list(candidate_occurrences)
-                for left_index, left_slot in enumerate(unique_slots):
-                    for right_slot in unique_slots[left_index + 1 :]:
-                        base = first_overlap(
-                            candidate_occurrences[left_slot],
-                            candidate_duration,
-                            candidate_occurrences[right_slot],
-                            candidate_duration,
+                # Merge all candidate occurrence streams and compare adjacent
+                # starts. Every invocation has the same duration, so any
+                # overlap necessarily appears between adjacent sorted starts.
+                # This covers main-vs-extra *and* a slot-vs-its-next-recurrence
+                # in O(E log E), instead of the old O(S²) slot-pair loop.
+                candidate_events = sorted(
+                    (start, slot) for slot, starts in candidate_occurrences.items() for start in starts
+                )
+                self_overlaps: dict[tuple[str, str], tuple[bool, float, int, str, int, bool]] = {}
+                weather_duration = candidate_duration * factor / 100.0
+                for (left_start, left_slot), (right_start, right_slot) in pairwise(candidate_events):
+                    base_overlap = left_start + candidate_duration - right_start
+                    weather_overlap = left_start + weather_duration - right_start if factor > 100 else 0
+                    if base_overlap <= 0 and weather_overlap <= 0:
+                        continue
+                    is_base = base_overlap > 0
+                    key = tuple(sorted((left_slot, right_slot)))
+                    existing = self_overlaps.get(key)
+                    if existing is not None and (existing[0] or not is_base):
+                        continue
+                    self_overlaps[key] = (
+                        is_base,
+                        base_overlap if is_base else weather_overlap,
+                        left_start,
+                        right_slot,
+                        right_start,
+                        left_slot == right_slot,
+                    )
+
+                for (left_slot, right_slot), (
+                    is_base,
+                    overlap,
+                    left_start,
+                    chronological_right_slot,
+                    right_start,
+                    self_recurrence,
+                ) in self_overlaps.items():
+                    anchor_unknown = candidate_schedule == "interval" and any(
+                        _read_anchor_date(candidate_spec["interval_anchors"].get(slot)) is None
+                        for slot in (left_slot, right_slot)
+                    )
+                    if self_recurrence:
+                        base_message = "Следующий запуск текущей программы начинается до завершения предыдущего"
+                        weather_message = "Следующие запуски пересекаются с погодным коэффициентом"
+                    else:
+                        base_message = "Основное и дополнительное время текущей программы пересекаются"
+                        weather_message = "Основное и дополнительное время пересекаются с погодным коэффициентом"
+                    if v2:
+                        level = "error" if is_base else "warning"
+                        v2_conflicts.append(
+                            {
+                                "program_id": program_id,
+                                "program_name": "Текущая программа",
+                                "level": level,
+                                "overlap_minutes": round(overlap, 1),
+                                "weather_factor": 100 if level == "error" else factor,
+                                "group_id": next(iter(candidate_groups), 0),
+                                "group_name": "",
+                                "candidate_self_conflict": True,
+                                "self_recurrence_conflict": self_recurrence,
+                                "anchor_unknown": anchor_unknown,
+                                "message": base_message if level == "error" else weather_message,
+                            }
                         )
-                        weather = None
-                        if factor > 100:
-                            weather = first_overlap(
-                                candidate_occurrences[left_slot],
-                                candidate_duration * factor / 100.0,
-                                candidate_occurrences[right_slot],
-                                candidate_duration * factor / 100.0,
-                            )
-                        if base is None and weather is None:
-                            continue
-                        overlap, left_start, right_start = base or weather  # type: ignore[misc]
-                        anchor_unknown = candidate_schedule == "interval" and any(
-                            _read_anchor_date(candidate_spec["interval_anchors"].get(slot)) is None
-                            for slot in (left_slot, right_slot)
+                    else:
+                        applied_duration = candidate_duration if is_base else weather_duration
+                        legacy_conflicts.append(
+                            {
+                                "program_id": program_id,
+                                "program_name": "Текущая программа",
+                                "program_time": chronological_right_slot,
+                                "program_duration": candidate_duration,
+                                "common_zones": candidate_zones,
+                                "common_groups": sorted(candidate_groups),
+                                "common_days": candidate_days,
+                                "overlap_start": right_start,
+                                "overlap_end": min(left_start + applied_duration, right_start + applied_duration),
+                                "candidate_self_conflict": True,
+                                "self_recurrence_conflict": self_recurrence,
+                                "anchor_unknown": anchor_unknown,
+                            }
                         )
-                        if v2:
-                            level = "error" if base is not None else "warning"
-                            v2_conflicts.append(
-                                {
-                                    "program_id": program_id,
-                                    "program_name": "Текущая программа",
-                                    "level": level,
-                                    "overlap_minutes": round(overlap, 1),
-                                    "weather_factor": 100 if level == "error" else factor,
-                                    "group_id": next(iter(candidate_groups), 0),
-                                    "group_name": "",
-                                    "candidate_self_conflict": True,
-                                    "anchor_unknown": anchor_unknown,
-                                    "message": (
-                                        "Основное и дополнительное время текущей программы пересекаются"
-                                        if level == "error"
-                                        else "Основное и дополнительное время пересекаются с погодным коэффициентом"
-                                    ),
-                                }
-                            )
-                        else:
-                            legacy_conflicts.append(
-                                {
-                                    "program_id": program_id,
-                                    "program_name": "Текущая программа",
-                                    "program_time": right_slot,
-                                    "program_duration": candidate_duration,
-                                    "common_zones": candidate_zones,
-                                    "common_groups": sorted(candidate_groups),
-                                    "common_days": candidate_days,
-                                    "overlap_start": max(left_start, right_start),
-                                    "overlap_end": min(
-                                        left_start + candidate_duration,
-                                        right_start + candidate_duration,
-                                    ),
-                                    "candidate_self_conflict": True,
-                                    "anchor_unknown": anchor_unknown,
-                                }
-                            )
 
                 for stored in stored_programs:
                     stored_zones = _read_int_list(stored.get("zones"), minimum=1)

@@ -39,6 +39,7 @@ class TestProgramsAPI:
         assert resp.status_code == 400
 
     def test_get_single_program(self, admin_client, app):
+        app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program(
             {
                 "name": "P",
@@ -55,6 +56,7 @@ class TestProgramsAPI:
         assert resp.status_code == 404
 
     def test_update_program(self, admin_client, app):
+        app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program(
             {
                 "name": "Old",
@@ -78,6 +80,7 @@ class TestProgramsAPI:
         assert resp.status_code == 200
 
     def test_delete_program(self, admin_client, app):
+        app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program(
             {
                 "name": "Del",

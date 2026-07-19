@@ -385,7 +385,7 @@ class TestDuplicateProgram:
         assert dup["schedule_type"] == original["schedule_type"]
         assert dup["interval_days"] == original["interval_days"]
         assert dup["color"] == original["color"]
-        assert dup["enabled"] == original["enabled"]
+        assert dup["enabled"] is False
         assert dup["extra_times"] == original["extra_times"]
         assert dup["zones"] == original["zones"]
         assert dup["id"] != original["id"]
