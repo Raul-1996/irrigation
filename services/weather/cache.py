@@ -93,22 +93,23 @@ def read_stale(
     lat: float,
     lon: float,
     *,
-    max_age_sec: float | None = None,
+    max_age_sec: float,
 ) -> WeatherData | None:
-    """Return the most recent cached entry, optionally bounded by age.
+    """Return the most recent cached entry when it is within an explicit age bound.
 
-    Used by the degraded-mode fallback when the API is unreachable — stale
-    forecast data is strictly better than no data for the irrigation decision
-    engine (the coefficient just won't track sub-hour changes).
+    Used by the degraded-mode fallback when the API is unreachable.  Callers
+    must pass an explicit safety bound; ``WeatherService`` accepts at most six
+    hours while cache-only reads retain the normal 30-minute TTL.
 
     Args:
         db_path: SQLite path.
         lat: Latitude to key on.
         lon: Longitude to key on.
+        max_age_sec: Maximum accepted age in seconds.
 
     Returns:
-        ``WeatherData`` if a matching row exists and satisfies
-        ``max_age_sec`` (when provided), else ``None``.
+        ``WeatherData`` if a matching row exists and satisfies ``max_age_sec``,
+        else ``None``.
     """
     try:
         with sqlite3.connect(db_path, timeout=5) as conn:
@@ -122,7 +123,7 @@ def read_stale(
             row = cur.fetchone()
             if row:
                 fetched_at = float(row["fetched_at"])
-                if max_age_sec is not None and time.time() - fetched_at >= max_age_sec:
+                if time.time() - fetched_at >= max_age_sec:
                     return None
                 data = json.loads(row["data"])
                 data["_fetched_at"] = fetched_at
@@ -137,10 +138,9 @@ def save(db_path: str, lat: float, lon: float, data: dict[str, Any]) -> None:
     """Upsert the raw API payload into ``weather_cache`` and prune old rows.
 
     Old rows are defined as those with ``fetched_at`` older than 24 hours.
-    The TTL for "fresh" reads is ``_CACHE_TTL_SEC`` (30 min), but stale-mode
-    fallback (``read_stale``) accepts entries of any age, so we keep a 24h
-    buffer to support degraded operation across longer outages without
-    flooding the table.
+    The TTL for "fresh" reads is ``_CACHE_TTL_SEC`` (30 min).  Rows are retained
+    for 24 hours for diagnostics and potential future policy changes, while the
+    live service applies its stricter six-hour read bound.
 
     Args:
         db_path: SQLite path.

@@ -70,8 +70,12 @@ class WeatherData:
                 idx = i
                 break
         if idx is None and times:
-            # Fallback: closest hour
-            idx = 0
+            # Never reinterpret an arbitrary sample as "now".  This happens
+            # with an expired relay/cache payload whose time range no longer
+            # covers the controller's current hour.  Leaving idx=None makes the
+            # payload unavailable to safety decisions instead of presenting
+            # (usually midnight of an old day) as a live reading.
+            logger.warning("WeatherData: current hour absent from payload")
 
         def _safe_get(data, key, index):
             try:
@@ -102,28 +106,38 @@ class WeatherData:
         # Current weather code (WMO)
         self.weather_code = _safe_get_int(hourly, "weather_code", idx)
 
-        # Daily values (today = index 0)
-        self.daily_precipitation = _safe_get(daily, "precipitation_sum", 0)
-        self.daily_et0 = _safe_get(daily, "et0_fao_evapotranspiration", 0)
+        # Daily values must be selected by the location-local date.  ``past_days``
+        # deliberately puts yesterday at index 0, and a fresh cache may also be
+        # parsed on the next side of midnight.
+        today = now.strftime("%Y-%m-%d")
+        daily_times = daily.get("time", [])
+        daily_idx = next((i for i, value in enumerate(daily_times) if str(value) == today), None)
+
+        self.daily_precipitation = _safe_get(daily, "precipitation_sum", daily_idx)
+        self.daily_et0 = _safe_get(daily, "et0_fao_evapotranspiration", daily_idx)
 
         # Daily temperature min/max (today)
-        self.temperature_min = _safe_get(daily, "temperature_2m_min", 0)
-        self.temperature_max = _safe_get(daily, "temperature_2m_max", 0)
+        self.temperature_min = _safe_get(daily, "temperature_2m_min", daily_idx)
+        self.temperature_max = _safe_get(daily, "temperature_2m_max", daily_idx)
 
         # Sunrise/sunset (today, as strings like "06:28")
         daily_sunrise = daily.get("sunrise", [])
         daily_sunset = daily.get("sunset", [])
         self.sunrise = None
         self.sunset = None
-        if daily_sunrise and len(daily_sunrise) > 0 and daily_sunrise[0]:
+        if daily_idx is not None and daily_idx < len(daily_sunrise) and daily_sunrise[daily_idx]:
             with contextlib.suppress(IndexError, ValueError):
                 self.sunrise = (
-                    str(daily_sunrise[0]).split("T")[1][:5] if "T" in str(daily_sunrise[0]) else str(daily_sunrise[0])
+                    str(daily_sunrise[daily_idx]).split("T")[1][:5]
+                    if "T" in str(daily_sunrise[daily_idx])
+                    else str(daily_sunrise[daily_idx])
                 )
-        if daily_sunset and len(daily_sunset) > 0 and daily_sunset[0]:
+        if daily_idx is not None and daily_idx < len(daily_sunset) and daily_sunset[daily_idx]:
             with contextlib.suppress(IndexError, ValueError):
                 self.sunset = (
-                    str(daily_sunset[0]).split("T")[1][:5] if "T" in str(daily_sunset[0]) else str(daily_sunset[0])
+                    str(daily_sunset[daily_idx]).split("T")[1][:5]
+                    if "T" in str(daily_sunset[daily_idx])
+                    else str(daily_sunset[daily_idx])
                 )
 
         # Calculate precipitation sum for past 24h from hourly data
@@ -200,7 +214,6 @@ class WeatherData:
 
         # Daily forecast (3 days)
         self.daily_forecast = []  # type: List[Dict[str, Any]]
-        daily_times = daily.get("time", [])
         daily_tmin = daily.get("temperature_2m_min", [])
         daily_tmax = daily.get("temperature_2m_max", [])
         daily_psum = daily.get("precipitation_sum", [])
@@ -208,7 +221,8 @@ class WeatherData:
         daily_sr = daily.get("sunrise", [])
         daily_ss = daily.get("sunset", [])
 
-        for di in range(min(3, len(daily_times))):
+        daily_start = daily_idx if daily_idx is not None else len(daily_times)
+        for di in range(daily_start, min(daily_start + 3, len(daily_times))):
             date_str = str(daily_times[di]) if di < len(daily_times) else ""
             day_name = ""
             try:

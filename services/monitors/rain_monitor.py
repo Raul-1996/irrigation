@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import ssl
 
 from database import db
 
@@ -22,27 +23,42 @@ class RainMonitor:
         self._cfg: dict | None = None
 
     def stop(self):
-        try:
-            if self.client is not None:
-                self.client.loop_stop()
-                self.client.disconnect()
-        except (ConnectionError, TimeoutError, OSError):
-            logger.exception("RainMonitor stop failed")
+        client = self.client
         self.client = None
+        if client is not None:
+            try:
+                client.loop_stop()
+            except (ConnectionError, TimeoutError, OSError, RuntimeError):
+                logger.exception("RainMonitor loop stop failed")
+            try:
+                client.disconnect()
+            except (ConnectionError, TimeoutError, OSError, RuntimeError):
+                logger.exception("RainMonitor disconnect failed")
 
     def start(self, cfg: dict):
         try:
+            was_raining = self.is_rain is True
+            self.stop()
+            self._cfg = dict(cfg or {})
+            self.topic = None
+            self.server_id = None
+
             enabled = bool(cfg.get("enabled"))
             topic = (cfg.get("topic") or "").strip()
             server_id = cfg.get("server_id")
+            if was_raining and not enabled:
+                # Disabling the feature clears only rain-owned postpones.  A
+                # restart/change while still enabled stays fail-closed until a
+                # new sensor message explicitly reports no rain.
+                self._on_rain_stop()
+            self.is_rain = True if was_raining and enabled else None
             if not enabled or not topic or not server_id or mqtt is None:
                 return
             # keep config to evaluate NO/NC logic on RX
-            self._cfg = dict(cfg or {})
             self.topic = topic
             self.server_id = int(server_id)
             self._ensure_client()
-        except (ConnectionError, TimeoutError, OSError):
+        except (ConnectionError, TimeoutError, OSError, RuntimeError):
             logger.exception("RainMonitor start failed")
 
     def _ensure_client(self):
@@ -54,6 +70,7 @@ class RainMonitor:
             cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
             if server.get("username"):
                 cl.username_pw_set(server.get("username"), server.get("password") or None)
+            self._configure_tls(cl, server)
             host = server.get("host") or "127.0.0.1"
             port = int(server.get("port") or 1883)
 
@@ -74,8 +91,41 @@ class RainMonitor:
             cl.subscribe(self.topic, qos=0)
             cl.loop_start()
             self.client = cl
-        except (ConnectionError, TimeoutError, OSError):
+        except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError):
             logger.exception("RainMonitor client init failed")
+
+    @staticmethod
+    def _configure_tls(client, server: dict) -> None:
+        """Configure broker TLS or raise before any network connection.
+
+        ``tls_enabled`` is a security boundary: an invalid CA/certificate or
+        unsupported protocol must never degrade to a plaintext MQTT connect.
+        """
+        if int(server.get("tls_enabled") or 0) != 1:
+            return
+
+        configured = (server.get("tls_version") or "TLS_CLIENT").upper().replace("_", ".").strip()
+        versions = {
+            "TLS": ssl.PROTOCOL_TLS_CLIENT,
+            "TLS.CLIENT": ssl.PROTOCOL_TLS_CLIENT,
+            "TLSV1": ssl.PROTOCOL_TLSv1,
+            "TLSV1.0": ssl.PROTOCOL_TLSv1,
+            "TLSV1.1": ssl.PROTOCOL_TLSv1_1,
+            "TLSV1.2": ssl.PROTOCOL_TLSv1_2,
+        }
+        try:
+            tls_version = versions[configured]
+        except KeyError as error:
+            raise ValueError("Unsupported MQTT TLS version") from error
+
+        client.tls_set(
+            ca_certs=server.get("tls_ca_path") or None,
+            certfile=server.get("tls_cert_path") or None,
+            keyfile=server.get("tls_key_path") or None,
+            tls_version=tls_version,
+        )
+        if int(server.get("tls_insecure") or 0) == 1:
+            client.tls_insecure_set(True)
 
     def _handle_payload(self, payload: str):
         p = (payload or "").strip().lower()
@@ -168,18 +218,9 @@ class RainMonitor:
                         db.update_zone_postpone(int(z["id"]), None, None)
                 except (sqlite3.Error, OSError) as e:
                     logger.debug("Handled exception in _on_rain_stop: %s", e)
-            # После окончания дождя — уберём отмены программ на сегодня для этих групп, чтобы ближайшие вечерние сработали
-            try:
-                from datetime import datetime as _dt
-
-                today = _dt.now().strftime("%Y-%m-%d")
-                for gid in target_groups:
-                    try:
-                        db.clear_program_cancellations_for_group_on_date(int(gid), today)
-                    except (sqlite3.Error, OSError) as e:
-                        logger.debug("Handled exception in _on_rain_stop: %s", e)
-            except ImportError as e:
-                logger.debug("Handled exception in _on_rain_stop: %s", e)
+            # Rain start no longer creates program_cancellations, so rain stop
+            # must not clear that table: its rows may be manual operator
+            # cancellations and their provenance must be preserved.
             try:
                 db.add_log("rain_resume", str({"groups": target_groups}))
             except (sqlite3.Error, OSError) as e:

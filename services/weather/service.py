@@ -23,16 +23,18 @@ from services.weather.models import _CACHE_TTL_SEC, WeatherData
 
 logger = logging.getLogger(__name__)
 
+# A short upstream outage may use the last forecast, but day-old rain/freeze
+# data is unsafe.  Keep the degraded window explicit and testable.
+_STALE_CACHE_MAX_AGE_SEC = 6 * 60 * 60
+
 
 def _relay_payload_is_current(raw: dict[str, Any]) -> bool:
     """True if a relay payload's hourly forecast still covers the current hour.
 
     A stale relay file (the Action stopped committing) comes back as HTTP 200
-    with old content — not a network error — so without this check
-    ``WeatherData._parse`` would silently fall back to ``idx=0`` (midnight of the
-    file's first day): ~zero ``precipitation_24h`` and a wrong freeze window on a
-    live irrigation controller. We mirror the parser's own "current hour" math
-    and reject the payload when that hour is absent, so the caller fails closed.
+    with old content — not a network error.  Reject it before parsing when the
+    controller's current hour is absent, so the caller uses only a bounded
+    local cache fallback.
     """
     hourly = raw.get("hourly") or {}
     times = hourly.get("time") or []
@@ -86,16 +88,13 @@ class WeatherService:
                 if raw is not None and not _relay_payload_is_current(raw):
                     # Relay served 200 but its forecast no longer covers "now"
                     # (Action stopped updating). Fail CLOSED: return None →
-                    # stale-cache fallback + api-down alert, instead of letting
-                    # the parser silently use idx=0 (midnight of an old day).
-                    logger.error(
-                        "weather relay payload is stale (no current-hour entry); treating as fetch failure"
-                    )
+                    # bounded stale-cache fallback + api-down alert, instead of
+                    # presenting an old forecast as current weather.
+                    logger.error("weather relay payload is stale (no current-hour entry); treating as fetch failure")
                     return None
                 return raw
             logger.error(
-                "weather.source_mode=relay but OPEN_METEO_RELAY_URL not set; "
-                "falling back to a direct Open-Meteo call"
+                "weather.source_mode=relay but OPEN_METEO_RELAY_URL not set; falling back to a direct Open-Meteo call"
             )
         return _fetch_api_impl(lat, lon)
 
@@ -116,7 +115,7 @@ class WeatherService:
         Order of fallback:
             1. Fresh cache (age < ``_CACHE_TTL_SEC``), unless ``force_refresh``.
             2. Live API call via ``_fetch_api``.
-            3. Stale cache (any age) — degraded-mode fallback after a failed
+            3. Stale cache (at most six hours old) — degraded-mode fallback after a failed
                live request only.
             4. ``None``.
 
@@ -153,7 +152,12 @@ class WeatherService:
             return WeatherData(raw)
 
         # Fallback to stale cache if API fails
-        stale = _cache.read_stale(self.db_path, lat, lon)
+        stale = _cache.read_stale(
+            self.db_path,
+            lat,
+            lon,
+            max_age_sec=_STALE_CACHE_MAX_AGE_SEC,
+        )
         if stale is not None:
             return stale
 

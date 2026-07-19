@@ -2,8 +2,8 @@
 
 - ``get_effective_coefficient()`` routing: flag off → H1; on+fresh → cache;
   on+stale → H1 fallback; empty buffer → neutral.
-- ``fetch_history`` must NOT leak ``past_days`` into the H1 ``fetch_api`` request
-  (which keys the shared cache and reads ``daily[0]`` as today).
+- H1 requests one past day for rolling rain while H2 history remains a
+  separate daily-only, cache-independent request.
 """
 
 import os
@@ -108,9 +108,8 @@ def _ok_response(payload):
 
 
 class TestForecastRegressionGuard:
-    def test_fetch_api_does_not_send_past_days(self):
-        """The H1 forecast request must NOT carry past_days (would shift
-        daily[0] away from today and break models.py:107)."""
+    def test_fetch_api_requests_one_past_day_for_rolling_rain(self):
+        """H1 needs yesterday's hours; WeatherData selects daily rows by date."""
         captured = {}
 
         def _capture(url, params=None, timeout=None, headers=None):
@@ -119,7 +118,7 @@ class TestForecastRegressionGuard:
 
         with patch("requests.get", side_effect=_capture):
             wc.fetch_api(42.6531, 77.0822)
-        assert "past_days" not in captured["params"]
+        assert captured["params"]["past_days"] == 1
         assert captured["params"]["forecast_days"] == 3
 
     def test_fetch_history_sends_past_days_separately(self):

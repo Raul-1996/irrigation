@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from datetime import datetime
 
 import pytest
 
@@ -11,8 +12,9 @@ class TestWeatherData:
         from services.weather import WeatherData
 
         raw = {
+            "utc_offset_seconds": 0,
             "hourly": {
-                "time": ["2024-01-01T12:00"],
+                "time": [datetime.utcfromtimestamp(time.time()).strftime("%Y-%m-%dT%H:00")],
                 "temperature_2m": [22.5],
                 "relative_humidity_2m": [65],
                 "precipitation": [0.0],
