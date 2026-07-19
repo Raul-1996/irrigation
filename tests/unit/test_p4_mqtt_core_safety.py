@@ -87,7 +87,10 @@ def test_publisher_writes_command_channel_only():
     assert [call.args[2] for call in publish_one.call_args_list] == ["/devices/relay/K1/on"]
 
 
-@pytest.mark.parametrize("topic", [None, "", " ", "/", "on", "/on", "/relay/on", "/relay/on/on"])
+@pytest.mark.parametrize(
+    "topic",
+    [None, "", " ", "/", "on", "/on", "/relay/on", "/relay/on/on", "/relay/+", "/relay/#", "/relay/\x00"],
+)
 def test_invalid_or_command_channel_topics_never_publish(topic):
     from services import mqtt_pub
     from utils import normalize_topic
@@ -190,8 +193,8 @@ def test_mqtt_client_warmup_exposes_immutable_config_provenance_before_publish()
     client.publish.assert_not_called()
 
 
-def test_mqtt_client_db_rotation_cannot_relabel_old_client_before_invalidation():
-    """A DB update seen by publish must not change the cached client's origin."""
+def test_mqtt_client_db_rotation_replaces_old_authority_without_relabelling_it():
+    """A DB update replaces, rather than relabels, the cached old client."""
     from services import mqtt_pub
 
     old_server = {
@@ -227,9 +230,11 @@ def test_mqtt_client_db_rotation_cannot_relabel_old_client_before_invalidation()
     old_client.is_connected.return_value = True
     new_client = MagicMock(name="new_client")
     new_client.is_connected.return_value = True
+    post_invalidation_client = MagicMock(name="post_invalidation_client")
+    post_invalidation_client.is_connected.return_value = True
     fake_mqtt = SimpleNamespace(
         CallbackAPIVersion=SimpleNamespace(VERSION2=2),
-        Client=MagicMock(side_effect=[old_client, new_client]),
+        Client=MagicMock(side_effect=[old_client, new_client, post_invalidation_client]),
     )
     current_db = MagicMock()
     current_db.get_mqtt_server.return_value = new_server
@@ -251,19 +256,20 @@ def test_mqtt_client_db_rotation_cannot_relabel_old_client_before_invalidation()
         assert mqtt_pub.publish_mqtt_value(old_server, "/relay", "1", min_interval_sec=0) is True
         during_rotation = mqtt_pub.snapshot_mqtt_clients()[706]
 
-        assert during_rotation.client is old_client
-        assert during_rotation.generation == before.generation
-        assert during_rotation.config_fingerprint == mqtt_pub.mqtt_server_config_fingerprint(old_server)
-        assert during_rotation.config_fingerprint != mqtt_pub.mqtt_server_config_fingerprint(new_server)
+        assert during_rotation.client is new_client
+        assert during_rotation.generation == before.generation + 1
+        assert during_rotation.config_fingerprint == mqtt_pub.mqtt_server_config_fingerprint(new_server)
+        old_client.loop_stop.assert_called_once()
+        old_client.disconnect.assert_called_once()
 
         mqtt_pub.invalidate_mqtt_server(706)
         assert mqtt_pub.snapshot_mqtt_clients() == {}
 
-        assert mqtt_pub.get_or_create_mqtt_client(new_server) is new_client
+        assert mqtt_pub.get_or_create_mqtt_client(new_server) is post_invalidation_client
         after = mqtt_pub.snapshot_mqtt_clients()[706]
 
-    assert after.client is new_client
-    assert after.generation == before.generation + 1
+    assert after.client is post_invalidation_client
+    assert after.generation == before.generation + 2
     assert after.config_fingerprint == mqtt_pub.mqtt_server_config_fingerprint(new_server)
 
 
@@ -411,6 +417,122 @@ def test_server_invalidation_epoch_isolates_aba_inflight_and_debounce():
         assert mqtt_pub.publish_mqtt_value(server_a, "/relay", "0", min_interval_sec=60) is True
 
     assert calls == 3
+
+
+def test_invalidation_during_connect_rejects_stale_client_install():
+    from services import mqtt_pub
+
+    connect_entered = threading.Event()
+    release_connect = threading.Event()
+
+    class BlockingClient:
+        def reconnect_delay_set(self, **_kwargs):
+            return None
+
+        def max_inflight_messages_set(self, _value):
+            return None
+
+        def connect(self, *_args):
+            connect_entered.set()
+            assert release_connect.wait(timeout=2)
+
+        def loop_start(self):
+            return None
+
+        def loop_stop(self):
+            self.loop_stopped = True
+
+        def disconnect(self):
+            self.disconnected = True
+
+    client = BlockingClient()
+    fake_mqtt = SimpleNamespace(
+        CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+        Client=MagicMock(return_value=client),
+    )
+    result: list[object] = []
+    with (
+        patch.object(mqtt_pub, "mqtt", fake_mqtt),
+        patch.object(mqtt_pub, "_MQTT_CLIENTS", {}),
+        patch.object(mqtt_pub, "_MQTT_CLIENT_CREATE_LOCKS", {}),
+        patch.object(mqtt_pub, "_MQTT_CLIENT_PROVENANCE", {}),
+        patch.object(mqtt_pub, "_MQTT_SERVER_EPOCH", {}),
+    ):
+        creator = threading.Thread(
+            target=lambda: result.append(
+                mqtt_pub.get_or_create_mqtt_client({"id": 710, "host": "old-authority", "port": 1883})
+            )
+        )
+        creator.start()
+        assert connect_entered.wait(timeout=1)
+        mqtt_pub.invalidate_mqtt_server(710)
+        release_connect.set()
+        creator.join(timeout=2)
+
+        assert result == [None]
+        assert mqtt_pub.snapshot_mqtt_clients() == {}
+        assert mqtt_pub._MQTT_SERVER_EPOCH[710] == 1
+    assert client.loop_stopped is True
+    assert client.disconnected is True
+
+
+def test_invalidation_during_db_cache_fill_refetches_current_authority_before_publish():
+    from services import mqtt_pub
+
+    old_server = {"id": 711, "host": "old-authority", "port": 1883}
+    new_server = {"id": 711, "host": "new-authority", "port": 8883}
+    first_read_entered = threading.Event()
+    release_first_read = threading.Event()
+    current = {"server": old_server}
+    reads = 0
+
+    def get_server(_sid):
+        nonlocal reads
+        reads += 1
+        snapshot = dict(current["server"])
+        if reads == 1:
+            first_read_entered.set()
+            assert release_first_read.wait(timeout=2)
+        return snapshot
+
+    db = MagicMock()
+    db.get_mqtt_server.side_effect = get_server
+    published: list[tuple[dict, int, str]] = []
+
+    def publish_one(server, _sid, _topic, _value, _qos, _retain, **kwargs):
+        published.append((dict(server), kwargs["server_epoch"], kwargs["config_fingerprint"]))
+        return True
+
+    result: list[bool] = []
+    with (
+        patch.object(mqtt_pub, "_db", db),
+        patch.object(mqtt_pub, "_SERVER_CACHE", {}),
+        patch.object(mqtt_pub, "_MQTT_SERVER_EPOCH", {}),
+        patch.object(mqtt_pub, "_MQTT_CLIENTS", {}),
+        patch.object(mqtt_pub, "_TOPIC_LAST_SEND", {}),
+        patch.object(mqtt_pub, "_TOPIC_INFLIGHT", {}),
+        patch.object(mqtt_pub, "_publish_one", side_effect=publish_one),
+    ):
+        publisher = threading.Thread(
+            target=lambda: result.append(
+                mqtt_pub.publish_mqtt_value(old_server, "/relay/cache-race", "1", min_interval_sec=0)
+            )
+        )
+        publisher.start()
+        assert first_read_entered.wait(timeout=1)
+        current["server"] = new_server
+        mqtt_pub.invalidate_mqtt_server(711)
+        release_first_read.set()
+        publisher.join(timeout=2)
+
+        assert result == [True]
+        assert reads >= 2
+        cached_server, _cached_at, cached_epoch, cached_fingerprint = mqtt_pub._SERVER_CACHE[711]
+
+    assert published == [(new_server, 1, mqtt_pub.mqtt_server_config_fingerprint(new_server))]
+    assert cached_server == new_server
+    assert cached_epoch == 1
+    assert cached_fingerprint == mqtt_pub.mqtt_server_config_fingerprint(new_server)
 
 
 @pytest.mark.parametrize("payload", ["", "UNKNOWN", "2", "null", "offline", "yes"])
@@ -682,6 +804,77 @@ def test_delayed_fresh_off_cannot_disarm_newer_commanded_on_activation(test_db):
     assert after["observed_state"] == "off"
     assert after["watering_start_time"] == "2026-07-19 12:07:00"
     assert after["command_id"] == activation
+    scheduler.cancel_zone_jobs.assert_not_called()
+
+
+def test_sse_fresh_off_snapshot_apply_aba_is_noop_for_new_activation(test_db):
+    from services import sse_hub
+    from services.locks import zone_lock
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "sse-off-aba", state="on")
+    old_token = "d" * 32
+    new_token = "e" * 32
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "watering_start_time": "2026-07-19 12:09:00",
+        },
+    )
+    test_db.update_zone_versioned(zone["id"], {"command_id": old_token})
+    initial_read = threading.Event()
+    release_initial_read = threading.Event()
+    reads = 0
+
+    def get_zone(zone_id):
+        nonlocal reads
+        reads += 1
+        snapshot = dict(test_db.get_zone(zone_id) or {})
+        if reads == 1:
+            initial_read.set()
+            assert release_initial_read.wait(timeout=2)
+        return snapshot
+
+    db_view = MagicMock()
+    db_view.get_zone.side_effect = get_zone
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", db_view),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        worker = threading.Thread(
+            target=lambda: sse_hub._process_mqtt_message(
+                server["id"], None, zone["topic"], "0", retained=False
+            )
+        )
+        worker.start()
+        assert initial_read.wait(timeout=1)
+        with zone_lock(zone["id"]):
+            test_db.update_zone(
+                zone["id"],
+                {
+                    "state": "starting",
+                    "commanded_state": "on",
+                    "observed_state": "unconfirmed",
+                    "watering_start_time": "2026-07-19 12:10:00",
+                },
+            )
+            test_db.update_zone_versioned(zone["id"], {"command_id": new_token})
+        release_initial_read.set()
+        worker.join(timeout=2)
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "starting"
+    assert after["commanded_state"] == "on"
+    assert after["watering_start_time"] == "2026-07-19 12:10:00"
+    assert after["command_id"] == new_token
     scheduler.cancel_zone_jobs.assert_not_called()
 
 
@@ -1256,6 +1449,241 @@ def test_delayed_master_close_subscribes_before_publish_and_requires_fresh_echo(
     verifier.assert_called_once()
 
 
+def test_manual_master_open_plants_exact_cap_then_persists_token_before_publish(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    scheduler = MagicMock()
+    order: list[str] = []
+    identity = (server["id"], "/master/manual")
+
+    def schedule(group_id, server_id, topic, mode, token, **kwargs):
+        assert (group_id, server_id, topic, mode) == (1, *identity, "NC")
+        assert len(token) == 32
+        assert kwargs == {"hours": 24}
+        assert test_db.get_setting_value(zone_control._master_activation_key(identity)) is None
+        order.append("cap")
+        return True
+
+    scheduler.schedule_master_valve_cap.side_effect = schedule
+
+    def publish():
+        raw = test_db.get_setting_value(zone_control._master_activation_key(identity))
+        assert raw is not None
+        assert zone_control._MASTER_ACTIVATIONS[identity].token in raw
+        order.append("publish")
+        return True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_MASTER_ACTIVATIONS", {}),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control.activate_manual_master_open(1, *identity, "NC", publish) is True
+
+    assert order == ["cap", "publish"]
+    scheduler.cancel_master_valve_cap.assert_not_called()
+
+
+def test_confirmed_master_close_preserves_pending_retry_until_fresh_echo(test_db):
+    from services import zone_control
+
+    identity = (17, "/master/pending-retry")
+    timer = MagicMock()
+    publish = MagicMock(return_value=True)
+    zone_control._PENDING_CLOSE_TIMERS.clear()
+    try:
+        zone_control._PENDING_CLOSE_TIMERS[identity] = timer
+        with patch.object(zone_control.state_verifier, "verify_master_command", return_value=False):
+            assert zone_control.close_master_valve_confirmed(*identity, "NC", publish) is False
+        assert zone_control._PENDING_CLOSE_TIMERS[identity] is timer
+        timer.cancel.assert_not_called()
+
+        with patch.object(zone_control.state_verifier, "verify_master_command", return_value=True):
+            assert zone_control.close_master_valve_confirmed(*identity, "NC", publish) is True
+        assert identity not in zone_control._PENDING_CLOSE_TIMERS
+        timer.cancel.assert_called_once()
+    finally:
+        zone_control._PENDING_CLOSE_TIMERS.clear()
+
+
+@pytest.mark.parametrize("schedule_result", [False, None])
+def test_rejected_manual_master_cap_preserves_previous_activation(test_db, schedule_result):
+    from services import zone_control
+
+    server = _server(test_db)
+    identity = (server["id"], "/master/manual-existing")
+    previous = zone_control.MasterActivation(1, *identity, "NC", "a" * 32, 10.0)
+    scheduler = MagicMock()
+    scheduler.schedule_master_valve_cap.return_value = schedule_result
+    publish = MagicMock(return_value=True)
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_MASTER_ACTIVATIONS", {}),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control._persist_master_activation_locked(previous) is True
+        assert zone_control.activate_manual_master_open(1, *identity, "NC", publish) is False
+        assert zone_control._load_master_activation_locked(identity) == previous
+
+    publish.assert_not_called()
+    scheduler.cancel_master_valve_cap.assert_not_called()
+
+
+def test_uncertain_manual_master_open_retains_new_exact_cap_and_token(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    identity = (server["id"], "/master/manual-uncertain")
+    scheduler = MagicMock()
+    scheduler.schedule_master_valve_cap.return_value = True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_MASTER_ACTIVATIONS", {}),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control.activate_manual_master_open(1, *identity, "NC", lambda: False) is False
+        current = zone_control._load_master_activation_locked(identity)
+        assert current is not None
+        assert len(current.token) == 32
+        assert current.token == scheduler.schedule_master_valve_cap.call_args.args[4]
+
+    scheduler.cancel_master_valve_cap.assert_not_called()
+
+
+def test_master_cap_callback_is_token_exact_and_clears_only_after_fresh_echo(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    identity = (server["id"], "/master/cap-exact")
+    current = zone_control.MasterActivation(1, *identity, "NC", "b" * 32, 20.0)
+    scheduler = MagicMock()
+    scheduler.cancel_master_valve_cap.return_value = True
+    verifier = MagicMock(return_value=False)
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_MASTER_ACTIVATIONS", {}),
+        patch.object(zone_control.state_verifier, "verify_master_command", verifier),
+        patch.object(zone_control, "publish_mqtt_value", return_value=True) as publish,
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control._persist_master_activation_locked(current) is True
+
+        assert zone_control.close_master_valve_if_activation(1, *identity, "NC", "c" * 32) is True
+        verifier.assert_not_called()
+        publish.assert_not_called()
+
+        assert zone_control.close_master_valve_if_activation(1, *identity, "NC", current.token) is False
+        assert zone_control._load_master_activation_locked(identity) == current
+        scheduler.cancel_master_valve_cap.assert_not_called()
+
+        def fresh_echo(_sid, _topic, _expected, publish_command, **_kwargs):
+            assert publish_command() is True
+            return True
+
+        verifier.side_effect = fresh_echo
+        assert zone_control.close_master_valve_if_activation(1, *identity, "NC", current.token) is True
+        assert zone_control._load_master_activation_locked(identity) is None
+
+    scheduler.cancel_master_valve_cap.assert_called_once_with(1, *identity, "NC", current.token)
+    publish.assert_called_once()
+
+
+def test_queued_master_closed_echo_cannot_clear_newer_activation(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    identity = (server["id"], "/master/queued-echo")
+    current = zone_control.MasterActivation(1, *identity, "NC", "d" * 32, 100.0)
+    scheduler = MagicMock()
+    scheduler.cancel_master_valve_cap.return_value = True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_MASTER_ACTIVATIONS", {}),
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert zone_control._persist_master_activation_locked(current) is True
+        assert zone_control.confirm_master_closed_from_echo(*identity, "NC", received_at=99.0) is False
+        assert zone_control._load_master_activation_locked(identity) == current
+        scheduler.cancel_master_valve_cap.assert_not_called()
+
+        assert zone_control.confirm_master_closed_from_echo(*identity, "NC", received_at=101.0) is True
+        assert zone_control._load_master_activation_locked(identity) is None
+
+    scheduler.cancel_master_valve_cap.assert_called_once_with(1, *identity, "NC", current.token)
+
+
+def test_gate_flip_after_master_open_freshly_closes_master_without_opening_zone(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    group = test_db.create_group("gate-flip-after-master")
+    test_db.update_group_fields(
+        group["id"],
+        {
+            "use_master_valve": 1,
+            "master_mqtt_topic": "/master/gate-flip",
+            "master_mqtt_server_id": server["id"],
+            "master_mode": "NC",
+        },
+    )
+    zone = _mqtt_zone(test_db, server, "gate-flip-target", group_id=group["id"], state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    commands: list[tuple[str, str]] = []
+
+    def publish(_server, topic, value, **_kwargs):
+        commands.append((topic, value))
+        return True
+
+    verifier = MagicMock()
+
+    def verify_close(_sid, _topic, _expected, publish_command, **_kwargs):
+        assert publish_command() is True
+        return True
+
+    verifier.verify_master_command.side_effect = verify_close
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", side_effect=[False, False, False, False, True]),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    assert commands == [("/master/gate-flip", "1"), ("/master/gate-flip", "0")]
+    assert all(topic != zone["topic"] for topic, _value in commands)
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+
+
+def test_cancel_generation_guard_is_rechecked_immediately_before_target_open(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "cancel-generation-target", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": "off"})
+    cancel_guard = MagicMock(side_effect=[False, False, False, True])
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "state_verifier"),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False),
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"], cancel_guard=cancel_guard) is False
+
+    assert cancel_guard.call_count == 4
+    publish.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+
+
 def test_stop_all_reports_unresolved_failed_off(test_db):
     from services import zone_control
 
@@ -1270,7 +1698,13 @@ def test_stop_all_reports_unresolved_failed_off(test_db):
     ) as stop:
         result = zone_control.stop_all_in_group(1, force=True, require_observed_confirmation=True)
 
-    assert result == {"success": False, "stopped": [stopped["id"]], "unresolved": [failed["id"]]}
+    assert result == {
+        "success": False,
+        "group_id": 1,
+        "stopped": [stopped["id"]],
+        "unresolved": [failed["id"]],
+        "retry_scheduled": False,
+    }
     assert all(call.kwargs["require_observed_confirmation"] is True for call in stop.call_args_list)
 
 
@@ -1306,6 +1740,49 @@ def test_emergency_broker_ack_without_fresh_zone_off_echo_is_unresolved(test_db)
     assert stats["zones_stopped"] == 0
     assert stats["zones_failed"] == [zone["id"]]
     assert stop.call_args.kwargs["require_observed_confirmation"] is True
+
+
+@pytest.mark.parametrize("observed", [None, "", "unconfirmed", "on"])
+def test_emergency_empty_or_stale_physical_observation_is_unresolved(test_db, observed):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, f"emergency-observed-{observed}", state="off")
+    test_db.update_zone(zone["id"], {"observed_state": observed, "commanded_state": "off"})
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "stop_zone", return_value=True),
+    ):
+        stats = zone_control.emergency_stop_all()
+
+    assert stats["success"] is False
+    assert stats["zones_stopped"] == 0
+    assert stats["zones_failed"] == [zone["id"]]
+
+
+def test_emergency_stop_includes_orphaned_zone_from_complete_snapshot(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "emergency-orphan", group_id=424242, state="on")
+    test_db.update_zone(zone["id"], {"observed_state": "on", "commanded_state": "on"})
+
+    def stop_orphan(zone_id, **_kwargs):
+        assert zone_id == zone["id"]
+        test_db.update_zone(zone_id, {"state": "off", "observed_state": "off", "commanded_state": "off"})
+        return True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "stop_zone", side_effect=stop_orphan) as stop,
+    ):
+        stats = zone_control.emergency_stop_all()
+
+    stop.assert_called_once()
+    assert stats["success"] is True
+    assert stats["zones_stopped"] == 1
+    assert stats["zones_failed"] == []
 
 
 def test_emergency_master_ack_without_fresh_close_echo_is_unresolved(test_db):
@@ -1745,6 +2222,55 @@ def test_master_command_verifier_subscribes_before_publish_and_rejects_retained(
     assert fake_mqtt.Client.call_count == 1
 
 
+@pytest.mark.parametrize("failure", ["wrong_mid", "rejected", "disconnect"])
+def test_master_verifier_never_publishes_without_matching_successful_suback(test_db, failure):
+    from services import observed_state
+
+    server = _server(test_db)
+
+    class Client:
+        def __init__(self):
+            self.loop_stops = 0
+            self.disconnects = 0
+
+        def connect(self, *_args, **_kwargs):
+            return None
+
+        def subscribe(self, *_args, **_kwargs):
+            return 0, 7
+
+        def loop_start(self):
+            self.on_connect(self, None, None, 0, None)
+            if failure == "wrong_mid":
+                self.on_subscribe(self, None, 8, [1], None)
+            elif failure == "rejected":
+                self.on_subscribe(self, None, 7, [128], None)
+            else:
+                self.on_disconnect(self, None, None, 1, None)
+
+        def loop_stop(self):
+            self.loop_stops += 1
+
+        def disconnect(self):
+            self.disconnects += 1
+
+    client = Client()
+    fake_mqtt = SimpleNamespace(
+        CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+        Client=MagicMock(return_value=client),
+    )
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    publish = MagicMock(return_value=True)
+
+    with patch.object(observed_state, "mqtt", fake_mqtt):
+        assert verifier.verify_master_command(server["id"], "/master/suback", "0", publish, timeout=0.001) is False
+
+    publish.assert_not_called()
+    assert client.loop_stops >= 1
+    assert client.disconnects >= 1
+
+
 def test_configured_command_topics_are_rejected_and_never_self_subscribed():
     from services import sse_hub
 
@@ -1876,6 +2402,32 @@ def test_old_tls_subscriber_is_retired_when_different_tls_replacement_fails():
     ):
         assert sse_hub._apply_rebuild(1) is True
         assert 14 not in sse_hub._SSE_HUB_MQTT
+
+    old_client.loop_stop.assert_called_once()
+    old_client.disconnect.assert_called_once()
+
+
+def test_unexpected_current_rebuild_exception_retires_all_old_authority():
+    from services import sse_hub
+
+    old_client = MagicMock()
+    with (
+        patch.object(sse_hub, "_SSE_HUB_REQUESTED_GENERATION", 9),
+        patch.object(sse_hub, "_SSE_HUB_APPLIED_GENERATION", 8),
+        patch.object(sse_hub, "_SSE_HUB_REBUILD_RUNNING", True),
+        patch.object(sse_hub, "_SSE_HUB_STARTED", True),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {7: old_client}),
+        patch.object(sse_hub, "_SSE_HUB_SERVER_KEYS", {7: ("old",)}),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {7: {"/relay": [1]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {7: {"/master": [(2, "NC")]}}),
+        patch.object(sse_hub, "_apply_rebuild", side_effect=RuntimeError("unexpected dependency fault")),
+    ):
+        sse_hub._rebuild_loop()
+        assert sse_hub._SSE_HUB_MQTT == {}
+        assert sse_hub._SSE_HUB_SERVER_KEYS == {}
+        assert sse_hub._SSE_HUB_ZONE_TOPICS == {}
+        assert sse_hub._SSE_HUB_MV_TOPICS == {}
+        assert sse_hub._SSE_HUB_REBUILD_RUNNING is False
 
     old_client.loop_stop.assert_called_once()
     old_client.disconnect.assert_called_once()

@@ -18,6 +18,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timedelta
 
+from services.locks import zone_lock
 from services.observed_state import canonical_relay_state
 from utils import normalize_topic
 
@@ -354,7 +355,25 @@ def _finish_observed_run(zone_id: int) -> None:
         logger.exception("sse_hub: finish_zone_run on observed off failed zid=%s", zone_id)
 
 
-def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, retained: bool = False) -> None:
+def _zone_activation_snapshot(zone: dict) -> tuple[object, object, str, str, object]:
+    """Return the fields that identify one zone activation generation."""
+    return (
+        zone.get("version"),
+        zone.get("command_id"),
+        str(zone.get("state") or "").lower(),
+        str(zone.get("commanded_state") or "").lower(),
+        zone.get("watering_start_time"),
+    )
+
+
+def _process_mqtt_message(
+    sid: int,
+    source_client,
+    topic: str,
+    payload: str,
+    retained: bool = False,
+    received_at: float | None = None,
+) -> None:
     """Process one decoded MQTT event away from paho's network thread."""
     normalized = _incoming_report_topic(topic)
     if not normalized:
@@ -391,10 +410,31 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
         if retained:
             logger.info("sse_hub: retained master replay ignored sid=%s topic=%s", sid, normalized)
             return
+        event_received_at = time.time() if received_at is None else float(received_at)
         for group_id, mode in master_groups:
             # Normally-closed: 1=open, 0=closed. Normally-open is inverted.
             is_open = (not relay_high) if mode == "NO" else relay_high
             state = "open" if is_open else "closed"
+            if state == "closed":
+                try:
+                    from services.zone_control import confirm_master_closed_from_echo
+
+                    if not confirm_master_closed_from_echo(
+                        int(sid),
+                        normalized,
+                        mode,
+                        received_at=event_received_at,
+                    ):
+                        logger.info(
+                            "sse_hub: stale/unreconciled master CLOSED echo ignored sid=%s topic=%s group=%s",
+                            sid,
+                            normalized,
+                            group_id,
+                        )
+                        continue
+                except (ImportError, RuntimeError, TypeError, ValueError):
+                    logger.exception("master activation reconciliation failed sid=%s topic=%s", sid, normalized)
+                    continue
             try:
                 _db.update_group_fields(int(group_id), {"master_valve_observed": state})
             except (sqlite3.Error, OSError) as e:
@@ -437,6 +477,43 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
             logger.info("sse_hub: retained relay replay ignored for active generation zone=%s", zid)
             continue
         observed_state = "on" if relay_high else "off"
+
+        if not relay_high:
+            # The queue snapshot can be overtaken by a new activation before
+            # this worker reaches its DB/job mutations. Serialize with command
+            # registration, re-read the exact generation, and make a stale
+            # event a complete no-op instead of cancelling the new UUID jobs.
+            snapshot = _zone_activation_snapshot(zone)
+            with zone_lock(zid):
+                current = _db.get_zone(zid) or {}
+                if not current or _zone_activation_snapshot(current) != snapshot:
+                    logger.info("sse_hub: stale fresh OFF event ignored after activation changed zone=%s", zid)
+                    continue
+                if str(current.get("commanded_state") or "").lower() != "on":
+                    mark_zone_stopped(zid)
+                    if current.get("watering_start_time"):
+                        _finish_observed_run(zid)
+                    updates = {"state": "off", "observed_state": "off", "planned_end_time": None}
+                    if _cancel_zone_safety_jobs(zid):
+                        updates["watering_start_time"] = None
+                        updates["command_id"] = None
+                else:
+                    # Physical evidence for a still-commanded ON is retained,
+                    # but cannot complete or disarm that activation.
+                    updates = {"observed_state": "off"}
+                _audited_zone_update(zid, updates)
+            broadcast(
+                json.dumps(
+                    {
+                        "zone_id": zid,
+                        "topic": normalized,
+                        "payload": payload,
+                        "state": observed_state,
+                    }
+                )
+            )
+            continue
+
         updates = {"state": observed_state, "observed_state": observed_state}
         persisted = False
 
@@ -505,25 +582,6 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
                         logger.debug("sse_hub: remote auto-stop schedule failed zone=%s: %s", zid, e)
             # Own/retained ON echoes for an active run only confirm observation.
             # In particular they never cancel or reset override/hard-stop jobs.
-        elif str(zone.get("commanded_state") or "").lower() != "on":
-            mark_zone_stopped(zid)
-            if zone.get("watering_start_time"):
-                _finish_observed_run(zid)
-            updates["planned_end_time"] = None
-            if _cancel_zone_safety_jobs(zid):
-                updates["watering_start_time"] = None
-                updates["command_id"] = None
-        else:
-            # A delayed OFF report from the previous command can be dequeued
-            # after a newer ON activation has persisted its UUID and planted
-            # hard/cap jobs. It is useful physical evidence, but it cannot
-            # complete the newer activation or disarm its safety callbacks.
-            updates = {"observed_state": "off"}
-            logger.info(
-                "sse_hub: OFF report retained as observation without completing active ON generation zone=%s",
-                zid,
-            )
-
         if not persisted:
             try:
                 _audited_zone_update(zid, updates)
@@ -545,9 +603,9 @@ def _process_mqtt_message(sid: int, source_client, topic: str, payload: str, ret
 
 def _event_worker() -> None:
     while True:
-        sid, source_client, topic, payload, retained = _SSE_EVENT_QUEUE.get()
+        sid, source_client, topic, payload, retained, received_at = _SSE_EVENT_QUEUE.get()
         try:
-            _process_mqtt_message(sid, source_client, topic, payload, retained)
+            _process_mqtt_message(sid, source_client, topic, payload, retained, received_at)
         except Exception:  # A malformed event must not terminate the permanent safety worker.
             logger.exception("sse_hub: MQTT event worker failed sid=%s topic=%s", sid, topic)
         finally:
@@ -571,7 +629,7 @@ def _enqueue_mqtt_message(sid: int, source_client, msg) -> None:
         payload = msg.payload.decode("utf-8", errors="ignore").strip()
     except (ValueError, TypeError, AttributeError):
         payload = str(getattr(msg, "payload", ""))
-    item = (int(sid), source_client, topic, payload, bool(getattr(msg, "retain", False)))
+    item = (int(sid), source_client, topic, payload, bool(getattr(msg, "retain", False)), time.time())
     try:
         _SSE_EVENT_QUEUE.put_nowait(item)
     except queue.Full:
@@ -722,11 +780,11 @@ def _apply_rebuild(target_generation: int) -> bool:
     candidates: dict[int, object] = {}
     candidate_keys: dict[int, tuple] = {}
     created: list[tuple[int, object]] = []
-    for sid in unavailable_sids:
-        current = old_clients.get(sid)
-        if current is not None:
-            candidates[sid] = current
-            candidate_keys[sid] = old_keys.get(sid, ())
+    if unavailable_sids:
+        logger.error(
+            "sse_hub: retiring previous authority for unreadable MQTT servers=%s",
+            sorted(unavailable_sids),
+        )
     for sid, server in servers.items():
         key = _server_key(server)
         current = old_clients.get(sid)
@@ -807,6 +865,19 @@ def _apply_rebuild(target_generation: int) -> bool:
     return True
 
 
+def _retire_failed_rebuild_authority(target_generation: int) -> None:
+    """Fail closed when a rebuild aborts before its normal atomic swap."""
+    with _SSE_HUB_LOCK:
+        if target_generation != _SSE_HUB_REQUESTED_GENERATION:
+            return
+        stale = list(_SSE_HUB_MQTT.items())
+        _SSE_HUB_MQTT.clear()
+        _SSE_HUB_SERVER_KEYS.clear()
+        _SSE_HUB_ZONE_TOPICS.clear()
+        _SSE_HUB_MV_TOPICS.clear()
+    _stop_clients(stale)
+
+
 def _rebuild_loop() -> None:
     global _SSE_HUB_APPLIED_GENERATION, _SSE_HUB_REBUILD_RUNNING, _SSE_HUB_STARTED
     while True:
@@ -817,6 +888,7 @@ def _rebuild_loop() -> None:
             applied = _apply_rebuild(target)
         except Exception:  # Keep the lifecycle worker state consistent on unexpected dependency failures.
             logger.exception("sse_hub: subscription rebuild failed generation=%s", target)
+            _retire_failed_rebuild_authority(target)
         with _SSE_HUB_LOCK:
             if applied:
                 _SSE_HUB_APPLIED_GENERATION = target
