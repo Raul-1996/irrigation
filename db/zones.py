@@ -586,6 +586,94 @@ class ZoneRepository(BaseRepository):
             return False
 
     @retry_on_busy()
+    def apply_group_rain_postpone_atomic(self, group_id: int, postpone_until: str) -> dict[str, Any] | None:
+        """Claim currently unowned postpone rows for rain in one transaction.
+
+        The complete group is read after ``BEGIN IMMEDIATE``.  Only rows where
+        both ownership fields are SQL ``NULL`` are eligible, so rain can never
+        extend an existing deadline or replace a manual/foreign owner.  ``None``
+        denotes a read/write failure; an empty group is a successful no-op.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    """
+                    SELECT id, postpone_until, postpone_reason
+                    FROM zones
+                    WHERE group_id = ?
+                    ORDER BY id
+                    """,
+                    (int(group_id),),
+                ).fetchall()
+                snapshot = [dict(row) for row in rows]
+                eligible_ids = [
+                    int(zone["id"])
+                    for zone in snapshot
+                    if zone["postpone_until"] is None and zone["postpone_reason"] is None
+                ]
+                if eligible_ids:
+                    updated = conn.execute(
+                        """
+                        UPDATE zones
+                        SET postpone_until = ?, postpone_reason = 'rain',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE group_id = ?
+                          AND postpone_until IS NULL
+                          AND postpone_reason IS NULL
+                        """,
+                        (postpone_until, int(group_id)),
+                    )
+                    if updated.rowcount != len(eligible_ids):
+                        raise sqlite3.IntegrityError("rain postpone snapshot changed during atomic apply")
+                conn.commit()
+                return {
+                    "group_zones": snapshot,
+                    "updated_zone_ids": eligible_ids,
+                }
+        except sqlite3.Error as e:
+            logger.error("Ошибка атомарной установки дождевой отсрочки группы %s: %s", group_id, e)
+            return None
+
+    @retry_on_busy()
+    def clear_group_rain_postpone_atomic(self, group_id: int) -> bool | None:
+        """Clear only current rain-owned rows from a complete locked snapshot.
+
+        ``None`` denotes a read/write failure.  ``True`` includes a successful
+        no-op when the group currently contains no rain-owned rows.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    """
+                    SELECT id, postpone_until, postpone_reason
+                    FROM zones
+                    WHERE group_id = ?
+                    ORDER BY id
+                    """,
+                    (int(group_id),),
+                ).fetchall()
+                rain_owned_ids = [int(row["id"]) for row in rows if row["postpone_reason"] == "rain"]
+                if rain_owned_ids:
+                    updated = conn.execute(
+                        """
+                        UPDATE zones
+                        SET postpone_until = NULL, postpone_reason = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE group_id = ? AND postpone_reason = 'rain'
+                        """,
+                        (int(group_id),),
+                    )
+                    if updated.rowcount != len(rain_owned_ids):
+                        raise sqlite3.IntegrityError("rain postpone snapshot changed during atomic clear")
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error("Ошибка атомарной очистки дождевой отсрочки группы %s: %s", group_id, e)
+            return None
+
+    @retry_on_busy()
     def update_zone_photo(
         self, zone_id: int, photo_path: str | None, photo_thumb: str | None = None, update_thumb: bool = False
     ) -> bool:

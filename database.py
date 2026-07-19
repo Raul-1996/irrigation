@@ -108,6 +108,12 @@ class IrrigationDB:
     def update_zone_postpone(self, zone_id: int, postpone_until: str | None = None, reason: str | None = None) -> bool:
         return self.zones.update_zone_postpone(zone_id, postpone_until, reason)
 
+    def apply_group_rain_postpone_atomic(self, group_id: int, postpone_until: str) -> dict[str, Any] | None:
+        return self.zones.apply_group_rain_postpone_atomic(group_id, postpone_until)
+
+    def clear_group_rain_postpone_atomic(self, group_id: int) -> bool | None:
+        return self.zones.clear_group_rain_postpone_atomic(group_id)
+
     def update_zone_photo(
         self, zone_id: int, photo_path: str | None, photo_thumb: str | None = None, update_thumb: bool = False
     ) -> bool:
