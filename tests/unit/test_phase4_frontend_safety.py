@@ -383,6 +383,96 @@ process.stdout.write(JSON.stringify([
     assert "enabled: document.getElementById('balance_enabled')" not in settings_source
 
 
+def test_rain_sensor_status_never_reports_dry_for_degraded_states() -> None:
+    source = _source(STATUS)
+    helper = _function(source, "rainSensorStatusText")
+    display = _function(source, "updateStatusDisplay")
+    script = f"""
+{helper}
+process.stdout.write(JSON.stringify([
+  rainSensorStatusText({{rain_sensor_state: 'disabled', rain_sensor_online: false}}),
+  rainSensorStatusText({{rain_sensor_state: 'offline', rain_sensor_online: false}}),
+  rainSensorStatusText({{rain_sensor_state: 'unknown', rain_sensor_online: true}}),
+  rainSensorStatusText({{rain_sensor_state: 'reconnecting', rain_sensor_online: false}}),
+  rainSensorStatusText({{rain_sensor_state: 'dry', rain_sensor_online: false}}),
+  rainSensorStatusText({{rain_sensor_state: 'rain', rain_sensor_online: true}}),
+  rainSensorStatusText({{rain_sensor_state: 'dry', rain_sensor_online: true}}),
+]));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    disabled, offline, unknown, reconnecting, stale_dry, rain, dry = json.loads(completed.stdout)
+    assert "выключен" in disabled
+    assert "нет связи" in offline and "заблокирован" in offline
+    assert "нет данных" in unknown and "заблокирован" in unknown
+    assert "подключ" in reconnecting and "заблокирован" in reconnecting
+    assert "нет связи" in stale_dry and "дождя нет" not in stale_dry
+    assert rain == "идёт дождь"
+    assert dry == "дождя нет"
+    assert all("дождя нет" not in value for value in (disabled, offline, unknown, reconnecting, stale_dry))
+    assert "rainSensorStatusText(statusData)" in display
+
+
+def test_global_rain_save_applies_authoritative_config_and_group_snapshot_before_render() -> None:
+    source = _source(ZONES)
+    save = _function(source, "saveRainConfig")
+    script = f"""
+const elements = {{
+  'rain-enabled': {{checked: true}},
+  'rain-type': {{value: 'NO'}},
+  'rain-topic': {{value: '/rain', style: {{}}}},
+  'rain-server': {{value: '7'}},
+}};
+const document = {{getElementById(id) {{ return elements[id] || null; }}}};
+const window = {{rainConfig: {{enabled: true, topic: '/old'}}}};
+let groupsData = [
+  {{id: 1, use_rain_sensor: false}},
+  {{id: 2, use_rain_sensor: true}},
+  {{id: 999, use_rain_sensor: false}},
+];
+let requestPayload = null;
+const rendered = [];
+const notifications = [];
+async function fetch(_url, options) {{
+  requestPayload = JSON.parse(options.body);
+  return {{
+    ok: true,
+    json: async () => ({{
+      success: true,
+      config: {{enabled: false, type: 'NC', topic: '/server', server_id: 8}},
+      groups: [
+        {{id: 1, use_rain_sensor: true}},
+        {{id: 2, use_rain_sensor: false}},
+      ],
+    }}),
+  }};
+}}
+function showNotification(message, level) {{ notifications.push([message, level]); }}
+function initRainUi() {{}}
+function updateGlobalToggleTitles() {{}}
+function renderGroupsGrid() {{
+  rendered.push({{
+    config: {{...window.rainConfig}},
+    groups: groupsData.map(group => [group.id, group.use_rain_sensor]),
+  }});
+}}
+{save}
+saveRainConfig().then(() => process.stdout.write(JSON.stringify({{
+  requestPayload,
+  config: window.rainConfig,
+  groups: groupsData.map(group => [group.id, group.use_rain_sensor]),
+  rendered,
+  notifications,
+}})));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = json.loads(completed.stdout)
+    assert result["requestPayload"]["enabled"] is True
+    assert result["config"] == {"enabled": False, "type": "NC", "topic": "/server", "server_id": 8}
+    assert result["groups"] == [[1, True], [2, False], [999, False]]
+    assert result["rendered"] == [{"config": result["config"], "groups": result["groups"]}]
+    assert result["notifications"] == [["Конфигурация датчика дождя сохранена", "success"]]
+
+
 def test_zones_sse_resync_cannot_overwrite_a_newer_event() -> None:
     source = _source(ZONES)
     load = _function(source, "loadData")

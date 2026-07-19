@@ -546,15 +546,31 @@
             }
             const resp = await fetch('/api/rain', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled, type, topic, server_id})});
             const data = await resp.json();
-            if (data && data.success) {
-                showNotification('Конфигурация датчика дождя сохранена', 'success');
-                // Если глобально выключили — запретим переключатели у групп
-                try{ window.rainConfig = window.rainConfig || {}; window.rainConfig.enabled = enabled; renderGroupsGrid(); }catch(e){}
+            if (resp.ok && data && data.success && data.config && Array.isArray(data.groups)) {
+                // The API applies global policy to every group.  Its returned
+                // snapshot is authoritative; never infer per-group flags from
+                // the requested global toggle.
+                window.rainConfig = data.config;
+                const rainFlags = new Map(
+                    data.groups.map(group => [Number(group.id), group.use_rain_sensor])
+                );
+                groupsData.forEach(group => {
+                    if (!rainFlags.has(Number(group.id))) return;
+                    const rawFlag = rainFlags.get(Number(group.id));
+                    group.use_rain_sensor = rawFlag === true || rawFlag === 1
+                        || String(rawFlag).trim().toLowerCase() === 'true'
+                        || String(rawFlag).trim() === '1';
+                });
+                initRainUi();
+                renderGroupsGrid();
                 try{ updateGlobalToggleTitles(); }catch(e){}
+                showNotification('Конфигурация датчика дождя сохранена', 'success');
             } else {
-                showNotification('Не удалось сохранить конфигурацию', 'error');
+                initRainUi();
+                showNotification((data && (data.message || data.error)) || 'Не удалось сохранить конфигурацию', 'error');
             }
         } catch (e) {
+            try{ initRainUi(); }catch(_e){}
             showNotification('Ошибка сохранения конфигурации', 'error');
         }
     }

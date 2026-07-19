@@ -418,6 +418,36 @@
         }
     }
     
+    function rainSensorStatusText(data) {
+        const source = data || {};
+        const configuredState = String(source.rain_sensor_state || '').trim().toLowerCase();
+        if (configuredState === 'disabled' || source.rain_enabled === false) {
+            return 'датчик выключен';
+        }
+        if (configuredState === 'reconnecting') {
+            return 'подключение восстанавливается — полив заблокирован';
+        }
+        if (configuredState === 'offline' || source.rain_sensor_online === false) {
+            return 'нет связи с датчиком — полив заблокирован';
+        }
+        if (configuredState === 'unknown') {
+            return 'нет данных — полив заблокирован';
+        }
+        if (configuredState === 'rain') return 'идёт дождь';
+        if (configuredState === 'dry') return 'дождя нет';
+
+        // Compatibility with controllers that have not yet exposed the state
+        // enum.  Only an explicit legacy rain/dry value may become definitive.
+        const legacy = String(source.rain_sensor || '').trim().toLowerCase();
+        if (legacy.indexOf('идёт дожд') !== -1 || legacy.indexOf('идет дожд') !== -1) {
+            return 'идёт дождь';
+        }
+        if (legacy.indexOf('нет дожд') !== -1 || legacy.indexOf('дождя нет') !== -1 || legacy === 'dry') {
+            return 'дождя нет';
+        }
+        return 'нет данных — полив заблокирован';
+    }
+
     async function updateStatusDisplay() {
         if (!statusData) return;
         updateDateTime();
@@ -438,18 +468,22 @@
             hb.style.display = 'inline-block';
             hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(Math.round(Number(statusData.humidity)));
         }
-        // Отображение датчика дождя: показывать, только если глобально включен
+        // Unknown/offline is safety-significant and must never look like dry.
         (function(){
             const rb = document.getElementById('rain-box');
             const rv = document.getElementById('rain-value');
-            const enabled = !!(statusData && statusData.rain_enabled);
-            if (!enabled) {
+            if (!rb || !rv) return;
+            const state = String(statusData.rain_sensor_state || '').trim().toLowerCase();
+            const disabled = state === 'disabled' || statusData.rain_enabled === false;
+            if (disabled) {
                 rb.style.display = 'none';
                 return;
             }
             rb.style.display = 'inline-block';
-            const s = String(statusData.rain_sensor || '').toLowerCase();
-            rv.textContent = (s.indexOf('идёт дожд') !== -1 || s.indexOf('идет дожд') !== -1) ? 'дождь идет' : 'нет дождя';
+            const text = rainSensorStatusText(statusData);
+            rv.textContent = text;
+            rv.dataset.state = text.indexOf('заблокирован') !== -1 ? 'degraded' : state;
+            rv.classList.toggle('degraded', text.indexOf('заблокирован') !== -1);
         })();
 
         // Быстрый пробник: если включённый датчик показывает "нет данных",
