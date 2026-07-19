@@ -8,6 +8,7 @@ Requires=mosquitto.service
 Type=notify
 NotifyAccess=main
 WorkingDirectory=/opt/wb-irrigation/irrigation
+EnvironmentFile=-/opt/wb-irrigation/.env
 Environment=TESTING=0
 Environment=UI_THEME=auto
 Environment=WB_WATCHDOG_ENABLED=1
