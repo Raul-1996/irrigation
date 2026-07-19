@@ -79,7 +79,8 @@ def read_fresh(db_path: str, lat: float, lon: float) -> WeatherData | None:
             row = cur.fetchone()
             if row:
                 fetched_at = float(row["fetched_at"])
-                if time.time() - fetched_at < _CACHE_TTL_SEC:
+                age_sec = time.time() - fetched_at
+                if 0 <= age_sec < _CACHE_TTL_SEC:
                     data = json.loads(row["data"])
                     data["_fetched_at"] = fetched_at
                     return WeatherData(data)
@@ -123,13 +124,14 @@ def read_stale(
             row = cur.fetchone()
             if row:
                 fetched_at = float(row["fetched_at"])
-                if time.time() - fetched_at >= max_age_sec:
+                age_sec = time.time() - fetched_at
+                if age_sec < 0 or age_sec >= max_age_sec:
                     return None
                 data = json.loads(row["data"])
                 data["_fetched_at"] = fetched_at
                 logger.info("Weather: using stale cache (API unavailable)")
                 return WeatherData(data)
-    except (sqlite3.Error, json.JSONDecodeError) as e:
+    except (sqlite3.Error, json.JSONDecodeError, ValueError, TypeError) as e:
         logger.debug("Weather stale cache read error: %s", e)
     return None
 
