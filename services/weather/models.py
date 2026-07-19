@@ -10,6 +10,7 @@ ten-line constants module would add import churn without clarity.
 """
 
 import logging
+import math
 import re
 import time
 from datetime import datetime
@@ -65,7 +66,10 @@ class WeatherData:
     def __init__(self, raw):
         # type: (Dict[str, Any]) -> None
         self.raw = raw
-        self.timestamp = raw.get("_fetched_at", time.time())
+        now = time.time()
+        self.timestamp = float(raw.get("_fetched_at", now))
+        if not math.isfinite(self.timestamp) or self.timestamp > now:
+            raise ValueError("weather fetched_at must not be in the future")
         self._parse()
 
     def _parse(self):
@@ -151,18 +155,41 @@ class WeatherData:
         if daily_idx is not None and daily_idx < len(daily_sunset) and daily_sunset[daily_idx]:
             self.sunset = _canonical_hh_mm(daily_sunset[daily_idx])
 
-        # Calculate precipitation sum for past 24h from hourly data
-        self.precipitation_24h = 0.0
-        if idx is not None:
+        # Calculate precipitation only when the payload covers every one of the
+        # previous 24 contiguous hourly slots.  A partial relay/cache payload is
+        # unavailable, never a misleading small "24h" value.
+        self.precipitation_24h = None
+        if idx is not None and idx >= 23:
             precip_arr = hourly.get("precipitation", [])
-            start_idx = max(0, idx - 23)
-            for i in range(start_idx, idx + 1):
-                try:
-                    val = precip_arr[i]
-                    if val is not None:
-                        self.precipitation_24h += float(val)
-                except (IndexError, ValueError, TypeError):
-                    pass
+            start_idx = idx - 23
+            window_times = times[start_idx : idx + 1]
+            contiguous = len(window_times) == 24
+            parsed_times = []
+            if contiguous:
+                for value in window_times:
+                    try:
+                        parsed_times.append(datetime.strptime(str(value), "%Y-%m-%dT%H:%M"))
+                    except ValueError:
+                        contiguous = False
+                        break
+            if contiguous:
+                contiguous = all(
+                    (parsed_times[i] - parsed_times[i - 1]).total_seconds() == 3600
+                    for i in range(1, len(parsed_times))
+                )
+            values = []
+            if contiguous and idx < len(precip_arr):
+                for i in range(start_idx, idx + 1):
+                    try:
+                        value = float(precip_arr[i])
+                        if not math.isfinite(value) or value < 0:
+                            raise ValueError("invalid precipitation")
+                        values.append(value)
+                    except (IndexError, ValueError, TypeError):
+                        values = []
+                        break
+            if len(values) == 24:
+                self.precipitation_24h = sum(values)
 
         # Calculate precipitation forecast for next 6h
         self.precipitation_forecast_6h = 0.0

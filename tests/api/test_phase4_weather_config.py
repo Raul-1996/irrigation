@@ -6,6 +6,19 @@ import sqlite3
 from unittest.mock import patch
 
 
+def _create_enabled_broker(app, *, enabled: bool = True) -> int:
+    server = app.db.create_mqtt_server(
+        {
+            "name": "rain-test",
+            "host": "127.0.0.1",
+            "port": 1883,
+            "enabled": enabled,
+        }
+    )
+    assert server is not None
+    return int(server["id"])
+
+
 def test_weather_validation_happens_before_any_setting_is_written(admin_client, app) -> None:
     assert app.db.set_setting_value("weather.enabled", "0")
 
@@ -58,6 +71,7 @@ def test_location_validates_both_coordinates_before_commit(admin_client, app) ->
 
 def test_rain_config_database_failure_rolls_back_and_does_not_restart(admin_client, app) -> None:
     assert app.db.set_setting_value("rain.enabled", "0")
+    server_id = _create_enabled_broker(app)
     with sqlite3.connect(app.db.db_path) as conn:
         conn.execute(
             """
@@ -74,23 +88,79 @@ def test_rain_config_database_failure_rolls_back_and_does_not_restart(admin_clie
     with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
         response = admin_client.post(
             "/api/rain",
-            json={"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"},
+            json={"enabled": True, "topic": "/rain", "server_id": server_id, "type": "NO"},
         )
 
     assert response.status_code == 500
     assert app.db.get_setting_value("rain.enabled") == "0"
-    monitor.start.assert_not_called()
+    monitor.reconfigure.assert_not_called()
 
 
 def test_rain_config_change_restarts_runtime_monitor(admin_client) -> None:
     with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
+        monitor.reconfigure.return_value = True
         response = admin_client.post(
             "/api/rain",
             json={"enabled": False, "topic": "", "server_id": None, "type": "NC"},
         )
 
     assert response.status_code == 200
-    monitor.start.assert_called_once_with({"enabled": False, "topic": "", "server_id": None, "type": "NC"})
+    monitor.reconfigure.assert_called_once_with({"enabled": False, "topic": "", "server_id": None, "type": "NC"})
+
+
+def test_rain_config_rejects_non_string_or_wildcard_topics_before_write(admin_client, app) -> None:
+    assert app.db.set_setting_value("rain.topic", "/old")
+    server_id = _create_enabled_broker(app)
+    with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
+        for topic in (7, "/rain/+", "/rain/#", "bad\x00topic"):
+            response = admin_client.post(
+                "/api/rain",
+                json={"enabled": True, "topic": topic, "server_id": server_id, "type": "NO"},
+            )
+            assert response.status_code == 400
+
+    assert app.db.get_setting_value("rain.topic") == "/old"
+    monitor.reconfigure.assert_not_called()
+
+
+def test_rain_config_rejects_missing_or_disabled_broker(admin_client, app) -> None:
+    disabled_id = _create_enabled_broker(app, enabled=False)
+    with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
+        missing = admin_client.post(
+            "/api/rain",
+            json={"enabled": True, "topic": "/rain", "server_id": disabled_id + 10_000, "type": "NO"},
+        )
+        disabled = admin_client.post(
+            "/api/rain",
+            json={"enabled": True, "topic": "/rain", "server_id": disabled_id, "type": "NO"},
+        )
+
+    assert missing.status_code == 400
+    assert disabled.status_code == 400
+    monitor.reconfigure.assert_not_called()
+
+
+def test_rain_runtime_failure_rolls_back_settings_and_group_flags(admin_client, app) -> None:
+    server_id = _create_enabled_broker(app)
+    assert app.db.set_setting_value("rain.enabled", "0")
+    assert app.db.set_setting_value("rain.topic", "/old")
+    assert app.db.set_setting_value("rain.type", "NC")
+    assert app.db.set_group_use_rain(1, False)
+
+    with patch("routes.system_config_api.rain_monitor", create=True) as monitor:
+        monitor.reconfigure.return_value = False
+        response = admin_client.post(
+            "/api/rain",
+            json={"enabled": True, "topic": "/new", "server_id": server_id, "type": "NO"},
+        )
+
+    assert response.status_code == 503
+    assert response.get_json()["rollback_success"] is True
+    assert app.db.get_setting_value("rain.enabled") == "0"
+    assert app.db.get_setting_value("rain.topic") == "/old"
+    assert app.db.get_setting_value("rain.type") == "NC"
+    assert app.db.get_setting_value("rain.server_id") is None
+    assert app.db.get_group_use_rain(1) is False
 
 
 def test_live_weather_response_overlays_fresh_local_sources(admin_client) -> None:

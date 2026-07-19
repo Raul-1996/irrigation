@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -34,6 +35,8 @@ system_config_api_bp = Blueprint("system_config_api", __name__)
 
 # Password blocklist (TASK-013)
 _PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
+_RAIN_CONFIG_LOCK = threading.Lock()
+_RAIN_SETTING_KEYS = ("rain.enabled", "rain.topic", "rain.type", "rain.server_id")
 
 
 # ===== Auth / Password =====
@@ -199,6 +202,88 @@ def api_map_delete(filename):
 # ===== Rain config =====
 
 
+def _rain_setting_value(cfg: dict, key: str) -> str | None:
+    values = {
+        "rain.enabled": "1" if cfg["enabled"] else "0",
+        "rain.topic": cfg["topic"],
+        "rain.type": cfg["type"],
+        "rain.server_id": str(cfg["server_id"]) if cfg["server_id"] is not None else None,
+    }
+    return values[key]
+
+
+def _rain_config_write(conn: sqlite3.Connection, cfg: dict) -> None:
+    for key in _RAIN_SETTING_KEYS:
+        value = _rain_setting_value(cfg, key)
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
+    if cfg["enabled"]:
+        conn.execute("UPDATE groups SET use_rain_sensor = 1, updated_at = CURRENT_TIMESTAMP WHERE id != 999")
+
+
+def _snapshot_rain_db(conn: sqlite3.Connection) -> tuple[dict[str, tuple[bool, str | None]], dict[int, int]]:
+    settings: dict[str, tuple[bool, str | None]] = {}
+    for key in _RAIN_SETTING_KEYS:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        settings[key] = (row is not None, row[0] if row is not None else None)
+    groups = {
+        int(group_id): int(use_rain or 0)
+        for group_id, use_rain in conn.execute("SELECT id, use_rain_sensor FROM groups ORDER BY id").fetchall()
+    }
+    return settings, groups
+
+
+def _rollback_rain_db_cas(
+    old_settings: dict[str, tuple[bool, str | None]],
+    old_groups: dict[int, int],
+    attempted_cfg: dict,
+) -> bool:
+    """Restore only if no concurrent writer changed the attempted snapshot."""
+    with db.settings._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for key in _RAIN_SETTING_KEYS:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            current = (row is not None, row[0] if row is not None else None)
+            desired_value = _rain_setting_value(attempted_cfg, key)
+            desired = (desired_value is not None, desired_value)
+            if current != desired:
+                conn.rollback()
+                return False
+
+        for key, (existed, value) in old_settings.items():
+            if existed:
+                conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
+            else:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        rollback_exact = True
+        if attempted_cfg["enabled"]:
+            current_groups = {
+                int(group_id): int(use_rain or 0)
+                for group_id, use_rain in conn.execute("SELECT id, use_rain_sensor FROM groups ORDER BY id").fetchall()
+            }
+            if set(current_groups) != set(old_groups):
+                rollback_exact = False
+            for group_id, old_use_rain in old_groups.items():
+                current_use_rain = current_groups.get(group_id)
+                if current_use_rain is None:
+                    continue
+                if group_id == 999:
+                    continue
+                if current_use_rain == 1:
+                    conn.execute(
+                        "UPDATE groups SET use_rain_sensor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (old_use_rain, group_id),
+                    )
+                elif current_use_rain != old_use_rain:
+                    # A concurrent opt-out wins; never overwrite it merely to
+                    # make this rollback look exact.
+                    rollback_exact = False
+        conn.commit()
+    return rollback_exact
+
+
 @system_config_api_bp.route("/api/rain", methods=["GET", "POST"])
 @audit_log("rain_config_save", target_extractor=lambda *a, **kw: "rain_config")
 def api_rain_config():
@@ -213,6 +298,18 @@ def api_rain_config():
         sensor_type = data.get("type", "NO")
         if sensor_type not in ("NO", "NC"):
             raise ValueError("type must be NO or NC")
+        topic_raw = data.get("topic", "")
+        if not isinstance(topic_raw, str):
+            raise ValueError("topic must be a string")
+        topic = topic_raw.strip()
+        if "\x00" in topic or "+" in topic or "#" in topic:
+            raise ValueError("topic must not contain MQTT wildcards or NUL")
+        try:
+            topic_size = len(topic.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValueError("topic must be valid UTF-8") from error
+        if topic_size > 65535:
+            raise ValueError("topic is too long")
         server_id = data.get("server_id")
         if isinstance(server_id, bool):
             raise ValueError("server_id must be an integer")
@@ -220,11 +317,11 @@ def api_rain_config():
             raise ValueError("server_id must be an integer")
         if server_id is not None:
             server_id = int(server_id)
-            if server_id <= 0:
+            if server_id <= 0 or server_id > 9_223_372_036_854_775_807:
                 raise ValueError("server_id must be positive")
         cfg = {
             "enabled": bool(data.get("enabled")),
-            "topic": (data.get("topic") or "").strip(),
+            "topic": topic,
             "type": sensor_type,
             "server_id": server_id,
         }
@@ -233,28 +330,45 @@ def api_rain_config():
         if cfg["enabled"] and cfg["server_id"] is None:
             return jsonify({"success": False, "message": "Требуется MQTT-сервер для датчика дождя"}), 400
 
-        updates = [
-            ("rain.enabled", "1" if cfg["enabled"] else "0"),
-            ("rain.topic", cfg["topic"]),
-            ("rain.type", cfg["type"]),
-            ("rain.server_id", str(cfg["server_id"]) if cfg["server_id"] is not None else None),
-        ]
-        with db.settings._connect() as conn:
-            for key, value in updates:
-                if value is None:
-                    conn.execute("DELETE FROM settings WHERE key = ?", (key,))
-                else:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                        (key, value),
-                    )
-            if cfg["enabled"]:
-                conn.execute("UPDATE groups SET use_rain_sensor = 1, updated_at = CURRENT_TIMESTAMP WHERE id != 999")
-            conn.commit()
+        with _RAIN_CONFIG_LOCK:
+            with db.settings._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if cfg["enabled"]:
+                    broker = conn.execute(
+                        "SELECT enabled FROM mqtt_servers WHERE id = ? LIMIT 1",
+                        (cfg["server_id"],),
+                    ).fetchone()
+                    if broker is None:
+                        conn.rollback()
+                        return jsonify({"success": False, "message": "MQTT-сервер не найден"}), 400
+                    if int(broker[0] or 0) != 1:
+                        conn.rollback()
+                        return jsonify({"success": False, "message": "MQTT-сервер отключён"}), 400
+                old_settings, old_groups = _snapshot_rain_db(conn)
+                _rain_config_write(conn, cfg)
+                conn.commit()
 
-        # Apply every enable/change/disable immediately.  RainMonitor.start()
-        # owns replacement of the old MQTT client and cleanup of old rain state.
-        rain_monitor.start(cfg)
+            try:
+                runtime_applied = rain_monitor.reconfigure(cfg) is True
+            except (ConnectionError, TimeoutError, OSError, RuntimeError, sqlite3.Error):
+                logger.exception("rain monitor runtime reconfiguration failed")
+                runtime_applied = False
+            if not runtime_applied:
+                try:
+                    rollback_ok = _rollback_rain_db_cas(old_settings, old_groups, cfg)
+                except (sqlite3.Error, OSError):
+                    logger.exception("rain config DB rollback failed")
+                    rollback_ok = False
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "message": "Не удалось подключить датчик дождя; настройки не применены",
+                            "rollback_success": rollback_ok,
+                        }
+                    ),
+                    503,
+                )
         return jsonify({"success": True})
     except (ValueError, TypeError) as e:
         logger.debug("rain config validation failed: %s", e)

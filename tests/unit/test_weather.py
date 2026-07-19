@@ -96,7 +96,7 @@ class TestWeatherData:
         wd = WeatherData({"hourly": {}, "daily": {}})
         assert wd.temperature is None
         assert wd.humidity is None
-        assert wd.precipitation_24h == 0.0
+        assert wd.precipitation_24h is None
 
     def test_to_dict(self):
         from services.weather import WeatherData

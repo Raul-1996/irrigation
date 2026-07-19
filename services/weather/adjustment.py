@@ -288,7 +288,9 @@ class WeatherAdjustment:
             return False
 
         rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-        rain_24h = weather.precipitation_24h or 0.0
+        if weather.precipitation_24h is None:
+            return True
+        rain_24h = weather.precipitation_24h
         rain_forecast = weather.precipitation_forecast_6h or 0.0
         if self._rain_reaches_threshold(rain_24h, rain_threshold) or self._rain_reaches_threshold(
             rain_forecast, rain_threshold
@@ -376,13 +378,24 @@ class WeatherAdjustment:
 
         weather = self._get_weather(cache_only=cache_only)
         if not weather:
-            result["details"]["api_unavailable"] = True
+            result["skip"] = True
+            result["reason"] = "weather_unavailable"
+            result["details"] = {"type": "weather_unavailable", "api_unavailable": True}
             return result
 
         # Rain skip
         if settings.get("factor_rain", True):
             rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-            rain_24h = weather.precipitation_24h or 0.0
+            if weather.precipitation_24h is None:
+                result["skip"] = True
+                result["reason"] = "weather_unavailable: precipitation_24h"
+                result["details"] = {
+                    "type": "weather_unavailable",
+                    "field": "precipitation_24h",
+                    "api_unavailable": False,
+                }
+                return result
+            rain_24h = weather.precipitation_24h
             rain_forecast = weather.precipitation_forecast_6h or 0.0
 
             if self._rain_reaches_threshold(rain_24h, rain_threshold):
@@ -444,7 +457,7 @@ class WeatherAdjustment:
 
         weather = self._get_weather()
         if not weather:
-            return 100
+            return 0
 
         # Hard safety: thresholds always force skip even if factor_* flags are off
         if self._check_safety_skip(weather, settings):
@@ -547,20 +560,29 @@ class WeatherAdjustment:
             return False
 
     def _balance_coef_fresh(self) -> bool:
-        """True if the cached diagnostic balance coef is recent enough.
+        """True if the cached diagnostic balance coefficient is fresh."""
+        return self.get_balance_diagnostic_status()["status"] == "fresh"
 
-        Stale = ``last_recalc_date`` older than ``stale_fallback_days`` (the
-        nightly job has not run — service was down or Open-Meteo unreachable for
-        several nights). This is diagnostic metadata only; neither a fresh nor a
-        stale H2 value is used by the scheduler (PR-060).
+    def get_balance_diagnostic_status(self) -> dict[str, Any]:
+        """Return canonical H2 shadow freshness metadata for the UI.
+
+        H2 never steers watering.  Future/invalid dates are surfaced explicitly
+        and cannot be mistaken for a fresh live coefficient.
         """
+        result: dict[str, Any] = {
+            "status": "unavailable",
+            "last_recalc_date": None,
+            "age_days": None,
+            "stale": False,
+            "fresh": False,
+        }
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.last_recalc_date'")
                 row = cur.fetchone()
                 if not row or not row["value"]:
-                    return False
+                    return result
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.stale_fallback_days'")
                 srow = cur.fetchone()
                 stale_days = 2
@@ -569,12 +591,20 @@ class WeatherAdjustment:
                         stale_days = int(float(srow["value"]))
                 from datetime import date, datetime
 
-                last = datetime.strptime(str(row["value"]), "%Y-%m-%d").date()
+                raw_date = str(row["value"])
+                last = datetime.strptime(raw_date, "%Y-%m-%d").date()
                 age_days = (date.today() - last).days
-                return age_days <= stale_days
+                status = "future" if age_days < 0 else "fresh" if age_days <= stale_days else "stale"
+                return {
+                    "status": status,
+                    "last_recalc_date": raw_date,
+                    "age_days": age_days,
+                    "stale": status == "stale",
+                    "fresh": status == "fresh",
+                }
         except (sqlite3.Error, OSError, ValueError, TypeError) as e:
             logger.debug("balance freshness check failed: %s", e)
-            return False
+            return result
 
     def get_effective_coefficient(self) -> int:
         """Compatibility alias; H2 remains diagnostic and never steers watering."""
@@ -600,21 +630,21 @@ class WeatherAdjustment:
         # Rain factor
         rain_enabled = settings.get("factor_rain", True)
         rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-        rain_24h = 0.0
+        rain_24h = None
         rain_forecast = 0.0
         if weather:
-            rain_24h = weather.precipitation_24h or 0.0
+            rain_24h = weather.precipitation_24h
             rain_forecast = weather.precipitation_forecast_6h or 0.0
 
-        rain_status = "ok"
-        rain_detail = f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
-        if self._rain_reaches_threshold(rain_24h, rain_threshold):
+        rain_status = "danger" if rain_24h is None else "ok"
+        rain_detail = "нет полных данных за 24ч (skip)" if rain_24h is None else f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
+        if rain_24h is not None and self._rain_reaches_threshold(rain_24h, rain_threshold):
             rain_status = "danger"
             rain_detail = f"{rain_24h:.1f} мм ≥ {rain_threshold:.0f} мм (skip)"
         elif self._rain_reaches_threshold(rain_forecast, rain_threshold):
             rain_status = "danger"
             rain_detail = f"прогноз {rain_forecast:.1f} мм за 6ч ≥ {rain_threshold:.0f} мм (skip)"
-        elif max(rain_24h, rain_forecast) > rain_threshold * 0.5:
+        elif rain_24h is not None and max(rain_24h, rain_forecast) > rain_threshold * 0.5:
             rain_status = "warn"
             rain_detail = f"{rain_24h:.1f} мм (прогноз +{rain_forecast:.1f} мм)"
 
@@ -756,7 +786,13 @@ class WeatherAdjustment:
 
     def log_decision(self, weather, coefficient, skip, reason, mode="auto") -> None:
         """Записать decision в weather_decisions для UI history."""
-        if skip:
+        snapshot_missing = weather is None
+        if snapshot_missing:
+            decision = "skip"
+            coefficient = 0
+            reason = reason or "weather_unavailable"
+            mode = "unknown"
+        elif skip:
             decision = "skip"
         elif coefficient == 100:
             decision = "water"
@@ -774,9 +810,11 @@ class WeatherAdjustment:
             except (TypeError, ValueError):
                 return None
 
-        allowed_sources = {"api", "api_fallback", "local"}
+        allowed_sources = {"api", "api_fallback", "local", "unknown"}
 
         def _source(attr: str) -> str:
+            if snapshot_missing:
+                return "unknown"
             sources = getattr(weather, "data_sources", None)
             value = sources.get(attr) if isinstance(sources, dict) else None
             return value if value in allowed_sources else "api"

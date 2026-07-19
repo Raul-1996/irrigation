@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 os.environ["TESTING"] = "1"
 
@@ -379,12 +380,17 @@ class TestRainEnvAPI:
         resp = admin_client.get("/api/rain")
         assert resp.status_code == 200
 
-    def test_post_rain(self, admin_client):
-        resp = admin_client.post(
-            "/api/rain",
-            data=json.dumps({"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}),
-            content_type="application/json",
+    def test_post_rain(self, admin_client, app):
+        server = app.db.create_mqtt_server(
+            {"name": "rain", "host": "127.0.0.1", "port": 1883, "enabled": True}
         )
+        with patch("routes.system_config_api.rain_monitor") as monitor:
+            monitor.reconfigure.return_value = True
+            resp = admin_client.post(
+                "/api/rain",
+                data=json.dumps({"enabled": True, "topic": "/rain", "server_id": server["id"], "type": "NO"}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
 
     def test_get_env(self, admin_client):

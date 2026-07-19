@@ -204,11 +204,20 @@ class WeatherService:
         adj = WeatherAdjustment(self.db_path)
         coefficient = adj.get_coefficient()
         skip_info = adj.should_skip()
-        factors = adj.get_factors_detail(weather)
+        effective_weather = adj._select_input_source(weather)
+        factors = adj.get_factors_detail(effective_weather)
 
         current = {
-            "temperature": {"value": weather.temperature, "source": "api", "unit": "°C"},
-            "humidity": {"value": weather.humidity, "source": "api", "unit": "%"},
+            "temperature": {
+                "value": effective_weather.temperature,
+                "source": getattr(effective_weather, "temperature_source", "api"),
+                "unit": "°C",
+            },
+            "humidity": {
+                "value": effective_weather.humidity,
+                "source": getattr(effective_weather, "humidity_source", "api"),
+                "unit": "%",
+            },
             "rain": {"value": False, "source": "api"},
             "precipitation_mm": {"value": weather.precipitation, "source": "api", "unit": "мм"},
             "wind_speed": {"value": weather.wind_speed, "source": "api", "unit": "м/с"},
@@ -228,7 +237,12 @@ class WeatherService:
         coefficient_legacy = coefficient
         from services.weather.balance import has_computed, read_cached_coef
 
-        coefficient_balance = read_cached_coef(self.db_path) if has_computed(self.db_path) else None
+        balance_diagnostic = adj.get_balance_diagnostic_status()
+        coefficient_balance = (
+            read_cached_coef(self.db_path)
+            if balance_diagnostic["status"] != "unavailable" and has_computed(self.db_path)
+            else None
+        )
         mode = "shadow" if coefficient_balance is not None else "legacy"
         coefficient_applied = coefficient_legacy
 
@@ -242,6 +256,13 @@ class WeatherService:
             "coefficient_applied": coefficient_applied,
             "coefficient_legacy": coefficient_legacy,
             "coefficient_balance": coefficient_balance,
+            "balance_enabled": adj._balance_enabled(),
+            "balance_active": False,
+            "balance_status": balance_diagnostic["status"],
+            "balance_last_recalc_date": balance_diagnostic["last_recalc_date"],
+            "balance_age_days": balance_diagnostic["age_days"],
+            "balance_stale": balance_diagnostic["stale"],
+            "balance_fresh": balance_diagnostic["fresh"],
         }
 
         forecast_24h = []

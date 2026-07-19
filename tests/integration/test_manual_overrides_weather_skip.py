@@ -39,7 +39,9 @@ def runner_db(tmp_path):
 
     _wsing._adjustment = None
     _wsing._weather_service = None
-    return db
+    yield db
+    _wsing._adjustment = None
+    _wsing._weather_service = None
 
 
 def test_manual_program_run_ignores_weather_skip(runner_db):
