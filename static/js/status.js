@@ -642,87 +642,15 @@
             const data = await assertJsonResponse(resp);
             if (requestGeneration !== statusRequestGeneration) return false;
             if (!data || !Array.isArray(data.groups)) throw new Error('Invalid status response');
-            // Обновим глобальные данные статуса, чтобы кнопки/условия отображались корректно
+            // /api/status is one coherent snapshot for every group.  Even when
+            // an action originated from a single card, render the whole winning
+            // snapshot so sibling cards cannot remain older than statusData.
             statusData = data;
+            updateStatusDisplay();
+            updateWaterMeter();
+            try { updateZoneStats(zonesData); } catch (e) {}
             hideConnectionError('status');
             updateMqttWarnings();
-            updateWaterMeter();
-            const group = (data.groups || []).find(g => String(g.id) === String(groupId));
-            if (!group) return false;
-            const card = document.getElementById(`group-card-${group.id}`);
-            if (!card) return false;
-            // Полностью пересоберем содержимое карточки по актуальным данным
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
-            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
-            const statusText = getStatusText(group);
-            const extraText2 = renderGroupExtraHtml(group, zonesData);
-            const mvEnabled2 = (group.use_master_valve === true) || (group.use_master_valve === 1); // показываем только если включено для группы
-            const mvState2 = String(group.master_valve_state || 'unknown');
-            const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
-            const anyZoneOnThisGroup2 = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
-            const _m3 = window.innerWidth < 1024;
-            const skipBtnHtml2 = (anyZoneOnThisGroup2 && Number(group.queue_remaining || 0) > 0)
-                ? `<button class=\"group-action-btn group-action-skip\" onclick=\"skipCurrentZone(${group.id})\">${_m3 ? '⏭ Пропустить' : 'Пропустить зону'}</button>`
-                : '';
-            const groupActionHtml2 = anyZoneOnThisGroup2
-                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">${_m3 ? '⏹ Стоп' : 'Остановить полив группы'}</button>${skipBtnHtml2}`
-                : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">${_m3 ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
-            const _mob2 = window.innerWidth < 1024;
-            const groupButtons = `
-                <div class=\"btn-group\">
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 1)\">${_mob2 ? '1 день' : 'Остановить полив на 1 день'}</button>
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 2)\">${_mob2 ? '2 дня' : 'Остановить полив на 2 дня'}</button>
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 3)\">${_mob2 ? '3 дня' : 'Остановить полив на 3 дня'}</button>
-                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class=\"cancel-postpone\" onclick=\"cancelPostpone(${group.id})\">${_mob2 ? 'Продолжить' : 'Продолжить по расписанию'}</button>` : ''}
-                </div>
-                <div class=\"btn-group\" style=\"width:100%\">${groupActionHtml2}</div>`;
-            card.innerHTML = `
-                <div class="group-header">${escapeHtml(group.name)}</div>
-                <div id="group-status-${group.id}">${statusText}</div>
-                <div class="postpone-until">${extraText2}</div>
-                ${groupButtons}
-            `;
-            // Append the same grid as in updateStatusDisplay
-            (function(){
-                const _flag2 = v => { try { if (v===true||v===1) return true; const s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
-                const pressureOn2 = _flag2(group.use_pressure_sensor);
-                const flowOn2 = _flag2(group.use_water_meter);
-                const cells = [];
-                if (mvEnabled2) {
-                    const dotCls2 = mvState2==='open' ? 'open' : (mvState2==='closed' ? 'closed' : '');
-                    const actionText2 = (mvState2==='open') ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан';
-                    const stateText2 = mvState2==='open' ? 'Открыт' : (mvState2==='closed' ? 'Закрыт' : '—');
-                    const mvBtn2 = `<button id=\"mv-btn-${group.id}\" class=\"mv-button\" data-mv-state=\"${mvState2}\" onclick=\"toggleMasterValve(${group.id})\">`
-                                  + `<span class=\"mv-action\">${actionText2}</span>`
-                                  + `<span class=\"mv-dot ${dotCls2}\"></span>`
-                                  + `<span class=\"mv-state-text\">(${stateText2})</span>`
-                                  + `</button>`;
-                    cells.push(`<div class=\"grid-item grid-item-span2\">${mvBtn2}</div>`);
-                }
-                if (pressureOn2 && !flowOn2) {
-                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
-                } else if (!pressureOn2 && flowOn2) {
-                    const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
-                    const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${escapeHtml(meter2)}</span> м³ (<span id=\"flow-${group.id}\">${escapeHtml(flow2)}</span> л/мин)</div></div>`);
-                } else {
-                    if (pressureOn2) {
-                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
-                    }
-                    if (flowOn2) {
-                        const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
-                        const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${escapeHtml(meter2)}</span> м³ (<span id=\"flow-${group.id}\">${escapeHtml(flow2)}</span> л/мин)</div></div>`);
-                    }
-                }
-                if (cells.length) {
-                    const pad2 = cells.length % 2 ? '<div class=\"grid-item\"></div>' : '';
-                    card.innerHTML += `<div class=\"group-info-grid\">${cells.join('')}${pad2}</div>`;
-                }
-            })();
-            if (group.status === 'watering' && group.current_zone) {
-                initGroupTimer(group);
-            }
             return true;
         } catch (e) {
             if (requestGeneration !== statusRequestGeneration) return false;
@@ -1300,29 +1228,35 @@
         if (c > 120) return 'var(--primary-color, #2196f3)';
         return 'var(--success-color, #4caf50)';
     }
-    // "Second opinion": a mode badge for the applied coefficient plus the other
-    // coefficient (legacy vs balance) shown as a comparison. Returns '' when the
-    // balance coefficient is unavailable (legacy-only mode, nothing to compare).
+    // H1 Zimmerman is the only applied coefficient.  H2 remains a dated shadow
+    // diagnostic and must never be presented as the active watering mode.
     function renderCoeffSecondOpinion(adj) {
-        if (!adj || adj.mode === undefined) return '';
-        var legacy = adj.coefficient_legacy;
-        var balance = adj.coefficient_balance;
-        var badge, second;
-        if (adj.mode === 'balance') {
-            badge = 'Баланс';
-            second = (legacy !== undefined && legacy !== null) ? legacy : null;
+        if (!adj) return '';
+        var status = String(adj.balance_status || 'unavailable').toLowerCase();
+        var numericBalance = Number(adj.coefficient_balance);
+        var hasBalance = adj.coefficient_balance !== null
+            && adj.coefficient_balance !== undefined
+            && Number.isFinite(numericBalance);
+        var date = adj.balance_last_recalc_date
+            ? escapeHtml(String(adj.balance_last_recalc_date))
+            : '';
+        var age = Number(adj.balance_age_days);
+        var detail;
+        if (status === 'fresh' && hasBalance) {
+            detail = numericBalance + '% · свежий' + (date ? ' · пересчёт ' + date : '');
+        } else if (status === 'stale' && hasBalance) {
+            detail = numericBalance + '% · устарел'
+                + (Number.isFinite(age) ? ' (' + Math.max(0, Math.round(age)) + ' дн.)' : '')
+                + (date ? ' · пересчёт ' + date : '');
+        } else if (status === 'future') {
+            detail = (hasBalance ? numericBalance + '% · ' : '')
+                + 'дата из будущего'
+                + (date ? ' · ' + date : '');
         } else {
-            // shadow or legacy: Zimmerman is applied
-            badge = (adj.mode === 'shadow') ? 'Зимм. (shadow)' : 'Зимм.';
-            second = (balance !== undefined && balance !== null) ? balance : null;
+            detail = 'нет данных' + (date ? ' · последний пересчёт ' + date : '');
         }
-        var html = '<span class="coeff-mode-badge">' + badge + '</span>';
-        if (second !== null) {
-            var numericSecond = Number(second);
-            if (Number.isFinite(numericSecond)) {
-                html += ' <span class="coeff-second">второе мнение: ' + numericSecond + '%</span>';
-            }
-        }
+        var html = '<span class="coeff-mode-badge">Зимм. (H1)</span>';
+        html += ' <span class="coeff-second">H2 shadow: ' + detail + '</span>';
         return html;
     }
     function formatCacheAge(sec) {
@@ -1388,10 +1322,12 @@
         var tempVal = (cur.temperature && cur.temperature.value !== undefined) ? cur.temperature.value : j.temperature;
         var tempEl = document.getElementById('w-temp');
         if (tempEl) tempEl.textContent = formatTemp(tempVal);
-        // Coefficient — applied value (balance or legacy), with "second opinion".
-        var coeffApplied = (adj.coefficient_applied !== undefined && adj.coefficient_applied !== null)
-            ? adj.coefficient_applied
-            : ((adj.coefficient !== undefined) ? adj.coefficient : j.coefficient);
+        // H1 is applied; H2 is rendered below only as a dated shadow value.
+        var coeffApplied = (adj.coefficient_legacy !== undefined && adj.coefficient_legacy !== null)
+            ? adj.coefficient_legacy
+            : ((adj.coefficient_applied !== undefined && adj.coefficient_applied !== null)
+                ? adj.coefficient_applied
+                : ((adj.coefficient !== undefined) ? adj.coefficient : j.coefficient));
         var skip = (adj.skip !== undefined) ? adj.skip : j.skip;
         var coeffEl = document.getElementById('w-coeff');
         var coeffModeEl = document.getElementById('w-coeff-mode');
@@ -1406,7 +1342,8 @@
                 if (coeffModeEl) coeffModeEl.textContent = '';
             } else {
                 coeffEl.textContent = (coeffApplied !== null && coeffApplied !== undefined) ? coeffApplied + '%' : '—';
-                coeffEl.style.color = coeffColor(coeffApplied || 100);
+                var numericApplied = Number(coeffApplied);
+                coeffEl.style.color = coeffColor(Number.isFinite(numericApplied) ? numericApplied : 100);
                 coeffEl.classList.remove('skip');
                 if (coeffModeEl) coeffModeEl.innerHTML = renderCoeffSecondOpinion(adj);
             }

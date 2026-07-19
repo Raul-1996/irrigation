@@ -1,15 +1,18 @@
 """System Config API — auth, password, rain, env, map, postpone, settings."""
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
+import secrets
 import sqlite3
-import tempfile
+import stat
+import threading
 import time
 from datetime import datetime, timedelta
 
-from flask import Blueprint, current_app, jsonify, redirect, request, session, url_for
+from flask import Blueprint, abort, current_app, jsonify, redirect, request, send_file, session, url_for
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -18,7 +21,7 @@ from database import db
 from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
-from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
+from services.helpers import ALLOWED_MIME_TYPES
 from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
 from services.monitors import env_monitor, probe_env_values
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
@@ -40,7 +43,17 @@ _PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"
 # both the API response and the on-disk collection bounded to the same newest
 # set so a long-running installation cannot grow this directory indefinitely.
 MAX_MAP_FILES = 20
+MAP_TEMP_STALE_SECONDS = 60 * 60
 _MAP_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_MAP_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+_TRUSTED_MAP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static", "media", "maps"))
+_MAP_STORAGE_LOCK = threading.RLock()
 
 
 # ===== Auth / Password =====
@@ -119,52 +132,250 @@ def api_change_password():
 # ===== Map =====
 
 
-def _list_map_items() -> list[dict[str, object]]:
-    items: list[dict[str, object]] = []
-    for filename in os.listdir(MAP_DIR):
-        path = os.path.join(MAP_DIR, filename)
+def _map_open_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    return flags
+
+
+@contextlib.contextmanager
+def _open_map_directory(*, create: bool) -> tuple[str, int]:
+    """Open the fixed map directory without following directory symlinks.
+
+    The in-process lock protects threads.  ``flock`` on the already verified
+    directory descriptor extends that serialization to multiple application
+    processes while every operation keeps using ``dir_fd`` relative syscalls.
+    """
+
+    with _MAP_STORAGE_LOCK:
+        map_directory = os.path.abspath(_TRUSTED_MAP_DIR)
+        if os.path.realpath(map_directory) != map_directory:
+            raise OSError("map directory or one of its parents is a symlink")
+        if create:
+            os.makedirs(map_directory, mode=0o755, exist_ok=True)
+        directory_info = os.lstat(map_directory)
+        if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
+            raise OSError("map storage path is not a trusted directory")
+        directory_fd = os.open(map_directory, _map_open_flags(directory=True))
         try:
-            extension = os.path.splitext(filename)[1].lower()
-            if os.path.isfile(path) and extension in _MAP_EXTENSIONS:
-                items.append(
-                    {
-                        "name": filename,
-                        "path": f"media/maps/{filename}",
-                        "mtime": os.path.getmtime(path),
-                    }
-                )
-        except (OSError, PermissionError) as exc:
-            logger.debug("Exception while listing maps: %s", exc)
+            opened_info = os.fstat(directory_fd)
+            if not stat.S_ISDIR(opened_info.st_mode):
+                raise OSError("map storage descriptor is not a directory")
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            try:
+                yield map_directory, directory_fd
+            finally:
+                fcntl.flock(directory_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(directory_fd)
+
+
+def _is_safe_map_filename(filename: str) -> bool:
+    return (
+        bool(filename)
+        and secure_filename(filename) == filename
+        and os.path.splitext(filename)[1].lower() in _MAP_EXTENSIONS
+    )
+
+
+def _entry_stat(directory_fd: int, filename: str) -> os.stat_result:
+    return os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+
+
+def _remove_unsafe_entries_locked(directory_fd: int) -> None:
+    removed = False
+    try:
+        for filename in os.listdir(directory_fd):
+            try:
+                item_stat = _entry_stat(directory_fd, filename)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(item_stat.st_mode):
+                os.unlink(filename, dir_fd=directory_fd)
+                removed = True
+    finally:
+        if removed:
+            os.fsync(directory_fd)
+
+
+def _list_map_items_locked(directory_fd: int) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for filename in os.listdir(directory_fd):
+        if not _is_safe_map_filename(filename):
+            continue
+        try:
+            item_stat = _entry_stat(directory_fd, filename)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(item_stat.st_mode):
+            continue
+        items.append(
+            {
+                "name": filename,
+                "path": f"media/maps/{filename}",
+                "mtime": item_stat.st_mtime,
+            }
+        )
     items.sort(key=lambda item: (float(item["mtime"]), str(item["name"])), reverse=True)
     return items
 
 
-def _prune_old_maps(new_filename: str) -> None:
-    """Retain the just-written map and the newest prior maps up to the cap."""
-    items = _list_map_items()
-    prior_items = [item for item in items if item["name"] != new_filename]
-    keep_names = {new_filename}
-    keep_names.update(str(item["name"]) for item in prior_items[: MAX_MAP_FILES - 1])
-    for item in items:
-        filename = str(item["name"])
-        if filename in keep_names:
-            continue
-        try:
-            os.remove(os.path.join(MAP_DIR, filename))
-        except (OSError, PermissionError) as exc:
-            logger.warning("map retention: failed to remove %s: %s", filename, exc)
+def _cleanup_stale_map_temps_locked(directory_fd: int) -> None:
+    cutoff = time.time() - MAP_TEMP_STALE_SECONDS
+    removed = False
+    try:
+        for filename in os.listdir(directory_fd):
+            if not (filename.startswith(".zones_map_") and filename.endswith(".tmp")):
+                continue
+            try:
+                item_stat = _entry_stat(directory_fd, filename)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(item_stat.st_mode) and item_stat.st_mtime < cutoff:
+                os.unlink(filename, dir_fd=directory_fd)
+                removed = True
+    finally:
+        if removed:
+            os.fsync(directory_fd)
 
 
-def _cleanup_stale_map_temps() -> None:
-    for filename in os.listdir(MAP_DIR):
-        if not (filename.startswith(".zones_map_") and filename.endswith(".tmp")):
-            continue
-        path = os.path.join(MAP_DIR, filename)
+def _prune_map_items_locked(directory_fd: int, *, new_filename: str | None = None) -> None:
+    """Prune oldest maps, always protecting a just-published map."""
+
+    items = _list_map_items_locked(directory_fd)
+    if new_filename is None:
+        keep_names = {str(item["name"]) for item in items[:MAX_MAP_FILES]}
+    else:
+        keep_names = {new_filename}
+        prior_items = [item for item in items if item["name"] != new_filename]
+        keep_names.update(str(item["name"]) for item in prior_items[: MAX_MAP_FILES - 1])
+    # Oldest first makes a failed prune conservative and cannot remove the
+    # newest item, including the map that triggered this retention pass.
+    victims = [str(item["name"]) for item in reversed(items) if item["name"] not in keep_names]
+    removed = False
+    try:
+        for filename in victims:
+            os.unlink(filename, dir_fd=directory_fd)
+            removed = True
+    finally:
+        if removed:
+            os.fsync(directory_fd)
+
+
+def _atomic_publish_map_locked(directory_fd: int, out_bytes: bytes, out_ext: str) -> str:
+    extension = str(out_ext).lower()
+    if extension not in _MAP_EXTENSIONS:
+        raise ValueError("unsupported optimized map extension")
+    unique = f"{time.time_ns()}_{secrets.token_hex(6)}"
+    filename = f"zones_map_{unique}{extension}"
+    temporary_name = f".zones_map_{unique}.tmp"
+    temporary_fd: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        temporary_fd = os.open(temporary_name, flags, 0o644, dir_fd=directory_fd)
+        with os.fdopen(temporary_fd, "wb") as temporary:
+            temporary_fd = None
+            temporary.write(out_bytes)
+            temporary.flush()
+            os.fchmod(temporary.fileno(), 0o644)
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary_name = ""
+        # Persist the new directory entry before any retention deletion.
+        os.fsync(directory_fd)
+        return filename
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_name:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+
+
+def _store_map_bytes(out_bytes: bytes, out_ext: str) -> str:
+    with _open_map_directory(create=True) as (_, directory_fd):
+        _remove_unsafe_entries_locked(directory_fd)
+        _cleanup_stale_map_temps_locked(directory_fd)
+        filename = _atomic_publish_map_locked(directory_fd, out_bytes, out_ext)
+        _prune_map_items_locked(directory_fd, new_filename=filename)
+        return filename
+
+
+def _open_safe_map_file(filename: str) -> tuple[object, str]:
+    if not _is_safe_map_filename(filename):
+        raise FileNotFoundError(filename)
+    with _open_map_directory(create=False) as (_, directory_fd):
         try:
-            if os.path.isfile(path):
-                os.remove(path)
-        except (OSError, PermissionError) as exc:
-            logger.warning("map retention: failed to remove stale temporary %s: %s", filename, exc)
+            item_stat = _entry_stat(directory_fd, filename)
+        except FileNotFoundError:
+            raise
+        if stat.S_ISLNK(item_stat.st_mode):
+            os.unlink(filename, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            raise FileNotFoundError(filename)
+        if not stat.S_ISREG(item_stat.st_mode):
+            raise FileNotFoundError(filename)
+        file_fd = os.open(filename, _map_open_flags(), dir_fd=directory_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise FileNotFoundError(filename)
+        except BaseException:
+            os.close(file_fd)
+            raise
+    extension = os.path.splitext(filename)[1].lower()
+    return os.fdopen(file_fd, "rb"), _MAP_MIME_TYPES[extension]
+
+
+def _serve_map_file(filename: str):
+    try:
+        file_handle, mimetype = _open_safe_map_file(filename)
+    except FileNotFoundError:
+        abort(404)
+    try:
+        response = send_file(
+            file_handle,
+            mimetype=mimetype,
+            download_name=filename,
+            conditional=False,
+            max_age=60 * 60 * 24 * 7,
+        )
+    except BaseException:
+        file_handle.close()
+        raise
+    response.call_on_close(file_handle.close)
+    return response
+
+
+@system_config_api_bp.before_app_request
+def _serve_legacy_map_static_path():
+    """Keep legacy map URLs without letting Flask follow map symlinks."""
+
+    prefix = "/static/media/maps/"
+    if not request.path.startswith(prefix):
+        return None
+    filename = request.path[len(prefix) :]
+    if "/" in filename:
+        abort(404)
+    try:
+        return _serve_map_file(filename)
+    except OSError as exc:
+        logger.error("map serving failed: %s", exc)
+        abort(500)
+
+
+@system_config_api_bp.route("/api/map/file/<string:filename>", methods=["GET"])
+def api_map_file(filename: str):
+    try:
+        return _serve_map_file(filename)
+    except OSError as exc:
+        logger.error("map serving failed: %s", exc)
+        return jsonify({"success": False, "message": "Ошибка работы с картой"}), 500
 
 
 @system_config_api_bp.route("/api/map", methods=["GET", "POST"])
@@ -172,7 +383,12 @@ def _cleanup_stale_map_temps() -> None:
 def api_map():
     try:
         if request.method == "GET":
-            return jsonify({"success": True, "items": _list_map_items()[:MAX_MAP_FILES]})
+            with _open_map_directory(create=True) as (_, directory_fd):
+                _remove_unsafe_entries_locked(directory_fd)
+                _cleanup_stale_map_temps_locked(directory_fd)
+                _prune_map_items_locked(directory_fd)
+                items = _list_map_items_locked(directory_fd)
+            return jsonify({"success": True, "items": items})
         else:
             if not (current_app.config.get("TESTING") or session.get("role") == "admin"):
                 return jsonify({"success": False, "message": "Только администратор может загружать карты"}), 403
@@ -210,33 +426,7 @@ def api_map():
                         "error_code": "IMAGE_PROCESSING_FAILED",
                     }
                 ), 400
-            filename = f"zones_map_{time.time_ns()}{out_ext}"
-            save_path = os.path.join(MAP_DIR, filename)
-            os.makedirs(MAP_DIR, exist_ok=True)
-            _cleanup_stale_map_temps()
-            temporary_path: str | None = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="wb",
-                    dir=MAP_DIR,
-                    prefix=".zones_map_",
-                    suffix=".tmp",
-                    delete=False,
-                ) as temporary:
-                    temporary_path = temporary.name
-                    temporary.write(out_bytes)
-                    temporary.flush()
-                    os.fchmod(temporary.fileno(), 0o644)
-                    os.fsync(temporary.fileno())
-                os.replace(temporary_path, save_path)
-                temporary_path = None
-            finally:
-                if temporary_path is not None:
-                    with contextlib.suppress(OSError, PermissionError):
-                        os.remove(temporary_path)
-            # Pruning happens strictly after the complete image has been
-            # atomically published at its final path.
-            _prune_old_maps(filename)
+            filename = _store_map_bytes(out_bytes, out_ext)
             return jsonify({"success": True, "message": "Карта загружена", "path": f"media/maps/{filename}"})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка работы с картой зон: {e}")
@@ -252,10 +442,21 @@ def api_map_delete(filename):
         safe = secure_filename(filename)
         if safe != filename:
             return jsonify({"success": False, "message": "Некорректное имя файла"}), 400
-        path = os.path.join(MAP_DIR, safe)
-        if not os.path.exists(path):
-            return jsonify({"success": False, "message": "Файл не найден"}), 404
-        os.remove(path)
+        if not _is_safe_map_filename(safe):
+            return jsonify({"success": False, "message": "Некорректное имя файла"}), 400
+        with _open_map_directory(create=False) as (_, directory_fd):
+            try:
+                item_stat = _entry_stat(directory_fd, safe)
+            except FileNotFoundError:
+                return jsonify({"success": False, "message": "Файл не найден"}), 404
+            if stat.S_ISLNK(item_stat.st_mode):
+                os.unlink(safe, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                return jsonify({"success": False, "message": "Файл не найден"}), 404
+            if not stat.S_ISREG(item_stat.st_mode):
+                return jsonify({"success": False, "message": "Файл не найден"}), 404
+            os.unlink(safe, dir_fd=directory_fd)
+            os.fsync(directory_fd)
         return jsonify({"success": True})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка удаления карты: {e}")

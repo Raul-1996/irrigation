@@ -938,25 +938,50 @@
             return false;
         }
     }
-    function waterCancel(groupId){
+    async function waterCancel(groupId){
         if (__waterSaveTimers[groupId]) {
             clearTimeout(__waterSaveTimers[groupId]);
             delete __waterSaveTimers[groupId];
         }
-        const st = __waterState[groupId] || {};
-        __waterState[groupId].editing = false;
+        const state = __waterState[groupId] = __waterState[groupId] || {};
+        const baseValueM3 = Number(state.baseValueM3 || 0);
+        const basePulses = Number(state.basePulses || 0);
+        const hadInFlightSave = Boolean(__waterSaveInFlight[groupId]);
+        const hadPendingRestore = Boolean(__waterCalibrationOverrides[groupId]);
+        const revision = (__waterSaveRevisions[groupId] || 0) + 1;
+        __waterSaveRevisions[groupId] = revision;
+        if (hadInFlightSave || hadPendingRestore) {
+            // The old request may already be on the wire.  Invalidate its UI
+            // result and serialize an explicit compensating write after it.
+            __waterCalibrationOverrides[groupId] = {revision, baseValueM3, basePulses};
+        } else {
+            delete __waterCalibrationOverrides[groupId];
+        }
+        state.editing = false;
+        waterStopLive(groupId);
         const actions = document.getElementById(`water-actions-${groupId}`);
         if (actions) actions.style.display = 'none';
-        waterSetDigits(groupId, Number(st.baseValueM3||0));
+        waterSetDigits(groupId, baseValueM3);
+        let restored = true;
+        if (hadInFlightSave || hadPendingRestore) {
+            restored = await waterFlushSave(groupId, {restartLive: false});
+            if (!restored) {
+                state.editing = true;
+                if (actions) actions.style.display = 'flex';
+            }
+        }
         if (waterModalIsOpen(groupId)) waterStartLive(groupId);
+        return restored;
     }
     const __waterSaveTimers = {};
     const __waterSaveRevisions = {};
     const __waterSaveInFlight = {};
+    const __waterCalibrationOverrides = {};
     function scheduleWaterAutoSave(groupId){
         // A response for the previous topic/pulse snapshot must never update
         // the calibration UI after the user has edited it.
         waterStopLive(groupId);
+        delete __waterCalibrationOverrides[groupId];
         __waterSaveRevisions[groupId] = (__waterSaveRevisions[groupId] || 0) + 1;
         if (__waterSaveTimers[groupId]) clearTimeout(__waterSaveTimers[groupId]);
         __waterSaveTimers[groupId] = setTimeout(()=>{ waterFlushSave(groupId); }, 600);
@@ -974,28 +999,40 @@
                 water_pulse_size: wPulse
             };
             const state = __waterState[groupId] || {};
+            const calibrationOverride = __waterCalibrationOverrides[groupId];
+            const hasCalibrationOverride = Boolean(
+                calibrationOverride && calibrationOverride.revision === revision
+            );
             let newValue = null;
             let currentPulses = null;
-            const editing = state.editing === true;
+            const editing = state.editing === true || hasCalibrationOverride;
             if (editing) {
-                newValue = waterDigitsToValue(groupId);
-                const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
-                const rawPulses = pulsesEl ? String(pulsesEl.value || '').trim() : '';
-                currentPulses = rawPulses
-                    ? (parseInt(rawPulses, 10) || 0)
-                    : Number(state.currentPulses ?? state.basePulses ?? 0);
+                if (hasCalibrationOverride) {
+                    newValue = Number(calibrationOverride.baseValueM3 || 0);
+                    currentPulses = Number(calibrationOverride.basePulses || 0);
+                } else {
+                    newValue = waterDigitsToValue(groupId);
+                    const pulsesEl = document.getElementById(`water-pulses-${groupId}`);
+                    const rawPulses = pulsesEl ? String(pulsesEl.value || '').trim() : '';
+                    currentPulses = rawPulses
+                        ? (parseInt(rawPulses, 10) || 0)
+                        : Number(state.currentPulses ?? state.basePulses ?? 0);
+                }
                 payload.water_base_value_m3 = newValue;
                 payload.water_base_pulses = currentPulses;
             }
             const result = await putGroupSettings(groupId, payload);
-            if (!result.ok) {
-                showNotification(result.message || 'Не удалось сохранить настройки счётчика воды', 'error');
+            if (!result || !result.ok) {
+                if ((__waterSaveRevisions[groupId] || 0) === revision) {
+                    showNotification((result && result.message) || 'Не удалось сохранить настройки счётчика воды', 'error');
+                }
                 return false;
             }
             if (editing && (__waterSaveRevisions[groupId] || 0) === revision) {
                 state.baseValueM3 = newValue;
                 state.basePulses = currentPulses;
                 state.editing = false;
+                if (hasCalibrationOverride) delete __waterCalibrationOverrides[groupId];
                 const actions = document.getElementById(`water-actions-${groupId}`);
                 if (actions) actions.style.display = 'none';
             }
@@ -1003,7 +1040,9 @@
             if (group && (__waterSaveRevisions[groupId] || 0) === revision) Object.assign(group, payload);
             return true;
         }catch(e){
-            showNotification('Ошибка сохранения настроек счётчика воды', 'error');
+            if ((__waterSaveRevisions[groupId] || 0) === revision) {
+                showNotification('Ошибка сохранения настроек счётчика воды', 'error');
+            }
             return false;
         }
     }

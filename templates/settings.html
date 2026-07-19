@@ -145,17 +145,13 @@
         </div>
       </details>
       <details style="margin-top:8px;">
-        <summary style="font-size:0.85rem; cursor:pointer;">🧮 Режим коррекции (H1 / Водный баланс)</summary>
+        <summary style="font-size:0.85rem; cursor:pointer;">🧮 H1 и диагностика H2</summary>
         <div style="padding:8px 0;">
-          <div class="settings-row">
-            <label style="display:flex; align-items:center; gap:6px;">
-              <input type="checkbox" id="balance_enabled"> Включить водный баланс (H2) вместо Зиммермана
-            </label>
-          </div>
           <p class="settings-note" style="margin:4px 0 8px;">
             Баланс копит скользящий ET-дефицит и сравнивает его с климат-нормой точки →
             ровный коэффициент на сутки (лечит ночное занижение и внутридневные скачки).
-            Пока выключено — применяется H1, а баланс показывается как «второе мнение».
+            H2 работает только в теневом режиме: полив всегда применяет H1 Зиммермана,
+            а H2 показывается как датированная диагностика.
           </p>
           <div class="settings-row">
             <label for="balance_window_days">Окно дефицита (дней)</label>
@@ -387,7 +383,6 @@
       if (factors.heat !== undefined) document.getElementById('factor_heat').checked = !!factors.heat;
       // H2 water-balance settings
       var bal = wj.balance || {};
-      if (bal.enabled !== undefined) document.getElementById('balance_enabled').checked = !!bal.enabled;
       if (bal.window_days !== undefined) document.getElementById('balance_window_days').value = bal.window_days;
       if (bal.norm_window_days !== undefined) document.getElementById('balance_norm_window_days').value = bal.norm_window_days;
       if (bal.coef_min !== undefined) document.getElementById('balance_coef_min').value = bal.coef_min;
@@ -489,7 +484,6 @@
             heat: document.getElementById('factor_heat').checked
           },
           balance: {
-            enabled: document.getElementById('balance_enabled').checked,
             window_days: parseInt(document.getElementById('balance_window_days').value),
             norm_window_days: parseInt(document.getElementById('balance_norm_window_days').value),
             coef_min: parseInt(document.getElementById('balance_coef_min').value),

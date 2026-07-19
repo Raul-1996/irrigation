@@ -221,6 +221,8 @@
 
   async function loadServers() {
     try {
+      const existingSelect = document.getElementById('serverSelect');
+      const selectedServerId = existingSelect ? String(existingSelect.value || '') : '';
       const res = await api.get('/api/mqtt/servers');
       if (!res || res.success === false || !Array.isArray(res.servers)) {
         throw new Error(mqttErrorMessage(res, 'Некорректный ответ MQTT серверов'));
@@ -267,8 +269,18 @@
       const select = document.getElementById('serverSelect');
       if (select) {
         select.innerHTML = (res.servers||[]).map(s=>`<option value="${s.id}" data-host="${escapeHtml(s.host)}" data-port="${s.port}" data-user="${escapeHtml(s.username||'')}" data-client="${escapeHtml(s.client_id||'')}">${escapeHtml(s.name)}</option>`).join('');
+        if ((res.servers || []).some(server => String(server.id) === selectedServerId)) {
+          select.value = selectedServerId;
+        }
         updateSelectedBadge();
       }
+      // Server CRUD may replace credentials or remove the selected broker.
+      // Rebind active consumers to the freshly populated selector instead of
+      // leaving an EventSource attached to the old server id/configuration.
+      if (scanning) resetTopicState();
+      if (scanning) startSSE();
+      else stopSSE();
+      if (subscribed) startPolling();
       // Обновляем статусы
       await updateStatuses();
       scheduleStatusPolling();
@@ -399,6 +411,7 @@
   let topicStateBytes = 0;
   let expandedPaths = new Set(); // 'devices/wb-.../controls'
   let sseSource = null; // EventSource
+  let sseGeneration = 0;
   let rebuildTimer = null;
   let pendingCount = 0;
   function buildDisplayRegex(filterStr){
@@ -585,19 +598,37 @@
 
   function stopScanLoop(){ if (scanTimer){ clearTimeout(scanTimer); scanTimer=null; } }
 
-  function stopSSE(){ if (sseSource){ sseSource.close(); sseSource=null; } }
+  function stopSSE(){
+    sseGeneration++;
+    const source = sseSource;
+    sseSource = null;
+    if (source) source.close();
+    if (rebuildTimer) {
+      clearTimeout(rebuildTimer);
+      rebuildTimer = null;
+    }
+  }
 
   function startSSE(){
     stopSSE();
     const sel = document.getElementById('serverSelect');
-    if (!sel) return;
+    if (!sel || !sel.value) {
+      scanning = false;
+      const scanButton = document.getElementById('scanBtn');
+      if (scanButton) scanButton.textContent = 'Сканировать топики';
+      return;
+    }
+    const generation = sseGeneration;
     const serverId = sel.value;
     const uiFilter = document.getElementById('filterInput').value.trim();
     const subFilter = hasMqttWildcards(uiFilter) ? uiFilter : '/devices/#';
     const displayRe = buildDisplayRegex(uiFilter);
     const url = `/api/mqtt/${serverId}/scan-sse?filter=${encodeURIComponent(subFilter)}`;
-    sseSource = new EventSource(url);
-    sseSource.onmessage = (ev)=>{
+    const source = new EventSource(url);
+    sseSource = source;
+    const isCurrent = () => generation === sseGeneration && sseSource === source;
+    source.onmessage = (ev)=>{
+      if (!isCurrent()) return;
       try{
         const it = JSON.parse(ev.data);
         const t = (String(it.topic||''));
@@ -606,7 +637,8 @@
           if (!storeTopicValue(norm, it.payload)) return;
           pendingCount++;
           if (!rebuildTimer){
-            rebuildTimer = setTimeout(()=>{
+            const scheduledTimer = setTimeout(()=>{
+              if (!isCurrent() || rebuildTimer !== scheduledTimer) return;
               rebuildTimer = null;
               const merged = Array.from(lastTopicMap, ([topic,payload])=>({topic,payload}));
               const tree = buildTreeFromTopics(merged);
@@ -615,12 +647,14 @@
               renderTree(tree, container);
               pendingCount = 0;
             }, 300); // не чаще, чем раз в 300 мс
+            rebuildTimer = scheduledTimer;
           }
         }
       }catch(e){}
     };
-    sseSource.addEventListener('ping', ()=>{});
-    sseSource.onerror = ()=>{
+    source.addEventListener('ping', ()=>{ if (!isCurrent()) return; });
+    source.onerror = ()=>{
+      if (!isCurrent()) return;
       appendLog('% SSE error — поток будет остановлен');
       stopSSE();
       scanning = false;

@@ -246,7 +246,7 @@ function renderList() {
             </div>
             <div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>
           </div>
-          <div class="program-time">⏰ ${p.time}</div>
+          <div class="program-time">⏰ ${escapeHtml(p.time)}</div>
           <div class="program-days">
             ${p.schedule_type === 'even-odd' ? 
               `<div class="day-pill active">${p.even_odd === 'even' ? 'Чётные дни' : 'Нечётные дни'}</div>` :

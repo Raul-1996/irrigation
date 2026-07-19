@@ -162,6 +162,60 @@ def test_single_group_refresh_shares_global_status_request_generation() -> None:
     assert "++statusRequestGeneration" in body
     assert "requestGeneration !== statusRequestGeneration" in body
     assert "statusData = data" in body
+    assert "updateStatusDisplay()" in body
+
+
+def test_single_group_refresh_renders_the_entire_winning_status_snapshot() -> None:
+    source = _source(STATUS)
+    functions = "\n".join(
+        _function(source, name) for name in ("assertJsonResponse", "loadStatusData", "refreshSingleGroup")
+    )
+    script = f"""
+let statusData = null;
+let statusRequestGeneration = 0;
+const cards = Object.create(null);
+const pending = [];
+function deferredResponse() {{
+  let resolve;
+  const promise = new Promise(done => {{ resolve = done; }});
+  return {{promise, resolve}};
+}}
+function fetch() {{
+  const deferred = deferredResponse();
+  pending.push(deferred);
+  return deferred.promise;
+}}
+function response(payload) {{
+  return {{ok: true, status: 200, json: async () => payload}};
+}}
+function updateStatusDisplay() {{
+  statusData.groups.forEach(group => {{ cards[group.id] = group.status; }});
+}}
+function updateWaterMeter() {{}}
+function updateZoneStats() {{}}
+function hideConnectionError() {{}}
+function showConnectionError() {{}}
+function updateMqttWarnings() {{}}
+const zonesData = [];
+{functions}
+const globalPoll = loadStatusData();
+const focusedRefresh = refreshSingleGroup(1);
+pending[1].resolve(response({{groups: [
+  {{id: 1, status: 'watering'}},
+  {{id: 2, status: 'postponed'}},
+]}}));
+focusedRefresh.then(() => {{
+  pending[0].resolve(response({{groups: [
+    {{id: 1, status: 'waiting'}},
+    {{id: 2, status: 'waiting'}},
+  ]}}));
+  return globalPoll;
+}}).then(() => process.stdout.write(JSON.stringify({{cards, statusData}})));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = json.loads(completed.stdout)
+    assert result["cards"] == {"1": "watering", "2": "postponed"}
+    assert [group["status"] for group in result["statusData"]["groups"]] == ["watering", "postponed"]
 
 
 def test_water_widgets_use_authoritative_controller_day_total_only() -> None:
@@ -224,7 +278,7 @@ process.stdout.write(JSON.stringify({{postponed, failed}}));
     assert "<script" not in rendered["failed"]
     assert "&lt;script" in rendered["failed"]
     assert "renderGroupExtraHtml" in display
-    assert "renderGroupExtraHtml" in single
+    assert "updateStatusDisplay" in single
     assert "escapeHtml(group.error_message)" in extra
     for name in (
         "renderForecast24h",
@@ -284,6 +338,49 @@ process.stdout.write(JSON.stringify(elements));
     for dangerous in ("<img", "<svg", "<script", "<iframe", "<object"):
         assert dangerous not in rendered
     assert "&lt;img" in rendered
+
+
+def test_weather_ui_keeps_h1_applied_and_h2_shadow_status_truthful() -> None:
+    status_source = _source(STATUS)
+    second_opinion = _function(status_source, "renderCoeffSecondOpinion")
+    summary = _function(status_source, "renderWeatherSummary")
+    settings_source = _source(SETTINGS)
+    script = f"""
+function escapeHtml(value) {{ return String(value ?? '').replaceAll('<', '&lt;').replaceAll('>', '&gt;'); }}
+{second_opinion}
+process.stdout.write(JSON.stringify([
+  renderCoeffSecondOpinion({{
+    mode: 'shadow', coefficient_balance: 88, balance_status: 'fresh',
+    balance_last_recalc_date: '2026-07-19', balance_age_days: 0,
+  }}),
+  renderCoeffSecondOpinion({{
+    mode: 'shadow', coefficient_balance: 91, balance_status: 'stale',
+    balance_last_recalc_date: '2026-07-16', balance_age_days: 3,
+  }}),
+  renderCoeffSecondOpinion({{
+    mode: 'legacy', coefficient_balance: null, balance_status: 'unavailable',
+    balance_last_recalc_date: null, balance_age_days: null,
+  }}),
+  renderCoeffSecondOpinion({{
+    mode: 'balance', coefficient_balance: 120, balance_status: 'future',
+    balance_last_recalc_date: '2026-07-22', balance_age_days: -3,
+  }}),
+]));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    fresh, stale, unavailable, future = json.loads(completed.stdout)
+    for rendered in (fresh, stale, unavailable, future):
+        assert "Зимм. (H1)" in rendered
+        assert "H2 shadow" in rendered
+        assert "Баланс" not in rendered
+    assert "свеж" in fresh and "2026-07-19" in fresh
+    assert "устар" in stale and "3" in stale and "2026-07-16" in stale
+    assert "нет данных" in unavailable
+    assert "будущ" in future and "2026-07-22" in future
+    assert "coefficient_legacy" in summary
+    assert 'id="balance_enabled"' not in settings_source
+    assert "H2 работает только в теневом режиме" in settings_source
+    assert "enabled: document.getElementById('balance_enabled')" not in settings_source
 
 
 def test_zones_sse_resync_cannot_overwrite_a_newer_event() -> None:
@@ -361,6 +458,7 @@ def test_water_close_reuses_the_current_autosave_request() -> None:
 const __waterSaveTimers = {{}};
 const __waterSaveRevisions = {{1: 4}};
 const __waterSaveInFlight = {{}};
+const __waterCalibrationOverrides = {{}};
 const __waterClosing = {{1: true}};
 const __waterState = {{1: {{editing: false}}}};
 const groupsData = [];
@@ -391,6 +489,64 @@ Promise.all([autosave, closeFlush]).then(results => {{
 """
     completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     assert json.loads(completed.stdout) == {"requestCount": 1, "results": [True, True]}
+
+
+def test_water_cancel_serializes_a_compensating_baseline_save() -> None:
+    source = _source(ZONES)
+    functions = "\n".join(_function(source, name) for name in ("waterCancel", "performWaterSave", "waterFlushSave"))
+    script = f"""
+const __waterSaveTimers = {{}};
+const __waterSaveRevisions = {{1: 1}};
+const __waterSaveInFlight = {{}};
+const __waterCalibrationOverrides = {{}};
+const __waterClosing = {{}};
+const __waterState = {{1: {{editing: true, baseValueM3: 10, basePulses: 100, currentPulses: 200}}}};
+const groupsData = [{{id: 1, water_base_value_m3: 10, water_base_pulses: 100}}];
+const digits = [];
+const elements = {{
+  'water-server-1': {{value: '3'}},
+  'water-topic-1': {{value: '/meter'}},
+  'water-pulse-1': {{value: '1l'}},
+  'water-pulses-1': {{value: '200'}},
+  'water-actions-1': {{style: {{display: 'flex'}}}},
+}};
+const document = {{getElementById(id) {{ return elements[id] || null; }}}};
+function waterDigitsToValue() {{ return 20; }}
+function waterSetDigits(_groupId, value) {{ digits.push(value); }}
+function waterModalIsOpen() {{ return false; }}
+function waterStartLive() {{}}
+function waterStopLive() {{}}
+function showNotification() {{}}
+const requests = [];
+function putGroupSettings(_groupId, payload) {{
+  let resolve;
+  const promise = new Promise(done => {{ resolve = done; }});
+  requests.push({{payload, resolve}});
+  return promise;
+}}
+{functions}
+const autosave = waterFlushSave(1, {{restartLive: false}});
+const cancel = waterCancel(1);
+requests[0].resolve({{ok: true}});
+setImmediate(() => {{
+  requests[1].resolve({{ok: true}});
+  Promise.all([autosave, cancel]).then(() => process.stdout.write(JSON.stringify({{
+    payloads: requests.map(request => request.payload),
+    state: __waterState[1],
+    group: groupsData[0],
+    digits,
+  }})));
+}});
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = json.loads(completed.stdout)
+    assert [payload["water_base_value_m3"] for payload in result["payloads"]] == [20, 10]
+    assert [payload["water_base_pulses"] for payload in result["payloads"]] == [200, 100]
+    assert result["state"]["baseValueM3"] == 10
+    assert result["state"]["basePulses"] == 100
+    assert result["state"]["editing"] is False
+    assert result["group"]["water_base_value_m3"] == 10
+    assert result["digits"][-1] == 10
 
 
 def test_all_sensor_mqtt_selectors_can_preserve_explicit_null() -> None:
@@ -430,6 +586,69 @@ def test_mqtt_server_switch_retargets_scan_and_referenced_servers_are_locked() -
     assert "references" in load
     assert "mqttServerGuardReason" in update
     assert "mqttServerGuardReason" in delete
+    assert "if (scanning) startSSE()" in load
+
+
+def test_mqtt_sse_retarget_ignores_queued_old_stream_callbacks() -> None:
+    source = _source(MQTT)
+    functions = "\n".join(_function(source, name) for name in ("stopSSE", "startSSE"))
+    script = f"""
+let scanning = true;
+let sseSource = null;
+let sseGeneration = 0;
+let rebuildTimer = null;
+let pendingCount = 0;
+let lastTopicMap = new Map();
+const stored = [];
+const notices = [];
+const sources = [];
+const select = {{value: '1'}};
+const elements = {{
+  serverSelect: select,
+  filterInput: {{value: ''}},
+  scanBtn: {{textContent: ''}},
+  topicTree: {{innerHTML: ''}},
+}};
+const document = {{getElementById(id) {{ return elements[id] || null; }}}};
+class EventSource {{
+  constructor(url) {{ this.url = url; this.closed = false; sources.push(this); }}
+  close() {{ this.closed = true; }}
+  addEventListener() {{}}
+}}
+function hasMqttWildcards() {{ return false; }}
+function buildDisplayRegex() {{ return /.*/; }}
+function storeTopicValue(topic, payload) {{ stored.push([topic, payload]); return true; }}
+function buildTreeFromTopics() {{ return {{}}; }}
+function renderTree() {{}}
+function appendLog(value) {{ notices.push(value); }}
+const setTimeout = () => 1;
+{functions}
+startSSE();
+const oldSource = sources[0];
+select.value = '2';
+startSSE();
+const currentSource = sources[1];
+oldSource.onmessage({{data: JSON.stringify({{topic: '/old', payload: 'stale'}})}});
+oldSource.onerror();
+currentSource.onmessage({{data: JSON.stringify({{topic: '/new', payload: 'fresh'}})}});
+process.stdout.write(JSON.stringify({{
+  stored,
+  scanning,
+  oldClosed: oldSource.closed,
+  currentClosed: currentSource.closed,
+  currentIsGlobal: sseSource === currentSource,
+  notices,
+}}));
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert json.loads(completed.stdout) == {
+        "stored": [["/new", "fresh"]],
+        "scanning": True,
+        "oldClosed": True,
+        "currentClosed": False,
+        "currentIsGlobal": True,
+        "notices": [],
+    }
 
 
 def test_mqtt_reference_metadata_covers_every_backend_category() -> None:
@@ -531,6 +750,39 @@ process.stdout.write(JSON.stringify([
     completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     assert json.loads(completed.stdout) == ["#abcdef", "#42a5f5", "#42a5f5"]
     assert "safeProgramColor(p.color)" in render
+
+
+def test_program_legacy_time_is_escaped_before_rendering() -> None:
+    source = _source(PROGRAMS)
+    render = _function(source, "renderList")
+    safe_color = _function(source, "safeProgramColor")
+    script = f"""
+function escapeHtml(value) {{
+  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}}
+const DEFAULT_PROGRAM_COLOR = '#42a5f5';
+{safe_color}
+const container = {{innerHTML: ''}};
+const document = {{getElementById() {{ return container; }}}};
+const currentSort = 'name';
+const zones = [];
+const programs = [{{
+  id: 1,
+  name: 'legacy',
+  time: '<img src=x onerror=alert(1)>',
+  type: 'time-based',
+  schedule_type: 'weekdays',
+  days: [],
+  zones: [],
+  enabled: true,
+}}];
+{render}
+renderList();
+process.stdout.write(container.innerHTML);
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert "<img" not in completed.stdout
+    assert "&lt;img" in completed.stdout
 
 
 def test_password_confirmation_and_whitespace_contract() -> None:
