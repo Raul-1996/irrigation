@@ -92,6 +92,17 @@ function safeProgramColor(value) {
   return /^#[0-9A-Fa-f]{6}$/.test(color) ? color.toLowerCase() : DEFAULT_PROGRAM_COLOR;
 }
 
+function isUnsupportedSmartProgram(program) {
+  return Boolean(program && program.type === 'smart');
+}
+
+function rejectUnsupportedProgramAction(id) {
+  const program = programs.find(item => item.id === id);
+  if (!isUnsupportedSmartProgram(program)) return false;
+  showToast('Smart Weather больше не поддерживается. Программу можно только просмотреть или удалить.');
+  return true;
+}
+
 function apiHeaders(json = true) {
   const h = {};
   if (json) h['Content-Type'] = 'application/json';
@@ -235,6 +246,7 @@ function renderList() {
   sorted.forEach(p => {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const days = p.days || [];
+    const unsupportedSmart = p.type === 'smart';
     
     html += `
       <div class="program-card" style="border-left-color: ${safeProgramColor(p.color)}">
@@ -242,9 +254,11 @@ function renderList() {
           <div class="program-title">
             <div class="program-name">
               <span>${escapeHtml(p.name)}</span>
-              <span class="badge ${p.type || 'time-based'}">${p.type === 'smart' ? 'Smart' : 'Time-Based'}</span>
+              <span class="badge ${unsupportedSmart ? 'smart' : 'time-based'}">${unsupportedSmart ? 'Smart — не поддерживается' : 'Time-Based'}</span>
             </div>
-            <div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>
+            ${unsupportedSmart
+              ? '<div class="toggle-switch disabled" aria-disabled="true" title="Smart Weather больше не поддерживается"></div>'
+              : `<div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>`}
           </div>
           <div class="program-time">⏰ ${escapeHtml(p.time)}</div>
           <div class="program-days">
@@ -258,6 +272,7 @@ function renderList() {
             }
           </div>
           <div class="program-stats">${(p.zones || []).length} зон</div>
+          ${unsupportedSmart ? '<div class="program-stats" role="status">⚠️ Smart Weather больше не поддерживается. Редактирование, включение, дублирование и запуск отключены.</div>' : ''}
         </div>
         
         <div class="program-details" id="details-${p.id}">
@@ -276,15 +291,17 @@ function renderList() {
             </div>
             
             <div class="program-actions">
-              <button class="icon-btn" onclick="editProgram(${p.id})"
-                      data-audit-action="program_edit_click"
-                      data-audit-target="program:${p.id}">✏️ Редактировать</button>
-              <button class="icon-btn" onclick="duplicateProgram(${p.id})"
-                      data-audit-action="program_duplicate_click"
-                      data-audit-target="program:${p.id}">📋 Дублировать</button>
-              <button class="icon-btn" onclick="runProgram(${p.id})"
-                      data-audit-action="program_run_click"
-                      data-audit-target="program:${p.id}">▶️ Запустить</button>
+              ${unsupportedSmart ? '' : `
+                <button class="icon-btn" onclick="editProgram(${p.id})"
+                        data-audit-action="program_edit_click"
+                        data-audit-target="program:${p.id}">✏️ Редактировать</button>
+                <button class="icon-btn" onclick="duplicateProgram(${p.id})"
+                        data-audit-action="program_duplicate_click"
+                        data-audit-target="program:${p.id}">📋 Дублировать</button>
+                <button class="icon-btn" onclick="runProgram(${p.id})"
+                        data-audit-action="program_run_click"
+                        data-audit-target="program:${p.id}">▶️ Запустить</button>
+              `}
               <button class="icon-btn danger" onclick="deleteProgram(${p.id})"
                       data-audit-action="program_delete_click"
                       data-audit-target="program:${p.id}">🗑 Удалить</button>
@@ -311,6 +328,7 @@ function toggleDetails(id) {
 async function toggleEnabled(id) {
   try {
     const prog = programs.find(p => p.id === id);
+    if (rejectUnsupportedProgramAction(id)) return;
     const newEnabled = !Boolean(prog.enabled);
     
     const resp = await fetch(`/api/programs/${id}/enabled`, {
@@ -334,6 +352,7 @@ async function toggleEnabled(id) {
 }
 
 async function duplicateProgram(id) {
+  if (rejectUnsupportedProgramAction(id)) return;
   try {
     const resp = await fetch(`/api/programs/${id}/duplicate`, {method: 'POST', headers: apiHeaders(false)});
     const data = await readResponseJson(resp);
@@ -350,6 +369,7 @@ async function duplicateProgram(id) {
 }
 
 async function runProgram(id) {
+  if (rejectUnsupportedProgramAction(id)) return;
   try {
     const resp = await fetch(`/api/programs/${id}/run`, {
       method: 'POST',
@@ -390,6 +410,7 @@ async function deleteProgram(id) {
 function editProgram(id) {
   const p = programs.find(pr => pr.id === id);
   if (!p) return;
+  if (rejectUnsupportedProgramAction(id)) return;
   editingId = id;
   wizardStep = 1;
   wizardData = {
@@ -470,12 +491,8 @@ function renderWizardStep() {
           <div class="radio-card-title">⏱ Time-Based</div>
           <div class="radio-card-desc">Фиксированное время для каждой зоны</div>
         </div>
-        <div class="radio-card ${wizardData.type === 'smart' ? 'selected' : ''}" 
-          onclick="wizardData.type = 'smart'; renderWizard()">
-          <div class="radio-card-title">🌤 Smart Weather</div>
-          <div class="radio-card-desc">Автокоррекция по погоде и ET₀</div>
-        </div>
       </div>
+      <div class="radio-card-desc">Smart Weather больше не поддерживается и недоступен для новых программ.</div>
     </div>
     
     <div class="form-group">
@@ -585,7 +602,7 @@ function renderWizardStep() {
         <div class="summary-label">Программа</div>
         <div class="summary-value">
           <strong>${escapeHtml(wizardData.name || 'Без названия')}</strong>
-          <span class="badge ${wizardData.type}">${wizardData.type === 'smart' ? 'Smart' : 'Time-Based'}</span>
+          <span class="badge time-based">Time-Based</span>
         </div>
       </div>
       
@@ -690,6 +707,10 @@ function toggleZone(zoneId) {
 }
 
 async function saveWizard() {
+  if (wizardData.type !== 'time-based') {
+    showToast('Smart Weather больше не поддерживается. Создайте программу Time-Based.');
+    return;
+  }
   if (!wizardData.name) {
     showToast('Введите название программы');
     return;
