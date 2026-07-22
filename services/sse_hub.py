@@ -344,21 +344,27 @@ def _audited_zone_update(zone_id: int, updates: dict, *, snapshot: dict) -> bool
         return False
 
 
-def _finish_observed_run(zone_id: int) -> None:
+def _finish_observed_run(zone_id: int, *, status: str = "ok") -> bool:
     try:
         run = _db.get_open_zone_run(int(zone_id))
-        if run:
-            _db.finish_zone_run(
+        if not run:
+            return True
+        finished = _db.finish_zone_run(
                 int(run["id"]),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 time.monotonic(),
                 None,
                 None,
                 None,
-                status="ok",
+                status=str(status),
             )
+        if finished is not True:
+            logger.error("sse_hub: finish_zone_run rejected zid=%s run=%s", zone_id, run.get("id"))
+            return False
+        return True
     except (sqlite3.Error, OSError):
         logger.exception("sse_hub: finish_zone_run on observed off failed zid=%s", zone_id)
+        return False
 
 
 def _zone_activation_snapshot(zone: dict) -> tuple[object, object, str, str, object]:
@@ -470,7 +476,15 @@ def _process_mqtt_message(
         recently_stopped(zone_id, window_sec=5) or _recent_db_stop(zones[zone_id], window_sec=5)
         for zone_id in eligible_zone_ids
     )
-    counter_required = relay_high and bool(eligible_zone_ids) and (emergency or bounced)
+    failed_stop_on = relay_high and any(
+        str(zones[zid].get("state") or "").lower() == "fault"
+        or (
+            str(zones[zid].get("commanded_state") or "").lower() == "off"
+            and str(zones[zid].get("state") or "").lower() in {"starting", "on", "stopping"}
+        )
+        for zid in eligible_zone_ids
+    )
+    counter_required = relay_high and bool(eligible_zone_ids) and (emergency or bounced or failed_stop_on)
     counter_handled = _publish_counter_off(int(sid), normalized) if counter_required else None
 
     for zone_id in zone_ids:
@@ -508,19 +522,78 @@ def _process_mqtt_message(
                         command_registered_at,
                     )
                     continue
-                if str(current.get("commanded_state") or "").lower() != "on":
-                    mark_zone_stopped(zid)
-                    if current.get("watering_start_time"):
-                        _finish_observed_run(zid)
-                    updates = {"state": "off", "observed_state": "off", "planned_end_time": None}
-                    if _cancel_zone_safety_jobs(zid):
-                        updates["watering_start_time"] = None
-                        updates["command_id"] = None
+                current_command = str(current.get("commanded_state") or "").lower()
+                if current_command == "off":
+                    applied = state_verifier.apply_live_confirmation(
+                        zid,
+                        "off",
+                        received_at=received_at,
+                        db_instance=_db,
+                        scheduler_getter=_get_scheduler_fn,
+                    )
+                    if applied:
+                        mark_zone_stopped(zid)
+                        broadcast(
+                            json.dumps(
+                                {
+                                    "zone_id": zid,
+                                    "topic": normalized,
+                                    "payload": payload,
+                                    "state": "off",
+                                }
+                            )
+                        )
+                    continue
+                try:
+                    invalidated_at = state_verifier.command_invalidated_at(zid)
+                    if not isinstance(invalidated_at, (int, float)):
+                        invalidated_at = None
+                except (AttributeError, TypeError, ValueError):
+                    invalidated_at = None
+                commanded_on = str(current.get("commanded_state") or "").lower() == "on"
+                was_fault = str(current.get("state") or "").lower() == "fault"
+                pre_fault_off = bool(
+                    was_fault
+                    and received_at is not None
+                    and invalidated_at is not None
+                    and float(received_at) < invalidated_at
+                )
+                if not commanded_on:
+                    updates = {"observed_state": "off", "planned_end_time": None}
+                    if not was_fault or pre_fault_off:
+                        updates["state"] = "off"
                 else:
                     # Physical evidence for a still-commanded ON is retained,
                     # but cannot complete or disarm that activation.
                     updates = {"observed_state": "off"}
-                _audited_zone_update(zid, updates, snapshot=current)
+                applied = _audited_zone_update(zid, updates, snapshot=current)
+                if not applied:
+                    # No history/job/token side effect may outlive a rejected
+                    # generation CAS. A newer activation now owns the relay.
+                    continue
+                if not commanded_on:
+                    mark_zone_stopped(zid)
+                    if current.get("watering_start_time"):
+                        if not _finish_observed_run(
+                            zid,
+                            status="failed" if was_fault and not pre_fault_off else "ok",
+                        ):
+                            # Keep token-bound safety jobs armed and let a
+                            # reconciliation/fresh report retry history close.
+                            continue
+                    if _cancel_zone_safety_jobs(zid):
+                        latest = _db.get_zone(zid) or {}
+                        if (
+                            latest
+                            and str(latest.get("observed_state") or "").lower() == "off"
+                            and str(latest.get("commanded_state") or "").lower() != "on"
+                            and latest.get("command_id") == current.get("command_id")
+                        ):
+                            _audited_zone_update(
+                                zid,
+                                {"watering_start_time": None, "command_id": None},
+                                snapshot=latest,
+                            )
             broadcast(
                 json.dumps(
                     {
@@ -533,6 +606,31 @@ def _process_mqtt_message(
             )
             continue
 
+        if (
+            relay_high
+            and not counter_required
+            and str(zone.get("commanded_state") or "").lower() == "on"
+        ):
+            applied = state_verifier.apply_live_confirmation(
+                zid,
+                "on",
+                received_at=received_at,
+                db_instance=_db,
+                scheduler_getter=_get_scheduler_fn,
+            )
+            if applied:
+                broadcast(
+                    json.dumps(
+                        {
+                            "zone_id": zid,
+                            "topic": normalized,
+                            "payload": payload,
+                            "state": "on",
+                        }
+                    )
+                )
+            continue
+
         updates = {"state": observed_state, "observed_state": observed_state}
         persisted = False
 
@@ -542,11 +640,15 @@ def _process_mqtt_message(
             # immediate watchdog tick cannot mistake it for an ownerless OFF.
             activation_token = str(zone.get("command_id") or uuid.uuid4().hex)
             watering_start = str(zone.get("watering_start_time") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            failed_stop_fault = str(zone.get("state") or "").lower() == "fault"
             updates.update(
                 {
-                    "state": "on",
+                    # A failed stop remains sticky FAULT.  The live ON is
+                    # physical evidence, not permission to resurrect it as a
+                    # normal activation; retain that evidence until fresh OFF.
+                    "state": "fault" if failed_stop_fault else "on",
                     "commanded_state": "off",
-                    "observed_state": "unconfirmed",
+                    "observed_state": "on" if failed_stop_fault else "unconfirmed",
                     "watering_start_time": watering_start,
                     "command_id": activation_token,
                 }

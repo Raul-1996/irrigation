@@ -8,12 +8,13 @@ from contextlib import ExitStack, contextmanager
 from flask import Blueprint, jsonify, request
 
 from database import db
+from irrigation_scheduler import get_scheduler
 from services import sse_hub as _sse_hub
 from services.audit import audit_log, debug_audit
 from services.duration_conflicts import compute_duration_conflicts
 from services.locks import group_lock, zone_lock
 from services.next_watering import NextWateringLimitError, compute_next_watering, normalize_requested_zone_ids
-from services.zones_state import compare_and_swap_zone
+from services.zones_state import compare_and_swap_zone_detailed
 from utils import normalize_topic, to_iso_with_tz
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,39 @@ def _zone_version_conflict(expected_version: int, current: dict | None):
     ), 409
 
 
+def _reconcile_affected_program_schedules(program_ids: object) -> bool:
+    """Best-effort post-commit reconciliation for atomic group-999 unlinks.
+
+    Timer callbacks independently revalidate and self-heal stale fingerprints;
+    this eager path keeps normal operation current immediately after the DB
+    commit.  The write itself is never misreported as rolled back if the live
+    scheduler is temporarily unavailable.
+    """
+    if not program_ids:
+        return True
+    if not isinstance(program_ids, list) or any(
+        type(program_id) is not int or program_id <= 0 for program_id in program_ids
+    ):
+        logger.error("zone mutation returned invalid affected_program_ids=%r", program_ids)
+        return False
+    affected = sorted(set(program_ids))
+    try:
+        scheduler = get_scheduler()
+        reconcile = getattr(scheduler, "reconcile_program_from_db", None) if scheduler is not None else None
+        if not callable(reconcile):
+            logger.error("affected program schedules await self-heal; live reconciler unavailable ids=%s", affected)
+            return False
+        all_ok = True
+        for program_id in affected:
+            if reconcile(program_id) is not True:
+                all_ok = False
+                logger.error("post-commit program schedule reconcile failed program=%s", program_id)
+        return all_ok
+    except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError):
+        logger.exception("post-commit program schedule reconcile failed ids=%s", affected)
+        return False
+
+
 # ---- Zone CRUD ----
 
 
@@ -393,7 +427,7 @@ def api_zone(zone_id):
                             "message": "Zone topology cannot change until the relay is confirmed off",
                         }
                     ), 409
-                applied, snapshot = compare_and_swap_zone(
+                cas_result = compare_and_swap_zone_detailed(
                     zone_id,
                     data,
                     expected_version=expected_version,
@@ -401,25 +435,38 @@ def api_zone(zone_id):
                     db=db,
                 )
         else:
-            applied, snapshot = compare_and_swap_zone(
+            cas_result = compare_and_swap_zone_detailed(
                 zone_id,
                 data,
                 expected_version=expected_version,
                 audit_reason="zone_crud",
                 db=db,
             )
-        if not applied:
-            return _zone_version_conflict(expected_version, snapshot)
+        if cas_result.get("success") is not True:
+            if cas_result.get("reason") in {"not_found", "version_conflict"}:
+                return _zone_version_conflict(expected_version, cas_result.get("current"))
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "Zone update is temporarily unavailable",
+                        "error_code": "ZONE_UPDATE_UNAVAILABLE",
+                    }
+                ),
+                503,
+            )
 
-        # Build the response from the exact pre-write snapshot and accepted
-        # fields.  A concurrent writer may commit immediately after our CAS;
-        # re-reading here would return that writer's version and make this
-        # response unusable as the caller's next expected_version.
-        assert snapshot is not None
-        zone = dict(snapshot)
-        zone.update(data)
-        zone["version"] = expected_version + 1
+        # The repository builds this enriched read model while its CAS write
+        # transaction is still locked. A later writer can commit immediately
+        # after that transaction, but can never leak into this response.
+        snapshot = cas_result.get("previous")
+        current = cas_result.get("current")
+        if not isinstance(snapshot, dict) or not isinstance(current, dict):
+            logger.error("successful detailed zone CAS returned incomplete snapshots zone=%s", zone_id)
+            return jsonify({"success": False, "error_code": "ZONE_UPDATE_RESULT_INVALID"}), 500
+        zone = dict(current)
         zone["success"] = True
+        _reconcile_affected_program_schedules(cas_result.get("affected_program_ids"))
         if zone:
             if is_csv:
                 try:
@@ -502,6 +549,10 @@ def api_create_zone():
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.debug("Handled exception in api_create_zone: %s", e)
     zone = db.create_zone(data)
+    if zone:
+        _reconcile_affected_program_schedules(zone.get("affected_program_ids"))
+        zone = dict(zone)
+        zone.pop("affected_program_ids", None)
     if zone and zone.get("mqtt_server_id") is None:
         # Zone created but no MQTT server assigned — warn caller
         db.add_log(
@@ -682,6 +733,7 @@ def api_import_zones_bulk():
                     "message": "Импорт зон полностью отменён из-за ошибки",
                 }
             ), 409
+        _reconcile_affected_program_schedules(stats.get("affected_program_ids"))
         try:
             db.add_log("zones_import", json.dumps({"counts": stats}))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

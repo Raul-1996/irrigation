@@ -1442,7 +1442,7 @@ def test_session_stop_fails_closed_when_strict_group_inventory_is_unavailable(ad
     scheduler.cancel_group_jobs.assert_not_called()
 
 
-def test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false(admin_client, app):
+def test_mqtt_stop_does_not_retry_raw_publish_after_central_failure(admin_client, app):
     import routes.zones_watering_api as route
 
     server = app.db.create_mqtt_server({"name": "fallback", "host": "127.0.0.1", "port": 1883})
@@ -1461,13 +1461,14 @@ def test_mqtt_stop_fallback_does_not_claim_off_when_publish_returns_false(admin_
     with (
         patch.object(route, "get_scheduler", return_value=None),
         patch("services.zone_control.stop_zone", return_value=False),
-        patch.object(route, "_publish_mqtt_value", return_value=False),
+        patch("services.mqtt_pub.publish_mqtt_value") as raw_publish,
     ):
         response = admin_client.post(f"/api/zones/{zone['id']}/mqtt/stop", content_type="application/json")
 
     assert response.status_code == 500
     assert response.get_json()["success"] is False
     assert app.db.get_zone(zone["id"])["state"] == "on"
+    raw_publish.assert_not_called()
 
 
 @pytest.mark.parametrize("observed_state", ["on", "unknown"])
@@ -1499,7 +1500,6 @@ def test_public_stop_forces_off_retry_when_observed_state_is_not_off(
         with (
             patch.object(route, "get_scheduler", return_value=None),
             patch("services.zone_control.publish_mqtt_value", return_value=False) as physical_publish,
-            patch.object(route, "_publish_mqtt_value", return_value=False),
         ):
             response = guest_client.post(path, content_type="application/json")
     finally:

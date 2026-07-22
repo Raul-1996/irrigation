@@ -212,6 +212,31 @@ def test_group_stop_without_scheduler_restarts_observed_state_verification() -> 
     verify_async.assert_called_once_with(81, "off")
 
 
+def test_group_stop_reports_stopping_off_as_pending_confirmation() -> None:
+    pending_zone = [
+        {
+            "id": 83,
+            "group_id": 8,
+            "state": "stopping",
+            "commanded_state": "off",
+        }
+    ]
+
+    with (
+        patch("irrigation_scheduler.get_scheduler", return_value=None),
+        patch("services.zone_control.stop_zone", return_value=False),
+        patch.object(telegram, "_read_group_zones_strict", return_value=pending_zone),
+        patch("services.observed_state.state_verifier.verify_async") as verify_async,
+    ):
+        result = telegram._do_group_stop(8)
+
+    assert "Команда OFF принята для зон: 83" in result
+    assert "ожидается свежее подтверждение реле" in result
+    assert "OFF не подтверждён" not in result
+    assert "Полив группы остановлен" not in result
+    verify_async.assert_called_once_with(83, "off")
+
+
 def test_group_stop_rejects_none_and_malformed_scheduler_results() -> None:
     zone = {"id": 71, "group_id": 7, "state": "off"}
 

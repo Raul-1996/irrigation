@@ -174,6 +174,8 @@ def _zone_off_status(zone: dict, stop_result: bool | None) -> str:
     """
     state = str(zone.get("state") or "").strip().lower()
     commanded = str(zone.get("commanded_state") or "").strip().lower()
+    if state == "stopping" and commanded == "off":
+        return "pending"
     if stop_result is False or state != "off" or (commanded and commanded != "off"):
         return "failed"
     has_mqtt_channel = bool(zone.get("mqtt_server_id") and str(zone.get("topic") or "").strip())

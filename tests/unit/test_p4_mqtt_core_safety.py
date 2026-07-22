@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -38,6 +39,166 @@ def _scheduler_group_stop_result(group_id: int, stopped: list[int]) -> dict:
         "unverified_zone_ids": [],
         "retry_scheduled": False,
     }
+
+
+def test_start_does_not_report_success_when_post_publish_cas_loses(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "start-final-cas", state="off")
+    original_update = zone_control._versioned_update
+
+    def reject_final_state(zone_id, updates, *, audit_reason=""):
+        if audit_reason == "mqtt_ack_on":
+            return False, test_db.get_zone(zone_id)
+        return original_update(zone_id, updates, audit_reason=audit_reason)
+
+    verifier = MagicMock()
+    verifier.prepare_verification.return_value = object()
+    published_values: list[str] = []
+
+    def publish(_server, _topic, value, **_kwargs):
+        published_values.append(value)
+        return True
+
+    verifier.verify_master_command.side_effect = lambda _sid, _topic, _expected, callback: callback()
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_versioned_update", side_effect=reject_final_state),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False),
+        patch("services.events.publish") as publish_event,
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    verifier.verify_async.assert_not_called()
+    assert published_values[-2:] == ["1", "0"]
+    assert not any(call.args[0].get("type") == "zone_start" for call in publish_event.call_args_list)
+
+
+def test_start_verify_launch_failure_counter_stops_energized_relay(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "start-verify-launch", state="off")
+    verifier = MagicMock()
+    verifier.prepare_verification.return_value = object()
+    verifier.verify_async.side_effect = RuntimeError("thread launch failed")
+    values: list[str] = []
+
+    def publish(_server, _topic, value, **_kwargs):
+        values.append(value)
+        return True
+
+    verifier.verify_master_command.side_effect = lambda _sid, _topic, _expected, callback: callback()
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", side_effect=publish),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+        patch.object(zone_control, "_emergency_stop_active", return_value=False),
+        patch.object(zone_control, "_rain_group_blocked", return_value=False),
+        patch("services.events.publish") as publish_event,
+    ):
+        assert zone_control.exclusive_start_zone(zone["id"]) is False
+
+    assert values[-2:] == ["1", "0"]
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+    publish_event.assert_not_called()
+
+
+def test_stop_rejects_stale_activation_before_any_side_effect(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "stale-stop-owner", state="on")
+    test_db.update_zone(zone["id"], {"command_id": "new-owner", "watering_start_time": "2026-07-23 10:00:00"})
+    verifier = MagicMock()
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "_maybe_schedule_master_close") as close_master,
+    ):
+        assert zone_control.stop_zone(zone["id"], activation_token="old-owner") is False
+
+    publish.assert_not_called()
+    verifier.register_command.assert_not_called()
+    close_master.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "on"
+
+
+def test_stop_does_not_publish_when_stopping_cas_loses(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "stop-initial-cas", state="on")
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "_versioned_update", return_value=(False, test_db.get_zone(zone["id"]))),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "state_verifier") as verifier,
+        patch("services.events.publish") as publish_event,
+    ):
+        assert zone_control.stop_zone(zone["id"], force=True) is False
+
+    publish.assert_not_called()
+    verifier.register_command.assert_not_called()
+    assert not any(call.args[0].get("type") == "zone_stop" for call in publish_event.call_args_list)
+
+
+def test_stop_verify_launch_failure_faults_and_returns_false(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "stop-verify-launch", state="on")
+    test_db.update_zone(zone["id"], {"command_id": "stop-owner", "watering_start_time": "2026-07-23 10:00:00"})
+    verifier = MagicMock()
+    verifier.prepare_verification.return_value = object()
+    verifier.verify_async.side_effect = RuntimeError("thread launch failed")
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", return_value=True),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "_maybe_schedule_master_close") as close_master,
+        patch("services.events.publish") as publish_event,
+    ):
+        assert zone_control.stop_zone(zone["id"], activation_token="stop-owner") is False
+
+    assert test_db.get_zone(zone["id"])["state"] == "fault"
+    close_master.assert_called_once()
+    publish_event.assert_not_called()
+
+
+def test_stop_revalidates_group_after_acquiring_original_group_lock(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "stop-group-race", state="on")
+    original_get_zone = test_db.get_zone
+    reads = 0
+
+    def moved_after_first_read(zone_id):
+        nonlocal reads
+        reads += 1
+        current = original_get_zone(zone_id)
+        if current and reads >= 2:
+            current = dict(current)
+            current["group_id"] = 2
+        return current
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(test_db, "get_zone", side_effect=moved_after_first_read),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "state_verifier"),
+    ):
+        assert zone_control.stop_zone(zone["id"], force=True) is False
+
+    publish.assert_not_called()
 
 
 def test_tls_setup_failure_never_connects_plaintext():
@@ -1029,6 +1190,97 @@ def test_off_received_before_fault_invalidation_still_completes_current_stop(tes
     scheduler.cancel_zone_jobs.assert_called_once_with(zone["id"], include_cap=True)
 
 
+def test_off_received_after_fault_invalidation_keeps_fault_and_closes_run_failed(test_db):
+    from services import observed_state, sse_hub, zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "off-after-fault-invalidation", state="stopping")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "command_id": "late-off-owner",
+            "watering_start_time": "2026-07-23 10:00:00",
+        },
+    )
+    run_id = test_db.create_zone_run(zone["id"], 1, "2026-07-23 10:00:00", 0.0, None, 1)
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    with patch.object(observed_state.time, "time", return_value=100.0):
+        verifier.register_command(zone["id"], "off")
+    with (
+        patch.object(observed_state.time, "time", return_value=120.0),
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "state_verifier", verifier),
+    ):
+        assert zone_control.mark_zone_command_fault(zone["id"], "off", reason="timeout") is True
+
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "state_verifier", verifier),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        sse_hub._process_mqtt_message(
+            server["id"], None, zone["topic"], "0", retained=False, received_at=130.0
+        )
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "fault"
+    assert after["observed_state"] == "off"
+    assert after["command_id"] is None
+    with sqlite3.connect(test_db.db_path) as conn:
+        status = conn.execute("SELECT status FROM zone_runs WHERE id = ?", (run_id,)).fetchone()[0]
+    assert status == "failed"
+    scheduler.cancel_zone_jobs.assert_called_once_with(zone["id"], include_cap=True)
+
+
+def test_sse_and_verifier_duplicate_off_share_one_terminal_commit(test_db):
+    from services import observed_state, sse_hub
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "duplicate-off-observers", state="stopping")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "command_id": "duplicate-owner",
+            "watering_start_time": "2026-07-23 10:00:00",
+        },
+    )
+    test_db.create_zone_run(zone["id"], 1, "2026-07-23 10:00:00", 0.0, None, 1)
+    assert test_db.mark_zone_run_confirmed(zone["id"]) is True
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    generation = verifier.register_command(zone["id"], "off")
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "state_verifier", verifier),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+        patch("services.events.publish") as publish_event,
+    ):
+        sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "0", retained=False)
+        version_after_sse = test_db.get_zone(zone["id"])["version"]
+        assert verifier._apply_confirmation_if_current(zone["id"], "off", generation) is True
+
+    assert test_db.get_zone(zone["id"])["version"] == version_after_sse
+    zone_stop_events = [c for c in publish_event.call_args_list if c.args[0].get("type") == "zone_stop"]
+    assert len(zone_stop_events) == 1
+
+
 def test_orchestrated_start_accepts_exact_confirmed_target_and_peer_partition(test_db):
     from services import zone_control
 
@@ -1185,6 +1437,99 @@ def test_failed_counter_off_plants_activation_and_safety_retry_before_scheduling
     assert after["watering_start_time"]
     scheduler.schedule_zone_hard_stop.assert_called_once()
     scheduler.schedule_zone_cap.assert_called_once()
+
+
+def test_live_on_for_faulted_command_is_countered_without_clearing_fault(test_db):
+    from services import sse_hub
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "faulted-late-on", state="fault")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "state": "fault",
+            "commanded_state": "on",
+            "observed_state": "unconfirmed",
+            "command_id": "fault-owner",
+            "watering_start_time": "2026-07-23 10:00:00",
+        },
+    )
+    scheduler = MagicMock()
+    with (
+        patch.object(sse_hub, "_db", test_db),
+        patch.object(sse_hub, "_app_config", {}),
+        patch.object(sse_hub, "_publish_mqtt_value_fn", return_value=True) as publish,
+        patch.object(sse_hub, "_get_scheduler_fn", return_value=scheduler),
+        patch.object(sse_hub, "_SSE_HUB_ZONE_TOPICS", {server["id"]: {zone["topic"]: [zone["id"]]}}),
+        patch.object(sse_hub, "_SSE_HUB_MV_TOPICS", {}),
+        patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
+        patch.object(sse_hub, "broadcast"),
+    ):
+        sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "1", retained=False)
+
+    after = test_db.get_zone(zone["id"])
+    assert after["state"] == "fault"
+    assert after["commanded_state"] == "off"
+    assert after["observed_state"] == "on"
+    assert publish.call_args.args[2] == "0"
+    scheduler.schedule_zone_hard_stop.assert_called_once()
+
+
+def test_on_confirmation_rejects_run_confirmation_write_failure(test_db):
+    from services import observed_state
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "on-history-reject", state="starting")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "on",
+            "observed_state": "unconfirmed",
+            "command_id": "on-owner",
+            "watering_start_time": "2026-07-23 10:00:00",
+        },
+    )
+    test_db.create_zone_run(zone["id"], 1, "2026-07-23 10:00:00", 0.0, None, 1)
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    with patch.object(test_db, "mark_zone_run_confirmed", return_value=False):
+        assert verifier.apply_live_confirmation(zone["id"], "on", db_instance=test_db) is False
+
+
+def test_off_confirmation_keeps_jobs_and_token_when_history_close_rejects(test_db):
+    from services import observed_state
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "off-history-reject", state="stopping")
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "command_id": "off-owner",
+            "watering_start_time": "2026-07-23 10:00:00",
+        },
+    )
+    test_db.create_zone_run(zone["id"], 1, "2026-07-23 10:00:00", 0.0, None, 1)
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    scheduler = MagicMock()
+    with (
+        patch.object(test_db, "finish_zone_run", return_value=False),
+        patch("services.events.publish") as publish_event,
+    ):
+        assert verifier.apply_live_confirmation(
+            zone["id"],
+            "off",
+            db_instance=test_db,
+            scheduler_getter=lambda: scheduler,
+        ) is False
+
+    after = test_db.get_zone(zone["id"])
+    assert after["observed_state"] == "off"
+    assert after["command_id"] == "off-owner"
+    scheduler.cancel_zone_jobs.assert_not_called()
+    publish_event.assert_not_called()
 
 
 def test_break_before_make_aborts_before_target_or_master_open(test_db):
@@ -2279,6 +2624,367 @@ def test_verifier_cancels_cap_after_fresh_physical_off(test_db):
     assert confirmed["observed_state"] == "off"
     assert confirmed["watering_start_time"] is None
     assert confirmed["command_id"] is None
+
+
+def test_normal_stop_stays_pending_until_matching_physical_off_closes_run(test_db):
+    from services import observed_state, zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "pending-off-run", state="on")
+    started_at = "2026-07-19 12:30:00"
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "on",
+            "observed_state": "on",
+            "watering_start_time": started_at,
+        },
+    )
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": "c" * 32},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
+    run_id = test_db.create_zone_run(zone["id"], 1, started_at, 0.0, None, 1)
+    assert run_id is not None
+    assert test_db.mark_zone_run_confirmed(zone["id"]) is True
+
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    prepared = object()
+    scheduler = MagicMock()
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(verifier, "prepare_verification", return_value=prepared),
+        patch.object(verifier, "verify_async") as verify_async,
+        patch.object(zone_control, "publish_mqtt_value", return_value=True),
+        patch.object(zone_control, "water_monitor") as water_monitor,
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+        patch("services.events.publish") as publish_event,
+    ):
+        water_monitor.get_pulses_at_or_after.return_value = None
+        water_monitor.summarize_run.return_value = (None, None)
+        assert zone_control.stop_zone(zone["id"], force=True) is True
+
+        pending = test_db.get_zone(zone["id"])
+        assert pending["state"] == "stopping"
+        assert pending["observed_state"] == "unconfirmed"
+        assert pending["watering_start_time"] == started_at
+        assert test_db.get_open_zone_run(zone["id"])["id"] == run_id
+        assert not any(call.args[0].get("type") == "zone_stop" for call in publish_event.call_args_list)
+
+        generation = verifier._generations[zone["id"]]
+        assert verifier._apply_confirmation_if_current(zone["id"], "off", generation) is True
+
+    verify_async.assert_called_once_with(
+        zone["id"],
+        "off",
+        generation=generation,
+        prepared=prepared,
+    )
+    completed = test_db.get_zone(zone["id"])
+    assert completed["state"] == "off"
+    assert completed["observed_state"] == "off"
+    assert completed["watering_start_time"] is None
+    assert completed["command_id"] is None
+    assert test_db.get_open_zone_run(zone["id"]) is None
+    with sqlite3.connect(test_db.db_path) as conn:
+        status, end_utc = conn.execute("SELECT status, end_utc FROM zone_runs WHERE id = ?", (run_id,)).fetchone()
+    assert status == "ok"
+    assert end_utc is not None
+    assert any(call.args[0].get("type") == "zone_stop" for call in publish_event.call_args_list)
+
+
+def test_duplicate_stop_while_physical_off_pending_keeps_run_open(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "duplicate-pending-off", state="stopping")
+    started_at = "2026-07-19 12:35:00"
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "watering_start_time": started_at,
+        },
+    )
+    run_id = test_db.create_zone_run(zone["id"], 1, started_at, 0.0, None, 1)
+    assert run_id is not None
+    assert test_db.mark_zone_run_confirmed(zone["id"]) is True
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value") as publish,
+        patch.object(zone_control, "water_monitor") as water_monitor,
+    ):
+        assert zone_control.stop_zone(zone["id"]) is True
+
+    publish.assert_not_called()
+    water_monitor.summarize_run.assert_not_called()
+    assert test_db.get_zone(zone["id"])["state"] == "stopping"
+    assert test_db.get_open_zone_run(zone["id"])["id"] == run_id
+
+
+def test_logical_off_without_fresh_physical_off_reissues_command_and_keeps_run_open(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "legacy-ack-off", state="off")
+    started_at = "2026-07-19 12:40:00"
+    test_db.update_zone(
+        zone["id"],
+        {
+            "commanded_state": "off",
+            "observed_state": "unconfirmed",
+            "watering_start_time": started_at,
+        },
+    )
+    run_id = test_db.create_zone_run(zone["id"], 1, started_at, 0.0, None, 1)
+    assert run_id is not None
+    assert test_db.mark_zone_run_confirmed(zone["id"]) is True
+    verifier = MagicMock()
+    verifier.prepare_verification.return_value = object()
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "publish_mqtt_value", return_value=True) as publish,
+        patch.object(zone_control, "state_verifier", verifier),
+        patch.object(zone_control, "water_monitor"),
+    ):
+        assert zone_control.stop_zone(zone["id"]) is True
+
+    publish.assert_called_once()
+    current = test_db.get_zone(zone["id"])
+    assert current["state"] == "stopping"
+    assert current["observed_state"] == "unconfirmed"
+    assert test_db.get_open_zone_run(zone["id"])["id"] == run_id
+
+
+def test_rejected_confirmation_has_no_run_or_job_side_effects(test_db):
+    from services import observed_state
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "confirmation-cas-race", state="starting")
+    test_db.update_zone(zone["id"], {"commanded_state": "on", "observed_state": "unconfirmed"})
+    run_id = test_db.create_zone_run(zone["id"], 1, "2026-07-19 12:30:00", 0.0, None, 1)
+    assert run_id is not None
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    generation = verifier.register_command(zone["id"], "on")
+    scheduler = MagicMock()
+
+    with (
+        patch(
+            "services.zones_state.update_zone_state_internal",
+            return_value=(False, test_db.get_zone(zone["id"])),
+        ),
+        patch.object(test_db, "mark_zone_run_confirmed", wraps=test_db.mark_zone_run_confirmed) as mark_confirmed,
+        patch("irrigation_scheduler.get_scheduler", return_value=scheduler),
+    ):
+        assert verifier._apply_confirmation_if_current(zone["id"], "on", generation) is False
+
+    mark_confirmed.assert_not_called()
+    scheduler.cancel_zone_jobs.assert_not_called()
+    with sqlite3.connect(test_db.db_path) as conn:
+        confirmed = conn.execute("SELECT confirmed FROM zone_runs WHERE id = ?", (run_id,)).fetchone()[0]
+    assert confirmed == 0
+
+
+def test_rejected_fault_cas_does_not_alert_or_claim_fault(test_db):
+    from services import observed_state
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "fault-cas-race", state="starting")
+    test_db.update_zone(zone["id"], {"commanded_state": "on", "observed_state": "unconfirmed"})
+    verifier = observed_state.StateVerifier()
+    verifier._db = test_db
+    verifier._notifier = MagicMock()
+
+    with (
+        patch(
+            "services.zones_state.update_zone_state_internal",
+            return_value=(False, test_db.get_zone(zone["id"])),
+        ),
+        patch("services.events.publish") as publish_event,
+        patch.object(observed_state.logger, "critical") as critical,
+    ):
+        assert verifier._record_fault(zone["id"], test_db.get_zone(zone["id"]), "on") is False
+
+    assert test_db.get_zone(zone["id"])["state"] == "starting"
+    publish_event.assert_not_called()
+    verifier._notifier.send_text.assert_not_called()
+    critical.assert_not_called()
+
+
+def test_group_exclusivity_false_stop_uses_fault_fallback_and_truthful_log(test_db):
+    import app as app_module
+
+    newer = test_db.create_zone({"name": "kept", "duration": 10, "group_id": 1})
+    older = test_db.create_zone({"name": "loser", "duration": 10, "group_id": 1})
+    test_db.update_zone(
+        newer["id"],
+        {"state": "on", "watering_start_time": "2026-07-19 13:01:00"},
+    )
+    test_db.update_zone(
+        older["id"],
+        {
+            "state": "on",
+            "observed_state": "on",
+            "watering_start_time": "2026-07-19 13:00:00",
+        },
+    )
+
+    with (
+        patch.object(app_module, "db", test_db),
+        patch("services.zone_control.stop_zone", return_value=False) as stop,
+    ):
+        app_module._force_group_exclusive(1, "race-test")
+
+    assert stop.call_args_list == [
+        call(
+            older["id"],
+            reason="group_exclusive",
+            force=True,
+            master_close_immediately=False,
+            skip_master_close=True,
+            require_observed_confirmation=True,
+        ),
+        call(
+            newer["id"],
+            reason="group_exclusive",
+            force=True,
+            master_close_immediately=True,
+            skip_master_close=False,
+            require_observed_confirmation=True,
+        ),
+    ]
+    assert test_db.get_zone(older["id"])["state"] == "fault"
+    assert test_db.get_zone(older["id"])["observed_state"] == "on"
+    assert test_db.get_zone(newer["id"])["state"] == "fault"
+    log = test_db.get_logs("warning")[0]
+    details = json.loads(log["details"])
+    assert details["kept_zone"] is None
+    assert details["group_shutdown"] is True
+    assert details["turned_off"] == []
+    assert details["faulted"] == [older["id"], newer["id"]]
+
+
+def test_group_exclusivity_reads_election_after_waiting_for_group_lock(test_db):
+    import app as app_module
+    from services.locks import group_lock
+
+    newer = test_db.create_zone({"name": "lock-kept", "duration": 10, "group_id": 1})
+    older = test_db.create_zone({"name": "lock-old", "duration": 10, "group_id": 1})
+    test_db.update_zone(newer["id"], {"state": "on", "watering_start_time": "2026-07-19 13:01:00"})
+    test_db.update_zone(older["id"], {"state": "on", "watering_start_time": "2026-07-19 13:00:00"})
+    entered = threading.Event()
+    stop_entered = threading.Event()
+
+    def run_watchdog():
+        entered.set()
+        app_module._force_group_exclusive(1, "lock-race")
+
+    def stopped(*_args, **_kwargs):
+        stop_entered.set()
+        return True
+
+    with (
+        patch.object(app_module, "db", test_db),
+        patch("services.zone_control.stop_zone", side_effect=stopped) as stop,
+    ):
+        with group_lock(1):
+            worker = threading.Thread(target=run_watchdog)
+            worker.start()
+            assert entered.wait(timeout=1)
+            assert stop_entered.wait(timeout=0.1) is False
+            test_db.update_zone(older["id"], {"state": "off"})
+        worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    stop.assert_not_called()
+
+
+def test_group_exclusivity_rejected_one_shot_fallback_is_reported_failed(test_db):
+    import app as app_module
+
+    newer = test_db.create_zone({"name": "strict-kept", "duration": 10, "group_id": 1})
+    older = test_db.create_zone({"name": "strict-old", "duration": 10, "group_id": 1})
+    test_db.update_zone(newer["id"], {"state": "on", "watering_start_time": "2026-07-19 13:01:00"})
+    test_db.update_zone(older["id"], {"state": "on", "watering_start_time": "2026-07-19 13:00:00"})
+
+    with (
+        patch.object(app_module, "db", test_db),
+        patch("services.zone_control.stop_zone", return_value=False),
+        patch(
+            "services.zones_state.update_zone_state",
+            return_value=(False, test_db.get_zone(older["id"])),
+        ) as fallback,
+    ):
+        app_module._force_group_exclusive(1, "strict-race")
+
+    assert fallback.call_count == 2
+    assert fallback.call_args_list[0].kwargs["expected_version"] == test_db.get_zone(older["id"])["version"]
+    assert test_db.get_zone(older["id"])["state"] == "on"
+    details = json.loads(test_db.get_logs("warning")[0]["details"])
+    assert details["turned_off"] == []
+    assert details["faulted"] == []
+    assert details["failed"] == [older["id"], newer["id"]]
+    assert details["group_shutdown"] is True
+
+
+def test_group_exclusivity_counts_transitional_and_faulted_physical_rows_without_double_fault(test_db):
+    import app as app_module
+
+    server = _server(test_db)
+    keeper = _mqtt_zone(test_db, server, "transition-keeper", state="on")
+    stopping = _mqtt_zone(test_db, server, "transition-stopping", state="stopping")
+    faulted = _mqtt_zone(test_db, server, "transition-fault", state="fault")
+    test_db.update_zone(keeper["id"], {"watering_start_time": "2026-07-23 10:02:00"})
+    test_db.update_zone(
+        stopping["id"],
+        {"observed_state": "unconfirmed", "watering_start_time": "2026-07-23 10:01:00"},
+    )
+    test_db.update_zone(
+        faulted["id"],
+        {
+            "state": "fault",
+            "commanded_state": "off",
+            "observed_state": "on",
+            "fault_count": 4,
+            "watering_start_time": "2026-07-23 10:00:00",
+        },
+    )
+    with (
+        patch.object(app_module, "db", test_db),
+        patch("services.zone_control.stop_zone", return_value=False) as stop,
+    ):
+        app_module._force_group_exclusive(1, "transitional")
+
+    assert [item.args[0] for item in stop.call_args_list] == [stopping["id"], faulted["id"], keeper["id"]]
+    assert test_db.get_zone(faulted["id"])["fault_count"] == 4
+    details = json.loads(test_db.get_logs("warning")[0]["details"])
+    assert details["group_shutdown"] is True
+    assert faulted["id"] in details["unresolved"]
+
+
+def test_command_fault_preserves_last_confirmed_observed_state(test_db):
+    from services import zone_control
+
+    server = _server(test_db)
+    zone = _mqtt_zone(test_db, server, "fault-preserves-observed", state="on")
+    test_db.update_zone(zone["id"], {"commanded_state": "on", "observed_state": "on"})
+
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(zone_control, "state_verifier"),
+    ):
+        assert zone_control.mark_zone_command_fault(zone["id"], "off", reason="publish_failed") is True
+
+    current = test_db.get_zone(zone["id"])
+    assert current["state"] == "fault"
+    assert current["observed_state"] == "on"
 
 
 def test_stale_off_confirmation_cannot_clear_new_activation_after_recheck(test_db):
