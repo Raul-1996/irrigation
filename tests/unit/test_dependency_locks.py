@@ -58,6 +58,15 @@ def test_development_requirements_have_compatible_exact_pins():
     _assert_direct_requirements_are_locked("requirements-dev.txt", "requirements-dev.lock")
 
 
+def test_sqlalchemy_greenlet_runtime_is_explicitly_cross_platform_locked():
+    """Keep SQLAlchemy's Linux/aarch64 runtime dependency in macOS-built locks."""
+    source_names = {requirement.name.lower() for requirement in _requirements("requirements.txt")}
+    locked_names = set(_exact_pins("requirements.lock"))
+
+    assert "greenlet" in source_names
+    assert "greenlet" in locked_names
+
+
 def test_every_locked_requirement_has_a_sha256_artifact_hash():
     for path in ("requirements.lock", "requirements-dev.lock"):
         logical = _logical_lines(path)

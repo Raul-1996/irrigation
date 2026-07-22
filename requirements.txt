@@ -8,6 +8,10 @@ APScheduler==3.10.4
 # (zone_stop:N, master_close, ...) are lost on every `systemctl restart`.
 # See audit-report PHYS-2 / MASTER-H10.
 SQLAlchemy>=2.0,<3.0
+# SQLAlchemy publishes greenlet behind architecture markers.  A lock compiled
+# on Apple Silicon (arm64) otherwise omits the package required by Linux
+# x86_64/aarch64, including GitHub CI and the Wirenboard target.
+greenlet>=3.2,<4.0
 Flask-WTF>=1.2.1
 python-dotenv>=1.0.1
 paho-mqtt==2.1.0
