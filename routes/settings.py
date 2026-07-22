@@ -52,30 +52,30 @@ def api_get_telegram_settings():
 def api_put_telegram_settings():
     try:
         data = request.get_json() or {}
+        # This application supports long polling only.  Reject the unsupported
+        # mode before touching the token: the former implementation persisted
+        # it and only then called a nonexistent notifier.set_webhook().
+        if bool(data.get("set_webhook")):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "Telegram webhook mode is not supported; use long polling",
+                }
+            ), 400
+
         ok = True
         if "telegram_bot_token" in data:
             tok = data.get("telegram_bot_token") or ""
             val = encrypt_secret(tok) if tok else None
-            ok &= db.set_setting_value("telegram_bot_token_encrypted", val)
-            # Автогенерация секрета вебхука, если не задан — для защиты, но не обязательна
-            cur = db.get_setting_value("telegram_webhook_secret_path") or ""
-            if not cur:
-                try:
-                    import secrets
+            from services.telegram_bot import reconfigure_bot_token
 
-                    db.set_setting_value("telegram_webhook_secret_path", secrets.token_urlsafe(16))
-                except ImportError as e:
-                    logger.debug("Handled exception in api_put_telegram_settings: %s", e)
-            # Настройка вебхука — только по явному запросу
-            if bool(data.get("set_webhook")):
-                try:
-                    base_url = (request.host_url or "").rstrip("/")
-                    wh_secret = db.get_setting_value("telegram_webhook_secret_path") or "any"
-                    from services.telegram_bot import notifier
-
-                    notifier.set_webhook(f"{base_url}/telegram/webhook/{wh_secret}")
-                except ImportError as e:
-                    logger.debug("Handled exception in api_put_telegram_settings: %s", e)
+            if not reconfigure_bot_token(val):
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": "Не удалось безопасно перезапустить Telegram polling runtime",
+                    }
+                ), 503
         if "telegram_access_password" in data:
             from werkzeug.security import generate_password_hash
 
@@ -129,9 +129,11 @@ def api_test_telegram():
                 return jsonify(
                     {"success": True, "message": "Токен сохранён. Откройте чат с ботом (/start), затем повторите тест."}
                 )
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("Exception in api_test_telegram: %s", e)
-            return jsonify({"success": False, "message": f"Ошибка отправки: {e}"}), 500
-    except (sqlite3.Error, OSError) as e:
-        logger.debug("Exception in api_test_telegram: %s", e)
-        return jsonify({"success": False, "message": str(e)}), 500
+        except (sqlite3.Error, OSError):
+            # Transport exceptions may embed the full /bot<TOKEN>/ URL.  Keep
+            # both the operator response and logs stable and credential-free.
+            logger.warning("Telegram test message transport or storage failure")
+            return jsonify({"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}), 500
+    except (sqlite3.Error, OSError):
+        logger.warning("Telegram test message setup failure")
+        return jsonify({"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}), 500

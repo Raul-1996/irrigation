@@ -17,7 +17,7 @@ class TestZonesDBDeep:
         zones = test_db.get_zones()
         zid = zones[0]["id"]
         # Returns (ok: bool, prev_zone: dict | None) since AUDIT-LOGGING-EXPANSION.
-        ok, prev = test_db.update_zone_versioned(zid, {"state": "on"})
+        ok, prev = test_db.update_zone_versioned(zid, {"state": "on"}, expected_version=zones[0]["version"])
         assert ok is True
         assert isinstance(prev, dict)
         zone = test_db.get_zone(zid)
@@ -53,13 +53,14 @@ class TestZonesDBDeep:
         assert result is not None
 
     def test_create_zone_with_topic(self, test_db):
+        server = test_db.create_mqtt_server({"name": "Zone broker", "host": "localhost", "port": 1883})
         test_db.create_zone(
             {
                 "name": "Z1",
                 "duration": 10,
                 "group_id": 1,
                 "topic": "/devices/wb-mr6cv3_85/controls/K1",
-                "mqtt_server_id": 1,
+                "mqtt_server_id": server["id"],
             }
         )
         zones = test_db.get_zones()

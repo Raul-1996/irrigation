@@ -14,6 +14,10 @@ import json
 import os
 from unittest.mock import patch
 
+import pytest
+
+from tests.safety_contracts import confirmed_group_stop
+
 os.environ["TESTING"] = "1"
 
 
@@ -35,8 +39,17 @@ def _patch_publish():
     return patch("services.zone_control.publish_mqtt_value", return_value=True)
 
 
+def _water_monitor_patch():
+    return patch("services.zone_control.water_monitor", **{"summarize_run.return_value": (None, None)})
+
+
 class TestApiMqttStartWritesZoneRun:
     """The bug: UI start used to skip db.create_zone_run. Fixed by delegating."""
+
+    @pytest.fixture(autouse=True)
+    def _confirmed_group_stop(self, app):
+        with confirmed_group_stop(app.db):
+            yield
 
     def test_mqtt_start_creates_open_zone_run(self, admin_client, app):
         """POST /mqtt/start opens exactly one zone_run row with start_utc set, end_utc NULL."""
@@ -52,7 +65,7 @@ class TestApiMqttStartWritesZoneRun:
 
         with (
             _patch_publish(),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             resp = admin_client.post(f"/api/zones/{zone['id']}/mqtt/start")
@@ -66,7 +79,7 @@ class TestApiMqttStartWritesZoneRun:
         assert run.get("end_utc") is None
 
     def test_mqtt_start_then_stop_closes_zone_run(self, admin_client, app):
-        """Start → stop closes the run with end_utc set and status='ok' — regression for the original bug."""
+        """Start → stop keeps history pending until a fresh physical OFF, then closes it."""
         srv = app.db.create_mqtt_server(
             {
                 "name": "S1",
@@ -79,7 +92,7 @@ class TestApiMqttStartWritesZoneRun:
 
         with (
             _patch_publish(),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             r1 = admin_client.post(f"/api/zones/{zone['id']}/mqtt/start")
@@ -92,7 +105,25 @@ class TestApiMqttStartWritesZoneRun:
             r2 = admin_client.post(f"/api/zones/{zone['id']}/mqtt/stop")
             assert r2.status_code == 200, r2.get_data(as_text=True)
 
-        # After stop the previously-open run should be gone (closed)
+            # Broker acceptance is not physical truth.  The command path must
+            # leave the run open until the relay's fresh OFF report arrives.
+            assert app.db.get_open_zone_run(int(zone["id"])) is not None
+
+            from services.observed_state import StateVerifier
+
+            verifier = StateVerifier()
+            verifier._db = app.db
+            assert (
+                verifier.apply_live_confirmation(
+                    int(zone["id"]),
+                    "off",
+                    db_instance=app.db,
+                    scheduler_getter=lambda: None,
+                )
+                is True
+            )
+
+        # After confirmed OFF the previously-open run should be gone (closed).
         assert app.db.get_open_zone_run(int(zone["id"])) is None
 
         # And get_last_watering_time must now resolve — that's the user-facing
@@ -122,7 +153,7 @@ class TestApiMqttStartWritesZoneRun:
         before = datetime.now()
         with (
             _patch_publish(),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             resp = admin_client.post(
@@ -164,7 +195,7 @@ class TestApiMqttStartWritesZoneRun:
 
         with (
             _patch_publish(),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             r1 = admin_client.post(f"/api/zones/{zone['id']}/mqtt/start")
@@ -218,7 +249,7 @@ class TestApiMqttStartWritesZoneRun:
         try:
             with (
                 _patch_publish(),
-                patch("services.zone_control.water_monitor"),
+                _water_monitor_patch(),
                 patch("services.zone_control.state_verifier"),
             ):
                 resp = admin_client.post(f"/api/zones/{zone['id']}/mqtt/start")

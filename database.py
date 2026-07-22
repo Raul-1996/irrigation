@@ -66,6 +66,11 @@ class IrrigationDB:
     def get_zones(self, **kw) -> list[dict[str, Any]]:
         return self.zones.get_zones(**kw)
 
+    def get_zones_strict(self) -> list[dict[str, Any]]:
+        """Return zones without converting SQLite failures into an empty installation."""
+
+        return self.zones.get_zones_strict()
+
     def get_zone(self, zone_id: int) -> dict[str, Any] | None:
         return self.zones.get_zone(zone_id)
 
@@ -75,14 +80,33 @@ class IrrigationDB:
     def update_zone(self, zone_id: int, zone_data: dict[str, Any]) -> dict[str, Any] | None:
         return self.zones.update_zone(zone_id, zone_data)
 
-    def update_zone_versioned(self, zone_id: int, updates: dict[str, Any]) -> tuple:
-        """Versioned zone update — see db.zones.update_zone_versioned for contract.
+    def update_zone_versioned(
+        self,
+        zone_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_version: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Caller-owned zone compare-and-swap.
 
-        Returns ``(ok: bool, prev_zone: dict | None)`` since the audit-logging
-        rework: callers that need atomic prev-state snapshots use this directly,
-        scheduler legacy paths use the bool ``ok`` portion.
+        See :meth:`db.zones.ZoneRepository.update_zone_versioned`.
         """
-        return self.zones.update_zone_versioned(zone_id, updates)
+        return self.zones.update_zone_versioned(zone_id, updates, expected_version=expected_version)
+
+    def update_zone_versioned_detailed(
+        self,
+        zone_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """CAS result with locked pre/post snapshots and program side effects."""
+
+        return self.zones.update_zone_versioned_detailed(
+            zone_id,
+            updates,
+            expected_version=expected_version,
+        )
 
     def bulk_update_zones(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         return self.zones.bulk_update_zones(updates)
@@ -107,6 +131,12 @@ class IrrigationDB:
 
     def update_zone_postpone(self, zone_id: int, postpone_until: str | None = None, reason: str | None = None) -> bool:
         return self.zones.update_zone_postpone(zone_id, postpone_until, reason)
+
+    def apply_group_rain_postpone_atomic(self, group_id: int, postpone_until: str) -> dict[str, Any] | None:
+        return self.zones.apply_group_rain_postpone_atomic(group_id, postpone_until)
+
+    def clear_group_rain_postpone_atomic(self, group_id: int) -> bool | None:
+        return self.zones.clear_group_rain_postpone_atomic(group_id)
 
     def update_zone_photo(
         self, zone_id: int, photo_path: str | None, photo_thumb: str | None = None, update_thumb: bool = False
@@ -200,6 +230,36 @@ class IrrigationDB:
     def get_groups(self) -> list[dict[str, Any]]:
         return self.groups.get_groups()
 
+    def get_groups_strict(self) -> list[dict[str, Any]]:
+        return self.groups.get_groups_strict()
+
+    def get_group_storage_snapshot(self, group_id: int) -> dict[str, Any] | None:
+        return self.groups.get_group_storage_snapshot(group_id)
+
+    def restore_group_snapshot(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any] | None = None,
+        *,
+        allow_observed_drift: bool = False,
+    ) -> bool:
+        return self.groups.restore_group_snapshot(
+            before,
+            expected_current,
+            allow_observed_drift=allow_observed_drift,
+        )
+
+    def delete_group_if_unchanged(
+        self,
+        expected: dict[str, Any],
+        *,
+        allow_observed_drift: bool = False,
+    ) -> bool:
+        return self.groups.delete_group_if_unchanged(
+            expected,
+            allow_observed_drift=allow_observed_drift,
+        )
+
     def create_group(self, name: str) -> dict[str, Any] | None:
         return self.groups.create_group(name)
 
@@ -211,6 +271,24 @@ class IrrigationDB:
 
     def update_group_fields(self, group_id: int, updates: dict[str, Any]) -> bool:
         return self.groups.update_group_fields(group_id, updates)
+
+    def update_group_config(self, group_id: int, updates: dict[str, Any]) -> bool:
+        return self.groups.update_group_config(group_id, updates)
+
+    def update_group_config_with_snapshot(
+        self,
+        group_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_current: dict[str, Any] | None = None,
+        allow_observed_drift: bool = False,
+    ) -> dict[str, Any] | None:
+        return self.groups.update_group_config_with_snapshot(
+            group_id,
+            updates,
+            expected_current=expected_current,
+            allow_observed_drift=allow_observed_drift,
+        )
 
     def get_group_use_rain(self, group_id: int) -> bool:
         return self.groups.get_group_use_rain(group_id)
@@ -228,8 +306,54 @@ class IrrigationDB:
     def get_mqtt_servers(self) -> list[dict[str, Any]]:
         return self.mqtt.get_mqtt_servers()
 
+    def get_mqtt_servers_strict(self) -> list[dict[str, Any]]:
+        return self.mqtt.get_mqtt_servers_strict()
+
+    def get_mqtt_server_strict(self, server_id: int) -> dict[str, Any] | None:
+        return self.mqtt.get_mqtt_server_strict(server_id)
+
+    def get_mqtt_server_storage_snapshot(self, server_id: int) -> dict[str, Any] | None:
+        return self.mqtt.get_mqtt_server_storage_snapshot(server_id)
+
+    def restore_mqtt_server_snapshot(
+        self, before: dict[str, Any], expected_current: dict[str, Any] | None = None
+    ) -> bool:
+        return self.mqtt.restore_mqtt_server_snapshot(before, expected_current)
+
+    def update_mqtt_server_reference_guarded(
+        self,
+        server_id: int,
+        data: dict[str, Any],
+        *,
+        allowed_settings: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        return self.mqtt.update_mqtt_server_reference_guarded(
+            server_id,
+            data,
+            allowed_settings=allowed_settings,
+        )
+
+    def restore_mqtt_server_snapshot_reference_guarded(
+        self,
+        before: dict[str, Any],
+        expected_current: dict[str, Any],
+        *,
+        allowed_settings: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        return self.mqtt.restore_mqtt_server_snapshot_reference_guarded(
+            before,
+            expected_current,
+            allowed_settings=allowed_settings,
+        )
+
+    def delete_mqtt_server_if_unchanged(self, expected: dict[str, Any]) -> bool:
+        return self.mqtt.delete_mqtt_server_if_unchanged(expected)
+
     def get_mqtt_server(self, server_id: int) -> dict[str, Any] | None:
         return self.mqtt.get_mqtt_server(server_id)
+
+    def get_mqtt_server_references(self, server_id: int) -> dict[str, list[Any]]:
+        return self.mqtt.get_mqtt_server_references(server_id)
 
     def create_mqtt_server(self, data: dict[str, Any]) -> dict[str, Any] | None:
         return self.mqtt.create_mqtt_server(data)

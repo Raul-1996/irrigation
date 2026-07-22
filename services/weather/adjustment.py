@@ -9,15 +9,15 @@ Algorithm: hybrid Zimmerman method (from OpenSprinkler) + ET₀ (FAO-56).
 
 NOTE(wave4, CQ-015): direct ``sqlite3.connect(self.db_path, timeout=5)``
 calls in ``_get_settings`` / ``_has_ms_threshold`` / ``log_adjustment`` are
-preserved from the pre-split implementation. Migrating to
-``db.SettingsRepository`` is tracked as follow-up (see
-``irrigation-audit/findings/code-quality.md`` CQ-015).
+preserved from the pre-split implementation. A future repository migration
+should remain separate from the import-cycle cleanup.
 """
 
 import contextlib
 import copy
 import json
 import logging
+import math
 import sqlite3
 import time
 from typing import Any
@@ -25,6 +25,7 @@ from typing import Any
 from services.weather.singletons import get_weather_service
 
 logger = logging.getLogger(__name__)
+_WEATHER_UNSET = object()
 
 
 class WeatherAdjustment:
@@ -47,7 +48,8 @@ class WeatherAdjustment:
     # Local WB-MSW sensor sanity bounds + mismatch thresholds vs Open-Meteo.
     # Local temp/hum take priority over the API forecast when present, sane
     # and fresh; a temperature gap beyond the hard threshold flags a faulty
-    # sensor and forces an Open-Meteo fallback for the whole calculation.
+    # sensor.  The colder source is retained for freeze safety while humidity
+    # falls back to Open-Meteo.
     SENSOR_TEMP_MIN_C = -50.0
     SENSOR_TEMP_MAX_C = 60.0
     SENSOR_HUM_MIN_PCT = 0.0
@@ -108,27 +110,30 @@ class WeatherAdjustment:
                             defaults["factor_" + factor_name] = str(val) in ("1", "true", "True")
                         else:
                             short_key = key.replace("weather.", "")
-                            with contextlib.suppress(ValueError, TypeError):
+                            try:
                                 defaults[short_key] = float(val)
+                            except (OverflowError, ValueError, TypeError):
+                                defaults[short_key] = None
         except (sqlite3.Error, OSError) as e:
             logger.debug("Weather settings read error: %s", e)
         return defaults
 
-    def _get_weather(self):
+    def _get_weather(self, cache_only: bool = False):
         """Get current weather data."""
         try:
             svc = get_weather_service(self.db_path)
-            weather = svc.get_weather()
+            weather = svc.get_weather(cache_only=cache_only)
             if weather is None:
-                self._maybe_alert_api_down("weather=None")
+                if not cache_only:
+                    self._maybe_alert_api_down("weather=None")
                 return None
             try:
                 ts = getattr(weather, "timestamp", None)
                 if ts:
                     age = time.time() - float(ts)
-                    if age > 7200:
+                    if age > 7200 and not cache_only:
                         self._maybe_alert_api_down(f"cache stale {int(age / 60)}min")
-            except (TypeError, ValueError):
+            except (OverflowError, TypeError, ValueError):
                 pass
             return self._select_input_source(weather)
         except (ImportError, OSError) as e:
@@ -136,13 +141,98 @@ class WeatherAdjustment:
             return None
 
     @staticmethod
-    def _sane(value: Any, lo: float, hi: float) -> bool:
-        """True if ``value`` is a finite number within ``[lo, hi]``."""
+    def _finite_number(
+        value: Any,
+        *,
+        minimum: float | None = None,
+        maximum: float | None = None,
+    ) -> float | None:
+        """Return a finite constrained float or ``None`` for unsafe input."""
+        if value is None or isinstance(value, bool):
+            return None
         try:
-            v = float(value)
-        except (TypeError, ValueError):
-            return False
-        return v == v and lo <= v <= hi  # v == v rejects NaN
+            number = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        if minimum is not None and number < minimum:
+            return None
+        if maximum is not None and number > maximum:
+            return None
+        return number
+
+    @classmethod
+    def _sane(cls, value: Any, lo: float, hi: float) -> bool:
+        """True if ``value`` is a finite number within ``[lo, hi]``."""
+        return cls._finite_number(value, minimum=lo, maximum=hi) is not None
+
+    def _validated_safety_inputs(
+        self,
+        weather: Any,
+        settings: dict[str, Any],
+    ) -> tuple[dict[str, float | bool] | None, str | None]:
+        """Validate every value participating in hard rain/freeze/wind safety."""
+        source_error = getattr(weather, "safety_invalid_field", None)
+        if isinstance(source_error, str) and source_error:
+            return None, source_error
+        use_ms = self._has_ms_threshold()
+        threshold_key = "wind_threshold_ms" if use_ms else "wind_threshold_kmh"
+        defaults = {
+            "rain_threshold_mm": self.DEFAULT_RAIN_THRESHOLD_MM,
+            "freeze_threshold_c": self.DEFAULT_FREEZE_THRESHOLD_C,
+            "wind_threshold_ms": self.DEFAULT_WIND_THRESHOLD_MS,
+            "wind_threshold_kmh": self.DEFAULT_WIND_THRESHOLD_KMH,
+        }
+        specifications = (
+            ("rain_threshold_mm", settings.get("rain_threshold_mm", defaults["rain_threshold_mm"]), 0.0),
+            ("freeze_threshold_c", settings.get("freeze_threshold_c", defaults["freeze_threshold_c"]), None),
+            (threshold_key, settings.get(threshold_key, defaults[threshold_key]), 0.0),
+            (
+                "sensor_mismatch_soft_c",
+                settings.get("sensor_mismatch_soft_c", self.DEFAULT_SENSOR_MISMATCH_SOFT_C),
+                0.0,
+            ),
+            (
+                "sensor_mismatch_hard_c",
+                settings.get("sensor_mismatch_hard_c", self.DEFAULT_SENSOR_MISMATCH_HARD_C),
+                0.0,
+            ),
+            ("precipitation_24h", getattr(weather, "precipitation_24h", None), 0.0),
+            ("precipitation_forecast_6h", getattr(weather, "precipitation_forecast_6h", None), 0.0),
+            ("temperature", getattr(weather, "temperature", None), None),
+            ("min_temp_forecast_6h", getattr(weather, "min_temp_forecast_6h", None), None),
+            ("wind_speed", getattr(weather, "wind_speed", None), 0.0),
+        )
+        validated: dict[str, float | bool] = {"wind_uses_ms": use_ms}
+        for field, raw_value, minimum in specifications:
+            value = self._finite_number(raw_value, minimum=minimum)
+            if value is None:
+                return None, field
+            validated[field] = value
+        if validated["sensor_mismatch_hard_c"] < validated["sensor_mismatch_soft_c"]:
+            return None, "sensor_mismatch_window"
+        validated["wind_threshold"] = validated[threshold_key]
+        return validated, None
+
+    @staticmethod
+    def _unavailable_decision(
+        *,
+        field: str | None = None,
+        cache_only: bool = False,
+        api_unavailable: bool = False,
+    ) -> dict[str, Any]:
+        reason = "weather_unavailable" if field is None else f"weather_unavailable: {field}"
+        details: dict[str, Any] = {
+            "type": "weather_unavailable",
+            "api_unavailable": api_unavailable,
+        }
+        if field is not None:
+            details["field"] = field
+        if cache_only:
+            details["unknown"] = True
+            details["display_only"] = True
+        return {"skip": not cache_only, "reason": reason, "details": details}
 
     def evaluate_sensor_source(self, api_weather: Any) -> dict[str, Any]:
         """Choose temp/hum input source (local sensor priority) + detect mismatch.
@@ -150,8 +240,9 @@ class WeatherAdjustment:
         The local WB-MSW sensor wins over the Open-Meteo forecast when its
         reading is present, physically sane and fresh (handled by
         ``_get_env_state``). A temperature gap vs the API beyond the *hard*
-        threshold is treated as a faulty sensor: the whole calculation falls
-        back to Open-Meteo and a ``mismatch`` of level ``'hard'`` is returned.
+        threshold is treated as a faulty sensor and a ``mismatch`` of level
+        ``'hard'`` is returned. Temperature keeps the colder of local/API so
+        the mismatch cannot mask a freeze; humidity falls back to Open-Meteo.
         A gap beyond the *soft* threshold keeps the local value but flags
         ``'soft'`` for the UI. Precipitation/wind/ET₀ are untouched (API only).
 
@@ -162,8 +253,18 @@ class WeatherAdjustment:
         from services.weather.merge import _get_env_state
 
         settings = self._get_settings()
-        soft = float(settings.get("sensor_mismatch_soft_c", self.DEFAULT_SENSOR_MISMATCH_SOFT_C))
-        hard = float(settings.get("sensor_mismatch_hard_c", self.DEFAULT_SENSOR_MISMATCH_HARD_C))
+        soft = self._finite_number(
+            settings.get("sensor_mismatch_soft_c", self.DEFAULT_SENSOR_MISMATCH_SOFT_C),
+            minimum=0.0,
+        )
+        hard = self._finite_number(
+            settings.get("sensor_mismatch_hard_c", self.DEFAULT_SENSOR_MISMATCH_HARD_C),
+            minimum=0.0,
+        )
+        invalid_mismatch_window = soft is None or hard is None or hard < soft
+        if invalid_mismatch_window:
+            soft = self.DEFAULT_SENSOR_MISMATCH_SOFT_C
+            hard = self.DEFAULT_SENSOR_MISMATCH_HARD_C
 
         env = _get_env_state(time.time())
         api_t = getattr(api_weather, "temperature", None)
@@ -180,7 +281,13 @@ class WeatherAdjustment:
                 delta = abs(local_t - float(api_t))
                 if delta > hard:
                     mismatch = {"level": "hard", "local": local_t, "api": float(api_t), "delta": round(delta, 1)}
-                    temp_value, temp_source = float(api_t), "api_fallback"
+                    # A hard mismatch still must not discard the colder input
+                    # before the freeze gate.  Fall back only when the API is
+                    # the safer (colder) source; retain a colder local reading.
+                    if local_t <= float(api_t):
+                        temp_value, temp_source = local_t, "local"
+                    else:
+                        temp_value, temp_source = float(api_t), "api_fallback"
                 else:
                     if delta > soft:
                         mismatch = {"level": "soft", "local": local_t, "api": float(api_t), "delta": round(delta, 1)}
@@ -206,6 +313,7 @@ class WeatherAdjustment:
             "temp_source": temp_source,
             "hum_source": hum_source,
             "mismatch": mismatch,
+            "safety_invalid_field": "sensor_mismatch_window" if invalid_mismatch_window else None,
         }
 
     def _apply_source(self, weather: Any, verdict: dict[str, Any]) -> Any:
@@ -218,6 +326,22 @@ class WeatherAdjustment:
         eff = copy.copy(weather)
         eff.temperature = verdict["temperature"]
         eff.humidity = verdict["humidity"]
+        eff.temperature_source = verdict.get("temp_source", "api")
+        eff.humidity_source = verdict.get("hum_source", "api")
+        eff.sensor_mismatch = verdict.get("mismatch")
+        eff.safety_invalid_field = verdict.get("safety_invalid_field")
+        # Keep provenance next to the values that flow into safety and decision
+        # logging.  Open-Meteo remains the only source for all fields except the
+        # two values that may be overlaid by the local WB-MSW sensor.
+        eff.data_sources = {
+            "temperature": eff.temperature_source,
+            "humidity": eff.humidity_source,
+            "precipitation_24h": "api",
+            "precipitation_forecast_6h": "api",
+            "wind_speed": "api",
+            "daily_et0": "api",
+            "min_temp_forecast_6h": "api",
+        }
         return eff
 
     def _select_input_source(self, weather: Any) -> Any:
@@ -262,25 +386,33 @@ class WeatherAdjustment:
         must still skip — flags are UX, thresholds are hard safety).
         """
         if weather is None:
-            return False
-
-        rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-        rain_24h = weather.precipitation_24h or 0.0
-        rain_forecast = weather.precipitation_forecast_6h or 0.0
-        if rain_24h > rain_threshold or rain_forecast > rain_threshold:
+            return True
+        safety, error = self._validated_safety_inputs(weather, settings)
+        if error is not None or safety is None:
             return True
 
-        freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
-        temp = weather.temperature
-        if temp is not None and temp < freeze_threshold:
-            return True
-        min_temp_6h = getattr(weather, "min_temp_forecast_6h", None)
-        if isinstance(min_temp_6h, (int, float)) and min_temp_6h < freeze_threshold:
+        rain_threshold = float(safety["rain_threshold_mm"])
+        rain_24h = float(safety["precipitation_24h"])
+        rain_forecast = float(safety["precipitation_forecast_6h"])
+        if self._rain_reaches_threshold(rain_24h, rain_threshold) or self._rain_reaches_threshold(
+            rain_forecast, rain_threshold
+        ):
             return True
 
-        wind = weather.wind_speed
-        exceeds, _ = self._get_wind_check(settings, wind)
-        return bool(exceeds)
+        freeze_threshold = float(safety["freeze_threshold_c"])
+        temp = float(safety["temperature"])
+        if temp <= freeze_threshold:
+            return True
+        min_temp_6h = float(safety["min_temp_forecast_6h"])
+        if min_temp_6h <= freeze_threshold:
+            return True
+
+        return float(safety["wind_speed"]) >= float(safety["wind_threshold"])
+
+    @staticmethod
+    def _rain_reaches_threshold(value: float, threshold: float) -> bool:
+        """Inclusive rain threshold without treating dry zero as a hit at 0 mm."""
+        return value > 0 if threshold <= 0 else value >= threshold
 
     def _has_ms_threshold(self):
         # type: () -> bool
@@ -298,131 +430,139 @@ class WeatherAdjustment:
         """Get wind threshold in m/s."""
         if self._has_ms_threshold():
             ms_val = settings.get("wind_threshold_ms", self.DEFAULT_WIND_THRESHOLD_MS)
-            return float(ms_val)
+            value = self._finite_number(ms_val, minimum=0.0)
+            return value if value is not None else float("nan")
         kmh_val = settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH)
-        return round(float(kmh_val) / 3.6, 1)
+        value = self._finite_number(kmh_val, minimum=0.0)
+        return round(value / 3.6, 1) if value is not None else float("nan")
 
     def _get_wind_check(self, settings, wind_value):
         # type: (Dict[str, Any], Optional[float]) -> Tuple[bool, str]
         """Check if wind exceeds threshold."""
-        if wind_value is None:
-            return (False, "")
+        wind = self._finite_number(wind_value, minimum=0.0)
+        if wind is None:
+            return (True, "weather_unavailable: wind_speed")
         if self._has_ms_threshold():
-            threshold = float(settings.get("wind_threshold_ms", self.DEFAULT_WIND_THRESHOLD_MS))
-            exceeds = wind_value > threshold
-            detail = (
-                f"{wind_value:.1f} м/с > {threshold:.1f} м/с"
-                if exceeds
-                else f"{wind_value:.1f} м/с < {threshold:.1f} м/с"
+            threshold = self._finite_number(
+                settings.get("wind_threshold_ms", self.DEFAULT_WIND_THRESHOLD_MS),
+                minimum=0.0,
             )
-            return (exceeds, f"wind_skip: {wind_value:.1f} м/с (порог {threshold:.1f} м/с)" if exceeds else detail)
-        else:
-            threshold = float(settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH))
-            exceeds = wind_value > threshold
-            detail = (
-                f"{wind_value:.1f} км/ч > {threshold:.0f} км/ч"
-                if exceeds
-                else f"{wind_value:.1f} км/ч < {threshold:.0f} км/ч"
-            )
-            return (exceeds, f"wind_skip: {wind_value:.1f} км/ч (порог {threshold:.0f} км/ч)" if exceeds else detail)
+            if threshold is None:
+                return (True, "weather_unavailable: wind_threshold_ms")
+            exceeds = wind >= threshold
+            detail = f"{wind:.1f} м/с ≥ {threshold:.1f} м/с" if exceeds else f"{wind:.1f} м/с < {threshold:.1f} м/с"
+            return (exceeds, f"wind_skip: {wind:.1f} м/с (порог {threshold:.1f} м/с)" if exceeds else detail)
+
+        threshold = self._finite_number(
+            settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH),
+            minimum=0.0,
+        )
+        if threshold is None:
+            return (True, "weather_unavailable: wind_threshold_kmh")
+        exceeds = wind >= threshold
+        detail = f"{wind:.1f} км/ч ≥ {threshold:.0f} км/ч" if exceeds else f"{wind:.1f} км/ч < {threshold:.0f} км/ч"
+        return (exceeds, f"wind_skip: {wind:.1f} км/ч (порог {threshold:.0f} км/ч)" if exceeds else detail)
 
     def is_enabled(self) -> bool:
         """Check if weather adjustment is enabled."""
         return self._get_settings().get("enabled", False)
 
-    def should_skip(self) -> dict[str, Any]:
+    def should_skip(self, cache_only: bool = False, *, weather: Any = _WEATHER_UNSET) -> dict[str, Any]:
         """Determine if watering should be skipped entirely.
 
         Returns a dict with keys ``skip`` (bool), ``reason`` (human-readable
         string) and ``details`` (dict with ``type``/``value``/``threshold``).
+
+        ``cache_only=True`` decides по кэшу погоды без сетевого запроса —
+        для hot-path'ов отображения (поллинг /api/status). A cache miss is
+        returned as non-suppressing unknown state; live scheduler calls remain
+        fail-closed.
         """
         result = {"skip": False, "reason": "", "details": {}}
         settings = self._get_settings()
         if not settings.get("enabled"):
             return result
 
-        weather = self._get_weather()
+        if weather is _WEATHER_UNSET:
+            weather = self._get_weather(cache_only=cache_only)
         if not weather:
-            result["details"]["api_unavailable"] = True
+            return self._unavailable_decision(cache_only=cache_only, api_unavailable=not cache_only)
+
+        safety, error = self._validated_safety_inputs(weather, settings)
+        if error is not None or safety is None:
+            return self._unavailable_decision(field=error, cache_only=cache_only)
+
+        # Rain/freeze/wind thresholds are hard safety. The factor toggles only
+        # disable their soft coefficient contribution and UI control state.
+        rain_threshold = float(safety["rain_threshold_mm"])
+        rain_24h = float(safety["precipitation_24h"])
+        rain_forecast = float(safety["precipitation_forecast_6h"])
+
+        if self._rain_reaches_threshold(rain_24h, rain_threshold):
+            result["skip"] = True
+            result["reason"] = f"rain_skip: {rain_24h:.1f}mm за 24ч (порог {rain_threshold:.0f}mm)"
+            result["details"] = {"type": "rain", "value": rain_24h, "threshold": rain_threshold}
             return result
 
-        # Rain skip
-        if settings.get("factor_rain", True):
-            rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-            rain_24h = weather.precipitation_24h or 0.0
-            rain_forecast = weather.precipitation_forecast_6h or 0.0
+        if self._rain_reaches_threshold(rain_forecast, rain_threshold):
+            result["skip"] = True
+            result["reason"] = f"rain_forecast_skip: прогноз {rain_forecast:.1f}mm за 6ч (порог {rain_threshold:.0f}mm)"
+            result["details"] = {"type": "rain_forecast", "value": rain_forecast, "threshold": rain_threshold}
+            return result
 
-            if rain_24h > rain_threshold:
-                result["skip"] = True
-                result["reason"] = f"rain_skip: {rain_24h:.1f}mm за 24ч (порог {rain_threshold:.0f}mm)"
-                result["details"] = {"type": "rain", "value": rain_24h, "threshold": rain_threshold}
-                return result
+        freeze_threshold = float(safety["freeze_threshold_c"])
+        temp = float(safety["temperature"])
 
-            if rain_forecast > rain_threshold:
-                result["skip"] = True
-                result["reason"] = (
-                    f"rain_forecast_skip: прогноз {rain_forecast:.1f}mm за 6ч (порог {rain_threshold:.0f}mm)"
-                )
-                result["details"] = {"type": "rain_forecast", "value": rain_forecast, "threshold": rain_threshold}
-                return result
+        if temp <= freeze_threshold:
+            result["skip"] = True
+            result["reason"] = f"freeze_skip: {temp:.1f}°C (порог {freeze_threshold:.0f}°C)"
+            result["details"] = {"type": "freeze", "value": temp, "threshold": freeze_threshold}
+            return result
 
-        # Freeze skip
-        if settings.get("factor_freeze", True):
-            freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
-            temp = weather.temperature
+        min_temp_6h = float(safety["min_temp_forecast_6h"])
+        if min_temp_6h <= freeze_threshold:
+            result["skip"] = True
+            result["reason"] = (
+                f"freeze_forecast_skip: прогноз мин {min_temp_6h:.1f}°C за 6ч (порог {freeze_threshold:.0f}°C)"
+            )
+            result["details"] = {"type": "freeze_forecast", "value": min_temp_6h, "threshold": freeze_threshold}
+            return result
 
-            if temp is not None and temp < freeze_threshold:
-                result["skip"] = True
-                result["reason"] = f"freeze_skip: {temp:.1f}°C (порог {freeze_threshold:.0f}°C)"
-                result["details"] = {"type": "freeze", "value": temp, "threshold": freeze_threshold}
-                return result
-
-            min_temp_6h = getattr(weather, "min_temp_forecast_6h", None)
-            if min_temp_6h is not None and isinstance(min_temp_6h, (int, float)) and min_temp_6h < freeze_threshold:
-                result["skip"] = True
-                result["reason"] = (
-                    f"freeze_forecast_skip: прогноз мин {min_temp_6h:.1f}°C за 6ч (порог {freeze_threshold:.0f}°C)"
-                )
-                result["details"] = {"type": "freeze_forecast", "value": min_temp_6h, "threshold": freeze_threshold}
-                return result
-
-        # Wind postpone
-        if settings.get("factor_wind", True):
-            wind = weather.wind_speed
-            exceeds, reason_str = self._get_wind_check(settings, wind)
-            if exceeds:
-                result["skip"] = True
-                result["reason"] = reason_str
-                threshold = (
-                    self._get_wind_threshold_ms(settings)
-                    if self._has_ms_threshold()
-                    else settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH)
-                )
-                result["details"] = {"type": "wind", "value": wind, "threshold": threshold}
-                return result
+        wind = float(safety["wind_speed"])
+        wind_threshold = float(safety["wind_threshold"])
+        if wind >= wind_threshold:
+            unit = "м/с" if safety["wind_uses_ms"] else "км/ч"
+            result["skip"] = True
+            result["reason"] = f"wind_skip: {wind:.1f} {unit} (порог {wind_threshold:.1f} {unit})"
+            result["details"] = {"type": "wind", "value": wind, "threshold": wind_threshold}
+            return result
 
         return result
 
-    def get_coefficient(self) -> int:
-        """Calculate watering adjustment coefficient (0-200%)."""
+    def get_coefficient(self, *, weather: Any = _WEATHER_UNSET) -> int:
+        """Calculate the H1 watering adjustment coefficient (0-200%)."""
         settings = self._get_settings()
         if not settings.get("enabled"):
             return 100
 
-        weather = self._get_weather()
+        if weather is _WEATHER_UNSET:
+            weather = self._get_weather()
         if not weather:
-            return 100
+            return 0
 
         # Hard safety: thresholds always force skip even if factor_* flags are off
         if self._check_safety_skip(weather, settings):
+            return 0
+        safety, error = self._validated_safety_inputs(weather, settings)
+        if error is not None or safety is None:
             return 0
 
         base = 100
 
         # Temperature factor (Zimmerman-style)
-        temp = weather.temperature
+        temp = float(safety["temperature"])
         temp_factor = 1.0
-        if temp is not None and settings.get("factor_heat", True):
+        if settings.get("factor_heat", True):
             if temp > 35:
                 temp_factor = 1.5
             elif temp > 30:
@@ -439,9 +579,9 @@ class WeatherAdjustment:
                 temp_factor = 0.85
 
         # Humidity factor (Zimmerman-style)
-        hum = weather.humidity
+        hum = self._finite_number(getattr(weather, "humidity", None), minimum=0.0, maximum=100.0)
         humidity_factor = 1.0
-        if hum is not None:
+        if hum is not None and settings.get("factor_humidity", True):
             if hum > 90:
                 humidity_factor = 0.5
             elif hum > 80:
@@ -455,15 +595,25 @@ class WeatherAdjustment:
 
         # Additional humidity threshold reduction
         if hum is not None and settings.get("factor_humidity", True):
-            hum_threshold = settings.get("humidity_threshold_pct", self.DEFAULT_HUMIDITY_THRESHOLD_PCT)
-            hum_reduction = settings.get("humidity_reduction_pct", self.DEFAULT_HUMIDITY_REDUCTION_PCT)
+            hum_threshold = self._finite_number(
+                settings.get("humidity_threshold_pct", self.DEFAULT_HUMIDITY_THRESHOLD_PCT),
+                minimum=0.0,
+                maximum=100.0,
+            )
+            hum_reduction = self._finite_number(
+                settings.get("humidity_reduction_pct", self.DEFAULT_HUMIDITY_REDUCTION_PCT),
+                minimum=0.0,
+                maximum=100.0,
+            )
+            if hum_threshold is None or hum_reduction is None:
+                return 0
             if hum > hum_threshold:
                 humidity_factor = humidity_factor * (1.0 - hum_reduction / 100.0)
 
         # Rain factor
-        rain_24h = weather.precipitation_24h or 0.0
+        rain_24h = float(safety["precipitation_24h"])
         rain_factor = 1.0
-        rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
+        rain_threshold = float(safety["rain_threshold_mm"])
         if rain_24h > 0 and rain_threshold > 0 and settings.get("factor_rain", True):
             ratio = rain_24h / rain_threshold
             if ratio >= 1.0:
@@ -472,10 +622,10 @@ class WeatherAdjustment:
                 rain_factor = max(0.3, 1.0 - ratio * 0.7)
 
         # Wind factor
-        wind = weather.wind_speed
+        wind = float(safety["wind_speed"])
         wind_factor = 1.0
-        if wind is not None and settings.get("factor_wind", True):
-            if self._has_ms_threshold():
+        if settings.get("factor_wind", True):
+            if bool(safety["wind_uses_ms"]):
                 if wind > 4.2:
                     wind_factor = 1.1
                 elif wind > 2.8:
@@ -488,7 +638,7 @@ class WeatherAdjustment:
 
         # ET₀ factor
         et0_factor = 1.0
-        daily_et0 = weather.daily_et0
+        daily_et0 = self._finite_number(getattr(weather, "daily_et0", None), minimum=0.0)
         if daily_et0 is not None:
             ref_et0 = 4.5
             if daily_et0 > 0:
@@ -496,16 +646,17 @@ class WeatherAdjustment:
                 et0_factor = 0.5 + 0.5 * min(2.0, et0_ratio)
 
         coefficient = base * temp_factor * humidity_factor * rain_factor * wind_factor * et0_factor
+        if not math.isfinite(coefficient):
+            return 0
         result = max(0, min(200, round(coefficient)))
         return result
 
     # --- H2 water-balance integration -----------------------------------
-    # These additive methods route the watering path to the cached balance
-    # coefficient when enabled and fresh, and fall back to H1 otherwise.
-    # ``get_coefficient`` / sensor-source / ``should_skip`` are NOT touched.
+    # H2 is intentionally shadow-only (PR-060).  These helpers expose diagnostic
+    # state to the UI/nightly job; the scheduler always calls the H1 method above.
 
     def _balance_enabled(self) -> bool:
-        """True if the H2 water-balance mode flag is set in settings."""
+        """True if the H2 shadow/diagnostic calculation flag is set."""
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.enabled'")
@@ -515,48 +666,64 @@ class WeatherAdjustment:
             return False
 
     def _balance_coef_fresh(self) -> bool:
-        """True if the cached balance coef was recalculated recently enough.
+        """True if the cached diagnostic balance coefficient is fresh."""
+        return self.get_balance_diagnostic_status()["status"] == "fresh"
 
-        Stale = ``last_recalc_date`` older than ``stale_fallback_days`` (the
-        nightly job has not run — service was down or Open-Meteo unreachable for
-        several nights). A stale balance must not steer watering (review #5);
-        we fall back to H1 instead.
+    def get_balance_diagnostic_status(self) -> dict[str, Any]:
+        """Return canonical H2 shadow freshness metadata for the UI.
+
+        H2 never steers watering.  Future/invalid dates are surfaced explicitly
+        and cannot be mistaken for a fresh live coefficient.
         """
+        result: dict[str, Any] = {
+            "status": "unavailable",
+            "last_recalc_date": None,
+            "age_days": None,
+            "stale": False,
+            "fresh": False,
+        }
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.last_recalc_date'")
                 row = cur.fetchone()
                 if not row or not row["value"]:
-                    return False
+                    return result
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.stale_fallback_days'")
                 srow = cur.fetchone()
                 stale_days = 2
                 if srow and srow["value"] is not None:
-                    with contextlib.suppress(ValueError, TypeError):
-                        stale_days = int(float(srow["value"]))
+                    raw_stale_days = float(srow["value"])
+                    if (
+                        not math.isfinite(raw_stale_days)
+                        or not raw_stale_days.is_integer()
+                        or not 1 <= raw_stale_days <= 14
+                    ):
+                        logger.error(
+                            "invalid weather.balance.stale_fallback_days=%r",
+                            srow["value"],
+                        )
+                        return result
+                    stale_days = int(raw_stale_days)
                 from datetime import date, datetime
 
-                last = datetime.strptime(str(row["value"]), "%Y-%m-%d").date()
+                raw_date = str(row["value"])
+                last = datetime.strptime(raw_date, "%Y-%m-%d").date()
                 age_days = (date.today() - last).days
-                return age_days <= stale_days
-        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+                status = "future" if age_days < 0 else "fresh" if age_days <= stale_days else "stale"
+                return {
+                    "status": status,
+                    "last_recalc_date": raw_date,
+                    "age_days": age_days,
+                    "stale": status == "stale",
+                    "fresh": status == "fresh",
+                }
+        except (sqlite3.Error, OSError, OverflowError, ValueError, TypeError) as e:
             logger.debug("balance freshness check failed: %s", e)
-            return False
+            return result
 
     def get_effective_coefficient(self) -> int:
-        """Coefficient actually applied to watering: balance if live, else H1.
-
-        Returns the cached H2 water-balance coefficient when the balance mode is
-        enabled AND its cache is fresh; otherwise (disabled / stale / empty)
-        returns the H1 ``get_coefficient()`` — leaving the legacy path entirely
-        untouched. The hard safety-skip thresholds remain a separate gate on top
-        of whichever multiplier is returned.
-        """
-        if self._balance_enabled() and self._balance_coef_fresh():
-            from services.weather.balance import read_cached_coef
-
-            return read_cached_coef(self.db_path)
+        """Compatibility alias; H2 remains diagnostic and never steers watering."""
         return self.get_coefficient()
 
     def get_factors_detail(self, weather: Any | None = None) -> dict[str, dict[str, Any]]:
@@ -578,55 +745,65 @@ class WeatherAdjustment:
 
         # Rain factor
         rain_enabled = settings.get("factor_rain", True)
-        rain_threshold = settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM)
-        rain_24h = 0.0
-        rain_forecast = 0.0
+        rain_threshold = self._finite_number(
+            settings.get("rain_threshold_mm", self.DEFAULT_RAIN_THRESHOLD_MM),
+            minimum=0.0,
+        )
+        rain_24h = None
+        rain_forecast = None
         if weather:
-            rain_24h = weather.precipitation_24h or 0.0
-            rain_forecast = weather.precipitation_forecast_6h or 0.0
+            rain_24h = self._finite_number(getattr(weather, "precipitation_24h", None), minimum=0.0)
+            rain_forecast = self._finite_number(
+                getattr(weather, "precipitation_forecast_6h", None),
+                minimum=0.0,
+            )
 
         rain_status = "ok"
-        rain_detail = f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
-        if rain_24h > rain_threshold:
+        if rain_threshold is None or rain_24h is None or rain_forecast is None:
             rain_status = "danger"
-            rain_detail = f"{rain_24h:.1f} мм > {rain_threshold:.0f} мм (skip)"
-        elif rain_24h > rain_threshold * 0.5:
+            rain_detail = "нет достоверных данных дождя за 24ч/прогноза 6ч/порога (skip)"
+        elif self._rain_reaches_threshold(rain_24h, rain_threshold):
+            rain_status = "danger"
+            rain_detail = f"{rain_24h:.1f} мм ≥ {rain_threshold:.0f} мм (skip)"
+        elif self._rain_reaches_threshold(rain_forecast, rain_threshold):
+            rain_status = "danger"
+            rain_detail = f"прогноз {rain_forecast:.1f} мм за 6ч ≥ {rain_threshold:.0f} мм (skip)"
+        elif max(rain_24h, rain_forecast) > rain_threshold * 0.5:
             rain_status = "warn"
             rain_detail = f"{rain_24h:.1f} мм (прогноз +{rain_forecast:.1f} мм)"
+        else:
+            rain_detail = f"{rain_24h:.1f} мм < {rain_threshold:.0f} мм"
 
         result["rain"] = {"status": rain_status, "detail": rain_detail, "enabled": rain_enabled}
 
         # Freeze factor
         freeze_enabled = settings.get("factor_freeze", True)
-        freeze_threshold = settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C)
-        temp = weather.temperature if weather else None
+        freeze_threshold = self._finite_number(settings.get("freeze_threshold_c", self.DEFAULT_FREEZE_THRESHOLD_C))
+        temp = self._finite_number(getattr(weather, "temperature", None)) if weather else None
         _raw_min_6h = getattr(weather, "min_temp_forecast_6h", None) if weather else None
-        min_temp_6h = _raw_min_6h if isinstance(_raw_min_6h, (int, float)) else None
+        min_temp_6h = self._finite_number(_raw_min_6h)
 
         freeze_status = "ok"
-        if temp is not None:
-            if temp < freeze_threshold:
-                freeze_status = "danger"
-                freeze_detail = f"{temp:.1f}°C < {freeze_threshold:.0f}°C (skip)"
-            elif min_temp_6h is not None and min_temp_6h < freeze_threshold:
-                freeze_status = "danger"
-                freeze_detail = f"прогноз мин {min_temp_6h:.1f}°C за 6ч (skip)"
-            elif min_temp_6h is not None and min_temp_6h < freeze_threshold + 3:
-                freeze_status = "warn"
-                freeze_detail = f"мин {min_temp_6h:.1f}°C за 6ч (близко к порогу)"
-            else:
-                if min_temp_6h is not None:
-                    freeze_detail = f"мин +{min_temp_6h:.1f}°C за 6ч"
-                else:
-                    freeze_detail = f"+{temp:.1f}°C — норма"
+        if freeze_threshold is None or temp is None or min_temp_6h is None:
+            freeze_status = "danger"
+            freeze_detail = "нет достоверных данных температуры/порога (skip)"
+        elif temp <= freeze_threshold:
+            freeze_status = "danger"
+            freeze_detail = f"{temp:.1f}°C ≤ {freeze_threshold:.0f}°C (skip)"
+        elif min_temp_6h <= freeze_threshold:
+            freeze_status = "danger"
+            freeze_detail = f"прогноз мин {min_temp_6h:.1f}°C за 6ч (skip)"
+        elif min_temp_6h < freeze_threshold + 3:
+            freeze_status = "warn"
+            freeze_detail = f"мин {min_temp_6h:.1f}°C за 6ч (близко к порогу)"
         else:
-            freeze_detail = "нет данных"
+            freeze_detail = f"мин +{min_temp_6h:.1f}°C за 6ч"
 
         result["freeze"] = {"status": freeze_status, "detail": freeze_detail, "enabled": freeze_enabled}
 
         # Wind factor
         wind_enabled = settings.get("factor_wind", True)
-        wind = weather.wind_speed if weather else None
+        wind = self._finite_number(getattr(weather, "wind_speed", None), minimum=0.0) if weather else None
         use_ms = self._has_ms_threshold()
 
         wind_status = "ok"
@@ -635,28 +812,39 @@ class WeatherAdjustment:
                 wind_thr = self._get_wind_threshold_ms(settings)
                 unit = "м/с"
             else:
-                wind_thr = float(settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH))
+                raw_wind_threshold = settings.get("wind_threshold_kmh", self.DEFAULT_WIND_THRESHOLD_KMH)
+                wind_thr = self._finite_number(raw_wind_threshold, minimum=0.0)
                 unit = "км/ч"
-            if wind > wind_thr:
+            if wind_thr is None or not math.isfinite(wind_thr):
                 wind_status = "danger"
-                wind_detail = f"{wind:.1f} {unit} > {wind_thr:.1f} {unit} (skip)"
+                wind_detail = "нет достоверного порога ветра (skip)"
+            elif wind >= wind_thr:
+                wind_status = "danger"
+                wind_detail = f"{wind:.1f} {unit} ≥ {wind_thr:.1f} {unit} (skip)"
             elif wind > wind_thr * 0.7:
                 wind_status = "warn"
                 wind_detail = f"{wind:.1f} {unit} (близко к порогу)"
             else:
                 wind_detail = f"{wind:.1f} {unit} < {wind_thr:.1f} {unit}"
         else:
-            wind_detail = "нет данных"
+            wind_status = "danger"
+            wind_detail = "нет достоверных данных ветра (skip)"
 
         result["wind"] = {"status": wind_status, "detail": wind_detail, "enabled": wind_enabled}
 
         # Humidity factor
         hum_enabled = settings.get("factor_humidity", True)
-        hum_threshold = settings.get("humidity_threshold_pct", self.DEFAULT_HUMIDITY_THRESHOLD_PCT)
-        hum = weather.humidity if weather else None
+        hum_threshold = self._finite_number(
+            settings.get("humidity_threshold_pct", self.DEFAULT_HUMIDITY_THRESHOLD_PCT),
+            minimum=0.0,
+            maximum=100.0,
+        )
+        hum = self._finite_number(getattr(weather, "humidity", None), minimum=0.0, maximum=100.0) if weather else None
 
         hum_status = "ok"
-        if hum is not None:
+        if not hum_enabled:
+            hum_detail = "фактор отключён"
+        elif hum is not None and hum_threshold is not None:
             if hum > hum_threshold:
                 hum_status = "warn"
                 hum_detail = f"{hum:.0f}% > {hum_threshold:.0f}% (коэфф. снижен)"
@@ -670,7 +858,9 @@ class WeatherAdjustment:
         # Heat factor
         heat_enabled = settings.get("factor_heat", True)
         heat_status = "ok"
-        if temp is not None:
+        if not heat_enabled:
+            heat_detail = "фактор отключён"
+        elif temp is not None:
             if temp > 35:
                 heat_status = "danger"
                 heat_detail = f"+{temp:.0f}°C — жара (коэфф. ×1.5)"
@@ -732,7 +922,13 @@ class WeatherAdjustment:
 
     def log_decision(self, weather, coefficient, skip, reason, mode="auto") -> None:
         """Записать decision в weather_decisions для UI history."""
-        if skip:
+        snapshot_missing = weather is None
+        if snapshot_missing:
+            decision = "skip"
+            coefficient = 0
+            reason = reason or "weather_unavailable"
+            mode = "unknown"
+        elif skip:
             decision = "skip"
         elif coefficient == 100:
             decision = "water"
@@ -749,6 +945,25 @@ class WeatherAdjustment:
                 return float(v) if v is not None else None
             except (TypeError, ValueError):
                 return None
+
+        allowed_sources = {"api", "api_fallback", "local", "unknown"}
+
+        def _source(attr: str) -> str:
+            if snapshot_missing:
+                return "unknown"
+            sources = getattr(weather, "data_sources", None)
+            value = sources.get(attr) if isinstance(sources, dict) else None
+            return value if value in allowed_sources else "api"
+
+        data_sources = {
+            "temperature": _source("temperature"),
+            "humidity": _source("humidity"),
+            "precipitation_24h": _source("precipitation_24h"),
+            "precipitation_forecast_6h": _source("precipitation_forecast_6h"),
+            "wind_speed": _source("wind_speed"),
+            "daily_et0": _source("daily_et0"),
+            "min_temp_forecast_6h": _source("min_temp_forecast_6h"),
+        }
 
         try:
             with sqlite3.connect(self.db_path, timeout=5) as conn:
@@ -768,7 +983,7 @@ class WeatherAdjustment:
                         decision,
                         reason or "",
                         mode,
-                        json.dumps({"source": "open-meteo"}),
+                        json.dumps(data_sources),
                         0,
                     ),
                 )

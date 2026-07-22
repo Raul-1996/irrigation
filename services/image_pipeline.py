@@ -38,26 +38,36 @@ class ImageTooLargeError(ValueError):
 
 
 def load_safe_image(file_data: bytes) -> Image.Image:
-    """Decode bytes -> Pillow Image, applying EXIF rotation and pixel cap.
+    """Inspect and decode bytes, applying EXIF rotation and pixel cap.
 
     Returns an RGB image (mode == "RGB"). Raises ImageTooLargeError if
     the input would exceed MAX_INPUT_PIXELS pixels. Other Pillow/IO
     errors propagate to the caller.
     """
-    img = Image.open(io.BytesIO(file_data))
-    img.load()  # force decode so PIL raises here, not later
+    try:
+        img = Image.open(io.BytesIO(file_data))
+    except Image.DecompressionBombError as e:
+        # Pillow applies its own, higher pixel threshold while parsing image
+        # headers. Normalize that rejection to the public pipeline contract so
+        # every upload handler returns IMAGE_TOO_LARGE instead of HTTP 500.
+        raise ImageTooLargeError("image dimensions exceed Pillow's safety cap") from e
+
+    # Pillow knows dimensions after parsing the header. Enforce our stricter
+    # 50 MP limit before load() allocates and decodes the full pixel buffer.
     w0, h0 = img.size
     if w0 * h0 > MAX_INPUT_PIXELS:
-        raise ImageTooLargeError(
-            f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {MAX_INPUT_PIXELS}"
-        )
+        img.close()
+        raise ImageTooLargeError(f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {MAX_INPUT_PIXELS}")
+    try:
+        img.load()  # force decode so malformed inputs fail inside this helper
+    except Image.DecompressionBombError as e:
+        img.close()
+        raise ImageTooLargeError("image dimensions exceed Pillow's safety cap") from e
     try:
         img = ImageOps.exif_transpose(img)
     except (ValueError, TypeError, OSError) as e:
         logger.debug("load_safe_image: exif_transpose ignored: %s", e)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
-    elif img.mode != "RGB":
+    if img.mode in ("RGBA", "LA", "P") or img.mode != "RGB":
         img = img.convert("RGB")
     return img
 

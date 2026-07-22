@@ -1,11 +1,12 @@
-"""Tests: guest (no admin) can control zones/groups/emergency but NOT MQTT CRUD.
+"""Tests for the production guest-control boundary.
 
 Since TESTING=1 disables both middleware and @admin_required decorator,
 we verify:
-1. Structure: that @admin_required is absent from zone control endpoints
-   and present on MQTT CRUD endpoints.
-2. _is_status_action(): that the path matcher correctly allows/denies paths.
+1. _is_status_action(): only fail-safe OFF actions remain public.
+2. Production-like middleware rejects anonymous ON/resume actions.
 """
+
+from unittest.mock import patch
 
 import pytest
 
@@ -20,16 +21,10 @@ class TestIsStatusAction:
 
         self._is_status_action = app_mod._is_status_action
 
-    # -- Allowed paths (guest can access) --
-
-    def test_zone_mqtt_start(self):
-        assert self._is_status_action("/api/zones/1/mqtt/start")
+    # -- Allowed paths (fail-safe OFF actions) --
 
     def test_zone_mqtt_stop(self):
         assert self._is_status_action("/api/zones/42/mqtt/stop")
-
-    def test_zone_start(self):
-        assert self._is_status_action("/api/zones/7/start")
 
     def test_zone_stop(self):
         assert self._is_status_action("/api/zones/99/stop")
@@ -37,23 +32,8 @@ class TestIsStatusAction:
     def test_group_stop(self):
         assert self._is_status_action("/api/groups/3/stop")
 
-    def test_group_start_from_first(self):
-        assert self._is_status_action("/api/groups/5/start-from-first")
-
-    def test_group_master_valve_open(self):
-        assert self._is_status_action("/api/groups/2/master-valve/open")
-
-    def test_group_master_valve_close(self):
-        assert self._is_status_action("/api/groups/2/master-valve/close")
-
-    def test_group_start_zone(self):
-        assert self._is_status_action("/api/groups/1/start-zone/5")
-
     def test_emergency_stop(self):
         assert self._is_status_action("/api/emergency-stop")
-
-    def test_emergency_resume(self):
-        assert self._is_status_action("/api/emergency-resume")
 
     def test_postpone(self):
         assert self._is_status_action("/api/postpone")
@@ -66,6 +46,23 @@ class TestIsStatusAction:
     def test_mqtt_servers_denied(self):
         assert not self._is_status_action("/api/mqtt/servers")
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/zones/1/start",
+            "/api/zones/1/mqtt/start",
+            "/api/groups/1/start-from-first",
+            "/api/groups/1/start-zone/2",
+            "/api/groups/1/run-selected",
+            "/api/groups/1/skip-current",
+            "/api/groups/1/master-valve/open",
+            "/api/groups/1/master-valve/close",
+            "/api/emergency-resume",
+        ],
+    )
+    def test_unsafe_physical_actions_denied(self, path):
+        assert not self._is_status_action(path)
+
     def test_mqtt_server_by_id_denied(self):
         assert not self._is_status_action("/api/mqtt/servers/1")
 
@@ -77,6 +74,9 @@ class TestIsStatusAction:
 
     def test_zones_crud_denied(self):
         assert not self._is_status_action("/api/zones")
+
+    def test_next_watering_projection_is_not_anonymous(self):
+        assert not self._is_status_action("/api/zones/next-watering-bulk")
 
     def test_groups_crud_denied(self):
         assert not self._is_status_action("/api/groups")
@@ -140,18 +140,95 @@ class TestDecoratorPresence:
 
 
 class TestGuestEndpointAccess:
-    """Integration: guest client hits zone control endpoints (TESTING mode)."""
+    """Integration: exercise the production auth middleware with a guest."""
 
     def test_guest_emergency_stop(self, guest_client, app):
-        """Guest can POST /api/emergency-stop."""
-        resp = guest_client.post("/api/emergency-stop", content_type="application/json")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["success"] is True
+        """Emergency OFF remains reachable without an authenticated session."""
+        app.config["TESTING"] = False
+        app.db.set_setting_value("password_must_change", "0")
+        try:
+            with (
+                patch(
+                    "services.zone_control.emergency_stop_all",
+                    return_value={
+                        "success": True,
+                        "zones_failed": [],
+                        "errors": [],
+                        "masters_failed_publish": 0,
+                        "zones_still_active_after_wait": 0,
+                    },
+                ),
+                patch("routes.system_emergency_api.get_scheduler", return_value=None),
+            ):
+                resp = guest_client.post("/api/emergency-stop", content_type="application/json")
+            assert resp.status_code == 503
+            assert resp.get_json()["success"] is False
+            assert resp.get_json()["physical_stop_confirmed"] is True
+            assert resp.get_json()["sessions_quiesced"] is False
+            assert app.config["EMERGENCY_STOP"] is True
+        finally:
+            app.config["EMERGENCY_STOP"] = False
+            app.config["TESTING"] = True
 
-    def test_guest_emergency_resume(self, guest_client, app):
-        """Guest can POST /api/emergency-resume."""
-        resp = guest_client.post("/api/emergency-resume", content_type="application/json")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["success"] is True
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/zones/1/start",
+            "/api/zones/1/mqtt/start",
+            "/api/groups/1/start-from-first",
+            "/api/groups/1/start-zone/2",
+            "/api/groups/1/master-valve/open",
+            "/api/emergency-resume",
+        ],
+    )
+    def test_guest_cannot_issue_on_or_resume_actions(self, guest_client, app, path):
+        app.config["TESTING"] = False
+        app.db.set_setting_value("password_must_change", "0")
+        try:
+            resp = guest_client.post(path, content_type="application/json")
+            assert resp.status_code == 401
+            assert resp.get_json()["error_code"] == "UNAUTHENTICATED"
+        finally:
+            app.config["TESTING"] = True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/zones/1/start",
+            "/api/zones/1/mqtt/start",
+            "/api/groups/1/start-from-first",
+            "/api/groups/1/start-zone/2",
+            "/api/groups/1/run-selected",
+            "/api/groups/1/skip-current",
+            "/api/groups/1/master-valve/open",
+            "/api/groups/1/master-valve/close",
+            "/api/emergency-resume",
+        ],
+    )
+    def test_stale_admin_role_without_logged_in_cannot_control(self, app, path):
+        stale_client = app.test_client()
+        with stale_client.session_transaction() as sess:
+            sess["logged_in"] = False
+            sess["role"] = "admin"
+        app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
+        app.db.set_setting_value("password_must_change", "0")
+        try:
+            response = stale_client.post(path, content_type="application/json")
+            assert response.status_code == 401
+            assert response.get_json()["error_code"] == "UNAUTHENTICATED"
+        finally:
+            app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+
+    def test_logged_in_admin_can_resume_in_production_mode(self, admin_client, app):
+        from services.api_rate_limiter import reset_all
+
+        app.config.update(TESTING=False, WTF_CSRF_ENABLED=False, EMERGENCY_STOP=True)
+        app.db.set_setting_value("password_must_change", "0")
+        reset_all()
+        try:
+            response = admin_client.post("/api/emergency-resume", content_type="application/json")
+            assert response.status_code == 200
+            assert response.get_json()["success"] is True
+        finally:
+            app.config.update(TESTING=True, WTF_CSRF_ENABLED=False, EMERGENCY_STOP=False)
+            reset_all()

@@ -20,7 +20,9 @@ class TestStatusAPI:
 class TestEmergencyAPI:
     def test_emergency_stop(self, admin_client):
         resp = admin_client.post("/api/emergency-stop", content_type="application/json")
-        assert resp.status_code in (200, 400, 500)
+        assert resp.status_code == 503
+        assert resp.get_json()["success"] is False
+        assert resp.get_json()["sessions_quiesced"] is False
 
     def test_emergency_resume(self, admin_client):
         resp = admin_client.post("/api/emergency-resume", content_type="application/json")

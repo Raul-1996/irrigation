@@ -19,7 +19,7 @@ class TestRainMonitor:
 
         rm = RainMonitor()
         rm._cfg = {"type": "NO"}
-        with patch.object(rm, "_on_rain_start"):
+        with patch.object(rm, "_on_rain_start", return_value=True):
             rm._handle_payload("1")
             assert rm.is_rain is True
 
@@ -28,7 +28,7 @@ class TestRainMonitor:
 
         rm = RainMonitor()
         rm._cfg = {"type": "NO"}
-        with patch.object(rm, "_on_rain_stop"):
+        with patch.object(rm, "_on_rain_stop", return_value=True):
             rm._handle_payload("0")
             assert rm.is_rain is False
 
@@ -38,7 +38,7 @@ class TestRainMonitor:
 
         rm = RainMonitor()
         rm._cfg = {"type": "NC"}
-        with patch.object(rm, "_on_rain_stop"):
+        with patch.object(rm, "_on_rain_stop", return_value=True):
             rm._handle_payload("1")
             assert rm.is_rain is False
 

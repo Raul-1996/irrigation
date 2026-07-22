@@ -21,7 +21,7 @@ class TestWizardValidation:
         html = read_file("templates/programs.html")
         # Extract the wizardNext function body
         idx = html.index("function wizardNext()")
-        body = html[idx:idx + 300]
+        body = html[idx : idx + 300]
         assert "validateWizardStep(wizardStep)" in body
         # Validator must abort transition on failure
         assert "if (!validateWizardStep(wizardStep)) return;" in body
@@ -29,7 +29,7 @@ class TestWizardValidation:
     def test_step1_validates_name_not_empty(self):
         html = read_file("templates/programs.html")
         idx = html.index("function validateWizardStep(")
-        body = html[idx:idx + 2000]
+        body = html[idx : idx + 2000]
         # Step 1 branch must check wizardData.name
         assert "step === 1" in body
         assert "wizardData.name" in body
@@ -37,18 +37,18 @@ class TestWizardValidation:
     def test_step2_validates_schedule(self):
         html = read_file("templates/programs.html")
         idx = html.index("function validateWizardStep(")
-        body = html[idx:idx + 2000]
+        body = html[idx : idx + 2000]
         assert "step === 2" in body
         # Each schedule branch must be validated
         assert "schedule_type === 'weekdays'" in body
         assert "wizardData.days.length === 0" in body
         assert "schedule_type === 'interval'" in body
-        assert "schedule_type === 'even_odd'" in body
+        assert "schedule_type === 'even-odd'" in body
 
     def test_step4_validates_zones_selected(self):
         html = read_file("templates/programs.html")
         idx = html.index("function validateWizardStep(")
-        body = html[idx:idx + 2000]
+        body = html[idx : idx + 2000]
         assert "step === 4" in body
         assert "wizardData.zones.length === 0" in body
 

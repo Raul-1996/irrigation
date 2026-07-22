@@ -68,13 +68,13 @@ class TestMigrations:
         ids = [g["id"] for g in groups]
         assert 999 in ids
 
-    def test_default_password_set(self, test_db_path):
-        """Default password should be set after init."""
+    def test_public_default_password_not_seeded(self, test_db_path):
+        """Fresh databases must defer credential bootstrap to the recovery workflow."""
         from database import IrrigationDB
 
         db = IrrigationDB(db_path=test_db_path)
         h = db.get_password_hash()
-        assert h is not None
+        assert h is None
 
     def test_migration_records_exist(self, test_db_path):
         """Migration names should be recorded in migrations table."""

@@ -90,8 +90,9 @@
           <input type="text" id="weather_lon" name="weather_lon" placeholder="37.6176" style="flex:1">
           <button type="button" id="geo-detect" class="settings-btn" style="white-space:nowrap; padding:8px 10px; font-size:12px;"
                   data-audit-action="settings_geo_detect"
-                  data-audit-target="setting:weather_location">📍 По IP</button>
+                  data-audit-target="setting:weather_location">📍 Геопозиция</button>
         </div>
+        <div class="settings-note" id="geo-guidance" hidden></div>
       </div>
       <div class="settings-row">
         <label for="rain_threshold">Порог дождя (mm за 24ч) → пропуск</label>
@@ -144,17 +145,13 @@
         </div>
       </details>
       <details style="margin-top:8px;">
-        <summary style="font-size:0.85rem; cursor:pointer;">🧮 Режим коррекции (H1 / Водный баланс)</summary>
+        <summary style="font-size:0.85rem; cursor:pointer;">🧮 H1 и диагностика H2</summary>
         <div style="padding:8px 0;">
-          <div class="settings-row">
-            <label style="display:flex; align-items:center; gap:6px;">
-              <input type="checkbox" id="balance_enabled"> Включить водный баланс (H2) вместо Зиммермана
-            </label>
-          </div>
           <p class="settings-note" style="margin:4px 0 8px;">
             Баланс копит скользящий ET-дефицит и сравнивает его с климат-нормой точки →
             ровный коэффициент на сутки (лечит ночное занижение и внутридневные скачки).
-            Пока выключено — применяется H1, а баланс показывается как «второе мнение».
+            H2 работает только в теневом режиме: полив всегда применяет H1 Зиммермана,
+            а H2 показывается как датированная диагностика.
           </p>
           <div class="settings-row">
             <label for="balance_window_days">Окно дефицита (дней)</label>
@@ -206,7 +203,7 @@
       <div id="weather-preview" style="display:none; margin-top:8px; padding:8px; background:rgba(0,0,0,.04); border-radius:8px; font-size:12px;"></div>
     </form>
 
-    <p class="settings-note">Минимальная длина пароля — 4 символа.</p>
+    <p class="settings-note">Минимальная длина пароля — 8 символов.</p>
     <form id="pwd-form" class="settings-form" autocomplete="off"
           data-audit-action="settings_password_submit"
           data-audit-target="setting:password">
@@ -220,17 +217,17 @@
       <div class="settings-row">
         <label for="new_password">Новый пароль</label>
         <div class="settings-input">
-          <input type="password" id="new_password" name="new_password" minlength="4" maxlength="32" required autocomplete="new-password">
+          <input type="password" id="new_password" name="new_password" minlength="8" maxlength="32" required autocomplete="new-password">
           <button type="button" class="settings-toggle" data-target="#new_password" aria-label="Показать/скрыть">👁️</button>
         </div>
       </div>
       <div class="settings-row">
         <label for="new_password2">Повторите пароль</label>
         <div class="settings-input">
-          <input type="password" id="new_password2" name="new_password2" minlength="4" maxlength="32" autocomplete="new-password">
+          <input type="password" id="new_password2" name="new_password2" minlength="8" maxlength="32" required autocomplete="new-password">
           <button type="button" class="settings-toggle" data-target="#new_password2" aria-label="Показать/скрыть">👁️</button>
         </div>
-        <div class="settings-note">Поле для контроля. Проверка при отправке — только на длину (≥ 4).</div>
+        <div class="settings-note">Пароли должны совпадать; пробелы по краям не используются.</div>
       </div>
       <div class="settings-actions">
         <button type="submit" id="submit-btn" class="settings-btn">
@@ -254,10 +251,12 @@
     e.preventDefault();
     const btn = document.getElementById('submit-btn');
     const msg = document.getElementById('form-msg');
-    const old_password = document.getElementById('old_password').value;
-    const new_password = document.getElementById('new_password').value;
+    const old_password = document.getElementById('old_password').value.trim();
+    const new_password = document.getElementById('new_password').value.trim();
+    const new_password2 = document.getElementById('new_password2').value.trim();
     msg.textContent = '';
-    if (new_password.length < 4){ msg.textContent = 'Пароль должен быть не короче 4 символов.'; msg.style.color = '#e11d48'; return; }
+    if (new_password.length < 8){ msg.textContent = 'Пароль должен быть не короче 8 символов.'; msg.style.color = '#e11d48'; return; }
+    if (new_password !== new_password2){ msg.textContent = 'Новый пароль и подтверждение не совпадают.'; msg.style.color = '#e11d48'; return; }
     btn.disabled = true;
     btn.querySelector('.spinner').style.display = 'inline';
     btn.querySelector('.label').textContent = 'Сохраняем...';
@@ -384,7 +383,6 @@
       if (factors.heat !== undefined) document.getElementById('factor_heat').checked = !!factors.heat;
       // H2 water-balance settings
       var bal = wj.balance || {};
-      if (bal.enabled !== undefined) document.getElementById('balance_enabled').checked = !!bal.enabled;
       if (bal.window_days !== undefined) document.getElementById('balance_window_days').value = bal.window_days;
       if (bal.norm_window_days !== undefined) document.getElementById('balance_norm_window_days').value = bal.norm_window_days;
       if (bal.coef_min !== undefined) document.getElementById('balance_coef_min').value = bal.coef_min;
@@ -393,21 +391,52 @@
     }catch(e){ console.debug('weather settings load:', e); }
   })();
 
-  // Geo-detect by IP
+  // Browser geolocation stays within CSP connect-src 'self': no third-party
+  // request is made from the controller UI.
+  function configureGeolocationAvailability() {
+    const button = document.getElementById('geo-detect');
+    const guidance = document.getElementById('geo-guidance');
+    const available = window.isSecureContext === true && !!navigator.geolocation;
+    button.disabled = !available;
+    if (!available) {
+      button.textContent = '📍 Нужен HTTPS';
+      button.title = 'Автоопределение браузером недоступно по обычному HTTP';
+      guidance.hidden = false;
+      guidance.textContent = 'Автоопределение доступно только в защищённом контексте (HTTPS). Введите координаты вручную.';
+    } else {
+      button.textContent = '📍 Геопозиция';
+      button.title = '';
+      guidance.hidden = true;
+      guidance.textContent = '';
+    }
+    return available;
+  }
+
+  configureGeolocationAvailability();
   document.getElementById('geo-detect').addEventListener('click', async ()=>{
     const msg = document.getElementById('weather-msg'); msg.textContent='Определяем...'; msg.style.color='#666';
-    try{
-      const r = await fetch('https://ipapi.co/json/', {timeout:5000});
-      const j = await r.json();
-      if (j.latitude && j.longitude){
-        document.getElementById('weather_lat').value = j.latitude;
-        document.getElementById('weather_lon').value = j.longitude;
-        msg.textContent = `Определено: ${j.city || ''} (${j.latitude}, ${j.longitude})`; msg.style.color='#2e7d32';
-      } else {
-        msg.textContent = 'Не удалось определить'; msg.style.color='#c62828';
-      }
-    }catch(e){ msg.textContent='Ошибка определения: '+e.message; msg.style.color='#c62828'; }
+    if (!configureGeolocationAvailability()) {
+      msg.textContent='Автоопределение недоступно по HTTP. Введите координаты вручную.'; msg.style.color='#c62828';
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(position => {
+      const latitude = Math.round(position.coords.latitude * 1000000) / 1000000;
+      const longitude = Math.round(position.coords.longitude * 1000000) / 1000000;
+      document.getElementById('weather_lat').value = latitude;
+      document.getElementById('weather_lon').value = longitude;
+      msg.textContent = `Определено: ${latitude}, ${longitude}`; msg.style.color='#2e7d32';
+    }, error => {
+      msg.textContent='Не удалось определить геопозицию: '+error.message+'. Введите координаты вручную.';
+      msg.style.color='#c62828';
+    }, {enableHighAccuracy:false, timeout:5000, maximumAge:300000});
   });
+
+  function parseLocaleCoordinate(value) {
+    const normalized = String(value || '').trim().replace(',', '.');
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) return null;
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
 
   // Save weather settings
   document.getElementById('weather-save').addEventListener('click', async ()=>{
@@ -416,9 +445,26 @@
       // Save location
       const lat = document.getElementById('weather_lat').value.trim();
       const lon = document.getElementById('weather_lon').value.trim();
-      if (lat && lon){
-        await fetch('/api/settings/location', {method:'PUT', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({latitude: parseFloat(lat), longitude: parseFloat(lon)})});
+      if (lat || lon){
+        if (!lat || !lon) throw new Error('Укажите и широту, и долготу');
+        const latitude = parseLocaleCoordinate(lat);
+        const longitude = parseLocaleCoordinate(lon);
+        if (latitude === null || latitude < -90 || latitude > 90) {
+          throw new Error('Широта должна быть числом от -90 до 90');
+        }
+        if (longitude === null || longitude < -180 || longitude > 180) {
+          throw new Error('Долгота должна быть числом от -180 до 180');
+        }
+        const locationResponse = await fetch('/api/settings/location', {
+          method:'PUT',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({latitude, longitude})
+        });
+        let locationResult = {};
+        try{ locationResult = await locationResponse.json(); }catch(_){ locationResult = {}; }
+        if (!locationResponse.ok || !locationResult.success) {
+          throw new Error(locationResult.error || locationResult.message || 'Ошибка сохранения координат');
+        }
       }
       // Save weather settings
       const r = await fetch('/api/settings/weather', {method:'PUT', headers:{'Content-Type':'application/json'},
@@ -438,7 +484,6 @@
             heat: document.getElementById('factor_heat').checked
           },
           balance: {
-            enabled: document.getElementById('balance_enabled').checked,
             window_days: parseInt(document.getElementById('balance_window_days').value),
             norm_window_days: parseInt(document.getElementById('balance_norm_window_days').value),
             coef_min: parseInt(document.getElementById('balance_coef_min').value),
@@ -446,9 +491,13 @@
             intercept_mm: parseFloat(document.getElementById('balance_intercept_mm').value)
           }
         })});
-      const j = await r.json();
-      msg.style.color = j.success ? '#2e7d32' : '#c62828';
-      msg.textContent = j.success ? 'Настройки погоды сохранены' : 'Ошибка сохранения';
+      let j = {};
+      try{ j = await r.json(); }catch(_){ j = {}; }
+      if (!r.ok || !j.success) {
+        throw new Error(j.error || j.message || 'Ошибка сохранения настроек погоды');
+      }
+      msg.style.color = '#2e7d32';
+      msg.textContent = 'Настройки погоды сохранены';
     }catch(e){ msg.textContent='Ошибка: '+e.message; msg.style.color='#c62828'; }
   });
 
@@ -498,5 +547,3 @@
   });
 </script>
 {% endblock %}
-
-

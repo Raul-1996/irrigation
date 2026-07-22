@@ -96,8 +96,8 @@ class TestSourceSelection:
         assert v["mismatch"]["level"] == "soft"
         assert v["mismatch"]["delta"] == 7.0
 
-    def test_hard_mismatch_falls_back_to_api(self):
-        """delta > 10 → API fallback for temp AND hum, mismatch=hard."""
+    def test_hard_mismatch_uses_colder_api_and_falls_back_for_humidity(self):
+        """delta > 10 uses the colder API temp and API humidity."""
         v = _evaluate(_adj(), _env(temp_value=30.0, hum_value=80.0), _api(temperature=15.0, humidity=50.0))
         assert v["temp_source"] == "api_fallback"
         assert v["temperature"] == 15.0

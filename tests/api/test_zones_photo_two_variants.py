@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import os
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -122,6 +123,25 @@ class TestUploadSizeLimit:
             content_type="multipart/form-data",
         )
         assert resp.status_code == 200, resp.data
+
+    def test_upload_returns_safe_4xx_for_decompression_bomb(self, admin_client, app):
+        zone = app.db.create_zone({"name": "Bomb", "duration": 10, "group_id": 1})
+        bomb = Image.DecompressionBombError("unsafe dimensions")
+
+        with patch("services.image_pipeline.Image.open", side_effect=bomb):
+            resp = admin_client.post(
+                f"/api/zones/{zone['id']}/photo",
+                data={"photo": (io.BytesIO(b"bomb header"), "bomb.png")},
+                content_type="multipart/form-data",
+            )
+
+        assert resp.status_code == 400
+        assert resp.get_json() == {
+            "success": False,
+            "message": "Изображение слишком большое",
+            "error_code": "IMAGE_TOO_LARGE",
+        }
+        assert app.db.get_zone(zone["id"])["photo_path"] is None
 
 
 class TestExifOrientation:
@@ -265,3 +285,27 @@ class TestRotateRotatesBothVariants:
         # the file is still a readable image — proves the rotate didn't skip it).
         with Image.open(thumb_fs) as t:
             assert t.size == (400, 400)
+
+    def test_rotate_preserves_webp_format(self, admin_client, app):
+        """Regression: rotate must keep the source format — .webp files were
+        silently re-encoded as JPEG (derived images have .format == None)."""
+        zone = app.db.create_zone({"name": "RotFmt", "duration": 10, "group_id": 1})
+        png = _png_bytes((800, 400))
+        admin_client.post(
+            f"/api/zones/{zone['id']}/photo",
+            data={"photo": (io.BytesIO(png), "rf.png")},
+            content_type="multipart/form-data",
+        )
+        main_fs, thumb_fs = _zone_photo_paths(zone["id"])
+        with Image.open(main_fs) as m:
+            assert m.format == "WEBP"
+
+        resp = admin_client.post(
+            f"/api/zones/{zone['id']}/photo/rotate",
+            json={"angle": 90},
+        )
+        assert resp.status_code == 200, resp.data
+
+        for path in (main_fs, thumb_fs):
+            with Image.open(path) as img:
+                assert img.format == "WEBP", f"{path} re-encoded as {img.format}"

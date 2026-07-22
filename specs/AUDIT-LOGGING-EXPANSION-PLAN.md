@@ -284,7 +284,7 @@ def _versioned_update(zone_id: int, updates: dict, *, audit_reason: str = '') ->
 
 - **Уже существует.** `POST /api/logging/debug` (`routes/system_config_api.py:392`).
 - Body: `{"enabled": true|false, "auto_off_minutes": 1..720}`.
-- Защита: middleware mutation guard требует `role='admin'` (см. `irrigation-audit/findings/security.md:253` — есть вопрос об улучшении decorator-level admin guard).
+- Защита: middleware mutation guard требует `role='admin'`; decorator-level admin guard можно усилить отдельно.
 
 > **Рекомендация:** добавить `@admin_required` явно к `api_logging_debug_toggle` — сейчас защита через before_request, что менее очевидно. Один лишний декоратор — defence in depth.
 

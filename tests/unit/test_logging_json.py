@@ -175,11 +175,9 @@ def test_pii_filter_still_active():
     """Both PII filters (masking + quote-variant) still fire through
     WBJsonFormatter — the formatter does not interfere with filter output.
 
-    Note: the existing PIIMaskingFilter/PIIFilter (pre-Wave 2) only INSERT
-    a redaction marker (`[REDACTED]` / `***`) right after the sensitive key
-    name; they do not scrub the trailing value. That behaviour is by design
-    for Wave 2 (out of scope to tighten). This test only verifies the
-    marker is present, proving the filter ran through the new formatter.
+    This test only verifies the marker is present, proving the filter ran
+    through the new formatter; value scrubbing itself is covered by
+    test_pii_filters_scrub_secret_values.
     """
     fmt = WBJsonFormatter()
 
@@ -214,6 +212,45 @@ def test_pii_filter_still_active():
     soft.filter(rec2)
     out2 = fmt.format(rec2)
     assert "***" in out2, f"PIIFilter did not mask at all: {out2}"
+
+
+# ── 8a. PII filters must scrub the secret VALUES, not just insert a marker ──
+def test_pii_filters_scrub_secret_values():
+    """Regression: the secret value itself must be absent from the output.
+
+    Historically both filters only inserted a marker right after the key
+    name (``password=[REDACTED]hunter2``) leaving the value in app.log.
+    """
+
+    def _mk(msg):
+        return logging.LogRecord(
+            name="svc",
+            level=logging.INFO,
+            pathname="/x.py",
+            lineno=1,
+            msg=msg,
+            args=(),
+            exc_info=None,
+            func="f",
+        )
+
+    masking = PIIMaskingFilter()
+    rec = _mk("login password=hunter2 and \"token\":\"abc123\" and 'secret':'qwe456'")
+    masking.filter(rec)
+    assert "hunter2" not in rec.msg
+    assert "abc123" not in rec.msg
+    assert "qwe456" not in rec.msg
+    assert "password=[REDACTED]" in rec.msg
+    assert '"token":"[REDACTED]"' in rec.msg
+
+    soft = PIIFilter()
+    rec2 = _mk('payload {"password":"v1secret"} old_password=v2secret Authorization: Bearer tok789')
+    soft.filter(rec2)
+    assert "v1secret" not in rec2.msg
+    assert "v2secret" not in rec2.msg
+    assert "tok789" not in rec2.msg
+    assert '"password":"***"' in rec2.msg
+    assert "old_password=***" in rec2.msg
 
 
 # ── 8b. PIIFilter must clear record.args after rewriting record.msg ────────

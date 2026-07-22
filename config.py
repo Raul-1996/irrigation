@@ -1,9 +1,9 @@
-import logging
 import os
 import secrets
-import stat
 
 from dotenv import load_dotenv
+
+from utils import SecretKeyConfigurationError, create_private_file, read_private_file
 
 load_dotenv()
 
@@ -20,21 +20,38 @@ def _load_or_generate_secret(env_var: str = "SECRET_KEY", file_path: str = ".sec
     if env_val and env_val != "wb-irrigation-secret":
         return env_val
 
-    # Try reading from file
+    # Try reading from file.  An existing but empty/damaged file must never be
+    # replaced silently: that would rotate the session key without an operator
+    # recovery decision and invalidate every current session.
     try:
-        with open(file_path) as f:
-            key = f.read().strip()
-        if key:
-            return key
+        raw_key = read_private_file(file_path)
     except FileNotFoundError:
-        logging.getLogger(__name__).debug("No secret key file found, generating new one")
+        raw_key = None
+
+    if raw_key is not None:
+        try:
+            key = raw_key.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise SecretKeyConfigurationError("Flask secret key file is invalid; restore the original key") from error
+        if not key:
+            raise SecretKeyConfigurationError("Flask secret key file is empty; restore the original key")
+        return key
 
     # Generate new key and persist
     key = secrets.token_hex(32)
-    with open(file_path, "w") as f:
-        f.write(key)
-    os.chmod(file_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-    return key
+    try:
+        create_private_file(file_path, key.encode("utf-8"))
+        return key
+    except FileExistsError:
+        # Another worker completed first-start initialisation.  Re-read its
+        # material instead of rotating it with this worker's generated value.
+        try:
+            persisted = read_private_file(file_path).decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise SecretKeyConfigurationError("Flask secret key file is invalid; restore the original key") from error
+        if not persisted:
+            raise SecretKeyConfigurationError("Flask secret key file is empty; restore the original key") from None
+        return persisted
 
 
 # Module-level TESTING flag — read ONCE at import time so every site that

@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.safety_contracts import confirmed_group_stop
+
 os.environ["TESTING"] = "1"
 
 
@@ -89,6 +91,7 @@ def test_manual_start_writes_source_manual(admin_client, app):
         }
     )
     with (
+        confirmed_group_stop(app.db),
         patch("services.zone_control.publish_mqtt_value", return_value=True),
         patch("services.zone_control.water_monitor"),
         patch("services.zone_control.state_verifier"),

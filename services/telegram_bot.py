@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import importlib.util
 import logging
 import os
@@ -12,7 +13,6 @@ from database import db
 from utils import decrypt_secret
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))  # .../irrigation/services
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 # --- надёжная загрузка локального routes-модуля по пути файла ---
 _routes_mod = None
@@ -43,6 +43,13 @@ def _load_routes_module():
 
 logger = logging.getLogger("TELEGRAM")
 
+_TELEGRAM_TRANSPORT_ERRORS = (
+    requests.exceptions.RequestException,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
 try:
     # aiogram v3
     from aiogram import Bot, Dispatcher, F
@@ -59,25 +66,9 @@ except ImportError as e:
     _AInlineKeyboardMarkup = None
     _AInlineKeyboardButton = None
 
-try:
-    if not getattr(logger, "_telegram_configured", False):
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        log_path = os.path.join(LOGS_DIR, "telegram.txt")
-        fh = logging.FileHandler(log_path, encoding="utf-8")
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-        # консоль
-        if not any(isinstance(h, logging.StreamHandler) for h in getattr(logger, "handlers", [])):
-            sh = logging.StreamHandler()
-            sh.setFormatter(fmt)
-            logger.addHandler(sh)
-        logger.setLevel(logging.INFO)
-        logger.propagate = True
-        logger._telegram_configured = True  # type: ignore[attr-defined]
-        logger.info(f"telegram service logger initialized -> {log_path}")
-except (OSError, PermissionError) as e:
-    logger.debug("Handled exception in line_74: %s", e)
+# Telegram inherits the application's hardened root handlers.  A dedicated
+# handler previously created services/logs/telegram.txt under the process umask
+# and duplicated unfiltered PII outside the protected application log.
 
 
 def _redact_url(url: str) -> str:
@@ -96,39 +87,91 @@ def _redact_url(url: str) -> str:
 class TelegramNotifier:
     def __init__(self):
         self._token: str | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def _ensure_token(self) -> str | None:
         try:
-            if self._token:
+            with self._lock:
+                if self._token:
+                    return self._token
+                tok_enc = db.get_setting_value("telegram_bot_token_encrypted")
+                if not tok_enc:
+                    logger.error("TelegramNotifier: no encrypted token in DB (telegram_bot_token_encrypted)")
+                    return None
+                token = decrypt_secret(tok_enc)
+                if not token:
+                    logger.error("TelegramNotifier: decrypt_secret returned empty token")
+                    return None
+                self._token = token
                 return self._token
-            tok_enc = db.get_setting_value("telegram_bot_token_encrypted")
-            if not tok_enc:
-                logger.error("TelegramNotifier: no encrypted token in DB (telegram_bot_token_encrypted)")
-                return None
-            token = decrypt_secret(tok_enc)
-            if not token:
-                logger.error("TelegramNotifier: decrypt_secret returned empty token")
-                return None
-            self._token = token
-            return self._token
-        except (sqlite3.Error, OSError) as e:
+        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
             logger.error(f"TelegramNotifier ensure_token failed: {e}")
             return None
 
+    def invalidate_token(self) -> None:
+        """Forget cached plaintext after any token configuration transition."""
+        with self._lock:
+            self._token = None
+
+    @staticmethod
+    def _close_coroutine(coro) -> None:
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+
+    @staticmethod
+    def _log_scheduled_result(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except (asyncio.CancelledError, RuntimeError):
+            return
+        if exc is not None:
+            if isinstance(exc, _TELEGRAM_TRANSPORT_ERRORS):
+                logger.warning("scheduled aiogram coroutine transport failed")
+            else:
+                logger.error("scheduled aiogram coroutine failed: %s", exc)
+
     def _submit_aiogram(self, coro) -> bool:
+        """Submit from sync callers without ever blocking the target loop.
+
+        Flask, scheduler and monitor threads need synchronous delivery feedback,
+        so they wait on ``run_coroutine_threadsafe``.  Aiogram handlers already
+        execute on the target loop; waiting there would deadlock for ten seconds.
+        In that case we enqueue the coroutine and return accepted-for-delivery.
+        """
         try:
             global _aiogram_runner
-            if _aiogram_runner and getattr(_aiogram_runner, "_bot", None) and getattr(_aiogram_runner, "_loop", None):
-                fut = asyncio.run_coroutine_threadsafe(coro, _aiogram_runner._loop)
-                try:
-                    res = fut.result(timeout=10)
-                    return bool(res)
-                except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
-                    logger.exception(f"aiogram coroutine failed: {e}")
-                    fut.cancel()
+            runner = _aiogram_runner
+            loop = getattr(runner, "_loop", None) if runner else None
+            if not runner or not getattr(runner, "_bot", None) or loop is None or loop.is_closed():
+                self._close_coroutine(coro)
+                return False
+
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is loop:
+                task = loop.create_task(coro)
+                task.add_done_callback(self._log_scheduled_result)
+                return True
+
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                res = fut.result(timeout=10)
+                return bool(res)
+            except _TELEGRAM_TRANSPORT_ERRORS:
+                logger.warning("aiogram coroutine transport failed")
+                fut.cancel()
+            except RuntimeError:
+                logger.exception("aiogram coroutine runtime failed")
+                fut.cancel()
         except (RuntimeError, OSError) as e:
             logger.debug("Handled exception in _submit_aiogram: %s", e)
+            self._close_coroutine(coro)
         return False
 
     def send_text(self, chat_id: int, text: str) -> bool:
@@ -155,11 +198,19 @@ class TelegramNotifier:
                 return False
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             payload = {"chat_id": int(chat_id), "text": str(text)}
-            logger.info(f"http POST {_redact_url(url)} payload={payload}")
+            logger.info(
+                "http POST %s chat_id=%s text_len=%s",
+                _redact_url(url),
+                int(chat_id),
+                len(str(text)),
+            )
             resp = requests.post(url, json=payload, timeout=10)
-            logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
+            logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier send_text transport failed")
+            return False
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier send_text failed: {e}")
             return False
@@ -202,9 +253,12 @@ class TelegramNotifier:
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             logger.info(f"http POST {_redact_url(url)} payload_keys={list(payload.keys())}")
             resp = requests.post(url, json=payload, timeout=10)
-            logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
+            logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier send_message transport failed")
+            return False
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier send_message failed: {e}")
             return False
@@ -244,9 +298,12 @@ class TelegramNotifier:
             url = f"https://api.telegram.org/bot{token}/editMessageText"
             logger.info(f"http POST {_redact_url(url)} payload_keys={list(payload.keys())}")
             resp = requests.post(url, json=payload, timeout=10)
-            logger.info(f"http RESP status={resp.status_code} body={resp.text[:200]}")
+            logger.info("http RESP status=%s", resp.status_code)
             data = resp.json() if resp.ok else {}
             return bool(data.get("ok"))
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier edit_message_text transport failed")
+            return False
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier edit_message_text failed: {e}")
             return False
@@ -279,8 +336,67 @@ class TelegramNotifier:
                 payload["text"] = str(text)
                 payload["show_alert"] = bool(show_alert)
             requests.post(url, json=payload, timeout=10)
+        except _TELEGRAM_TRANSPORT_ERRORS:
+            logger.warning("TelegramNotifier answer_callback transport failed")
         except (ValueError, TypeError, KeyError) as e:
             logger.error(f"TelegramNotifier answer_callback failed: {e}")
+
+
+def _valid_hhmm(value: str) -> bool:
+    try:
+        hours, minutes = str(value).split(":", 1)
+        return len(hours) == 2 and len(minutes) == 2 and 0 <= int(hours) <= 23 and 0 <= int(minutes) <= 59
+    except (ValueError, TypeError):
+        return False
+
+
+def _apply_subscription_command(chat_id: int, text: str) -> str | None:
+    """Apply a subscription command, returning a response or ``None``.
+
+    Both polling implementations call this function so command availability
+    cannot drift between aiogram and the HTTP fallback.
+    """
+    parts = str(text or "").strip().split()
+    if not parts:
+        return None
+    command = parts[0].split("@", 1)[0].lower()
+    if command not in ("/subscribe", "/unsubscribe"):
+        return None
+
+    user = db.get_bot_user_by_chat(int(chat_id))
+    if not user:
+        return "Не удалось сохранить подписку: пользователь не зарегистрирован"
+    user_id = int(user["id"])
+
+    if command == "/unsubscribe":
+        daily_ok = db.create_or_update_subscription(user_id, "daily", "brief", "08:00", None, False)
+        weekly_ok = db.create_or_update_subscription(user_id, "weekly", "brief", "08:00", "1111111", False)
+        return "Подписки отключены" if daily_ok and weekly_ok else "Не удалось отключить подписки"
+
+    sub_type = parts[1].lower() if len(parts) > 1 else "daily"
+    report_format = parts[2].lower() if len(parts) > 2 else "brief"
+    time_local = parts[3] if len(parts) > 3 else "08:00"
+    dow_mask = parts[4] if len(parts) > 4 and sub_type == "weekly" else None
+    if sub_type not in ("daily", "weekly"):
+        return "Тип подписки должен быть daily или weekly"
+    if report_format not in ("brief", "full"):
+        return "Формат подписки должен быть brief или full"
+    if not _valid_hhmm(time_local):
+        return "Время подписки должно быть в формате HH:MM"
+    if sub_type == "weekly":
+        dow_mask = dow_mask or "1111111"
+        if len(dow_mask) != 7 or any(bit not in "01" for bit in dow_mask):
+            return "Маска дней недели должна содержать 7 символов 0/1"
+
+    saved = db.create_or_update_subscription(
+        user_id,
+        sub_type,
+        report_format,
+        time_local,
+        dow_mask,
+        True,
+    )
+    return "Подписка сохранена" if saved else "Не удалось сохранить подписку"
 
 
 class AiogramBotRunner:
@@ -290,6 +406,17 @@ class AiogramBotRunner:
         self._bot: Bot | None = None
         self._dp: Dispatcher | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_requested = threading.Event()
+        self._startup_event = threading.Event()
+        self._startup_ok = False
+        self._startup_error: str | None = None
+
+    def _signal_startup(self, ok: bool, error: str | None = None) -> None:
+        if self._startup_event.is_set():
+            return
+        self._startup_ok = bool(ok)
+        self._startup_error = error
+        self._startup_event.set()
 
     def _is_authorized_chat(self, chat_id: int) -> bool:
         """SECURITY FIX (VULN-005): Check if chat_id is the admin chat."""
@@ -321,8 +448,15 @@ class AiogramBotRunner:
             return
         try:
             db.upsert_bot_user(int(chat_id), username, first_name)
+            db.set_bot_user_authorized(int(chat_id), role="admin")
         except (sqlite3.Error, OSError) as e:
             logger.debug("Handled exception in __init__: %s", e)
+
+        command_response = _apply_subscription_command(chat_id, text)
+        if command_response is not None:
+            notifier.send_text(chat_id, command_response)
+            return
+
         try:
             routes = _load_routes_module()
             if hasattr(routes, "set_notifier"):
@@ -333,33 +467,6 @@ class AiogramBotRunner:
             logger.debug("Exception in __init__: %s", e)
             notifier.send_text(chat_id, "Главное меню: нажмите «Группы»")
         return
-
-        if text.startswith("/subscribe"):
-            try:
-                parts = text.split()
-                stype = parts[1] if len(parts) > 1 else "daily"
-                sformat = parts[2] if len(parts) > 2 else "brief"
-                time_local = parts[3] if len(parts) > 3 else "08:00"
-                dow = parts[4] if (len(parts) > 4 and stype == "weekly") else None
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug("Exception in line_299: %s", e)
-                stype, sformat, time_local, dow = "daily", "brief", "08:00", None
-            u = db.get_bot_user_by_chat(int(chat_id))
-            if u:
-                db.create_or_update_subscription(int(u.get("id")), stype, sformat, time_local, dow, True)
-                notifier.send_text(chat_id, "Подписка сохранена")
-            return
-
-        if text.startswith("/unsubscribe"):
-            u = db.get_bot_user_by_chat(int(chat_id))
-            if u:
-                try:
-                    db.create_or_update_subscription(int(u.get("id")), "daily", "brief", "08:00", None, False)
-                    db.create_or_update_subscription(int(u.get("id")), "weekly", "brief", "08:00", "1111111", False)
-                except (sqlite3.Error, OSError) as e:
-                    logger.debug("Handled exception in line_314: %s", e)
-            notifier.send_text(chat_id, "Подписки отключены")
-            return
 
     async def _on_callback(self, cq: CallbackQuery):
         # 1) ACK first to stop spinner
@@ -398,30 +505,97 @@ class AiogramBotRunner:
             jd = routes._cb_decode(data)
             logger.info(f"cb json chat_id={from_chat} data={jd}")
             if isinstance(jd, dict) and jd.get("t"):
-                routes.process_callback_json(int(from_chat), jd, message_id=msg_id)
+                # Route actions are synchronous and may perform MQTT/SQLite
+                # work.  Running them in a worker keeps the aiogram event loop
+                # available for notifier coroutines submitted back to it.
+                await asyncio.to_thread(routes.process_callback_json, int(from_chat), jd, message_id=msg_id)
                 return
         except (ValueError, TypeError, KeyError):
             logger.exception("callback processing failed")
             return
 
     async def _main(self):
+        bot = None
+        polling_task = None
         try:
             token = notifier._ensure_token()
             if not token or Bot is None or Dispatcher is None:
-                logger.error("Aiogram _main: missing token or aiogram is not available")
+                message = "Aiogram _main: missing token or aiogram is not available"
+                logger.error(message)
+                self._signal_startup(False, message)
                 return
             logger.info("[telegram] Starting aiogram v3 polling runner")
             self._bot = Bot(token=token)
+            bot = self._bot
             self._dp = Dispatcher()
-            try:
-                await self._bot.delete_webhook(drop_pending_updates=True)
-            except (sqlite3.Error, OSError) as e:
-                logger.warning(f"delete_webhook failed: {e}")
+            if self._stop_requested.is_set():
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+
+            # Bot() only validates token syntax.  get_me performs an authenticated
+            # request, so settings PUT cannot report success for a token that the
+            # Telegram API rejects.  Both bootstrap calls are bounded because
+            # reconfigure_bot_token synchronously depends on this handshake.
+            await asyncio.wait_for(self._bot.get_me(), timeout=5.0)
+            if self._stop_requested.is_set():
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+            await asyncio.wait_for(self._bot.delete_webhook(drop_pending_updates=True), timeout=5.0)
+            if self._stop_requested.is_set():
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+
             self._dp.message.register(self._on_message, F.text)
             self._dp.callback_query.register(self._on_callback)
-            await self._dp.start_polling(self._bot, allowed_updates=["message", "callback_query"])
-        except (sqlite3.Error, OSError) as e:
-            logger.error(f"Aiogram runner failed: {e}")
+            polling_task = asyncio.create_task(
+                self._dp.start_polling(
+                    self._bot,
+                    allowed_updates=["message", "callback_query"],
+                    handle_signals=False,
+                    close_bot_session=False,
+                )
+            )
+            if self._stop_requested.is_set():
+                polling_task.cancel()
+                await asyncio.gather(polling_task, return_exceptions=True)
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+
+            # Give the real Dispatcher a bounded window to enter its steady
+            # polling wait.  Immediate failures (bad thread setup, startup
+            # observer errors, etc.) must be visible before settings persistence
+            # is accepted by reconfigure_bot_token().
+            done, _pending = await asyncio.wait({polling_task}, timeout=0.05)
+            if polling_task in done:
+                if polling_task.cancelled():
+                    self._signal_startup(False, "polling cancelled during bootstrap")
+                    return
+                error = polling_task.exception()
+                if error is not None:
+                    raise error
+                raise RuntimeError("polling exited during bootstrap")
+            if self._stop_requested.is_set():
+                polling_task.cancel()
+                await asyncio.gather(polling_task, return_exceptions=True)
+                self._signal_startup(False, "stop requested during bootstrap")
+                return
+            self._running = True
+            self._signal_startup(True)
+            await polling_task
+        except Exception as e:  # Bootstrap failures must reach the synchronous caller.
+            self._signal_startup(False, str(e))
+            logger.error("Aiogram runner failed: %s", e)
+        finally:
+            if not self._startup_event.is_set():
+                self._signal_startup(False, "aiogram runner exited during bootstrap")
+            self._running = False
+            if bot is not None:
+                try:
+                    await bot.session.close()
+                except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:
+                    logger.debug("aiogram bot session close failed: %s", e)
+            self._bot = None
+            self._dp = None
 
     def _thread_target(self):
         try:
@@ -429,13 +603,75 @@ class AiogramBotRunner:
             asyncio.set_event_loop(self._loop)
             self._loop.run_until_complete(self._main())
         except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:  # catch-all: intentional
+            self._signal_startup(False, str(e))
             logger.exception(f"Aiogram thread target error: {e}")
+        finally:
+            if not self._startup_event.is_set():
+                self._signal_startup(False, "aiogram thread exited during bootstrap")
+            loop = self._loop
+            if loop is not None and not loop.is_closed():
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except RuntimeError as e:
+                    logger.debug("aiogram loop cleanup failed: %s", e)
+                loop.close()
+            self._loop = None
+            self._running = False
 
-    def start(self):
+    def start(self, timeout: float = 12.0) -> bool:
         if self._thread and self._thread.is_alive():
-            return
+            return self._startup_event.is_set() and self._startup_ok
+        self._stop_requested.clear()
+        self._startup_event.clear()
+        self._startup_ok = False
+        self._startup_error = None
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
+        if not self._startup_event.wait(timeout=max(0.0, timeout)):
+            self._stop_requested.set()
+            self._startup_error = "aiogram bootstrap timed out"
+            logger.error(self._startup_error)
+            return False
+        if not self._startup_ok:
+            self._thread.join(timeout=1.0)
+            return False
+        if not self._thread.is_alive():
+            self._startup_error = "aiogram runner exited immediately after bootstrap"
+            return False
+        return True
+
+    def stop(self, timeout: float = 10.0) -> bool:
+        self._stop_requested.set()
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            return True
+
+        loop = self._loop
+        dispatcher = self._dp
+        if loop is not None and dispatcher is not None and loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                task = loop.create_task(dispatcher.stop_polling())
+                task.add_done_callback(TelegramNotifier._log_scheduled_result)
+                # The current handler cannot join its own polling thread.  The
+                # caller must retry configuration from a non-aiogram thread.
+                return False
+            try:
+                future = asyncio.run_coroutine_threadsafe(dispatcher.stop_polling(), loop)
+                future.result(timeout=min(5.0, timeout))
+            except (concurrent.futures.CancelledError, ConnectionError, TimeoutError, OSError, RuntimeError) as e:
+                logger.debug("aiogram stop_polling failed: %s", e)
+        if thread is threading.current_thread():
+            return False
+        thread.join(timeout=max(0.0, timeout))
+        return not thread.is_alive()
 
 
 class SimpleHTTPPoller:
@@ -443,6 +679,7 @@ class SimpleHTTPPoller:
         self._thr: threading.Thread | None = None
         self._running = False
         self._offset = None
+        self._stop_requested = threading.Event()
 
     def _run(self):
         try:
@@ -455,6 +692,8 @@ class SimpleHTTPPoller:
                 requests.post(f"https://api.telegram.org/bot{token}/deleteWebhook", timeout=10)
             except (ConnectionError, TimeoutError, OSError) as e:
                 logger.debug("Handled exception in _run: %s", e)
+            if self._stop_requested.is_set():
+                return
             logger.info("[telegram] Starting legacy HTTP polling fallback")
             self._running = True
 
@@ -462,12 +701,17 @@ class SimpleHTTPPoller:
             if hasattr(routes, "set_notifier"):
                 routes.set_notifier(notifier)
 
-            while self._running:
+            while self._running and not self._stop_requested.is_set():
                 try:
-                    params = {"timeout": 50}
+                    # A short long-poll keeps token replacement bounded.  The
+                    # previous 50/60-second pair made it impossible to stop the
+                    # old-token runner atomically from the settings request.
+                    params = {"timeout": 5}
                     if self._offset is not None:
                         params["offset"] = int(self._offset)
-                    resp = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params, timeout=60)
+                    resp = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params, timeout=10)
+                    if not self._running or self._stop_requested.is_set():
+                        break
                     data = resp.json() if resp.ok else {}
                     for u in data.get("result") or []:
                         try:
@@ -526,6 +770,11 @@ class SimpleHTTPPoller:
                                 username = chat.get("username")
                                 first_name = chat.get("first_name")
                                 db.upsert_bot_user(int(cid), username, first_name)
+                                db.set_bot_user_authorized(int(cid), role="admin")
+                                command_response = _apply_subscription_command(int(cid), text)
+                                if command_response is not None:
+                                    notifier.send_text(int(cid), command_response)
+                                    continue
                                 routes = _load_routes_module()
                                 if hasattr(routes, "set_notifier"):
                                     routes.set_notifier(notifier)
@@ -546,16 +795,28 @@ class SimpleHTTPPoller:
         except (sqlite3.Error, OSError) as e:
             logger.error(f"HTTP poller failed: {e}")
 
-    def start(self):
+    def start(self) -> bool:
         if self._thr and self._thr.is_alive():
-            return
+            return True
+        self._stop_requested.clear()
         self._thr = threading.Thread(target=self._run, daemon=True)
         self._thr.start()
+        return True
+
+    def stop(self, timeout: float = 11.0) -> bool:
+        self._stop_requested.set()
+        self._running = False
+        thread = self._thr
+        if thread is None or not thread.is_alive():
+            return True
+        thread.join(timeout=max(0.0, timeout))
+        return not thread.is_alive()
 
 
 _poller = None
 _aiogram_runner: AiogramBotRunner | None = None
 _http_poller: SimpleHTTPPoller | None = None
+_runtime_lock = threading.RLock()
 
 notifier = TelegramNotifier()
 
@@ -573,8 +834,106 @@ def _is_authorized_chat_id(chat_id: int) -> bool:
         return False
 
 
-def start_long_polling_if_needed():
+def _start_runtime_locked() -> bool:
+    """Start exactly one polling implementation; caller holds runtime lock."""
     global _aiogram_runner, _http_poller
+    try:
+        from config import TESTING
+
+        if TESTING:
+            return True
+    except ImportError:
+        pass
+    if not notifier._ensure_token():
+        return False
+    if Bot is not None and Dispatcher is not None:
+        if _aiogram_runner is None:
+            _aiogram_runner = AiogramBotRunner()
+        return _aiogram_runner.start()
+    if _http_poller is None:
+        _http_poller = SimpleHTTPPoller()
+    return _http_poller.start()
+
+
+def _start_runtime_safely_locked() -> bool:
+    """Normalize both bootstrap rejection and Thread.start exceptions."""
+    try:
+        return bool(_start_runtime_locked())
+    except (OSError, RuntimeError, TypeError, ValueError) as e:
+        logger.error("Telegram polling runtime start failed: %s", e)
+        return False
+
+
+def _stop_runtime_locked() -> bool:
+    """Stop current pollers before a token transition; caller holds lock."""
+    global _aiogram_runner, _http_poller
+    stopped = True
+    if _aiogram_runner is not None:
+        aiogram_stopped = _aiogram_runner.stop()
+        stopped = aiogram_stopped and stopped
+        if aiogram_stopped:
+            _aiogram_runner = None
+    if _http_poller is not None:
+        http_stopped = _http_poller.stop()
+        stopped = http_stopped and stopped
+        if http_stopped:
+            _http_poller = None
+    return stopped
+
+
+def reconfigure_bot_token(token_encrypted: str | None) -> bool:
+    """Atomically replace the persisted token and its polling runtime.
+
+    If the old runner cannot stop, persistence is untouched.  If the new
+    runtime cannot start, both the DB value and old runtime are restored.
+    """
+    with _runtime_lock:
+        try:
+            old_encrypted = db.get_setting_value("telegram_bot_token_encrypted")
+            if not _stop_runtime_locked():
+                logger.error("Telegram token change refused: old polling runtime did not stop")
+                return False
+
+            # Prevent a concurrent scheduler/monitor notification from loading
+            # the old DB value back into the plaintext cache between invalidation
+            # and persistence.  Runtime bootstrap itself happens after releasing
+            # this lock because its worker thread must call _ensure_token().
+            with notifier._lock:
+                notifier.invalidate_token()
+                if not db.set_setting_value("telegram_bot_token_encrypted", token_encrypted):
+                    notifier.invalidate_token()
+                    persisted = False
+                else:
+                    persisted = True
+
+            if not persisted:
+                if old_encrypted:
+                    _start_runtime_safely_locked()
+                return False
+            if not token_encrypted:
+                return True
+            if _start_runtime_safely_locked():
+                return True
+
+            logger.error("Telegram token change rolled back: new polling runtime did not start")
+            try:
+                _stop_runtime_locked()
+            except (OSError, RuntimeError, TypeError, ValueError) as e:
+                logger.error("Failed to stop rejected Telegram runtime: %s", e)
+            with notifier._lock:
+                restored = db.set_setting_value("telegram_bot_token_encrypted", old_encrypted)
+                notifier.invalidate_token()
+            if old_encrypted:
+                restored = _start_runtime_safely_locked() and restored
+            if not restored:
+                logger.critical("Telegram token rollback failed; polling remains stopped")
+            return False
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            logger.error("Telegram token reconfiguration failed: %s", e)
+            return False
+
+
+def start_long_polling_if_needed():
     try:
         # Skip in TESTING mode
         from config import TESTING
@@ -582,25 +941,11 @@ def start_long_polling_if_needed():
         if TESTING:
             logger.debug("TESTING mode: skipping telegram long polling")
             return
-
-        if not notifier._ensure_token():
-            logger.error("start_long_polling_if_needed: no token; skip")
-            return
-        started = False
-        try:
-            if Bot is not None and Dispatcher is not None:
-                if _aiogram_runner is None:
-                    _aiogram_runner = AiogramBotRunner()
-                    _aiogram_runner.start()
-                started = True
-                logger.info("aiogram runner started")
-        except (ConnectionError, TimeoutError, OSError, RuntimeError) as e:  # catch-all: intentional
-            logger.error(f"Aiogram start failed: {e}")
-            started = False
-        if not started and _http_poller is None:
-            _http_poller = SimpleHTTPPoller()
-            _http_poller.start()
-            logger.info("http poller started")
+        with _runtime_lock:
+            if _start_runtime_safely_locked():
+                logger.info("telegram polling runtime started")
+            else:
+                logger.error("telegram polling runtime failed to start")
     except (ValueError, TypeError, KeyError, OSError) as e:
         logger.exception(f"start_long_polling_if_needed error: {e}")
 

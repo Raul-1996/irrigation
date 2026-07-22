@@ -49,6 +49,118 @@
     let mqttNoConnection = false;
     let envProbeTimer = null;
     let envProbeAttempts = 0;
+    let envProbeExhausted = false;
+    let zonesDataRevision = 0;
+    let statusRequestGeneration = 0;
+    let zonesRequestGeneration = 0;
+    const connectionErrorFeeds = new Set();
+    const pendingZoneStates = Object.create(null);
+    const pendingZoneDurations = Object.create(null);
+
+    function assertJsonResponse(response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+    }
+
+    function isZoneCasConflict(response) {
+        if (!response || typeof response !== 'object') return false;
+        return response.error_code === 'ZONE_VERSION_CONFLICT'
+            || response.error_code === 'EXPECTED_VERSION_REQUIRED';
+    }
+
+    function zoneCasConflictMessage(response) {
+        if (response && response.error_code === 'EXPECTED_VERSION_REQUIRED') {
+            return 'Версия зоны устарела или отсутствует. Загружены актуальные данные; повторите изменение.';
+        }
+        return 'Зона уже изменена в другом окне. Загружены актуальные данные; повторите изменение.';
+    }
+
+    async function recoverFromZoneCasConflict(response, closeEditor) {
+        if (closeEditor && editingZoneId) closeZoneSheet();
+        showZoneToast(zoneCasConflictMessage(response), 'warning');
+        await loadZonesData();
+    }
+
+    function optimisticTimestamp(timestamp) {
+        return new Date(timestamp === undefined ? Date.now() : timestamp).toISOString();
+    }
+
+    function invalidateLiveDataRequests() {
+        statusRequestGeneration += 1;
+        zonesRequestGeneration += 1;
+    }
+
+    function rememberOptimisticZoneState(zone, state, wateringStart, plannedEnd) {
+        if (!zone) return null;
+        var token = ++zonesDataRevision;
+        pendingZoneStates[zone.id] = {
+            token: token,
+            state: state,
+            watering_start_time: wateringStart,
+            planned_end_time: plannedEnd,
+            previous: {
+                state: zone.state,
+                watering_start_time: zone.watering_start_time,
+                planned_end_time: zone.planned_end_time,
+            },
+            confirmed: false,
+            expires_at: 0,
+        };
+        zone.state = state;
+        zone.watering_start_time = wateringStart;
+        zone.planned_end_time = plannedEnd;
+        return token;
+    }
+
+    function applyPendingZoneStates(zones) {
+        var now = Date.now();
+        var reconciled = false;
+        (zones || []).forEach(function(zone) {
+            var pending = pendingZoneStates[zone.id];
+            if (!pending) return;
+            if (pending.confirmed && (zone.state === pending.state || now >= pending.expires_at)) {
+                delete pendingZoneStates[zone.id];
+                reconciled = true;
+                return;
+            }
+            zone.state = pending.state;
+            zone.watering_start_time = pending.watering_start_time;
+            zone.planned_end_time = pending.planned_end_time;
+        });
+        if (reconciled) zonesDataRevision += 1;
+    }
+
+    function applyPendingZoneDurations(zones) {
+        (zones || []).forEach(function(zone) {
+            var pending = pendingZoneDurations[zone.id];
+            if (!pending) return;
+            zone.duration = pending.duration;
+            // Preserve the caller-owned token while the local edit is pending.
+            // Adopting a newer poll version here would silently rebase this edit
+            // over somebody else's write instead of producing a 409 conflict.
+            zone.version = pending.expectedVersion;
+        });
+    }
+
+    function revertOptimisticZoneState(zoneId, token) {
+        var pending = pendingZoneStates[zoneId];
+        if (!pending || pending.token !== token) return;
+        delete pendingZoneStates[zoneId];
+        zonesDataRevision += 1;
+        var zone = (zonesData || []).find(function(item) { return item.id === zoneId; });
+        if (!zone) return;
+        zone.state = pending.previous.state;
+        zone.watering_start_time = pending.previous.watering_start_time;
+        zone.planned_end_time = pending.previous.planned_end_time;
+    }
+
+    function reconcileOptimisticZoneState(zoneId, token) {
+        var pending = pendingZoneStates[zoneId];
+        if (!pending || pending.token !== token) return Promise.resolve();
+        pending.confirmed = true;
+        pending.expires_at = Date.now() + 15000;
+        return loadZonesData();
+    }
     
     // Функция обновления времени (локальное, без fetch)
     var _serverTimeOffset = 0;
@@ -57,8 +169,8 @@
             const r = await fetch('/api/server-time?ts=' + Date.now(), { cache: 'no-store' });
             const j = await r.json();
             if (j && j.now_iso) {
-                var serverMs = new Date(j.now_iso).getTime();
-                _serverTimeOffset = serverMs - Date.now();
+                var serverMs = new Date(String(j.now_iso).replace(' ','T')).getTime();
+                if (Number.isFinite(serverMs)) _serverTimeOffset = serverMs - Date.now();
             }
         } catch (e) {}
     }
@@ -70,125 +182,53 @@
         if (el) el.textContent = dt;
     }
     
-    function anyGroupUsesWaterMeter() {
-        try {
-            const groups = (statusData && Array.isArray(statusData.groups)) ? statusData.groups : [];
-            const _flag = v => { try { if (v===true||v===1) return true; const s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
-            return groups.some(g => _flag(g.use_water_meter));
-        } catch(e) { return false; }
-    }
-
-    function removeAdminCellsFromRows(){
-        try{
-            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
-            tbody.querySelectorAll('tr').forEach(row=>{
-                row.querySelectorAll('td.admin-only').forEach(td=> td.remove());
-            });
-        }catch(e){}
-    }
-
-    function updateAdminHeaderColumns(){
-        try {
-            const head = document.getElementById('zones-table-head');
-            if (!head) return;
-            const isAdmin = !!(statusData && statusData.is_admin);
-            const wantWaterCols = isAdmin && anyGroupUsesWaterMeter();
-            const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
-            const tr = head.querySelector('tr');
-            if (!tr) return;
-            if (wantWaterCols && !hasAdmin) {
-                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.innerHTML = 'Средний расход<br>(л/мин)';
-                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.innerHTML = 'Расход (л)<br>за прошлый полив';
-                tr.insertBefore(thAvg, tr.lastElementChild);
-                tr.insertBefore(thTot, tr.lastElementChild);
-                // как только добавили заголовки — убедимся, что в строках есть ячейки
-                try { ensureAdminCellsInRows(); } catch(e){}
-                // и сразу заполним их текущими значениями из zonesData, если они уже есть
-                try { fillAdminCellsFromZonesData(); } catch(e){}
-            } else if ((!wantWaterCols) && hasAdmin) {
-                head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
-                try { removeAdminCellsFromRows(); } catch(e){}
-            }
-        } catch(e) {}
-    }
-
-    function ensureAdminCellsInRows(){
-        try{
-            const head = document.getElementById('zones-table-head');
-            const need = !!(head && head.querySelector('th.admin-only'));
-            if (!need) return;
-            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
-            tbody.querySelectorAll('tr').forEach(row=>{
-                const adminTds = row.querySelectorAll('td.admin-only');
-                if (adminTds.length >= 2) return;
-                const photoTd = row.lastElementChild; // фото — последняя колонка
-                const tdAvg = document.createElement('td'); tdAvg.className = 'admin-only'; tdAvg.textContent = 'НД';
-                const tdTot = document.createElement('td'); tdTot.className = 'admin-only'; tdTot.textContent = 'НД';
-                if (photoTd && photoTd.parentElement === row) {
-                    row.insertBefore(tdAvg, photoTd);
-                    row.insertBefore(tdTot, photoTd);
-                } else {
-                    row.appendChild(tdAvg); row.appendChild(tdTot);
-                }
-            });
-        }catch(e){}
-    }
-
-    function fillAdminCellsFromZonesData(){
-        try{
-            if (!Array.isArray(zonesData) || !zonesData.length) return;
-            const byId = {};
-            zonesData.forEach(z=>{ byId[String(z.id)] = z; });
-            const tbody = document.getElementById('zones-table-body'); if (!tbody) return;
-            tbody.querySelectorAll('tr').forEach(row=>{
-                const idCell = row.querySelector('td:nth-child(2)');
-                const adminCells = row.querySelectorAll('td.admin-only');
-                if (!idCell || adminCells.length < 2) return;
-                const zid = idCell.textContent.trim();
-                const z = byId[zid]; if (!z) return;
-                let avg = (z.last_avg_flow_lpm!=null && z.last_avg_flow_lpm!=='') ? z.last_avg_flow_lpm : 'НД';
-                let tot = (z.last_total_liters!=null && z.last_total_liters!=='') ? z.last_total_liters : 'НД';
-                if (avg !== 'НД') {
-                    const n = Number(avg);
-                    if (!Number.isNaN(n)) avg = String(Math.round(n));
-                }
-                adminCells[0].textContent = avg;
-                adminCells[1].textContent = tot;
-            });
-        }catch(e){}
-    }
-
     async function loadStatusData() {
+        var requestGeneration = ++statusRequestGeneration;
         try {
-            statusData = await api.get('/api/status');
-            updateAdminHeaderColumns();
+            var nextStatus = await fetch('/api/status?ts=' + Date.now(), { cache: 'no-store' })
+                .then(assertJsonResponse);
+            if (requestGeneration !== statusRequestGeneration) return false;
+            if (!nextStatus || typeof nextStatus !== 'object' || !Array.isArray(nextStatus.groups)) {
+                throw new Error('Invalid status response');
+            }
+            statusData = nextStatus;
             updateStatusDisplay();
-            hideConnectionError();
+            updateWaterMeter();
+            try { updateZoneStats(zonesData); } catch (e) {}
+            hideConnectionError('status');
             updateMqttWarnings();
-            // Согласуем таблицу зон с карточками групп (мгновенно)
-            try { reconcileZoneRowsWithGroupStatus(); } catch(e) {}
+            return true;
         } catch (error) {
+            if (requestGeneration !== statusRequestGeneration) return false;
             console.error('Ошибка загрузки статуса:', error);
-            showConnectionError();
+            showConnectionError('status');
+            return false;
         }
     }
     
     async function loadZonesData() {
+        var requestGeneration = ++zonesRequestGeneration;
+        var requestRevision = zonesDataRevision;
         try {
             // Fetch zones + groups in PARALLEL
             var needGroups = !zoneGroupsCache || !zoneGroupsCache.length;
             var promises = [
-                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(function(r){return r.json();}).catch(function(){return [];}),
+                fetch('/api/zones?ts=' + Date.now(), { cache: 'no-store' }).then(assertJsonResponse),
             ];
             if (needGroups) {
-                promises.push(fetch('/api/groups').then(function(r){return r.json();}).catch(function(){return [];}));
+                promises.push(fetch('/api/groups').then(assertJsonResponse));
             }
             var results = await Promise.all(promises);
+            if (requestGeneration !== zonesRequestGeneration) return false;
+            if (requestRevision !== zonesDataRevision) return false;
+            if (!Array.isArray(results[0])) throw new Error('Invalid zones response');
             var prevNW = {};
             (zonesData || []).forEach(function(z) { if (z && z._nextWatering) prevNW[z.id] = z._nextWatering; });
-            zonesData = Array.isArray(results[0]) ? results[0] : [];
+            applyPendingZoneStates(results[0]);
+            applyPendingZoneDurations(results[0]);
+            zonesData = results[0];
             zonesData.forEach(function(z) { if (prevNW[z.id]) z._nextWatering = prevNW[z.id]; });
-            if (needGroups && results[1]) zoneGroupsCache = results[1];
+            if (needGroups && Array.isArray(results[1])) zoneGroupsCache = results[1];
 
             // Render V2 zones IMMEDIATELY
             renderGroupTabs();
@@ -204,6 +244,10 @@
                         body: JSON.stringify({ zone_ids: filteredZones.map(function(z){return z.id;}) })
                     });
                     var nwData = await nwResp.json();
+                    if (!nwResp.ok || !nwData || nwData.success === false) {
+                        throw new Error((nwData && (nwData.message || nwData.error)) || 'Next watering unavailable');
+                    }
+                    if (requestGeneration !== zonesRequestGeneration) return;
                     var nwMap = {};
                     (nwData.items || []).forEach(function(it) {
                         nwMap[it.zone_id] = it.next_datetime || (it.next_watering === 'Никогда' ? 'Никогда' : null);
@@ -222,77 +266,98 @@
 
             // Update sidebar indicators
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
-            try { updateWaterMeter(zonesData); } catch(e) {}
+            try { updateWaterMeter(); } catch(e) {}
 
-            hideConnectionError();
+            hideConnectionError('zones');
+            return true;
         } catch (error) {
+            if (requestGeneration !== zonesRequestGeneration) return false;
             console.error('Ошибка загрузки зон:', error);
-            showConnectionError();
+            showConnectionError('zones');
+            return false;
         }
     }
 
-    // Быстрая синхронизация строк зон с текущим статусом групп из statusData
-    function reconcileZoneRowsWithGroupStatus() {
-        try {
-            if (!statusData || !statusData.groups || !statusData.groups.length) return;
-            const wateringByGroup = {};
-            (statusData.groups || []).forEach(g => {
-                if (g && g.status === 'watering' && g.current_zone) {
-                    wateringByGroup[String(g.id)] = Number(g.current_zone);
-                }
-            });
-            const tbody = document.getElementById('zones-table-body');
-            if (!tbody) return;
-            const rows = tbody.querySelectorAll('tr');
-            rows.forEach(row => {
-                try {
-                    const idCell = row.querySelector('td:nth-child(2)');
-                    const grpCell = row.querySelector('td:nth-child(7)');
-                    if (!idCell || !grpCell) return;
-                    const zid = Number(idCell.textContent.trim());
-                    const gidAttr = grpCell.getAttribute('data-group-id');
-                    const gid = gidAttr ? String(Number(gidAttr)) : String(grpCell.textContent.trim());
-                    const runningZoneId = wateringByGroup[gid];
-                    if (typeof runningZoneId === 'undefined') return;
-                    const isOn = (zid === runningZoneId);
-                    const ind = row.querySelector('.indicator');
-                    if (ind) { ind.classList.remove('on','off'); ind.classList.add(isOn ? 'on' : 'off'); }
-                    const btn = row.querySelector('.zone-start-btn');
-                    if (btn) {
-                        btn.textContent = isOn ? '⏹' : '▶';
-                        const emergency = !!(statusData && statusData.emergency_stop);
-                        const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zid + ", '" + (isOn ? 'on' : 'off') + "')");
-                        btn.setAttribute('onclick', action);
-                    }
-                } catch(e) {}
-            });
-        } catch (e) {}
+    function showConnectionError(feed) {
+        connectionErrorFeeds.add(feed || 'unknown');
+        connectionError = connectionErrorFeeds.size > 0;
+        var el = document.getElementById('connection-status');
+        if (!el) return;
+        var labels = { status: 'статус', zones: 'зоны', unknown: 'сервер' };
+        var failed = Array.from(connectionErrorFeeds).map(function(name) { return labels[name] || name; });
+        el.textContent = '⚠️ Нет связи: ' + failed.join(', ') + '. Проверьте подключение.';
+        el.classList.add('show');
     }
     
-    function showConnectionError() {
+    function hideConnectionError(feed) {
+        if (feed) connectionErrorFeeds.delete(feed);
+        else connectionErrorFeeds.clear();
+        connectionError = connectionErrorFeeds.size > 0;
+        var el = document.getElementById('connection-status');
+        if (!el) return;
         if (!connectionError) {
-            connectionError = true;
-            document.getElementById('connection-status').classList.add('show');
+            el.classList.remove('show');
+            return;
         }
+        var labels = { status: 'статус', zones: 'зоны', unknown: 'сервер' };
+        var failed = Array.from(connectionErrorFeeds).map(function(name) { return labels[name] || name; });
+        el.textContent = '⚠️ Нет связи: ' + failed.join(', ') + '. Проверьте подключение.';
     }
-    
-    function hideConnectionError() {
-        if (connectionError) {
-            connectionError = false;
-            document.getElementById('connection-status').classList.remove('show');
+
+    function deriveMqttWarningState(data) {
+        data = data && typeof data === 'object' ? data : {};
+        const serverCount = Number(data.mqtt_servers_count || 0);
+        const enabledCount = Number(data.mqtt_enabled_count || 0);
+        const health = data.mqtt_health && typeof data.mqtt_health === 'object'
+            ? String(data.mqtt_health.status || '').trim().toLowerCase()
+            : '';
+        const problemStates = new Set(['degraded', 'down', 'unhealthy', 'error', 'failed', 'critical', 'disconnected']);
+        const authoritativeProblem = problemStates.has(health);
+        // A degraded/error health result can accompany zero counts when the
+        // server list itself could not be decrypted/read. Do not mislabel that
+        // as "no servers configured".
+        const noServers = authoritativeProblem
+            ? false
+            : (!Number.isFinite(serverCount) || serverCount <= 0);
+        const hasEnabledServers = Number.isFinite(enabledCount) && enabledCount > 0;
+        let connectionProblem = false;
+
+        if (authoritativeProblem) {
+            connectionProblem = true;
+        } else if (!noServers && hasEnabledServers) {
+            if (health) {
+                // "disabled" and "unknown" are explicitly not proof of a
+                // broker disconnect.  Only an authoritative unhealthy state
+                // may trigger the red connection warning.
+                connectionProblem = problemStates.has(health);
+            } else {
+                // Compatibility with older /api/status responses that did not
+                // expose mqtt_health yet.
+                connectionProblem = data.mqtt_connected === false;
+            }
         }
+
+        return {
+            noServers: noServers,
+            connectionProblem: connectionProblem,
+            degraded: health === 'degraded',
+        };
     }
 
     function updateMqttWarnings() {
         try {
-            const noServers = !statusData || !Number(statusData.mqtt_servers_count || 0);
-            const notConnected = !noServers && (statusData && statusData.mqtt_connected === false);
+            const warningState = deriveMqttWarningState(statusData);
             const elNoServers = document.getElementById('mqtt-no-servers');
             const elNoConn = document.getElementById('mqtt-no-connection');
-            if (noServers && !mqttNoServers) { mqttNoServers = true; elNoServers.classList.add('show'); }
-            if (!noServers && mqttNoServers) { mqttNoServers = false; elNoServers.classList.remove('show'); }
-            if (notConnected && !mqttNoConnection) { mqttNoConnection = true; elNoConn.classList.add('show'); }
-            if (!notConnected && mqttNoConnection) { mqttNoConnection = false; elNoConn.classList.remove('show'); }
+            mqttNoServers = warningState.noServers;
+            mqttNoConnection = warningState.connectionProblem;
+            if (elNoServers) elNoServers.classList.toggle('show', mqttNoServers);
+            if (elNoConn) {
+                elNoConn.textContent = warningState.degraded
+                    ? '⚠️ MQTT работает нестабильно. Проверьте подключение.'
+                    : '⚠️ Нет связи с MQTT сервером. Проверьте подключение.';
+                elNoConn.classList.toggle('show', mqttNoConnection);
+            }
         } catch (e) {}
     }
     
@@ -322,6 +387,36 @@
             }
             default: return mob ? '✅ Ожидание' : 'Ожидание - готов к поливу';
         }
+    }
+
+    function renderGroupExtraHtml(group, zones) {
+        group = group && typeof group === 'object' ? group : {};
+        zones = Array.isArray(zones) ? zones : [];
+        if (group.status === 'watering' && group.current_zone) {
+            const zone = zones.find(function(candidate) { return candidate.id === group.current_zone; });
+            const zoneId = escapeHtml(group.current_zone);
+            const zoneLabel = zone && zone.name
+                ? `#${escapeHtml(zone.id)} ${escapeHtml(zone.name)}`
+                : `#${zoneId}`;
+            const groupId = escapeHtml(group.id);
+            return `Зона ${zoneLabel}: осталось <span class="group-timer" id="group-timer-${groupId}" data-group-id="${groupId}" data-zone-id="${zoneId}" data-remaining-seconds="">--:--</span>`;
+        }
+        if (group.status === 'postponed' && group.postpone_until) {
+            const postponeUntil = String(group.postpone_until);
+            const safePostponeUntil = escapeHtml(postponeUntil);
+            // postpone_reason is used only as an exact enum and is never
+            // interpolated into HTML. Unknown/malicious values get the
+            // generic, safely escaped presentation.
+            const reason = String(group.postpone_reason || '').toLowerCase();
+            if (reason === 'emergency' || postponeUntil.trim().toLowerCase().startsWith('до ')) {
+                return safePostponeUntil;
+            }
+            return `До ${safePostponeUntil}`;
+        }
+        if (group.status === 'error' && group.error_message) {
+            return escapeHtml(group.error_message);
+        }
+        return '—';
     }
 
     async function initGroupTimer(group) {
@@ -356,6 +451,36 @@
         }
     }
     
+    function rainSensorStatusText(data) {
+        const source = data || {};
+        const configuredState = String(source.rain_sensor_state || '').trim().toLowerCase();
+        if (configuredState === 'disabled' || source.rain_enabled === false) {
+            return 'датчик выключен';
+        }
+        if (configuredState === 'reconnecting') {
+            return 'подключение восстанавливается — полив заблокирован';
+        }
+        if (configuredState === 'offline' || source.rain_sensor_online === false) {
+            return 'нет связи с датчиком — полив заблокирован';
+        }
+        if (configuredState === 'unknown') {
+            return 'нет данных — полив заблокирован';
+        }
+        if (configuredState === 'rain') return 'идёт дождь';
+        if (configuredState === 'dry') return 'дождя нет';
+
+        // Compatibility with controllers that have not yet exposed the state
+        // enum.  Only an explicit legacy rain/dry value may become definitive.
+        const legacy = String(source.rain_sensor || '').trim().toLowerCase();
+        if (legacy.indexOf('идёт дожд') !== -1 || legacy.indexOf('идет дожд') !== -1) {
+            return 'идёт дождь';
+        }
+        if (legacy.indexOf('нет дожд') !== -1 || legacy.indexOf('дождя нет') !== -1 || legacy === 'dry') {
+            return 'дождя нет';
+        }
+        return 'нет данных — полив заблокирован';
+    }
+
     async function updateStatusDisplay() {
         if (!statusData) return;
         updateDateTime();
@@ -376,25 +501,40 @@
             hb.style.display = 'inline-block';
             hv.textContent = (statusData.humidity === 'нет данных') ? 'нет данных' : String(Math.round(Number(statusData.humidity)));
         }
-        // Отображение датчика дождя: показывать, только если глобально включен
+        // Unknown/offline is safety-significant and must never look like dry.
         (function(){
             const rb = document.getElementById('rain-box');
             const rv = document.getElementById('rain-value');
-            const enabled = !!(statusData && statusData.rain_enabled);
-            if (!enabled) {
+            if (!rb || !rv) return;
+            const state = String(statusData.rain_sensor_state || '').trim().toLowerCase();
+            const disabled = state === 'disabled' || statusData.rain_enabled === false;
+            if (disabled) {
                 rb.style.display = 'none';
                 return;
             }
             rb.style.display = 'inline-block';
-            const s = String(statusData.rain_sensor || '').toLowerCase();
-            rv.textContent = (s.indexOf('идёт дожд') !== -1 || s.indexOf('идет дожд') !== -1) ? 'дождь идет' : 'нет дождя';
+            const text = rainSensorStatusText(statusData);
+            rv.textContent = text;
+            rv.dataset.state = text.indexOf('заблокирован') !== -1 ? 'degraded' : state;
+            rv.classList.toggle('degraded', text.indexOf('заблокирован') !== -1);
         })();
 
-        // Быстрый пробник: если сейчас отображается "нет данных", опрашиваем /api/env чаще (до 10 попыток)
-        if ((tv.textContent === 'нет данных' || hv.textContent === 'нет данных') && !envProbeTimer) {
+        // Быстрый пробник: если включённый датчик показывает "нет данных",
+        // опрашиваем /api/env чаще, но не более десяти раз за один offline-период.
+        var envNeedsProbe = statusData.temperature === 'нет данных' || statusData.humidity === 'нет данных';
+        if (!envNeedsProbe) {
+            envProbeExhausted = false;
+            if (envProbeTimer) { clearInterval(envProbeTimer); envProbeTimer = null; }
+        }
+        if (envNeedsProbe && !envProbeTimer && !envProbeExhausted) {
             envProbeAttempts = 0;
             envProbeTimer = setInterval(async () => {
                 try {
+                    if (envProbeAttempts >= 10) {
+                        envProbeExhausted = true;
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                        return;
+                    }
                     envProbeAttempts += 1;
                     const resp = await fetch(`/api/env?ts=${Date.now()}`, { cache: 'no-store' });
                     const js = await resp.json();
@@ -407,12 +547,23 @@
                         hb.style.display = 'inline-block';
                         hv.textContent = String(Math.round(Number(val.hum)));
                     }
-                    if (tv.textContent !== 'нет данных' && hv.textContent !== 'нет данных') {
+                    var tempReady = statusData.temperature === null
+                        || typeof statusData.temperature === 'undefined'
+                        || tv.textContent !== 'нет данных';
+                    var humReady = statusData.humidity === null
+                        || typeof statusData.humidity === 'undefined'
+                        || hv.textContent !== 'нет данных';
+                    if (tempReady && humReady) {
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                    } else if (envProbeAttempts >= 10) {
+                        envProbeExhausted = true;
                         clearInterval(envProbeTimer); envProbeTimer = null;
                     }
-                    if (envProbeAttempts >= 10) { clearInterval(envProbeTimer); envProbeTimer = null; }
                 } catch (e) {
-                    if (envProbeAttempts >= 10) { clearInterval(envProbeTimer); envProbeTimer = null; }
+                    if (envProbeAttempts >= 10) {
+                        envProbeExhausted = true;
+                        clearInterval(envProbeTimer); envProbeTimer = null;
+                    }
                 }
             }, 1000);
         }
@@ -426,22 +577,7 @@
             card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
             const statusText = getStatusText(group);
             // Доп. информация: при поливе — зона и таймер; при отложке — дата/время; при ошибке — текст ошибки; иначе — '—'
-            let extraText = '—';
-            if (group.status === 'watering' && group.current_zone) {
-                const _zw = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
-                const _zLbl = (_zw && _zw.name) ? `#${_zw.id} ${escapeHtml(_zw.name)}` : `#${group.current_zone}`;
-                extraText = `Зона ${_zLbl}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
-            } else if (group.status === 'postponed' && group.postpone_until) {
-                const pu = String(group.postpone_until);
-                const reason = String(group.postpone_reason || '').toLowerCase();
-                if (reason === 'emergency' || pu.trim().toLowerCase().startsWith('до ')) {
-                    extraText = pu;
-                } else {
-                    extraText = `До ${pu}`;
-                }
-            } else if (group.status === 'error' && group.error_message) {
-                extraText = String(group.error_message);
-            }
+            const extraText = renderGroupExtraHtml(group, zonesData);
             const anyZoneOnThisGroup = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
             const _m = window.innerWidth < 1024;
             const skipBtnHtml = (anyZoneOnThisGroup && Number(group.queue_remaining || 0) > 0)
@@ -475,19 +611,19 @@
                 gridCells.push(`<div class="grid-item grid-item-span2">${mvBtn}</div>`);
             }
             if (pressureOn && !flowOn) {
-                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
             } else if (!pressureOn && flowOn) {
                 const meter = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
                 const flow = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${meter}</span> м³ (<span id="flow-${group.id}">${flow}</span> л/мин)</div></div>`);
+                gridCells.push(`<div class="grid-item grid-item-span2"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${escapeHtml(meter)}</span> м³ (<span id="flow-${group.id}">${escapeHtml(flow)}</span> л/мин)</div></div>`);
             } else {
                 if (pressureOn) {
-                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
+                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Давление:</span> <span id="pressure-${group.id}">${escapeHtml((group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—')}</span> ${escapeHtml(group.pressure_unit||'')}</div></div>`);
                 }
                 if (flowOn) {
                     const meter = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
                     const flow = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${meter}</span> м³ (<span id="flow-${group.id}">${flow}</span> л/мин)</div></div>`);
+                    gridCells.push(`<div class="grid-item"><div class="info-chip"><span class="label">Счётчик:</span> <span id="meter-${group.id}">${escapeHtml(meter)}</span> м³ (<span id="flow-${group.id}">${escapeHtml(flow)}</span> л/мин)</div></div>`);
                 }
             }
             // pad to keep even number of cells for 2x2 symmetry on desktop
@@ -567,104 +703,27 @@
     }
 
     async function refreshSingleGroup(groupId) {
+        const requestGeneration = ++statusRequestGeneration;
         try {
             const resp = await fetch(`/api/status?ts=${Date.now()}`, {cache: 'no-store'});
-            const data = await resp.json();
-            if (!data || !data.groups) return;
-            // Обновим глобальные данные статуса, чтобы кнопки/условия отображались корректно
+            const data = await assertJsonResponse(resp);
+            if (requestGeneration !== statusRequestGeneration) return false;
+            if (!data || !Array.isArray(data.groups)) throw new Error('Invalid status response');
+            // /api/status is one coherent snapshot for every group.  Even when
+            // an action originated from a single card, render the whole winning
+            // snapshot so sibling cards cannot remain older than statusData.
             statusData = data;
-            const group = (data.groups || []).find(g => String(g.id) === String(groupId));
-            if (!group) return;
-            const card = document.getElementById(`group-card-${group.id}`);
-            if (!card) return;
-            // Полностью пересоберем содержимое карточки по актуальным данным
-            const flowActive = group.status === 'watering' && Math.random() > 0.3;
-            card.className = `card ${group.status} ${flowActive ? 'flow-active' : ''}`;
-            const statusText = getStatusText(group);
-            let extraText2 = '—';
-            if (group.status === 'watering' && group.current_zone) {
-                const _zw2 = (zonesData || []).find(function(z){ return z.id === group.current_zone; });
-                const _zLbl2 = (_zw2 && _zw2.name) ? `#${_zw2.id} ${escapeHtml(_zw2.name)}` : `#${group.current_zone}`;
-                extraText2 = `Зона ${_zLbl2}: осталось <span class="group-timer" id="group-timer-${group.id}" data-group-id="${group.id}" data-zone-id="${group.current_zone}" data-remaining-seconds="">--:--</span>`;
-            } else if (group.status === 'postponed' && group.postpone_until) {
-                const pu2 = String(group.postpone_until);
-                const reason2 = String(group.postpone_reason || '').toLowerCase();
-                if (reason2 === 'emergency' || pu2.trim().toLowerCase().startsWith('до ')) {
-                    extraText2 = pu2;
-                } else {
-                    extraText2 = `До ${pu2}`;
-                }
-            } else if (group.status === 'error' && group.error_message) {
-                extraText2 = String(group.error_message);
-            }
-            const mvEnabled2 = (group.use_master_valve === true) || (group.use_master_valve === 1); // показываем только если включено для группы
-            const mvState2 = String(group.master_valve_state || 'unknown');
-            const mvIndicator2 = mvState2 === 'open' ? 'Открыт' : (mvState2 === 'closed' ? 'Закрыт' : '—');
-            const anyZoneOnThisGroup2 = (String(group.status||'').toLowerCase()==='watering' && group.current_zone);
-            const _m3 = window.innerWidth < 1024;
-            const skipBtnHtml2 = (anyZoneOnThisGroup2 && Number(group.queue_remaining || 0) > 0)
-                ? `<button class=\"group-action-btn group-action-skip\" onclick=\"skipCurrentZone(${group.id})\">${_m3 ? '⏭ Пропустить' : 'Пропустить зону'}</button>`
-                : '';
-            const groupActionHtml2 = anyZoneOnThisGroup2
-                ? `<button class=\"group-action-btn group-action-stop\" onclick=\"stopGroup(${group.id})\">${_m3 ? '⏹ Стоп' : 'Остановить полив группы'}</button>${skipBtnHtml2}`
-                : `<button class=\"group-action-btn group-action-start\" onclick=\"startGroupFromFirst(${group.id})\">${_m3 ? '▶ Запустить' : 'Запустить полив группы'}</button>`;
-            const _mob2 = window.innerWidth < 1024;
-            const groupButtons = `
-                <div class=\"btn-group\">
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 1)\">${_mob2 ? '1 день' : 'Остановить полив на 1 день'}</button>
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 2)\">${_mob2 ? '2 дня' : 'Остановить полив на 2 дня'}</button>
-                    <button class=\"delay\" onclick=\"delayGroup(${group.id}, 3)\">${_mob2 ? '3 дня' : 'Остановить полив на 3 дня'}</button>
-                    ${group.status === 'postponed' && group.postpone_until && !statusData.emergency_stop ? `<button class=\"cancel-postpone\" onclick=\"cancelPostpone(${group.id})\">${_mob2 ? 'Продолжить' : 'Продолжить по расписанию'}</button>` : ''}
-                </div>
-                <div class=\"btn-group\" style=\"width:100%\">${groupActionHtml2}</div>`;
-            card.innerHTML = `
-                <div class="group-header">${escapeHtml(group.name)}</div>
-                <div id="group-status-${group.id}">${statusText}</div>
-                <div class="postpone-until">${extraText2}</div>
-                ${groupButtons}
-            `;
-            // Append the same grid as in updateStatusDisplay
-            (function(){
-                const _flag2 = v => { try { if (v===true||v===1) return true; const s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
-                const pressureOn2 = _flag2(group.use_pressure_sensor);
-                const flowOn2 = _flag2(group.use_water_meter);
-                const cells = [];
-                if (mvEnabled2) {
-                    const dotCls2 = mvState2==='open' ? 'open' : (mvState2==='closed' ? 'closed' : '');
-                    const actionText2 = (mvState2==='open') ? 'Закрыть мастер-клапан' : 'Открыть мастер-клапан';
-                    const stateText2 = mvState2==='open' ? 'Открыт' : (mvState2==='closed' ? 'Закрыт' : '—');
-                    const mvBtn2 = `<button id=\"mv-btn-${group.id}\" class=\"mv-button\" data-mv-state=\"${mvState2}\" onclick=\"toggleMasterValve(${group.id})\">`
-                                  + `<span class=\"mv-action\">${actionText2}</span>`
-                                  + `<span class=\"mv-dot ${dotCls2}\"></span>`
-                                  + `<span class=\"mv-state-text\">(${stateText2})</span>`
-                                  + `</button>`;
-                    cells.push(`<div class=\"grid-item grid-item-span2\">${mvBtn2}</div>`);
-                }
-                if (pressureOn2 && !flowOn2) {
-                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
-                } else if (!pressureOn2 && flowOn2) {
-                    const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
-                    const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                    cells.push(`<div class=\"grid-item grid-item-span2\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${meter2}</span> м³ (<span id=\"flow-${group.id}\">${flow2}</span> л/мин)</div></div>`);
-                } else {
-                    if (pressureOn2) {
-                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Давление:</span> <span id=\"pressure-${group.id}\">${(group.pressure_value!=null&&group.pressure_value!=='')?group.pressure_value:'—'}</span> ${group.pressure_unit||''}</div></div>`);
-                    }
-                    if (flowOn2) {
-                        const meter2 = (typeof group.meter_value_m3 !== 'undefined' && group.meter_value_m3 !== null) ? String(group.meter_value_m3) : '—';
-                        const flow2 = (typeof group.flow_value !== 'undefined' && group.flow_value !== null && group.flow_value !== '') ? String(group.flow_value) : '—';
-                        cells.push(`<div class=\"grid-item\"><div class=\"info-chip\"><span class=\"label\">Счётчик:</span> <span id=\"meter-${group.id}\">${meter2}</span> м³ (<span id=\"flow-${group.id}\">${flow2}</span> л/мин)</div></div>`);
-                    }
-                }
-                if (cells.length) {
-                    const pad2 = cells.length % 2 ? '<div class=\"grid-item\"></div>' : '';
-                    card.innerHTML += `<div class=\"group-info-grid\">${cells.join('')}${pad2}</div>`;
-                }
-            })();
-            if (group.status === 'watering' && group.current_zone) {
-                initGroupTimer(group);
-            }
-        } catch (e) {}
+            updateStatusDisplay();
+            updateWaterMeter();
+            try { updateZoneStats(zonesData); } catch (e) {}
+            hideConnectionError('status');
+            updateMqttWarnings();
+            return true;
+        } catch (e) {
+            if (requestGeneration !== statusRequestGeneration) return false;
+            showConnectionError('status');
+            return false;
+        }
     }
 
     // Реакция на события MQTT через SSE для моментального обновления (используется ниже в DOMContentLoaded)
@@ -685,85 +744,6 @@
         } catch (e) {}
     }
     
-    async function updateZonesTable() {
-        const tbody = document.getElementById('zones-table-body');
-        const countSpan = document.getElementById('zones-count');
-        
-        if (!tbody) return; // V2: table removed, cards used instead
-        tbody.innerHTML = '';
-        
-        // Фильтруем зоны, исключая группу 999 (БЕЗ ПОЛИВА)
-        const filteredZones = zonesData.filter(zone => zone.group_id !== 999);
-        
-        countSpan.textContent = filteredZones.length;
-        
-        // Получаем имена групп для отображения вместо чисел
-        const groups = await api.get('/api/groups');
-        const groupNameById = {};
-        groups.forEach(g => { groupNameById[g.id] = g.name; });
-
-        // Загружаем следующий полив одним батчем (значительно быстрее на WB)
-        let nextWateringData = [];
-        try {
-            const response = await fetch('/api/zones/next-watering-bulk', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ zone_ids: filteredZones.map(z=>z.id) })
-            });
-            const bulk = await response.json();
-            nextWateringData = (bulk && bulk.items) ? bulk.items : [];
-        } catch (e) {
-            nextWateringData = [];
-        }
-        
-        const frag = document.createDocumentFragment();
-        filteredZones.forEach(zone => {
-            let nextWatering = '—';
-            if (statusData.emergency_stop) {
-                nextWatering = 'До отмены аварии';
-            } else {
-                const item = nextWateringData.find(x => x.zone_id === zone.id) || {};
-                const nextDT = item.next_datetime;
-                if (nextDT) {
-                    nextWatering = String(nextDT).replace('T',' ').slice(0,19);
-                } else if (item.next_watering === 'Никогда') {
-                    nextWatering = 'Никогда';
-                }
-            }
-            const tr = document.createElement('tr');
-            
-            const isAdmin = (!!(statusData && statusData.is_admin));
-            const showWaterCols = isAdmin && anyGroupUsesWaterMeter();
-            const avgFlow = (zone.last_avg_flow_lpm!=null && zone.last_avg_flow_lpm!=='') ? zone.last_avg_flow_lpm : 'НД';
-            const totalLiters = (zone.last_total_liters!=null && zone.last_total_liters!=='') ? zone.last_total_liters : 'НД';
-             tr.innerHTML = `
-                 <td><span class="indicator ${zone.state}"></span></td>
-                 <td>${zone.id}</td>
-                 <td><button class="zone-start-btn" onclick="${statusData.emergency_stop ? `showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')` : `startOrStopZone(${zone.id}, '${zone.state}')`}">${zone.state==='on' ? '⏹' : '▶'}</button></td>
-                 <td>${escapeHtml(zone.name)}</td>
-                 <td>${escapeHtml(zone.icon)}</td>
-                 <td>${zone.duration} мин</td>
-                 <td>${escapeHtml(groupNameById[zone.group_id] || zone.group_id)}</td>
-                 <td class="hide-mobile col-last-watering">—</td>
-                 <td class="col-next" data-label="Следующий полив">${nextWatering}</td>
-                 ${showWaterCols ? `<td class=\"admin-only\">${avgFlow}</td>` : ''}
-                 ${showWaterCols ? `<td class=\"admin-only\">${totalLiters}</td>` : ''}
-                 <td class="col-photo" data-label="Фото">
-                     <div class="zone-photo">
-                         ${zone.photo_path ?
-                             `<img src="/api/zones/${zone.id}/photo?variant=thumb" alt="Фото зоны ${zone.id}" onclick="showPhotoModal('/api/zones/${zone.id}/photo')" title="Нажмите для просмотра">` :
-                             `<div class="no-photo" title="Нет фото">📷</div>`
-                         }
-                     </div>
-                 </td>
-             `;
-            
-            frag.appendChild(tr);
-        });
-        tbody.appendChild(frag);
-        // Signal render complete for perf
-        try{ window.dispatchEvent(new CustomEvent('zones-rendered')); }catch(e){}
-    }
-    
     // Обработчики действий
     async function delayGroup(groupId, days) {
         try {
@@ -781,9 +761,8 @@
             
             if (response.success) {
                 showNotification(response.message, 'success');
-                // Точечно обновляем карточку группы и строки зон этой группы
+                // Точечно обновляем карточку группы
                 await refreshSingleGroup(groupId);
-                await refreshZonesRowsForGroup(groupId);
             } else {
                 showNotification(response.message, 'error');
             }
@@ -814,9 +793,8 @@
             
             if (response.success) {
                 showNotification(response.message, 'success');
-                // Точечно обновляем карточку группы и строки зон этой группы
+                // Точечно обновляем карточку группы
                 await refreshSingleGroup(groupId);
-                await refreshZonesRowsForGroup(groupId);
             } else {
                 showNotification(response.message, 'error');
             }
@@ -909,37 +887,9 @@
             const wantOn = currentState !== 'on';
             // Оптимистическое обновление UI: переключим состояние сразу
             zonesData[idx].state = wantOn ? 'on' : 'off';
-            // Мгновенно обновим строку зоны в таблице (индикатор и кнопка)
-            try {
-                const tbody = document.getElementById('zones-table-body');
-                if (tbody) {
-                    let row = tbody.querySelector(`tr[data-zone-id="${zoneId}"]`);
-                    if (!row) {
-                        const rows = tbody.querySelectorAll('tr');
-                        rows.forEach(r => {
-                            const cells = r.querySelectorAll('td');
-                            if (cells.length > 1 && Number(cells[1].textContent.trim()) === zoneId) {
-                                row = r;
-                            }
-                        });
-                    }
-                    if (row) {
-                        const ind = row.querySelector('.indicator');
-                        if (ind) { ind.classList.remove('on','off'); ind.classList.add(wantOn ? 'on' : 'off'); }
-                        const btn = row.querySelector('.zone-start-btn');
-                        if (btn) {
-                            btn.textContent = wantOn ? '⏹' : '▶';
-                            const emergency = !!(statusData && statusData.emergency_stop);
-                            const action = emergency ? "showNotification('Аварийная остановка активна. Сначала отключите режим.', 'warning')" : ("startOrStopZone(" + zoneId + ", '" + (wantOn ? 'on' : 'off') + "')");
-                            btn.setAttribute('onclick', action);
-                        }
-                    }
-                }
-            } catch (e) {}
             if (groupId) {
-                // Обновим карточку группы и строки зон этой группы без полной перезагрузки
+                // Обновим карточку группы без полной перезагрузки
                 refreshSingleGroup(groupId);
-                refreshZonesRowsForGroup(groupId);
             }
             const url = wantOn ? `/api/zones/${zoneId}/mqtt/start` : `/api/zones/${zoneId}/mqtt/stop`;
             const res = await fetch(url, { method: 'POST' });
@@ -1002,7 +952,7 @@
     
     async function emergencyStop() {
         if (!confirm('Аварийная остановка всех зон?')) return;
-        
+        invalidateLiveDataRequests();
         try {
             const res = await fetch('/api/emergency-stop', { method: 'POST' });
             const data = await res.json();
@@ -1020,6 +970,7 @@
     }
 
     async function resumeSchedule() {
+        invalidateLiveDataRequests();
         try {
             const res = await fetch('/api/emergency-resume', { method: 'POST' });
             const data = await res.json();
@@ -1238,14 +1189,10 @@
         if (window._ssrZones && window._ssrZones.length) {
             zonesData = window._ssrZones;
             zoneGroupsCache = window._ssrGroups || [];
-            if (window._ssrStatus && window._ssrStatus.groups) {
-                statusData = window._ssrStatus;
-                updateStatusDisplay();
-            }
             renderGroupTabs();
             renderZoneCards();
             try { updateActiveZoneIndicator(zonesData); } catch(e) {}
-            try { updateWaterMeter(zonesData); } catch(e) {}
+            try { updateWaterMeter(); } catch(e) {}
             // Then refresh in background for live data
             setTimeout(function() {
                 Promise.all([loadStatusData(), loadZonesData()]).catch(function(){});
@@ -1292,62 +1239,6 @@
     window.deleteStatusPhoto = deleteStatusPhoto;
     window.rotateStatusPhoto = rotateStatusPhoto;
 
-    // Точечное обновление строк зон группы (без полной перерисовки таблицы)
-    async function refreshZonesRowsForGroup(groupId) {
-        try {
-            const tbody = document.getElementById('zones-table-body');
-            if (!tbody) return;
-            const zonesForGroup = (zonesData || []).filter(z => String(z.group_id) === String(groupId));
-            const promises = zonesForGroup.map(async (zone) => {
-                try {
-                    const resp = await fetch(`/api/zones/${zone.id}/next-watering`, { cache: 'no-store' });
-                    const data = await resp.json();
-                    let nextText = '—';
-                    if (data && data.next_datetime) {
-                        nextText = String(data.next_datetime).replace('T',' ').slice(0,19);
-                    } else if (data && data.next_watering === 'Никогда') {
-                        nextText = 'Никогда';
-                    }
-                    // Найти строку зоны по её № (вторая колонка)
-                    const rows = tbody.querySelectorAll('tr');
-                    rows.forEach(row => {
-                        const cells = row.querySelectorAll('td');
-                        if (cells.length >= 9) {
-                            const idCell = cells[1];
-                            if (idCell && String(idCell.textContent.trim()) === String(zone.id)) {
-                                // Колонка "Следующий полив" — девятая (index 8)
-                                const nextCell = cells[8];
-                                if (nextCell) nextCell.textContent = nextText;
-                            }
-                        }
-                    });
-                } catch (e) { /* ignore single zone error */ }
-            });
-            await Promise.all(promises);
-        } catch (e) { /* ignore group update error */ }
-    }
-
-    // Добавим/уберём админские колонки в заголовке по роли
-    try {
-        const head = document.getElementById('zones-table-head');
-        if (head) {
-            const isAdmin = !!(statusData && statusData.is_admin);
-            const ths = head.querySelectorAll('tr th');
-            const hasAdmin = head.querySelectorAll('th.admin-only').length > 0;
-            if (isAdmin && !hasAdmin) {
-                const tr = head.querySelector('tr');
-                const thAvg = document.createElement('th'); thAvg.className = 'admin-only'; thAvg.innerHTML = 'Средний расход<br>(л/мин)';
-                const thTot = document.createElement('th'); thTot.className = 'admin-only'; thTot.innerHTML = 'Расход (л)<br>за прошлый полив';
-                tr.insertBefore(thAvg, tr.lastElementChild);
-                tr.insertBefore(thTot, tr.lastElementChild);
-                try { ensureAdminCellsInRows(); } catch(e){}
-                try { fillAdminCellsFromZonesData(); } catch(e){}
-            } else if (!isAdmin && hasAdmin) {
-                head.querySelectorAll('th.admin-only').forEach(el=> el.remove());
-            }
-        }
-    } catch(e) {}
-
     // --- Weather Widget (full) ---
     var WEATHER_ICONS = {
         0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️',
@@ -1382,8 +1273,21 @@
     }
     function formatTemp(v) {
         if (v === null || v === undefined) return '—';
-        var sign = v > 0 ? '+' : '';
-        return sign + Math.round(v);
+        var numeric = Number(v);
+        if (!Number.isFinite(numeric)) return '—';
+        var sign = numeric > 0 ? '+' : '';
+        return sign + Math.round(numeric);
+    }
+    function formatWeatherNumber(v, digits, fallback) {
+        var fallbackValue = fallback === undefined ? '—' : fallback;
+        if (v === null || v === undefined || v === '') return fallbackValue;
+        var numeric = Number(v);
+        if (!Number.isFinite(numeric)) return fallbackValue;
+        return digits == null ? String(numeric) : numeric.toFixed(digits);
+    }
+    function formatWeatherMetric(v, digits, unit, fallback) {
+        var number = formatWeatherNumber(v, digits, '');
+        return number === '' ? (fallback === undefined ? '—' : fallback) : number + unit;
     }
     function coeffColor(c) {
         if (c === 0) return 'var(--danger-color, #f44336)';
@@ -1391,26 +1295,35 @@
         if (c > 120) return 'var(--primary-color, #2196f3)';
         return 'var(--success-color, #4caf50)';
     }
-    // "Second opinion": a mode badge for the applied coefficient plus the other
-    // coefficient (legacy vs balance) shown as a comparison. Returns '' when the
-    // balance coefficient is unavailable (legacy-only mode, nothing to compare).
+    // H1 Zimmerman is the only applied coefficient.  H2 remains a dated shadow
+    // diagnostic and must never be presented as the active watering mode.
     function renderCoeffSecondOpinion(adj) {
-        if (!adj || adj.mode === undefined) return '';
-        var legacy = adj.coefficient_legacy;
-        var balance = adj.coefficient_balance;
-        var badge, second;
-        if (adj.mode === 'balance') {
-            badge = 'Баланс';
-            second = (legacy !== undefined && legacy !== null) ? legacy : null;
+        if (!adj) return '';
+        var status = String(adj.balance_status || 'unavailable').toLowerCase();
+        var numericBalance = Number(adj.coefficient_balance);
+        var hasBalance = adj.coefficient_balance !== null
+            && adj.coefficient_balance !== undefined
+            && Number.isFinite(numericBalance);
+        var date = adj.balance_last_recalc_date
+            ? escapeHtml(String(adj.balance_last_recalc_date))
+            : '';
+        var age = Number(adj.balance_age_days);
+        var detail;
+        if (status === 'fresh' && hasBalance) {
+            detail = numericBalance + '% · свежий' + (date ? ' · пересчёт ' + date : '');
+        } else if (status === 'stale' && hasBalance) {
+            detail = numericBalance + '% · устарел'
+                + (Number.isFinite(age) ? ' (' + Math.max(0, Math.round(age)) + ' дн.)' : '')
+                + (date ? ' · пересчёт ' + date : '');
+        } else if (status === 'future') {
+            detail = (hasBalance ? numericBalance + '% · ' : '')
+                + 'дата из будущего'
+                + (date ? ' · ' + date : '');
         } else {
-            // shadow or legacy: Zimmerman is applied
-            badge = (adj.mode === 'shadow') ? 'Зимм. (shadow)' : 'Зимм.';
-            second = (balance !== undefined && balance !== null) ? balance : null;
+            detail = 'нет данных' + (date ? ' · последний пересчёт ' + date : '');
         }
-        var html = '<span class="coeff-mode-badge">' + badge + '</span>';
-        if (second !== null) {
-            html += ' <span class="coeff-second">второе мнение: ' + second + '%</span>';
-        }
+        var html = '<span class="coeff-mode-badge">Зимм. (H1)</span>';
+        html += ' <span class="coeff-second">H2 shadow: ' + detail + '</span>';
         return html;
     }
     function formatCacheAge(sec) {
@@ -1476,10 +1389,12 @@
         var tempVal = (cur.temperature && cur.temperature.value !== undefined) ? cur.temperature.value : j.temperature;
         var tempEl = document.getElementById('w-temp');
         if (tempEl) tempEl.textContent = formatTemp(tempVal);
-        // Coefficient — applied value (balance or legacy), with "second opinion".
-        var coeffApplied = (adj.coefficient_applied !== undefined && adj.coefficient_applied !== null)
-            ? adj.coefficient_applied
-            : ((adj.coefficient !== undefined) ? adj.coefficient : j.coefficient);
+        // H1 is applied; H2 is rendered below only as a dated shadow value.
+        var coeffApplied = (adj.coefficient_legacy !== undefined && adj.coefficient_legacy !== null)
+            ? adj.coefficient_legacy
+            : ((adj.coefficient_applied !== undefined && adj.coefficient_applied !== null)
+                ? adj.coefficient_applied
+                : ((adj.coefficient !== undefined) ? adj.coefficient : j.coefficient));
         var skip = (adj.skip !== undefined) ? adj.skip : j.skip;
         var coeffEl = document.getElementById('w-coeff');
         var coeffModeEl = document.getElementById('w-coeff-mode');
@@ -1488,13 +1403,14 @@
                 var skipReason = adj.skip_reason || j.skip_reason;
                 var phrase = weatherReasonPhrase(skipReason);
                 coeffEl.innerHTML = '<span class="skip-main">Полив отложен</span>'
-                    + (phrase ? '<span class="skip-reason">(' + phrase + ')</span>' : '');
+                    + (phrase ? '<span class="skip-reason">(' + escapeHtml(phrase) + ')</span>' : '');
                 coeffEl.style.color = 'var(--danger-color, #f44336)';
                 coeffEl.classList.add('skip');
                 if (coeffModeEl) coeffModeEl.textContent = '';
             } else {
                 coeffEl.textContent = (coeffApplied !== null && coeffApplied !== undefined) ? coeffApplied + '%' : '—';
-                coeffEl.style.color = coeffColor(coeffApplied || 100);
+                var numericApplied = Number(coeffApplied);
+                coeffEl.style.color = coeffColor(Number.isFinite(numericApplied) ? numericApplied : 100);
                 coeffEl.classList.remove('skip');
                 if (coeffModeEl) coeffModeEl.innerHTML = renderCoeffSecondOpinion(adj);
             }
@@ -1505,9 +1421,9 @@
         var precipVal = (j.stats && j.stats.precipitation_24h !== undefined) ? j.stats.precipitation_24h : j.precipitation_24h;
         var metricsEl = document.getElementById('w-metrics');
         if (metricsEl) {
-            metricsEl.innerHTML = '<span>💧 ' + (humVal !== null && humVal !== undefined ? Math.round(humVal) + '%' : '—') + '</span>'
-                + '<span>💨 ' + (windVal !== null && windVal !== undefined ? (typeof windVal === 'number' ? windVal.toFixed(1) : windVal) + ' м/с' : '—') + '</span>'
-                + '<span>🌧 ' + (precipVal !== null && precipVal !== undefined ? (typeof precipVal === 'number' ? precipVal.toFixed(1) : precipVal) + ' мм' : '—') + '</span>';
+            metricsEl.innerHTML = '<span>💧 ' + escapeHtml(formatWeatherMetric(humVal, 0, '%')) + '</span>'
+                + '<span>💨 ' + escapeHtml(formatWeatherMetric(windVal, 1, ' м/с')) + '</span>'
+                + '<span>🌧 ' + escapeHtml(formatWeatherMetric(precipVal, 1, ' мм')) + '</span>';
         }
         // Source
         var srcEl = document.getElementById('w-source');
@@ -1533,12 +1449,12 @@
             var it = filtered[i];
             var icon = it.icon || getWeatherIcon(it.weather_code);
             html += '<div class="hour-cell">'
-                + '<div class="hour-time">' + (it.time || '') + '</div>'
-                + '<div class="hour-icon">' + icon + '</div>'
-                + '<div class="hour-temp">' + formatTemp(it.temp) + '°</div>'
+                + '<div class="hour-time">' + escapeHtml(it.time || '') + '</div>'
+                + '<div class="hour-icon">' + escapeHtml(icon) + '</div>'
+                + '<div class="hour-temp">' + escapeHtml(formatTemp(it.temp)) + '°</div>'
                 + '<div class="hour-detail">'
-                + (it.precip != null ? (typeof it.precip === 'number' ? it.precip.toFixed(1) : it.precip) : '0') + 'мм · '
-                + (it.wind != null ? (typeof it.wind === 'number' ? it.wind.toFixed(1) : it.wind) : '—') + 'м/с'
+                + escapeHtml(formatWeatherNumber(it.precip, 1, '0')) + 'мм · '
+                + escapeHtml(formatWeatherMetric(it.wind, 1, 'м/с'))
                 + '</div></div>';
         }
         el.innerHTML = html;
@@ -1553,10 +1469,10 @@
             var it = items[i];
             var icon = it.icon || getWeatherIcon(it.weather_code);
             html += '<div class="weather-day">'
-                + '<span class="weather-day-dow">' + (it.day_name || '') + '</span>'
-                + '<span class="weather-day-icon">' + icon + '</span>'
-                + '<span class="weather-day-temps">' + formatTemp(it.temp_min) + '° / ' + formatTemp(it.temp_max) + '°</span>'
-                + '<span class="weather-day-rain">🌧 ' + (it.precip_sum !== null && it.precip_sum !== undefined ? (typeof it.precip_sum === 'number' ? it.precip_sum.toFixed(1) : it.precip_sum) : '0') + ' мм</span>'
+                + '<span class="weather-day-dow">' + escapeHtml(it.day_name || '') + '</span>'
+                + '<span class="weather-day-icon">' + escapeHtml(icon) + '</span>'
+                + '<span class="weather-day-temps">' + escapeHtml(formatTemp(it.temp_min)) + '° / ' + escapeHtml(formatTemp(it.temp_max)) + '°</span>'
+                + '<span class="weather-day-rain">🌧 ' + escapeHtml(formatWeatherNumber(it.precip_sum, 1, '0')) + ' мм</span>'
                 + '</div>';
         }
         el.innerHTML = html;
@@ -1571,11 +1487,11 @@
         var precip24 = (stats.precipitation_24h !== undefined) ? stats.precipitation_24h : j.precipitation_24h;
         var et0 = (stats.daily_et0 !== undefined) ? stats.daily_et0 : j.daily_et0;
         var html = '<div class="weather-params">';
-        if (astro.sunrise) html += '<span class="weather-params-label">🌅 Восход</span><span class="weather-params-val">' + astro.sunrise + '</span>';
-        if (astro.sunset) html += '<span class="weather-params-label">🌇 Закат</span><span class="weather-params-val">' + astro.sunset + '</span>';
-        html += '<span class="weather-params-label">🌧 Осадки 24ч</span><span class="weather-params-val">' + (precip24 !== null && precip24 !== undefined ? (typeof precip24 === 'number' ? precip24.toFixed(1) : precip24) + ' мм' : '—') + '</span>';
-        html += '<span class="weather-params-label">🔮 Прогноз 6ч</span><span class="weather-params-val">' + (precipFc !== null && precipFc !== undefined ? (typeof precipFc === 'number' ? precipFc.toFixed(1) : precipFc) + ' мм' : '—') + '</span>';
-        html += '<span class="weather-params-label">🔬 ET₀</span><span class="weather-params-val">' + (et0 !== null && et0 !== undefined ? (typeof et0 === 'number' ? et0.toFixed(2) : et0) + ' мм/день' : '—') + '</span>';
+        if (astro.sunrise) html += '<span class="weather-params-label">🌅 Восход</span><span class="weather-params-val">' + escapeHtml(astro.sunrise) + '</span>';
+        if (astro.sunset) html += '<span class="weather-params-label">🌇 Закат</span><span class="weather-params-val">' + escapeHtml(astro.sunset) + '</span>';
+        html += '<span class="weather-params-label">🌧 Осадки 24ч</span><span class="weather-params-val">' + escapeHtml(formatWeatherMetric(precip24, 1, ' мм')) + '</span>';
+        html += '<span class="weather-params-label">🔮 Прогноз 6ч</span><span class="weather-params-val">' + escapeHtml(formatWeatherMetric(precipFc, 1, ' мм')) + '</span>';
+        html += '<span class="weather-params-label">🔬 ET₀</span><span class="weather-params-val">' + escapeHtml(formatWeatherMetric(et0, 2, ' мм/день')) + '</span>';
         html += '</div>';
         el.innerHTML = html;
     }
@@ -1603,8 +1519,8 @@
             var statusMark = f.status === 'ok' ? '✓' : (f.status === 'danger' ? '✕' : '⚠');
             html += '<div class="weather-factor">'
                 + '<div class="weather-factor-row">'
-                + '<span class="weather-factor-name">' + (factorNames[key] || key) + '</span>'
-                + '<span class="weather-factor-status ' + statusCls + '">' + statusMark + ' ' + (f.detail || '') + '</span>'
+                + '<span class="weather-factor-name">' + escapeHtml(factorNames[key] || key) + '</span>'
+                + '<span class="weather-factor-status ' + statusCls + '">' + statusMark + ' ' + escapeHtml(f.detail || '') + '</span>'
                 + '</div></div>';
         }
         // Summary line
@@ -1613,9 +1529,11 @@
         if (coeff !== undefined || skip) {
             var summaryColor = skip ? 'var(--danger-color, #f44336)' : 'var(--success-color, #4caf50)';
             var skipPhrase = weatherReasonPhrase(adj.skip_reason || '');
-            var summaryText = skip ? ('Полив отложен' + (skipPhrase ? ' ' + skipPhrase : '')) : ('Коэффициент: ' + coeff + '%');
+            var summaryText = skip
+                ? ('Полив отложен' + (skipPhrase ? ' ' + skipPhrase : ''))
+                : ('Коэффициент: ' + formatWeatherNumber(coeff, 0, '—') + '%');
             html += '<div style="margin-top:0.5rem;padding:0.4rem;background:rgba(33,150,243,0.08);border-radius:6px;text-align:center;font-size:0.8rem;">'
-                + '<strong style="color:' + summaryColor + ';">' + summaryText + '</strong></div>';
+                + '<strong style="color:' + summaryColor + ';">' + escapeHtml(summaryText) + '</strong></div>';
         }
         el.innerHTML = html;
     }
@@ -1648,9 +1566,9 @@
                     badgeText = 'ОТЛОЖЕН';
                 }
                 html += '<div class="weather-hist-item">'
-                    + '<span class="weather-hist-date">' + date + '</span>'
-                    + '<span class="weather-badge ' + badgeCls + '">' + badgeText + '</span>'
-                    + '<span>' + localizeWeatherReason(it.reason || '') + '</span>'
+                    + '<span class="weather-hist-date">' + escapeHtml(date) + '</span>'
+                    + '<span class="weather-badge ' + badgeCls + '">' + escapeHtml(badgeText) + '</span>'
+                    + '<span>' + escapeHtml(localizeWeatherReason(it.reason || '')) + '</span>'
                     + '</div>';
             }
             el.innerHTML = html;
@@ -1732,30 +1650,53 @@
     }
 
     // --- Water Meter ---
-    function updateWaterMeter(zones) {
+    function getAuthoritativeWaterToday(data) {
+        const water = data && data.water_today;
+        if (!water || typeof water !== 'object') {
+            return { available: false, liters: null, date: null, source: null };
+        }
+        const source = typeof water.source === 'string' ? water.source : null;
+        if (source === 'unavailable' || water.error_code) {
+            return { available: false, liters: null, date: null, source: source };
+        }
+        const noRecordedUsage = water.has_data === false || source === 'none';
+        const liters = noRecordedUsage ? 0 : Number(water.liters);
+        if (!Number.isFinite(liters) || liters < 0) {
+            return { available: false, liters: null, date: null, source: source };
+        }
+        return {
+            available: true,
+            liters: liters,
+            date: typeof water.date === 'string' ? water.date : null,
+            source: source,
+        };
+    }
+
+    function updateWaterMeter() {
         var el = document.getElementById('sidebar-water-meter');
         if (!el) return;
-        var total = 0;
-        var perZone = [];
-        zones.forEach(function(z) {
-            if (z.last_total_liters > 0) {
-                total += z.last_total_liters;
-                perZone.push({name: z.name, liters: z.last_total_liters});
-            }
+        var usage = getAuthoritativeWaterToday(statusData);
+        var groups = statusData && Array.isArray(statusData.groups) ? statusData.groups : [];
+        var hasFlowMeter = groups.some(function(group) {
+            return group.use_water_meter === true || group.use_water_meter === 1;
         });
-        if (total === 0) {
+        if (!hasFlowMeter) {
             el.style.display = 'none';
             return;
         }
         el.style.display = '';
         var valEl = document.getElementById('water-meter-value');
         var detEl = document.getElementById('water-meter-detail');
-        if (valEl) valEl.innerHTML = Math.round(total).toLocaleString() + ' <span class="unit">л</span>';
+        if (!usage.available) {
+            if (valEl) valEl.innerHTML = '— <span class="unit">л</span>';
+            if (detEl) detEl.textContent = 'Данные за сутки недоступны';
+            return;
+        }
+        if (valEl) valEl.innerHTML = Math.round(usage.liters).toLocaleString() + ' <span class="unit">л</span>';
         if (detEl) {
-            perZone.sort(function(a,b) { return b.liters - a.liters; });
-            detEl.innerHTML = perZone.slice(0, 3).map(function(z) {
-                return '<span>' + escapeHtml(z.name) + ': ' + Math.round(z.liters) + 'л</span>';
-            }).join('');
+            detEl.textContent = usage.date
+                ? ('За ' + usage.date + (usage.source === 'none' ? ': расход не зафиксирован' : ''))
+                : 'За текущие сутки контроллера';
         }
     }
 
@@ -1921,10 +1862,10 @@
                 html += '<img src="' + _thumbUrl + '" alt="Фото зоны ' + escapeHtml(z.name || '') + '" onerror="this.style.display=\'none\'">';
                 html += '</div>';
             } else {
-                html += '<div class="zc-icon" style="background:' + t.bg + '">' + (z.icon || '🌿') + '</div>';
+                html += '<div class="zc-icon" style="background:' + t.bg + '">' + escapeHtml(z.icon || '🌿') + '</div>';
             }
             html += '<div class="zc-info"><div class="zc-name">#' + z.id + ' ' + escapeHtml(z.name || '') + '</div>';
-            html += '<div class="zc-meta"><span>' + t.label + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
+            html += '<div class="zc-meta"><span>' + escapeHtml(t.label) + '</span><span style="color:#ddd">·</span><span class="zc-dur-badge" id="zbadge-' + z.id + '">' + z.duration + ' мин</span>';
             if (!showSections) html += '<span style="color:#ddd">·</span><span>' + escapeHtml(gName2) + '</span>';
             html += '</div></div>';
             html += nextHtml;
@@ -1986,8 +1927,7 @@
         var all = (zonesData || []).filter(function(z) { return z.group_id !== 999; });
         var running = all.filter(function(z) { return z.state === 'on'; }).length;
         var groups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
-        var totalWater = 0;
-        all.forEach(function(z) { if (z.last_total_liters > 0) totalWater += z.last_total_liters; });
+        var waterToday = getAuthoritativeWaterToday(statusData);
         var _flag = function(v){ try { if (v===true||v===1) return true; var s=String(v).trim().toLowerCase(); return s==='1'||s==='true'||s==='on'||s==='yes'; } catch(e){ return false; } };
         var hasFlowMeter = groups.some(function(g){ return _flag(g.use_water_meter); });
 
@@ -1997,7 +1937,7 @@
         el = document.getElementById('statZonesGroups'); if (el) el.textContent = groups.length;
         el = document.getElementById('statZonesWater');
         if (el) {
-            el.textContent = totalWater > 0 ? Math.round(totalWater) : '—';
+            el.textContent = waterToday.available ? Math.round(waterToday.liters) : '—';
             // Hide the whole tile (.zstat-item) when no flow meter is configured (issue #3).
             // flex:1 on remaining tiles makes them fill the bar automatically.
             var tile = el.closest('.zstat-item');
@@ -2096,31 +2036,33 @@
     function toggleZoneRun(id) {
         showLoading(((zonesData||[]).find(function(z){return z.id===id;})||{}).state==='on' ? 'Остановка...' : 'Запуск...');
         var z = (zonesData || []).find(function(z) { return z.id === id; });
-        if (!z) return;
+        if (!z) { hideLoading(); return; }
         var wantOn = z.state !== 'on';
         var url = wantOn ? '/api/zones/' + id + '/mqtt/start' : '/api/zones/' + id + '/mqtt/stop';
         // Optimistic: set state + times BEFORE fetch for instant timer
-        z.state = wantOn ? 'on' : 'off';
-        if (wantOn) {
-            z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-            z.planned_end_time = new Date(Date.now() + (z.duration||10) * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
-        }
+        var optimisticStart = wantOn ? optimisticTimestamp() : null;
+        var optimisticEnd = wantOn ? optimisticTimestamp(Date.now() + (z.duration||10) * 60 * 1000) : null;
+        var mutationToken = rememberOptimisticZoneState(
+            z, wantOn ? 'on' : 'off', optimisticStart, optimisticEnd
+        );
         renderZoneCards();
         renderGroupTabs();
         fetch(url, { method: 'POST' }).then(function(r) { return r.json(); }).then(function(data) {
             if (data && data.success) {
                 hideLoading();
                 showZoneToast(wantOn ? '▶ Зона #' + id + ' запущена' : '⏹ Зона #' + id + ' остановлена', wantOn ? 'success' : '');
+                reconcileOptimisticZoneState(id, mutationToken);
                 // Light refresh status (groups) after 2 sec
                 setTimeout(function() { loadStatusData(); }, 2000);
             } else {
-                z.state = wantOn ? 'off' : 'on';
+                hideLoading();
+                revertOptimisticZoneState(id, mutationToken);
                 renderZoneCards();
                 showZoneToast((data && data.message) || 'Ошибка', 'error');
             }
         }).catch(function() {
             hideLoading();
-            z.state = wantOn ? 'off' : 'on';
+            revertOptimisticZoneState(id, mutationToken);
             renderZoneCards();
             showZoneToast('Ошибка сети', 'error');
         });
@@ -2129,10 +2071,108 @@
 
     // Duration +/-
     var durDebounceTimers = {};
+    var durWriteInFlight = {};
+    var durWritePending = {};
+
+    function cancelQueuedZoneDurationSave(id) {
+        clearTimeout(durDebounceTimers[id]);
+        durDebounceTimers[id] = null;
+        durWritePending[id] = false;
+    }
+
+    function discardPendingZoneDuration(id) {
+        delete pendingZoneDurations[id];
+        zonesDataRevision += 1;
+        cancelQueuedZoneDurationSave(id);
+    }
+
+    async function saveZoneDuration(id) {
+        var z = (zonesData || []).find(function(zone) { return zone.id === id; });
+        if (!z) return false;
+        var pending = pendingZoneDurations[id];
+        if (!pending) return true;
+        if (!Number.isInteger(pending.expectedVersion) || pending.expectedVersion < 0) {
+            discardPendingZoneDuration(id);
+            await recoverFromZoneCasConflict({ error_code: 'EXPECTED_VERSION_REQUIRED' }, false);
+            return false;
+        }
+
+        var requestedDuration = pending.duration;
+        var durationRevision = pending.revision;
+        var expectedVersion = pending.expectedVersion;
+        try {
+            var data = await api.put('/api/zones/' + id, {
+                duration: requestedDuration,
+                expected_version: expectedVersion,
+            });
+            if (isZoneCasConflict(data)) {
+                discardPendingZoneDuration(id);
+                await recoverFromZoneCasConflict(data, false);
+                return false;
+            }
+            if (!data || typeof data !== 'object' || data.success === false) {
+                showZoneToast((data && data.message) || 'Ошибка сохранения длительности', 'error');
+                discardPendingZoneDuration(id);
+                await loadZonesData();
+                return false;
+            }
+            if (!Number.isInteger(data.version)) {
+                showZoneToast('Сервер не вернул новую версию зоны. Загружены актуальные данные.', 'error');
+                discardPendingZoneDuration(id);
+                await loadZonesData();
+                return false;
+            }
+            var current = (zonesData || []).find(function(zone) { return zone.id === id; });
+            if (current && current.version === expectedVersion) current.version = data.version;
+            if (pendingZoneDurations[id] && pendingZoneDurations[id].revision === durationRevision) {
+                delete pendingZoneDurations[id];
+            } else if (pendingZoneDurations[id]) {
+                // A newer local click is causally based on this successful
+                // write, so only that local successor may advance its token.
+                pendingZoneDurations[id].expectedVersion = data.version;
+            }
+            zonesDataRevision += 1;
+            return true;
+        } catch (error) {
+            showZoneToast('Ошибка сохранения длительности', 'error');
+            discardPendingZoneDuration(id);
+            await loadZonesData();
+            return false;
+        }
+    }
+
+    function queueZoneDurationSave(id) {
+        if (durWriteInFlight[id]) {
+            durWritePending[id] = true;
+            return;
+        }
+        durWriteInFlight[id] = true;
+        saveZoneDuration(id).then(function(saved) {
+            if (!saved) durWritePending[id] = false;
+        }).catch(function() {
+            durWritePending[id] = false;
+        }).finally(function() {
+            durWriteInFlight[id] = false;
+            if (durWritePending[id]) {
+                durWritePending[id] = false;
+                queueZoneDurationSave(id);
+            }
+        });
+    }
+
     function changeZoneDur(id, delta) {
         var z = (zonesData || []).find(function(z) { return z.id === id; });
         if (!z) return;
-        z.duration = Math.max(1, Math.min(120, (z.duration || 10) + delta));
+        var pending = pendingZoneDurations[id];
+        var currentDuration = pending ? pending.duration : (z.duration || 10);
+        var nextDuration = Math.max(1, Math.min(120, currentDuration + delta));
+        var durationRevision = ++zonesDataRevision;
+        pendingZoneDurations[id] = {
+            duration: nextDuration,
+            revision: durationRevision,
+            expectedVersion: pending ? pending.expectedVersion : z.version,
+        };
+        z.duration = nextDuration;
         var el = document.getElementById('zdur-' + id);
         if (el) el.textContent = z.duration;
         var badge = document.getElementById('zbadge-' + id);
@@ -2140,7 +2180,7 @@
         // Debounce API call
         clearTimeout(durDebounceTimers[id]);
         durDebounceTimers[id] = setTimeout(function() {
-            api.put('/api/zones/' + id, { duration: z.duration }).catch(function() {});
+            queueZoneDurationSave(id);
         }, 500);
     }
     window.changeZoneDur = changeZoneDur;
@@ -2190,11 +2230,13 @@
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
             }).catch(function() { showZoneToast('Ошибка', 'error'); });
         } else {
-            (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
-                fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function() {});
+            showLoading('Запуск всех групп...');
+            runAllGroups(null).then(function(results) {
+                reportGroupRunResults(results, 'с настройками зон');
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
             });
-            showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
         }
     }
     window.runGroupWithDefaults = runGroupWithDefaults;
@@ -2264,13 +2306,39 @@
 
     function saveZoneEdit() {
         if (!editingZoneId) return;
-        var payload = {
+        var zoneId = editingZoneId;
+        var zone = (zonesData || []).find(function(item) { return item.id === zoneId; });
+        if (!zone || !Number.isInteger(zone.version) || zone.version < 0) {
+            recoverFromZoneCasConflict({ error_code: 'EXPECTED_VERSION_REQUIRED' }, true);
+            return;
+        }
+        var changes = {
             name: document.getElementById('editZoneName').value,
             duration: parseInt(document.getElementById('editZoneDuration').value) || 10,
             icon: document.getElementById('editZoneIcon').value,
             group_id: parseInt(document.getElementById('editZoneGroup').value) || 1,
         };
-        api.put('/api/zones/' + editingZoneId, payload).then(function(data) {
+        var expectedVersion = zone.version;
+        var payload = Object.assign({}, changes, { expected_version: expectedVersion });
+        api.put('/api/zones/' + zoneId, payload).then(function(data) {
+            if (isZoneCasConflict(data)) {
+                recoverFromZoneCasConflict(data, true);
+                return;
+            }
+            if (!data || typeof data !== 'object' || data.success === false) {
+                showZoneToast((data && data.message) || 'Ошибка сохранения', 'error');
+                return;
+            }
+            if (!Number.isInteger(data.version)) {
+                closeZoneSheet();
+                showZoneToast('Сервер не вернул новую версию зоны. Загружены актуальные данные.', 'error');
+                loadZonesData();
+                return;
+            }
+            var current = (zonesData || []).find(function(item) { return item.id === zoneId; });
+            if (current && current.version === expectedVersion) {
+                Object.assign(current, changes, { version: data.version });
+            }
             closeZoneSheet();
             showZoneToast('✅ Зона сохранена', 'success');
             loadZonesData();
@@ -2329,6 +2397,8 @@
         _runPopupAllGroups = false;
         _runPopupSelectedZones = selectedZones;
         runPopupDur = 15;
+        runPopupMode = 'min';
+        runPopupPct = null;
         document.getElementById('runPopupTitle').textContent =
             '▶ Выбранные зоны (' + selectedZones.length + ')';
         // Hide "📋 С настройками зон" — defaults path is group-wide, ambiguous for subset.
@@ -2336,6 +2406,7 @@
         if (defBtn) defBtn.style.display = 'none';
         if (typeof initDialTicks === 'function') initDialTicks();
         if (typeof updateDial === 'function') updateDial();
+        _refreshRunPopupModeUI();
         document.getElementById('runPopupOverlay').classList.add('show');
         document.getElementById('runPopup').classList.add('show');
         if (typeof initDialDrag === 'function') setTimeout(initDialDrag, 100);
@@ -2408,6 +2479,8 @@
     function initDialDrag() {
         var svg = document.getElementById('dialSvg');
         if (!svg) return;
+        if (svg.__dialDragInitialized) return;
+        svg.__dialDragInitialized = true;
         var dragging = false;
         function angleFromEvent(e) {
             var rect = svg.getBoundingClientRect();
@@ -2482,6 +2555,44 @@
         runPopupPct = p;
         _refreshRunPopupModeUI();
     }
+
+    function runAllGroups(groupBody) {
+        var allGroups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
+        return Promise.all(allGroups.map(function(group) {
+            var options = { method: 'POST' };
+            if (groupBody) {
+                options.headers = {'Content-Type': 'application/json'};
+                options.body = JSON.stringify(groupBody);
+            }
+            return fetch('/api/groups/' + group.id + '/start-from-first', options)
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    return {
+                        id: group.id,
+                        ok: !!(data && data.success),
+                        message: data && data.message,
+                    };
+                })
+                .catch(function() {
+                    return { id: group.id, ok: false, message: 'Ошибка сети' };
+                });
+        }));
+    }
+
+    function reportGroupRunResults(results, successLabel) {
+        hideLoading();
+        var okCount = results.filter(function(result) { return result.ok; }).length;
+        if (results.length > 0 && okCount === results.length) {
+            showZoneToast('▶ Все группы запущены' + (successLabel ? ': ' + successLabel : ''), 'success');
+        } else if (okCount > 0) {
+            showZoneToast('▶ Запущены ' + okCount + ' из ' + results.length + ' групп', 'warning');
+        } else {
+            var firstMessage = results[0] && results[0].message;
+            showZoneToast(firstMessage || 'Не удалось запустить группы', 'error');
+        }
+        setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+    }
+
     function confirmRun() {
         // _runPopupAllGroups flag: true when "all groups" was selected (gid=null)
         if (!runPopupZoneId && !runPopupGroupId && !_runPopupAllGroups && !_runPopupSelectedZones) return;
@@ -2555,17 +2666,11 @@
             if (savedAllGroups && !savedGroupId) {
                 // All groups: start each group with override
                 showLoading('Запуск всех групп...');
-                var allGroups = (zoneGroupsCache || []).filter(function(g) { return g.id !== 999; });
-                Promise.all(allGroups.map(function(g) {
-                    return fetch('/api/groups/' + g.id + '/start-from-first', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(groupBody)
-                    }).catch(function() {});
-                })).then(function() {
+                runAllGroups(groupBody).then(function(results) {
+                    reportGroupRunResults(results, label);
+                }).catch(function() {
                     hideLoading();
-                    showZoneToast('▶ Все группы запущены: ' + label, 'success');
-                    setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+                    showZoneToast('Ошибка сети', 'error');
                 });
                 return;
             }
@@ -2581,8 +2686,8 @@
                     pdur = Math.max(1, Math.min(240, Math.ceil(base * pct / 100)));
                 }
                 z.state = 'on';
-                z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-                z.planned_end_time = new Date(Date.now() + pdur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                z.watering_start_time = optimisticTimestamp();
+                z.planned_end_time = optimisticTimestamp(Date.now() + pdur * 60 * 1000);
             });
             renderZoneCards();
             renderGroupTabs();
@@ -2607,7 +2712,12 @@
                     });
                     setTimeout(function() { showZoneToast('⚠ ' + msgs.join('; '), 'error'); }, 600);
                 }
+                if (!data || !data.success) loadZonesData();
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
+                loadZonesData();
             });
             return;
         }
@@ -2620,6 +2730,7 @@
         // If already running — stop first, then restart
         var zName = (z && z.name) ? ' ' + z.name : '';
         showLoading('Запуск зоны #' + id + zName + '...');
+        var mutationToken = null;
         var startFn = function() {
             // Optimistic: set state + times BEFORE fetch for instant timer.
             // % mode: pre-compute the same way the server will (best-effort).
@@ -2629,9 +2740,12 @@
                 optDur = Math.max(1, Math.min(240, Math.ceil(base * pct / 100)));
             }
             if (z) {
-                z.state = 'on';
-                z.watering_start_time = new Date().toISOString().slice(0,19).replace('T',' ');
-                z.planned_end_time = new Date(Date.now() + optDur * 60 * 1000).toISOString().slice(0,19).replace('T',' ');
+                mutationToken = rememberOptimisticZoneState(
+                    z,
+                    'on',
+                    optimisticTimestamp(),
+                    optimisticTimestamp(Date.now() + optDur * 60 * 1000)
+                );
             }
             renderZoneCards();
             renderGroupTabs();
@@ -2641,6 +2755,7 @@
                 if (data && data.success) {
                     hideLoading();
                     showZoneToast('▶ #' + id + zName + ' запущена: ' + label, 'success');
+                    reconcileOptimisticZoneState(id, mutationToken);
                     // Issue #12: surface server-side warnings as toast text.
                     if (data.warnings && data.warnings.length) {
                         var msgs = data.warnings.map(function(w) {
@@ -2655,18 +2770,37 @@
                     initZoneTimer(z);
                     setTimeout(function() { loadStatusData(); }, 2000);
                 } else {
-                    if (z) z.state = 'off';
+                    revertOptimisticZoneState(id, mutationToken);
                     renderZoneCards();
                     hideLoading();
                     showZoneToast((data && data.message) || 'Ошибка', 'error');
                 }
-            }).catch(function() { hideLoading(); showZoneToast('Ошибка сети', 'error'); });
+            }).catch(function() {
+                revertOptimisticZoneState(id, mutationToken);
+                renderZoneCards();
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
+            });
         };
         
         if (wasRunning) {
             fetch('/api/zones/' + id + '/mqtt/stop', { method: 'POST' })
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
+                if (!data || !data.success) throw new Error((data && data.message) || 'stop failed');
+                if (z) {
+                    z.state = 'off';
+                    z.watering_start_time = null;
+                    z.planned_end_time = null;
+                }
+            })
             .then(function() { return new Promise(function(r) { setTimeout(r, 500); }); })
-            .then(startFn);
+            .then(startFn)
+            .catch(function() {
+                hideLoading();
+                showZoneToast('Не удалось перезапустить зону', 'error');
+                loadZonesData();
+            });
         } else {
             startFn();
         }
@@ -2680,16 +2814,22 @@
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 hideLoading();
-                showZoneToast(data && data.success ? '▶ Группа запущена с настройками зон' : 'Ошибка', data && data.success ? 'success' : 'error');
+                showZoneToast(
+                    data && data.success ? '▶ Группа запущена с настройками зон' : ((data && data.message) || 'Ошибка'),
+                    data && data.success ? 'success' : 'error'
+                );
                 setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
             });
         } else {
-            (zoneGroupsCache || []).filter(function(g){return g.id !== 999;}).forEach(function(g) {
-                fetch('/api/groups/' + g.id + '/start-from-first', { method: 'POST' }).catch(function(){});
+            runAllGroups(null).then(function(results) {
+                reportGroupRunResults(results, 'с настройками зон');
+            }).catch(function() {
+                hideLoading();
+                showZoneToast('Ошибка сети', 'error');
             });
-            hideLoading();
-            showZoneToast('▶ Все группы запущены', 'success');
-            setTimeout(function() { Promise.all([loadStatusData(), loadZonesData()]); }, 1500);
         }
     }
     window.confirmRunWithDefaults = confirmRunWithDefaults;

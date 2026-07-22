@@ -64,13 +64,14 @@ class TestStateVerifier:
         sv = StateVerifier()
         sv._db = test_db
         sv._notifier = MagicMock()
+        server = test_db.create_mqtt_server({"name": "Test", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zone = test_db.create_zone(
             {
                 "name": "Z",
                 "duration": 10,
                 "group_id": 1,
                 "topic": "/test/z1",
-                "mqtt_server_id": 1,
+                "mqtt_server_id": server["id"],
             }
         )
         zone_data = test_db.get_zone(zone["id"])

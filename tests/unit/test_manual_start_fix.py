@@ -11,6 +11,10 @@ import os
 import sys
 from datetime import datetime
 
+import pytest
+
+from tests.safety_contracts import confirmed_group_stop
+
 # Ensure project root is on path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
@@ -33,6 +37,11 @@ def _create_zone(db, name, duration, group_id, icon="🌿", topic="/test/topic")
 
 class TestZoneMqttStartOverride:
     """BUG 1 & 2: mqtt/start with override duration sets planned_end_time and watering_start_time."""
+
+    @pytest.fixture(autouse=True)
+    def _confirmed_group_stop(self, app):
+        with confirmed_group_stop(app.db):
+            yield
 
     def test_start_with_override_sets_planned_end_time(self, client, app):
         """Starting a zone with override duration should set planned_end_time based on override, not base."""

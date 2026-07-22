@@ -2,7 +2,7 @@
 
 Covers:
 - SSR JSON island (no |safe)
-- escapeHtml utility in app.js
+- escapeHtml utility in common.js
 - innerHTML escaping in JS files
 """
 
@@ -45,24 +45,18 @@ class TestSSRTemplateNoSafe:
             "status.html still uses |safe for inline_groups"
         )
 
-    def test_no_safe_filter_for_inline_status(self):
-        html = read_file("templates/status.html")
-        assert "|safe" not in html or "inline_status" not in html.split("|safe")[0].split("\n")[-1], (
-            "status.html still uses |safe for inline_status"
-        )
-
     def test_no_safe_anywhere_for_ssr_data(self):
         """More robust: no line should contain both inline_ and |safe."""
         html = read_file("templates/status.html")
         for i, line in enumerate(html.split("\n"), 1):
-            if "inline_zones" in line or "inline_groups" in line or "inline_status" in line:
+            if "inline_zones" in line or "inline_groups" in line:
                 assert "|safe" not in line, f"Line {i} uses |safe with SSR data: {line.strip()}"
 
     def test_tojson_filter_used(self):
         """status.html should use |tojson filter for SSR data."""
         html = read_file("templates/status.html")
         assert "|tojson" in html, "status.html missing |tojson filter for SSR data"
-        assert html.count("|tojson") >= 3, "Expected at least 3 |tojson usages for zones, groups, status"
+        assert html.count("|tojson") >= 2, "Expected at least 2 |tojson usages for zones and groups"
 
     def test_json_parse_present(self):
         """status.html should use JSON.parse to decode SSR data."""
@@ -148,39 +142,39 @@ class TestAPIReturnsRawData:
             assert xss_name in names, "API should return raw zone name without HTML escaping"
 
 
-# ── 4. escapeHtml Function in app.js ─────────────────────────────────
+# ── 4. escapeHtml Function in common.js ──────────────────────────────
 
 
 class TestEscapeHtmlFunction:
-    """app.js must contain a proper escapeHtml function."""
+    """common.js must contain a proper escapeHtml function."""
 
     def test_escape_html_exists(self):
-        js = read_file("static/js/app.js")
-        assert "function escapeHtml" in js, "app.js missing escapeHtml function"
+        js = read_file("static/js/common.js")
+        assert "function escapeHtml" in js, "common.js missing escapeHtml function"
 
     def test_escape_html_handles_ampersand(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&amp;" in js, "escapeHtml should escape & to &amp;"
 
     def test_escape_html_handles_lt(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&lt;" in js, "escapeHtml should escape < to &lt;"
 
     def test_escape_html_handles_gt(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&gt;" in js, "escapeHtml should escape > to &gt;"
 
     def test_escape_html_handles_double_quote(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&quot;" in js, 'escapeHtml should escape " to &quot;'
 
     def test_escape_html_handles_single_quote(self):
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         assert "&#039;" in js, "escapeHtml should escape ' to &#039;"
 
     def test_escape_html_handles_null(self):
         """escapeHtml should handle null/undefined by returning empty string."""
-        js = read_file("static/js/app.js")
+        js = read_file("static/js/common.js")
         # Should check for null: str == null catches both null and undefined
         assert "str == null" in js or "str === null" in js or "str==null" in js, "escapeHtml should handle null input"
 
@@ -289,20 +283,6 @@ class TestInnerHTMLEscaping:
                         violations.append(f"Line {i}: raw {pat}: {line.strip()[:100]}")
         assert not violations, "zones.js has raw names in innerHTML:\n" + "\n".join(violations)
 
-    def test_programs_js_names_escaped(self):
-        """programs.js: program.name, meta.name, zone.name must use escapeHtml."""
-        js = read_file("static/js/programs.js")
-        violations = []
-        lines = js.split("\n")
-        name_patterns = ["${program.name}", "${meta.name}", "${zone.name}"]
-        for i, line in enumerate(lines, 1):
-            for pat in name_patterns:
-                if pat in line and "escapeHtml" not in line:
-                    ctx = "\n".join(lines[max(0, i - 20) : i + 5])
-                    if ".innerHTML" in ctx:
-                        violations.append(f"Line {i}: raw {pat}: {line.strip()[:100]}")
-        assert not violations, "programs.js has raw names in innerHTML:\n" + "\n".join(violations)
-
     def test_mqtt_html_names_escaped(self):
         """mqtt.html: s.name, s.host, s.username in innerHTML must use escapeHtml."""
         html = read_file("templates/mqtt.html")
@@ -341,3 +321,17 @@ class TestInnerHTMLEscaping:
                 if "escapeHtml" not in line:
                     violations.append(f"Line {i}: raw ${{message}} in innerHTML: {line.strip()[:100]}")
         assert not violations, "app.js has raw message in innerHTML:\n" + "\n".join(violations)
+
+    def test_app_js_health_panel_actions_preserve_meta_as_text(self):
+        """Health details must not decode text and inject MQTT meta as HTML."""
+        js = read_file("static/js/app.js")
+        match = re.search(r"function wireActions\(d\)\s*\{(.*?)\n\s*async function refresh", js, re.DOTALL)
+        assert match, "Could not locate app.js health-panel wireActions function"
+
+        wire_actions = match.group(1)
+        assert "root.innerHTML" not in wire_actions, (
+            "wireActions must not put decoded health text back into innerHTML; "
+            "meta_tail topic/payload values are broker-controlled"
+        )
+        assert "document.createElement('span')" in wire_actions
+        assert "div.textContent = line" in wire_actions

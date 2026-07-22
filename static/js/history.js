@@ -19,6 +19,7 @@
     zonesCache: [],
     groupsCache: [],
     chart: null,
+    refreshGeneration: 0,
   };
 
   // ---------- DOM helpers ----------
@@ -38,6 +39,7 @@
   }
 
   function close() {
+    state.refreshGeneration += 1;
     var ov = $('historyOverlay');
     if (ov) ov.hidden = true;
     document.body.style.overflow = '';
@@ -179,12 +181,43 @@
   }
 
   // ---------- Refresh: fetch + render ----------
+  function clearHistoryView(message) {
+    state.lastData = null;
+    if (state.chart) { try { state.chart.destroy(); } catch (e) {} state.chart = null; }
+    var canvas = $('historyChart');
+    if (canvas && typeof canvas.getContext === 'function') {
+      try { canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height); } catch (e) {}
+    }
+    var minutes = $('historyTotalMinutes'); if (minutes) minutes.textContent = '—';
+    var runs = $('historyTotalRuns'); if (runs) runs.textContent = '—';
+    var liters = $('historyTotalLiters'); if (liters) liters.textContent = '—';
+    var litersCard = $('historyLitersCard'); if (litersCard) litersCard.hidden = true;
+    var litersSub = $('historyLitersSub'); if (litersSub) litersSub.hidden = true;
+    var empty = $('historyChartEmpty');
+    if (empty) { empty.hidden = false; empty.textContent = 'История временно недоступна'; }
+    var banner = $('historySavingsBanner'); if (banner) banner.hidden = true;
+    var noPlan = $('historyNoPlanNote'); if (noPlan) noPlan.hidden = true;
+    var box = $('historyRunsList');
+    if (box) box.innerHTML = '<div class="history-runs__empty">Ошибка загрузки истории: ' + safeText(message || 'сеть') + '</div>';
+    var footer = $('historyFooterStats'); if (footer) footer.textContent = 'Данные недоступны';
+    var title = $('historyTitle'); if (title) title.textContent = '💧 История — данные недоступны';
+    var csv = $('historyCsvBtn'); if (csv) csv.hidden = true;
+  }
+
   function refresh() {
+    var generation = ++state.refreshGeneration;
     var url = buildJsonUrl();
     fetch(url, { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (data) {
+          if (!r.ok || !data || data.success === false) {
+            throw new Error((data && (data.message || data.error)) || ('HTTP ' + r.status));
+          }
+          return data;
+        });
+      })
       .then(function (data) {
-        if (!data || !data.success) { console.warn('history fetch failed', data); return; }
+        if (generation !== state.refreshGeneration) return;
         state.lastData = data;
         renderSummary();
         renderChart();
@@ -193,7 +226,11 @@
         renderFooter();
         renderTitle();
       })
-      .catch(function (err) { console.warn('history fetch error', err); });
+      .catch(function (err) {
+        if (generation !== state.refreshGeneration) return;
+        console.warn('history fetch error', err);
+        clearHistoryView(err.message || 'сеть');
+      });
   }
 
   function buildJsonUrl() {
@@ -247,6 +284,7 @@
     var canvas = $('historyChart');
     var empty = $('historyChartEmpty');
     if (!canvas || !window.Chart) return;
+    empty.textContent = 'За выбранный период нет запусков';
     var daily = d.daily || [];
     var hasAnyRun = daily.some(function (x) { return (x.runs || 0) > 0; });
     empty.hidden = hasAnyRun;
@@ -254,7 +292,11 @@
     var labels = daily.map(function (x) { return formatDateShort(x.date); });
     var fact = daily.map(function (x) { return Math.round((x.actual_minutes || 0) * 10) / 10; });
     var plan = daily.map(function (x) { return x.plan_minutes; });
-    var hasPlan = (d.summary && d.summary.has_plan) && plan.some(function (v) { return v != null; });
+    var summary = d.summary || {};
+    var planAvailable = summary.plan_available !== undefined
+      ? summary.plan_available === true
+      : summary.has_plan === true;
+    var hasPlan = planAvailable && plan.some(function (v) { return v != null; });
 
     // Marker colors
     var todayIso = (new Date()).toISOString().slice(0, 10);
@@ -344,9 +386,22 @@
     var noplan = $('historyNoPlanNote');
     var s = d.summary || {};
     if (!state.compare) { banner.hidden = true; noplan.hidden = true; return; }
-    if (!s.has_plan) {
+    var savingsAvailable = s.savings_available !== undefined
+      ? s.savings_available === true
+      : s.has_plan === true;
+    if (!savingsAvailable) {
       banner.hidden = true;
-      noplan.hidden = (state.zoneId === 'all'); // show "no plan" only on per-zone view
+      noplan.hidden = false;
+      var unavailableReason = String(s.savings_unavailable_reason || '');
+      if (unavailableReason === 'plan_unavailable' || s.plan_available === false) {
+        noplan.textContent = 'Базовый план за выбранный период недоступен — экономия не рассчитывается';
+      } else if (unavailableReason === 'historical_zone_cohort_changed' || s.cohort_matches_current === false) {
+        noplan.textContent = 'Состав зон изменился — сравнение экономии для этого периода недоступно';
+      } else if (unavailableReason === 'actual_run_open' || s.actuals_complete === false) {
+        noplan.textContent = 'Расчёт экономии появится после завершения текущего полива';
+      } else {
+        noplan.textContent = 'Для выбранного периода нет сопоставимого плана — сравнить не с чем';
+      }
       return;
     }
     noplan.hidden = true;
@@ -369,6 +424,19 @@
   }
 
   // ---------- Runs list (grouped by day, desc) ----------
+  function summarizeActualRuns(runs) {
+    return (Array.isArray(runs) ? runs : []).reduce(function (total, run) {
+      // The backend owns accounting policy. In particular, an unconfirmed
+      // aborted run stays visible in the list but must not inflate actual
+      // minutes or run counts.
+      if (!run || run.counts_as_actual !== true) return total;
+      var minutes = Number(run.duration_min);
+      total.count += 1;
+      if (Number.isFinite(minutes)) total.minutes += minutes;
+      return total;
+    }, { count: 0, minutes: 0 });
+  }
+
   function renderRuns() {
     var d = state.lastData; if (!d) return;
     var box = $('historyRunsList'); if (!box) return;
@@ -388,15 +456,9 @@
     var html = '';
     dates.forEach(function (date) {
       var dayRuns = groups[date];
-      var dayMin = 0;
-      var dayCount = 0;
-      dayRuns.forEach(function (r) {
-        // Exclude phantom waterings (status='failed') from the day totals —
-        // they remain visible as rows below, but don't inflate minutes/count.
-        if (r.status === 'failed') return;
-        dayMin += (r.duration_min || 0);
-        dayCount += 1;
-      });
+      var actual = summarizeActualRuns(dayRuns);
+      var dayMin = actual.minutes;
+      var dayCount = actual.count;
       var headExtra = dayCount > 1
         ? ' · ' + dayCount + ' запуска · ' + dayMin + ' мин'
         : '';

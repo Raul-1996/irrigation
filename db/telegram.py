@@ -217,13 +217,24 @@ class TelegramRepository(BaseRepository):
             dow = now_local.weekday()
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
+                admin_row = conn.execute(
+                    "SELECT value FROM settings WHERE key='telegram_admin_chat_id' LIMIT 1"
+                ).fetchone()
+                if not admin_row or not str(admin_row["value"] or "").strip():
+                    return []
+                try:
+                    admin_chat_id = int(admin_row["value"])
+                except (ValueError, TypeError):
+                    logger.warning("Invalid telegram_admin_chat_id; suppressing scheduled reports")
+                    return []
                 cur = conn.execute(
                     """
                     SELECT bs.*, bu.chat_id FROM bot_subscriptions bs
                     JOIN bot_users bu ON bu.id = bs.user_id
                     WHERE bs.enabled=1 AND bs.time_local=?
+                      AND bu.is_authorized=1 AND bu.chat_id=?
                 """,
-                    (hhmm,),
+                    (hhmm, admin_chat_id),
                 )
                 out = []
                 for r in cur.fetchall():

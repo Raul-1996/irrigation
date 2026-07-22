@@ -4,14 +4,12 @@ Liveness, readiness, and Prometheus metrics for SRE / monitoring.
 
 Endpoint contract:
   * GET /healthz — liveness (200 if Flask event loop is not wedged).
-  * GET /readyz  — readiness (aggregates 5 checks; 200 all-ok / 503 any-fail).
-  * GET /metrics — Prometheus text exposition (dedicated CollectorRegistry).
+  * GET /readyz  — minimal public readiness; detailed checks only for admin.
+  * GET /metrics — admin-only Prometheus exposition.
 
-Design doc: irrigation-audit/design/wave2-observability-design.md §3.
-All three endpoints are GET-only, do not require session auth, and live
-under a dedicated blueprint so they are trivially CSRF-exempt.
-
-Future hardening (Wave 3, MASTER-M5): nginx IP allow-list for /metrics.
+The response contract is consumed by native deployment health checks.
+All three endpoints are GET-only and live under a dedicated blueprint so they
+are trivially CSRF-exempt. Only the minimal liveness/readiness result is public.
 """
 
 from __future__ import annotations
@@ -20,11 +18,12 @@ import contextlib
 import logging
 import os
 import platform
+import secrets
 import sqlite3
 import time
 from typing import Any, Callable
 
-from flask import Blueprint, Response, jsonify
+from flask import Blueprint, Response, current_app, jsonify, request, session
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -34,6 +33,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from services.security import admin_required
 from services.version import get_app_version as _get_app_version
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ WB_SCHEDULER_RUNNING = Gauge(
 
 WB_ZONES_TOTAL = Gauge(
     "wb_zones_total",
-    "Number of zones by state (on/off) — populated on every /metrics scrape",
+    "Number of zones by lifecycle state — populated on every /metrics scrape",
     ["state"],
     registry=REGISTRY,
 )
@@ -205,7 +205,7 @@ def init_metrics(app, db) -> None:
     for s in ("manual", "scheduler", "program", "other"):
         WB_ZONE_START.labels(source=s)
         WB_ZONE_STOP.labels(source=s)
-    for st in ("on", "off"):
+    for st in ("on", "off", "starting", "stopping", "paused", "fault", "unknown"):
         WB_ZONES_TOTAL.labels(state=st)
 
     # Install log-count handler on the ROOT logger (idempotent).
@@ -227,12 +227,16 @@ def _check_boot_reconcile() -> dict[str, Any]:
     try:
         from services import app_init
 
-        done = bool(getattr(app_init, "_boot_sync_done", False))
+        physical_done = bool(getattr(app_init, "_boot_sync_done", False))
+        recovery_done = bool(getattr(app_init, "_boot_recovery_done", False))
+        reason = str(getattr(app_init, "_boot_reconcile_error", "") or "")
     except ImportError:
         return {"status": "fail", "reason": "services.app_init import failed"}
-    if done:
+    if physical_done and recovery_done:
         return {"status": "ok"}
-    return {"status": "fail", "reason": "boot_sync not completed"}
+    if not physical_done:
+        return {"status": "fail", "reason": reason or "physical OFF reconciliation not completed"}
+    return {"status": "fail", "reason": reason or "scheduler boot recovery not completed"}
 
 
 def _check_disk_space(min_free_mb: int = 50) -> dict[str, Any]:
@@ -269,12 +273,48 @@ def _check_scheduler() -> dict[str, Any]:
     dur_ms = int((time.perf_counter() - t0) * 1000)
     if sched is None:
         return {"status": "fail", "duration_ms": dur_ms, "reason": "scheduler not initialised"}
-    running = bool(getattr(sched, "is_running", False))
+    recovery_completed = getattr(sched, "_boot_recovery_completed", None)
+    if recovery_completed is False:
+        return {
+            "status": "fail",
+            "duration_ms": dur_ms,
+            "reason": "scheduler boot recovery is still paused",
+        }
+    running = _scheduler_running(sched)
     return {
         "status": "ok" if running else "fail",
         "duration_ms": dur_ms,
         "reason": None if running else "scheduler.is_running is False",
     }
+
+
+def _scheduler_running(sched) -> bool:
+    """Read the IrrigationScheduler wrapper before APScheduler internals."""
+    if sched is None:
+        return False
+    wrapper_state = getattr(sched, "is_running", None)
+    if isinstance(wrapper_state, bool):
+        return wrapper_state
+    apscheduler = getattr(sched, "scheduler", None)
+    backend_state = getattr(apscheduler, "running", None)
+    if isinstance(backend_state, bool):
+        return backend_state
+    direct_state = getattr(sched, "running", None)
+    return direct_state if isinstance(direct_state, bool) else False
+
+
+def _scheduler_jobs(sched) -> list[Any]:
+    """Return jobs from the wrapped APScheduler, with direct fallback."""
+    if sched is None:
+        return []
+    apscheduler = getattr(sched, "scheduler", None)
+    get_backend_jobs = getattr(apscheduler, "get_jobs", None)
+    if callable(get_backend_jobs):
+        return list(get_backend_jobs() or [])
+    get_direct_jobs = getattr(sched, "get_jobs", None)
+    if callable(get_direct_jobs):
+        return list(get_direct_jobs() or [])
+    return []
 
 
 def _check_mqtt(db) -> dict[str, Any]:
@@ -295,28 +335,68 @@ def _check_mqtt(db) -> dict[str, Any]:
             "duration_ms": int((time.perf_counter() - t0) * 1000),
             "brokers": 0,
         }
+    enabled_servers = []
+    for server in servers:
+        try:
+            if int(server.get("enabled", 1) or 0) == 1:
+                enabled_servers.append(server)
+        except (AttributeError, TypeError, ValueError):
+            enabled_servers.append(server)
+    if not enabled_servers:
+        return {
+            "status": "skipped",
+            "reason": "no enabled brokers configured",
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+            "brokers": 0,
+            "configured": len(servers),
+            "connected": 0,
+            "unavailable": 0,
+        }
     try:
-        from services.mqtt_pub import _MQTT_CLIENTS
+        from services import mqtt_pub
     except ImportError as e:
         return {
             "status": "fail",
             "reason": f"mqtt_pub import: {e}",
             "duration_ms": int((time.perf_counter() - t0) * 1000),
         }
+    try:
+        snapshots = mqtt_pub.snapshot_mqtt_clients()
+    except (AttributeError, RuntimeError, TypeError, ValueError) as e:
+        return {
+            "status": "fail",
+            "reason": f"mqtt client snapshot: {type(e).__name__}",
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+            "brokers": len(enabled_servers),
+            "connected": 0,
+            "unavailable": len(enabled_servers),
+        }
+
     connected = 0
-    for cl in list(_MQTT_CLIENTS.values()):
+    for server in enabled_servers:
         try:
-            if cl is not None and bool(cl.is_connected()):
+            sid = int(server.get("id"))
+            snapshot = snapshots.get(sid)
+            if snapshot is None:
+                continue
+            if snapshot.config_fingerprint != mqtt_pub.mqtt_server_config_fingerprint(server):
+                continue
+            client = snapshot.client
+            if client is not None and bool(client.is_connected()):
                 connected += 1
-        except Exception:
-            pass
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+            continue
+    broker_count = len(enabled_servers)
+    unavailable = broker_count - connected
     dur_ms = int((time.perf_counter() - t0) * 1000)
     return {
-        "status": "ok" if connected >= 1 else "fail",
+        "status": "ok" if unavailable == 0 else "fail",
         "duration_ms": dur_ms,
-        "brokers": len(servers),
+        "brokers": broker_count,
+        "configured": len(servers),
         "connected": connected,
-        "reason": None if connected >= 1 else "no broker client reports is_connected()",
+        "unavailable": unavailable,
+        "reason": None if unavailable == 0 else "one or more enabled brokers are unavailable",
     }
 
 
@@ -355,14 +435,19 @@ def _readiness_checks(db) -> list[tuple[str, Callable[[], dict[str, Any]]]]:
 
 
 @health_api_bp.route("/healthz", methods=["GET"])
-def healthz() -> tuple[dict[str, str], int]:
+def healthz() -> Response:
     """Liveness probe.  200 iff the Flask event loop is alive enough to answer.
 
     Does NOT touch DB / MQTT / scheduler — those failures are handled by
     /readyz.  If this endpoint stops responding, the systemd watchdog (F4)
     will kill the process.
     """
-    return {"status": "ok"}, 200
+    response = jsonify({"status": "ok"})
+    configured_token = str(current_app.config.get("HTTP_STARTUP_PROBE_TOKEN") or "")
+    supplied_token = str(request.headers.get("X-WB-Startup-Probe") or "")
+    if configured_token and supplied_token and secrets.compare_digest(configured_token, supplied_token):
+        response.headers["X-WB-Startup-Probe"] = configured_token
+    return response
 
 
 @health_api_bp.route("/readyz", methods=["GET"])
@@ -393,12 +478,18 @@ def readyz() -> Response:
         "status": "ok" if all_ok else "fail",
         "checks": results,
     }
+    disclose_details = current_app.config.get("TESTING") or (
+        session.get("logged_in") is True and session.get("role") == "admin"
+    )
+    if not disclose_details:
+        payload = {"status": payload["status"]}
     resp = jsonify(payload)
     resp.status_code = 200 if all_ok else 503
     return resp
 
 
 @health_api_bp.route("/metrics", methods=["GET"])
+@admin_required
 def metrics() -> Response:
     """Prometheus text exposition.
 
@@ -406,7 +497,8 @@ def metrics() -> Response:
     MQTT connected) just before rendering so consumers see current state
     without a background thread.
 
-    Wave 2: no auth.  Wave 3 (MASTER-M5): nginx IP allow-list.
+    Requires an authenticated admin session because label values and counts
+    expose operational topology.
     """
     from flask import current_app
 
@@ -417,8 +509,8 @@ def metrics() -> Response:
         from irrigation_scheduler import get_scheduler
 
         sched = get_scheduler()
-        WB_SCHEDULER_JOBS.set(len(sched.get_jobs()) if sched else 0)
-        WB_SCHEDULER_RUNNING.set(1 if (sched and getattr(sched, "running", False)) else 0)
+        WB_SCHEDULER_JOBS.set(len(_scheduler_jobs(sched)))
+        WB_SCHEDULER_RUNNING.set(1 if _scheduler_running(sched) else 0)
     except Exception as e:
         logger.debug("metrics scheduler snapshot: %s", e)
 
@@ -426,9 +518,13 @@ def metrics() -> Response:
     try:
         if db is not None:
             zones = db.get_zones() or []
-            on = sum(1 for z in zones if str(z.get("state")) == "on")
-            WB_ZONES_TOTAL.labels(state="on").set(on)
-            WB_ZONES_TOTAL.labels(state="off").set(len(zones) - on)
+            states = ("on", "off", "starting", "stopping", "paused", "fault", "unknown")
+            counts = dict.fromkeys(states, 0)
+            for zone in zones:
+                state = str(zone.get("state") or "unknown").lower()
+                counts[state if state in counts else "unknown"] += 1
+            for state, count in counts.items():
+                WB_ZONES_TOTAL.labels(state=state).set(count)
     except Exception as e:
         logger.debug("metrics zones snapshot: %s", e)
 

@@ -27,10 +27,9 @@ def runner_db(tmp_path):
     db = IrrigationDB(db_path=db_path)
     conn = sqlite3.connect(db_path)
     conn.execute("INSERT OR IGNORE INTO groups (id, name) VALUES (1, 'G1')")
-    conn.execute("INSERT OR IGNORE INTO mqtt_servers (id, name, host, port) VALUES (1, 'Local', '127.0.0.1', 1883)")
     conn.execute(
         "INSERT OR IGNORE INTO zones (id, name, duration, group_id, topic, mqtt_server_id) "
-        "VALUES (1, 'Газон', 1, 1, '/test/zone1', 1)"
+        "VALUES (1, 'Газон', 1, 1, '', NULL)"
     )
     conn.commit()
     conn.close()
@@ -38,7 +37,12 @@ def runner_db(tmp_path):
 
 
 def test_group_sequence_opens_and_closes_zone_run(runner_db):
-    """_run_group_sequence([1]) writes exactly one zone_run with status='ok'."""
+    """A DB-only sequence writes exactly one completed zone_run.
+
+    Physical MQTT completion is covered separately: it intentionally remains
+    pending until a fresh relay OFF.  This test isolates scheduler/history
+    ownership without manufacturing a broker acknowledgement.
+    """
     from unittest.mock import patch
 
     from irrigation_scheduler import IrrigationScheduler

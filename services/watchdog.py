@@ -5,6 +5,7 @@ longer than the configured cap (default 240 minutes) and forcefully stops them.
 Also monitors concurrent zone count per group and sends Telegram alerts on anomalies.
 """
 
+import json
 import logging
 import sqlite3
 import threading
@@ -104,32 +105,84 @@ class ZoneWatchdog(threading.Thread):
                     elapsed_min,
                     cap_minutes,
                 )
-                # Force stop the zone
+                # A normal successful stop only proves that the broker
+                # accepted the command.  The watchdog must wait for a fresh
+                # relay report before telling an operator that the zone is
+                # physically OFF.
+                stop_result = None
+                current_zone = None
                 try:
-                    self.zone_control.stop_zone(zone_id, reason="watchdog_cap", force=True)
-                except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
+                    stop_result = self.zone_control.stop_zone(
+                        zone_id,
+                        reason="watchdog_cap",
+                        force=True,
+                        require_observed_confirmation=True,
+                    )
+                    current_zone = self.db.get_zone(zone_id)
+                except (
+                    AttributeError,
+                    ConnectionError,
+                    TimeoutError,
+                    OSError,
+                    sqlite3.Error,
+                    TypeError,
+                    ValueError,
+                    RuntimeError,
+                ):
                     logger.exception("Watchdog: failed to stop zone %d", zone_id)
-                # Send Telegram alert
-                self._send_alert(
-                    f"⚠️ WATCHDOG: Зона {zone_id} ({zone_name}) была включена {int(elapsed_min)} мин "
-                    f"(лимит {cap_minutes} мин). Принудительно остановлена!"
+                current_zone = current_zone or {}
+                current_state = str(current_zone.get("state") or "").lower()
+                commanded_state = str(current_zone.get("commanded_state") or "").lower()
+                observed_state = str(current_zone.get("observed_state") or "").lower()
+                physical_channel = bool(
+                    (z.get("mqtt_server_id") and str(z.get("topic") or "").strip())
+                    or (current_zone.get("mqtt_server_id") and str(current_zone.get("topic") or "").strip())
                 )
+                state_confirms_off = current_state == "off" and (
+                    not physical_channel or (commanded_state == "off" and observed_state == "off")
+                )
+                stop_confirmed = stop_result is True and state_confirms_off
+                if stop_confirmed:
+                    alert = (
+                        f"⚠️ WATCHDOG: Зона {zone_id} ({zone_name}) была включена "
+                        f"{int(elapsed_min)} мин (лимит {cap_minutes} мин). "
+                        "Принудительно остановлена; OFF подтверждён."
+                    )
+                    log_type = "watchdog_cap_stop"
+                    outcome = "confirmed_off"
+                else:
+                    logger.critical(
+                        "WATCHDOG: physical OFF was not confirmed for zone %d (%s)",
+                        zone_id,
+                        zone_name,
+                    )
+                    alert = (
+                        f"🚨 WATCHDOG: Зона {zone_id} ({zone_name}) была включена "
+                        f"{int(elapsed_min)} мин (лимит {cap_minutes} мин). "
+                        "Физическая остановка НЕ подтверждена; требуется немедленная проверка."
+                    )
+                    log_type = "watchdog_cap_stop_unresolved"
+                    outcome = "unresolved"
+                self._send_alert(alert)
                 # Log to DB
                 try:
-                    import json
-
                     self.db.add_log(
-                        "watchdog_cap_stop",
+                        log_type,
                         json.dumps(
                             {
                                 "zone_id": zone_id,
                                 "zone_name": zone_name,
                                 "elapsed_min": int(elapsed_min),
                                 "cap_min": cap_minutes,
+                                "outcome": outcome,
+                                "state": current_state or None,
+                                "commanded_state": commanded_state or None,
+                                "observed_state": observed_state or None,
+                                "physical_channel": physical_channel,
                             }
                         ),
                     )
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                except (sqlite3.Error, OSError, KeyError, TypeError, ValueError) as e:
                     logger.debug("Handled exception in line_112: %s", e)
 
         # Check concurrent count

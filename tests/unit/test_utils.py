@@ -44,11 +44,11 @@ class TestNormalizeTopic:
         result = normalize_topic("  /devices/test  ")
         assert result == "/devices/test"
 
-    def test_strips_on_suffix(self):
+    def test_rejects_on_command_suffix(self):
         from utils import normalize_topic
 
         result = normalize_topic("/devices/wb-mr6cv3_1/controls/K1/on")
-        assert result == "/devices/wb-mr6cv3_1/controls/K1"
+        assert result == ""
 
     def test_does_not_strip_non_on_suffix(self):
         from utils import normalize_topic

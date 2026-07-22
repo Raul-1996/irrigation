@@ -10,9 +10,13 @@ import contextlib
 import json as _json
 import logging
 import os
+import re as _re
 import sqlite3
 from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+
+from utils import ensure_private_directory, ensure_private_file
 
 try:
     from pythonjsonlogger import jsonlogger as _jsonlogger
@@ -25,6 +29,21 @@ except ImportError:  # graceful degradation — fall back to legacy JSONFormatte
 logger = logging.getLogger(__name__)
 
 _APP_VERSION_CACHED: "str | None" = None
+
+
+class PrivateTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Timed rotating handler whose current and future files are always 0600."""
+
+    def _open(self):
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.baseFilename, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            return os.fdopen(descriptor, self.mode, encoding=self.encoding, errors=self.errors)
+        except (OSError, ValueError):
+            os.close(descriptor)
+            raise
 
 
 def _get_app_version() -> str:
@@ -56,10 +75,15 @@ class PIIMaskingFilter(logging.Filter):
         try:
             msg = str(record.getMessage())
             for key in self.SENSITIVE_KEYS:
-                k = key.lower()
-                msg = msg.replace(f"{k}=", f"{k}=[REDACTED]")
-                msg = msg.replace(f'"{k}":"', f'"{key}":"[REDACTED]')
-                msg = msg.replace(f"'{k}':'", f"'{key}':'[REDACTED]")
+                k = _re.escape(key)
+                msg = _re.sub(rf"(?i)({k})=\S+", r"\1=[REDACTED]", msg)
+                msg = _re.sub(rf'(?i)("{k}"\s*:\s*")[^"]*(")', r"\1[REDACTED]\2", msg)
+                msg = _re.sub(rf"(?i)('{k}'\s*:\s*')[^']*(')", r"\1[REDACTED]\2", msg)
+            msg = _re.sub(
+                r"(?i)(initial (?:random|admin) password(?: generated)?\s*[:=]\s*)\S+",
+                r"\1[REDACTED]",
+                msg,
+            )
             record.msg = msg
             record.args = ()
         except (ValueError, TypeError, KeyError) as e:
@@ -71,10 +95,11 @@ class PIIFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = str(record.getMessage())
-            for key in ("password", "old_password", "new_password"):
-                msg = msg.replace(f'"{key}":"', f'"{key}":"***').replace(f"{key}=", f"{key}=***")
-            if "Authorization" in msg:
-                msg = msg.replace("Authorization", "Authorization: ***")
+            for key in ("old_password", "new_password", "password"):
+                k = _re.escape(key)
+                msg = _re.sub(rf'("{k}"\s*:\s*")[^"]*(")', r"\1***\2", msg)
+                msg = _re.sub(rf"({k})=\S+", r"\1=***", msg)
+            msg = _re.sub(r"(Authorization)[:=]?\s*(?:(?:Bearer|Basic)\s+)?\S+", r"\1: ***", msg)
             record.msg = msg
             record.args = ()
         except (ValueError, TypeError, KeyError) as e:
@@ -240,6 +265,13 @@ def _use_json_logging() -> bool:
     return os.environ.get("WB_LOG_FORMAT", "plain").lower() == "json"
 
 
+def _attach_pii_filters(handler: logging.Handler) -> None:
+    if not any(isinstance(filter_, PIIMaskingFilter) for filter_ in handler.filters):
+        handler.addFilter(PIIMaskingFilter())
+    if not any(isinstance(filter_, PIIFilter) for filter_ in handler.filters):
+        handler.addFilter(PIIFilter())
+
+
 def ensure_console_handler():
     """Ensure a StreamHandler with unified formatter on root logger."""
     try:
@@ -257,9 +289,7 @@ def ensure_console_handler():
             sh.setFormatter(WBJsonFormatter())
         else:
             sh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
-        # Ensure PII filter is attached
-        if not any(isinstance(f, PIIFilter) for f in sh.filters):
-            sh.addFilter(PIIFilter())
+        _attach_pii_filters(sh)
         wlg = logging.getLogger("werkzeug")
         for h in wlg.handlers or []:
             if isinstance(h, logging.StreamHandler):
@@ -325,6 +355,9 @@ def setup_logging(app_logger):
         for h in root.handlers:
             if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
                 h.setFormatter(WBJsonFormatter())
+    for h in root.handlers:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            _attach_pii_filters(h)
 
     # Test propagation: in pytest we keep propagate=False on the named app logger
     # to avoid writes to a closed stdout; in prod we keep it True so app-logger
@@ -338,40 +371,54 @@ def setup_logging(app_logger):
     # File handlers — attach to ROOT so every logger (services.*, routes.*, etc.)
     # that uses `logging.getLogger(__name__)` writes to app.log via propagation.
     try:
-        from logging.handlers import TimedRotatingFileHandler
-
         log_dir = os.path.join(os.getcwd(), "backups")
-        os.makedirs(log_dir, exist_ok=True)
+        ensure_private_directory(log_dir)
+        # Backups can contain SQLite snapshots in addition to logs.  Harden
+        # existing regular files too; never follow symlinks out of the runtime
+        # directory.
+        for entry in os.scandir(log_dir):
+            if entry.is_file(follow_symlinks=False):
+                ensure_private_file(entry.path)
 
         app_log_path = os.path.join(log_dir, "app.log")
         # Idempotence: do not add a second TimedRotatingFileHandler for app.log
-        already_attached = any(
-            isinstance(h, TimedRotatingFileHandler) and getattr(h, "baseFilename", "") == os.path.abspath(app_log_path)
+        app_file_handlers = [
+            h
             for h in root.handlers
-        )
+            if isinstance(h, TimedRotatingFileHandler)
+            and getattr(h, "baseFilename", "") == os.path.abspath(app_log_path)
+        ]
+        already_attached = bool(app_file_handlers)
+        for existing_handler in app_file_handlers:
+            _attach_pii_filters(existing_handler)
         if not already_attached:
-            fh = TimedRotatingFileHandler(
+            fh = PrivateTimedRotatingFileHandler(
                 app_log_path, when="midnight", interval=1, backupCount=7, encoding="utf-8", utc=False
             )
             fh.setLevel(logging.INFO)
             # File handler is ALWAYS JSON — rotated files must stay machine-parseable.
             fh.setFormatter(WBJsonFormatter())
-            fh.addFilter(PIIFilter())
+            _attach_pii_filters(fh)
             root.addHandler(fh)
 
         # Import/export log — dedicated named logger, keep handler local
         imp_logger = logging.getLogger("import_export")
         imp_logger.setLevel(logging.INFO)
         imp_path = os.path.join(log_dir, "import-export.log")
-        if not any(
-            isinstance(h, TimedRotatingFileHandler) and getattr(h, "baseFilename", "") == os.path.abspath(imp_path)
+        import_file_handlers = [
+            h
             for h in imp_logger.handlers
-        ):
-            imp_fh = TimedRotatingFileHandler(
+            if isinstance(h, TimedRotatingFileHandler) and getattr(h, "baseFilename", "") == os.path.abspath(imp_path)
+        ]
+        for existing_handler in import_file_handlers:
+            _attach_pii_filters(existing_handler)
+        if not import_file_handlers:
+            imp_fh = PrivateTimedRotatingFileHandler(
                 imp_path, when="midnight", interval=1, backupCount=7, encoding="utf-8", utc=False
             )
             imp_fh.setLevel(logging.INFO)
             imp_fh.setFormatter(WBJsonFormatter())
+            _attach_pii_filters(imp_fh)
             imp_logger.addHandler(imp_fh)
     except ImportError:
         pass

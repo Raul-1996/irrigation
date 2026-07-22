@@ -130,25 +130,35 @@ class TestZoneEditAPI:
             return data["zone"]["id"]
         return data["id"]
 
+    def _put_zone(self, client, zone_id, changes):
+        current = client.get(f"/api/zones/{zone_id}")
+        assert current.status_code == 200
+        version = current.get_json()["version"]
+        return client.put(
+            f"/api/zones/{zone_id}",
+            json={**changes, "expected_version": version},
+        )
+
     def test_put_duration(self, admin_client):
         zid = self._create_zone(admin_client)
-        resp = admin_client.put(f"/api/zones/{zid}", json={"duration": 12})
+        resp = self._put_zone(admin_client, zid, {"duration": 12})
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["duration"] == 12
 
     def test_put_name(self, admin_client):
         zid = self._create_zone(admin_client)
-        resp = admin_client.put(f"/api/zones/{zid}", json={"name": "Тест"})
+        resp = self._put_zone(admin_client, zid, {"name": "Тест"})
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["name"] == "Тест"
 
     def test_put_all_fields(self, admin_client):
         zid = self._create_zone(admin_client)
-        resp = admin_client.put(
-            f"/api/zones/{zid}",
-            json={
+        resp = self._put_zone(
+            admin_client,
+            zid,
+            {
                 "duration": 12,
                 "name": "Тест",
                 "icon": "🌊",
@@ -162,12 +172,12 @@ class TestZoneEditAPI:
 
     def test_put_duration_zero_rejected(self, admin_client):
         zid = self._create_zone(admin_client)
-        resp = admin_client.put(f"/api/zones/{zid}", json={"duration": 0})
+        resp = self._put_zone(admin_client, zid, {"duration": 0})
         assert resp.status_code == 400
 
     def test_put_duration_over_max_rejected(self, admin_client):
         zid = self._create_zone(admin_client)
-        resp = admin_client.put(f"/api/zones/{zid}", json={"duration": 3601})
+        resp = self._put_zone(admin_client, zid, {"duration": 3601})
         assert resp.status_code == 400
 
 
@@ -180,11 +190,18 @@ class TestJSContent:
     def _get_save_function_body(self):
         """Extract saveZoneEdit function body from status.js."""
         js = _read(JS_PATH)
-        # Find function saveZoneEdit and get its body
         idx = js.find("function saveZoneEdit")
         assert idx != -1, "saveZoneEdit function not found in status.js"
-        # Get ~800 chars from function start
-        return js[idx : idx + 800]
+        body_start = js.index("{", idx)
+        depth = 0
+        for end in range(body_start, len(js)):
+            if js[end] == "{":
+                depth += 1
+            elif js[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    return js[idx : end + 1]
+        pytest.fail("saveZoneEdit function body is unbalanced")
 
     def test_calls_api_put(self):
         body = self._get_save_function_body()

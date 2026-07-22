@@ -49,6 +49,38 @@ class TestMqttServerCRUD:
         updated = test_db.get_mqtt_server(server["id"])
         assert updated["name"] == "New"
 
+    def test_update_without_password_keeps_existing(self, test_db):
+        """Regression: сохранение из UI шлёт payload без password — пароль не должен затираться."""
+        server = test_db.create_mqtt_server(
+            {"name": "Keep", "host": "h1", "port": 1883, "username": "u", "password": "secret1"}
+        )
+        ok = test_db.update_mqtt_server(server["id"], {"name": "Keep2", "host": "h2", "username": "u"})
+        assert ok is True
+        updated = test_db.get_mqtt_server(server["id"])
+        assert updated["name"] == "Keep2"
+        assert updated["password"] == "secret1"
+
+    def test_update_with_empty_password_clears_it(self, test_db):
+        """Явная пустая строка — «очистить пароль» (брокер перестал требовать
+        авторизацию); «не менять» — это отсутствие ключа или маска "***"."""
+        server = test_db.create_mqtt_server({"name": "ClrE", "host": "h1", "port": 1883, "password": "secret2"})
+        ok = test_db.update_mqtt_server(server["id"], {"name": "ClrE", "host": "h1", "password": ""})
+        assert ok is True
+        assert not test_db.get_mqtt_server(server["id"])["password"]
+
+    def test_update_with_masked_password_keeps_existing(self, test_db):
+        """Маска "***" из GET-ответов API не должна сохраняться как настоящий пароль."""
+        server = test_db.create_mqtt_server({"name": "KeepM", "host": "h1", "port": 1883, "password": "secret3"})
+        ok = test_db.update_mqtt_server(server["id"], {"name": "KeepM", "host": "h1", "password": "***"})
+        assert ok is True
+        assert test_db.get_mqtt_server(server["id"])["password"] == "secret3"
+
+    def test_update_with_new_password_changes_it(self, test_db):
+        server = test_db.create_mqtt_server({"name": "Chg", "host": "h1", "port": 1883, "password": "old-pass"})
+        ok = test_db.update_mqtt_server(server["id"], {"name": "Chg", "host": "h1", "password": "new-pass"})
+        assert ok is True
+        assert test_db.get_mqtt_server(server["id"])["password"] == "new-pass"
+
     def test_delete_server(self, test_db):
         server = test_db.create_mqtt_server({"name": "Del", "host": "h1", "port": 1883})
         assert test_db.delete_mqtt_server(server["id"]) is True

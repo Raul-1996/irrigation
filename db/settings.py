@@ -1,16 +1,102 @@
 import logging
+import os
+import secrets
 import sqlite3
 from typing import Any
 
 from werkzeug.security import generate_password_hash
 
+from constants import MIN_PASSWORD_LENGTH
 from db.base import BaseRepository, retry_on_busy
+from utils import create_private_file, ensure_private_directory, ensure_private_file, read_private_file
 
 logger = logging.getLogger(__name__)
+
+_MAX_PASSWORD_LENGTH = 32
+_PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
+_BOOTSTRAP_PASSWORD_FILE = ".initial_admin_password"
+
+
+def normalize_password(password: str) -> str:
+    """Apply the same edge-whitespace contract used by the login endpoint."""
+
+    if not isinstance(password, str):
+        raise TypeError("password must be a string")
+    return password.strip()
 
 
 class SettingsRepository(BaseRepository):
     """Repository for settings, configs, and password management."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        if self._uses_filesystem_database:
+            # IrrigationDB constructs SettingsRepository before running schema
+            # migrations.  Pre-creating the database as 0600 closes the umask
+            # window for the DB and for SQLite sidecars derived from its mode.
+            ensure_private_file(self.db_path, create=True)
+
+    @property
+    def _uses_filesystem_database(self) -> bool:
+        path = str(self.db_path)
+        return bool(path) and path != ":memory:" and not path.startswith("file:")
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+        if not self._uses_filesystem_database:
+            return connection
+        try:
+            for path in (self.db_path, f"{self.db_path}-wal", f"{self.db_path}-shm"):
+                if os.path.lexists(path):
+                    ensure_private_file(path)
+        except OSError:
+            connection.close()
+            raise
+        return connection
+
+    def _bootstrap_password_path(self) -> str:
+        if self._uses_filesystem_database:
+            database_directory = os.path.dirname(os.path.abspath(self.db_path))
+        else:
+            database_directory = os.getcwd()
+        return os.path.join(database_directory, "backups", _BOOTSTRAP_PASSWORD_FILE)
+
+    def _load_or_create_bootstrap_password(self) -> tuple[str, str]:
+        recovery_path = self._bootstrap_password_path()
+        ensure_private_directory(os.path.dirname(recovery_path))
+        try:
+            raw_password = read_private_file(recovery_path)
+        except FileNotFoundError:
+            generated = secrets.token_urlsafe(12)
+            try:
+                create_private_file(recovery_path, generated.encode("utf-8"))
+                return generated, recovery_path
+            except FileExistsError:
+                raw_password = read_private_file(recovery_path)
+
+        try:
+            password = raw_password.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise RuntimeError("Initial admin password recovery file is invalid; restore or remove it") from error
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise RuntimeError("Initial admin password recovery file is invalid; restore or remove it")
+        return password, recovery_path
+
+    def _remove_bootstrap_password_file(self) -> None:
+        recovery_path = self._bootstrap_password_path()
+        try:
+            os.unlink(recovery_path)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            # The password hash has already changed, so returning False would
+            # falsely report a failed update.  Keep any stale recovery material
+            # owner-only and surface a safe operational warning instead.
+            try:
+                ensure_private_file(recovery_path)
+            except OSError:
+                pass
+            logger.warning("Unable to remove obsolete initial admin password recovery file: %s", error)
 
     def get_setting_value(self, key: str) -> str | None:
         try:
@@ -46,9 +132,7 @@ class SettingsRepository(BaseRepository):
                 cur = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", ("password_hash",))
                 row = cur.fetchone()
                 if not row:
-                    import secrets
-
-                    temp_password = secrets.token_urlsafe(12)
+                    temp_password, recovery_path = self._load_or_create_bootstrap_password()
                     pw_hash = generate_password_hash(temp_password, method="pbkdf2:sha256")
                     conn.execute(
                         "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", ("password_hash", pw_hash)
@@ -56,7 +140,11 @@ class SettingsRepository(BaseRepository):
                     conn.execute(
                         "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", ("password_must_change", "1")
                     )
-                    logger.warning("Initial random password generated: %s (change it on first login!)", temp_password)
+                    logger.warning(
+                        "Initial admin password is available only in private recovery file %s; "
+                        "change it on first login",
+                        recovery_path,
+                    )
                 else:
                     cur2 = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", ("password_must_change",))
                     row2 = cur2.fetchone()
@@ -158,20 +246,48 @@ class SettingsRepository(BaseRepository):
 
     @retry_on_busy()
     def set_env_config(self, cfg: dict[str, Any]) -> bool:
-        ok = True
-        temp = cfg.get("temp") or {}
-        hum = cfg.get("hum") or {}
-        ok &= self.set_setting_value("env.temp.enabled", "1" if temp.get("enabled") else "0")
-        ok &= self.set_setting_value("env.temp.topic", temp.get("topic") or "")
-        ok &= self.set_setting_value(
-            "env.temp.server_id", str(int(temp.get("server_id"))) if temp.get("server_id") is not None else None
-        )
-        ok &= self.set_setting_value("env.hum.enabled", "1" if hum.get("enabled") else "0")
-        ok &= self.set_setting_value("env.hum.topic", hum.get("topic") or "")
-        ok &= self.set_setting_value(
-            "env.hum.server_id", str(int(hum.get("server_id"))) if hum.get("server_id") is not None else None
-        )
-        return bool(ok)
+        try:
+            if not isinstance(cfg, dict):
+                raise TypeError("env config must be an object")
+
+            updates: list[tuple[str, str | None]] = []
+            for sensor in ("temp", "hum"):
+                sensor_cfg = cfg.get(sensor)
+                if sensor_cfg is None:
+                    sensor_cfg = {}
+                if not isinstance(sensor_cfg, dict):
+                    raise TypeError(f"env.{sensor} config must be an object")
+
+                server_id = sensor_cfg.get("server_id")
+                if isinstance(server_id, bool):
+                    raise ValueError(f"env.{sensor}.server_id must be an integer")
+                if isinstance(server_id, float) and not server_id.is_integer():
+                    raise ValueError(f"env.{sensor}.server_id must be an integer")
+                normalized_server_id = str(int(server_id)) if server_id is not None else None
+
+                updates.extend(
+                    (
+                        (f"env.{sensor}.enabled", "1" if sensor_cfg.get("enabled") else "0"),
+                        (f"env.{sensor}.topic", str(sensor_cfg.get("topic") or "")),
+                        (f"env.{sensor}.server_id", normalized_server_id),
+                    )
+                )
+        except (TypeError, ValueError) as e:
+            logger.error("Ошибка валидации env_config: %s", e)
+            return False
+
+        try:
+            with self._connect() as conn:
+                for key, value in updates:
+                    if value is None:
+                        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+                    else:
+                        conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("Ошибка записи env_config: %s", e)
+            return False
 
     # === Password ===
     def get_password_hash(self) -> str | None:
@@ -187,13 +303,25 @@ class SettingsRepository(BaseRepository):
     @retry_on_busy()
     def set_password(self, new_password: str) -> bool:
         try:
+            normalized_password = normalize_password(new_password)
+        except TypeError:
+            logger.warning("Rejected invalid admin password value")
+            return False
+        if not (MIN_PASSWORD_LENGTH <= len(normalized_password) <= _MAX_PASSWORD_LENGTH):
+            logger.warning("Rejected admin password outside the configured length policy")
+            return False
+        if normalized_password.casefold() in _PASSWORD_BLOCKLIST:
+            logger.warning("Rejected blocklisted admin password")
+            return False
+        try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                    ("password_hash", generate_password_hash(new_password, method="pbkdf2:sha256")),
+                    ("password_hash", generate_password_hash(normalized_password, method="pbkdf2:sha256")),
                 )
                 conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", ("password_must_change", "0"))
                 conn.commit()
+                self._remove_bootstrap_password_file()
                 return True
         except sqlite3.Error as e:
             logger.error("Ошибка обновления пароля: %s", e)

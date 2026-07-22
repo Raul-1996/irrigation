@@ -17,9 +17,10 @@
 import json
 import os
 import sqlite3
-from unittest.mock import MagicMock, patch
 
 import pytest
+
+from db.programs import ProgramRepository
 
 os.environ["TESTING"] = "1"
 
@@ -68,6 +69,12 @@ def _create_test_db(tmp_path, groups=None, zones=None, programs=None, settings=N
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS weather_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coefficient INTEGER
         )
     """)
 
@@ -129,31 +136,9 @@ def conflict_db(tmp_path):
     return db_path
 
 
-# ---------------------------------------------------------------------------
-# Попытка импорта расширенной check_program_conflicts v2.
-# Если функция ещё не расширена — xfail.
-# ---------------------------------------------------------------------------
-_check_fn = None
-try:
-    from db.programs import ProgramRepository
-
-    _check_fn = ProgramRepository
-except ImportError:
-    pass
-
-
 def _get_check_fn(db_path):
-    """Возвращает check_program_conflicts v2 или xfail."""
-    if _check_fn is None:
-        pytest.xfail("ProgramRepository не найден")
-    repo = _check_fn(db_path)
-    # Проверяем наличие расширенного API (weather_factor параметр)
-    import inspect
-
-    sig = inspect.signature(repo.check_program_conflicts)
-    if "weather_factor" not in sig.parameters:
-        pytest.xfail("check_program_conflicts ещё не расширен (нет параметра weather_factor)")
-    return repo.check_program_conflicts
+    """Return the required v2 conflict API without optional/xfail fallbacks."""
+    return ProgramRepository(db_path).check_program_conflicts
 
 
 class TestCheckConflictsV2:
@@ -200,14 +185,20 @@ class TestCheckConflictsV2:
             weather_factor=150,
         )
 
-        assert isinstance(result, dict)
-        # При base=100% нет конфликта (45 мин, 06:00-06:45 < 07:00)
-        # При weather=150% → 67.5 мин, 06:00-07:07 > 07:00 → warning
-        if result["has_conflicts"]:
-            warning_conflicts = [c for c in result["conflicts"] if c.get("level") == "warning"]
-            assert len(warning_conflicts) >= 1, "Конфликт только при weather>100% → level='warning'"
-            assert warning_conflicts[0].get("weather_factor", 0) > 100
-        # Если реализация не находит конфликт (другая логика группировки) — тоже допустимо
+        assert result["has_conflicts"] is True
+        assert result["conflicts"] == [
+            {
+                "program_id": 1,
+                "program_name": "Утро",
+                "level": "warning",
+                "overlap_minutes": 7.5,
+                "weather_factor": 150,
+                "group_id": 1,
+                "group_name": "Насос-1",
+                "anchor_unknown": False,
+                "message": 'Конфликт при погодном коэфф. 150% с программой "Утро"',
+            }
+        ]
 
     # === Test 3: Нет конфликта даже при 200% ===
 
@@ -292,9 +283,20 @@ class TestCheckConflictsV2:
             days=[0],
             weather_factor=120,
         )
-        if result_weather["has_conflicts"]:
-            warning = [c for c in result_weather["conflicts"] if c.get("level") == "warning"]
-            assert len(warning) >= 1, "При weather 120% → warning"
+        assert result_weather["has_conflicts"] is True
+        assert result_weather["conflicts"] == [
+            {
+                "program_id": 1,
+                "program_name": "A",
+                "level": "warning",
+                "overlap_minutes": 7.0,
+                "weather_factor": 120,
+                "group_id": 1,
+                "group_name": "G1",
+                "anchor_unknown": False,
+                "message": 'Конфликт при погодном коэфф. 120% с программой "A"',
+            }
+        ]
 
     # === Test 6: include_weather=True uses settings ===
 
@@ -305,15 +307,29 @@ class TestCheckConflictsV2:
         # settings.max_weather_coefficient = 200 (установлено в фикстуре)
         result = check(
             program_id=None,
-            time="06:30",
+            time="07:00",
             zones=[1, 2],
             days=[0, 2, 4],
             include_weather=True,
         )
 
-        assert isinstance(result, dict)
-        # Должен использовать weather_factor из settings (200)
-        # Сам факт вызова без ошибки — подтверждение работы include_weather
+        assert result == {
+            "has_conflicts": True,
+            "conflicts": [
+                {
+                    "program_id": 1,
+                    "program_name": "Утро",
+                    "level": "warning",
+                    "overlap_minutes": 30.0,
+                    "weather_factor": 200,
+                    "group_id": 1,
+                    "group_name": "Насос-1",
+                    "anchor_unknown": False,
+                    "message": 'Конфликт при погодном коэфф. 200% с программой "Утро"',
+                }
+            ],
+            "current_weather_coefficient": 100,
+        }
 
     # === Test 7: Текущий коэффициент в ответе ===
 
@@ -321,22 +337,18 @@ class TestCheckConflictsV2:
         """Response содержит current_weather_coefficient."""
         check = _get_check_fn(conflict_db)
 
-        with patch("services.weather_adjustment.get_weather_adjustment") as mock_wa:
-            mock_adj = MagicMock()
-            mock_adj.get_coefficient.return_value = 120
-            mock_adj.is_enabled.return_value = True
-            mock_wa.return_value = mock_adj
+        with sqlite3.connect(conflict_db) as conn:
+            conn.execute("INSERT INTO weather_decisions (coefficient) VALUES (120)")
 
-            result = check(
-                program_id=None,
-                time="06:30",
-                zones=[1, 2],
-                days=[0, 2, 4],
-                weather_factor=100,
-            )
+        result = check(
+            program_id=None,
+            time="06:30",
+            zones=[1, 2],
+            days=[0, 2, 4],
+            weather_factor=100,
+        )
 
-        assert "current_weather_coefficient" in result, "Ответ должен содержать current_weather_coefficient"
-        # Значение может быть 120 (замоканное) или дефолтное — зависит от реализации
+        assert result["current_weather_coefficient"] == 120
 
     # === Test 8: Пустой zones → нет конфликта ===
 
@@ -364,8 +376,6 @@ class TestCheckConflictsCurrentBehavior:
 
     def test_current_returns_list(self, conflict_db):
         """Текущая реализация возвращает list конфликтов."""
-        from db.programs import ProgramRepository
-
         repo = ProgramRepository(conflict_db)
 
         result = repo.check_program_conflicts(
@@ -375,12 +385,13 @@ class TestCheckConflictsCurrentBehavior:
             days=[0, 2, 4],
         )
 
-        assert isinstance(result, (list, dict)), "Должен вернуть list или dict"
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["program_id"] == 1
+        assert result[0]["program_name"] == "Утро"
 
     def test_current_no_conflict_different_days(self, conflict_db):
         """Разные дни → нет конфликта."""
-        from db.programs import ProgramRepository
-
         repo = ProgramRepository(conflict_db)
 
         result = repo.check_program_conflicts(
@@ -390,15 +401,10 @@ class TestCheckConflictsCurrentBehavior:
             days=[1, 3, 5],  # Вт, Чт, Сб — не пересекается с [0, 2, 4]
         )
 
-        if isinstance(result, list):
-            assert len(result) == 0, "Разные дни — нет конфликта"
-        else:
-            assert result.get("has_conflicts") is False
+        assert result == []
 
     def test_current_empty_zones_no_error(self, conflict_db):
         """Пустые zones → нет crash."""
-        from db.programs import ProgramRepository
-
         repo = ProgramRepository(conflict_db)
 
         result = repo.check_program_conflicts(
@@ -408,7 +414,4 @@ class TestCheckConflictsCurrentBehavior:
             days=[0, 2, 4],
         )
 
-        if isinstance(result, list):
-            assert len(result) == 0
-        else:
-            assert result.get("has_conflicts") is False
+        assert result == []

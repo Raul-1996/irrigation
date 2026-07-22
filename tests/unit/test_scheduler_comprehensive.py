@@ -237,7 +237,8 @@ class TestStartGroupSequence:
     def test_start_group_sequence(self, started_scheduler, test_db):
         test_db.create_zone({"name": "Z1", "duration": 2, "group_id": 1, "topic": "/t/1"})
         test_db.create_zone({"name": "Z2", "duration": 3, "group_id": 1, "topic": "/t/2"})
-        result = started_scheduler.start_group_sequence(1)
+        with patch("services.zone_control.db", test_db):
+            result = started_scheduler.start_group_sequence(1)
         assert result is True
 
     def test_start_group_no_zones(self, started_scheduler, test_db):
@@ -259,9 +260,11 @@ class TestStartGroupSequence:
         own durations (helper's third branch). Result must match what the
         method returned before #12 — True, with the first zone marked ON.
         """
-        z1 = test_db.create_zone({"name": "BC1", "duration": 4, "group_id": 7, "topic": "/t/bc1"})
-        test_db.create_zone({"name": "BC2", "duration": 6, "group_id": 7, "topic": "/t/bc2"})
-        result = started_scheduler.start_group_sequence(7)
+        group = test_db.create_group("Back-compat sequence group")
+        z1 = test_db.create_zone({"name": "BC1", "duration": 4, "group_id": group["id"], "topic": "/t/bc1"})
+        test_db.create_zone({"name": "BC2", "duration": 6, "group_id": group["id"], "topic": "/t/bc2"})
+        with patch("services.zone_control.db", test_db):
+            result = started_scheduler.start_group_sequence(group["id"])
         assert result is True
         # First zone goes ON in TESTING mode (legacy assertion still holds).
         assert test_db.get_zone(z1["id"])["state"] == "on"
@@ -329,14 +332,48 @@ class TestLoadPrograms:
         # Should have scheduled the program
 
 
+def _frozen_datetime(now: datetime):
+    """Return a datetime subclass whose ``now()`` is deterministic."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return now
+            return now.astimezone(tz)
+
+    return FrozenDateTime
+
+
+def _recent_time_today(now: datetime, minutes_ago=10):
+    """HH:MM ``minutes_ago`` before ``now``, without crossing midnight."""
+    start = now - timedelta(minutes=minutes_ago)
+    if start.date() != now.date():
+        start = now.replace(hour=0, minute=0)
+    return start.strftime("%H:%M")
+
+
+def _recover_jobs_at(scheduler, now: datetime):
+    """Run recovery at ``now`` and return the mocked scheduler add call."""
+    with (
+        patch("irrigation_scheduler.datetime", _frozen_datetime(now)),
+        patch.object(scheduler.scheduler, "add_job") as mock_add,
+    ):
+        scheduler.recover_missed_runs()
+    return mock_add
+
+
 class TestRecoverMissedRuns:
     def test_recover_no_programs(self, started_scheduler, test_db):
-        started_scheduler.recover_missed_runs()  # should not crash
+        now = datetime(2026, 7, 17, 12, 0)
+        with patch("irrigation_scheduler.datetime", _frozen_datetime(now)):
+            started_scheduler.recover_missed_runs()  # should not crash
 
     def test_recover_wrong_day(self, started_scheduler, test_db):
+        now = datetime(2026, 7, 17, 12, 0)  # Friday
         test_db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         # Create program for a day that's not today
-        today = datetime.now().weekday()
+        today = now.weekday()
         other_day = (today + 1) % 7
         test_db.create_program(
             {
@@ -346,7 +383,131 @@ class TestRecoverMissedRuns:
                 "zones": [1],
             }
         )
-        started_scheduler.recover_missed_runs()  # should skip
+        with patch("irrigation_scheduler.datetime", _frozen_datetime(now)):
+            started_scheduler.recover_missed_runs()  # should skip
+
+    def test_recover_skips_disabled_program(self, started_scheduler, test_db):
+        now = datetime(2026, 7, 17, 12, 0)
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "Disabled",
+                "time": _recent_time_today(now),
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "zones": [z["id"]],
+                "enabled": False,
+            }
+        )
+        mock_add = _recover_jobs_at(started_scheduler, now)
+        assert not mock_add.called
+
+    def test_recover_skips_interval_program(self, started_scheduler, test_db):
+        # IntervalTrigger пере-якорится при каждом старте сервиса: после
+        # рестарта нельзя отличить прерванный запуск от дня, когда полив
+        # не планировался, поэтому interval-программы не восстанавливаются.
+        now = datetime(2026, 7, 17, 12, 0)
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "Interval",
+                "time": _recent_time_today(now),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "interval",
+                "interval_days": 2,
+            }
+        )
+        mock_add = _recover_jobs_at(started_scheduler, now)
+        assert not mock_add.called
+
+    @pytest.mark.parametrize(
+        ("now", "should_recover"),
+        [
+            pytest.param(datetime(2026, 7, 17, 12, 0), True, id="odd-date"),
+            pytest.param(datetime(2026, 7, 18, 12, 0), False, id="even-date"),
+        ],
+    )
+    def test_recover_even_odd_null_means_odd(self, started_scheduler, test_db, now, should_recover):
+        # NULL в even_odd планировщик трактует как нечётные дни —
+        # восстановление обязано совпадать с ним.
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "EvenOddNull",
+                "time": _recent_time_today(now),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": None,
+            }
+        )
+        mock_add = _recover_jobs_at(started_scheduler, now)
+        assert mock_add.called is should_recover
+
+    @pytest.mark.parametrize(
+        "now",
+        [
+            pytest.param(datetime(2026, 7, 17, 12, 0), id="odd-date"),
+            pytest.param(datetime(2026, 7, 18, 12, 0), id="even-date"),
+        ],
+    )
+    def test_recover_even_odd_program_matching_parity(self, started_scheduler, test_db, now):
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        parity = "even" if now.day % 2 == 0 else "odd"
+        test_db.create_program(
+            {
+                "name": "EvenOdd",
+                "time": _recent_time_today(now),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": parity,
+            }
+        )
+        mock_add = _recover_jobs_at(started_scheduler, now)
+        assert mock_add.called
+
+    @pytest.mark.parametrize(
+        "now",
+        [
+            pytest.param(datetime(2026, 7, 17, 12, 0), id="odd-date"),
+            pytest.param(datetime(2026, 7, 18, 12, 0), id="even-date"),
+        ],
+    )
+    def test_recover_even_odd_program_wrong_parity(self, started_scheduler, test_db, now):
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        wrong_parity = "odd" if now.day % 2 == 0 else "even"
+        test_db.create_program(
+            {
+                "name": "EvenOddWrong",
+                "time": _recent_time_today(now),
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": wrong_parity,
+            }
+        )
+        mock_add = _recover_jobs_at(started_scheduler, now)
+        assert not mock_add.called
+
+    def test_recover_extra_time_window(self, started_scheduler, test_db):
+        # Main time is outside the execution window, extra time is inside it.
+        z = test_db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
+        now = datetime(2026, 7, 17, 12, 0)
+        main_t = (now + timedelta(hours=4)).strftime("%H:%M")
+        test_db.create_program(
+            {
+                "name": "ExtraTimes",
+                "time": main_t,
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "zones": [z["id"]],
+                "extra_times": [_recent_time_today(now)],
+            }
+        )
+        mock_add = _recover_jobs_at(started_scheduler, now)
+        assert mock_add.called
+        kwargs = mock_add.call_args.kwargs
+        assert "_recover_" in kwargs["id"]
 
 
 class TestCleanupJobsOnBoot:

@@ -111,6 +111,7 @@ class TestLogsDB:
         assert len(logs) >= 1
 
     def test_program_cancellation(self, test_db):
-        test_db.cancel_program_run_for_group(1, "2024-01-01", 1)
-        assert test_db.is_program_run_cancelled_for_group(1, "2024-01-01", 1)
-        assert not test_db.is_program_run_cancelled_for_group(1, "2024-01-02", 1)
+        program = test_db.create_program({"name": "Cancellation", "time": "06:00", "days": [0], "zones": []})
+        test_db.cancel_program_run_for_group(program["id"], "2024-01-01", 1)
+        assert test_db.is_program_run_cancelled_for_group(program["id"], "2024-01-01", 1)
+        assert not test_db.is_program_run_cancelled_for_group(program["id"], "2024-01-02", 1)

@@ -95,13 +95,52 @@ class TestSkipSequencerLoop:
         records which zones were started/stopped, so it can assert sequence.
         """
 
-        def _fake_start(zid):
-            test_db.update_zone(zid, {"state": "on"})
+        def _fake_start(
+            zid,
+            source="manual",
+            *,
+            safety_duration_minutes=None,
+            cancel_guard=None,
+        ):
+            assert source == "program"
+            assert safety_duration_minutes is None
+            assert callable(cancel_guard)
+            assert cancel_guard() is False
+            test_db.update_zone(
+                zid,
+                {
+                    "state": "on",
+                    "commanded_state": "on",
+                    "observed_state": "on",
+                    "watering_start_time": "2026-07-23 00:00:00",
+                    "command_id": f"test-program-{zid}",
+                },
+            )
             started_zones.append(zid)
             return True
 
-        def _fake_stop(zid, reason="auto", force=False, master_close_immediately=False, skip_master_close=False):
-            test_db.update_zone(zid, {"state": "off", "watering_start_time": None})
+        def _fake_stop(
+            zid,
+            reason="auto",
+            force=False,
+            master_close_immediately=False,
+            skip_master_close=False,
+            require_observed_confirmation=False,
+            activation_token=None,
+        ):
+            current = test_db.get_zone(zid) or {}
+            expected_token = current.get("command_id") or current.get("watering_start_time")
+            assert activation_token == expected_token
+            assert require_observed_confirmation is True
+            test_db.update_zone(
+                zid,
+                {
+                    "state": "off",
+                    "commanded_state": "off",
+                    "observed_state": "off",
+                    "watering_start_time": None,
+                },
+            )
             stopped_zones.append(zid)
             return True
 
@@ -115,16 +154,14 @@ class TestSkipSequencerLoop:
             patch.object(sch, "_check_weather_skip", return_value={"skip": False}),
             # _get_weather_adjusted_duration: passthrough
             patch.object(sch, "_get_weather_adjusted_duration", side_effect=lambda zid, base: base),
-            # zones_state.update_zone_state: route through plain DB update so we
-            # don't depend on audit infrastructure.
-            patch(
-                "services.zones_state.update_zone_state",
-                side_effect=lambda zid, fields, audit_reason=None, db=None: test_db.update_zone(zid, fields),
-            ),
+            # Central start owns final cancel-guard admission. This fake keeps
+            # the sequencer test focused on skip behavior while asserting the
+            # final core call contract explicitly.
+            patch("services.zone_control.exclusive_start_zone", side_effect=_fake_start),
             # zone_control.stop_zone: minimal DB update
             patch("services.zone_control.stop_zone", side_effect=_fake_stop),
             # Avoid scheduling a real hard-stop APScheduler job
-            patch.object(sch, "schedule_zone_hard_stop", return_value=None),
+            patch.object(sch, "schedule_zone_hard_stop", return_value=True),
             # Avoid MQTT
             patch("services.mqtt_pub.publish_mqtt_value", return_value=True),
             # Avoid db.reschedule_group_to_next_program touching real schedules
@@ -277,11 +314,10 @@ class TestSkipSequencerLoop:
 
         started = []
         stopped = []
-        # Reuse the sequencer-loop patches, plus extras for the program path.
+        # Reuse the same central-start fake for the program path; stacking a
+        # second patch on that symbol makes FIFO cleanup restore the first mock
+        # globally and contaminates every later test in the full suite.
         patches = self._patches(test_db, sch, started, stopped)
-        # _run_program_threaded uses exclusive_start_zone (not in
-        # _run_group_sequence), which would try to publish MQTT — short it.
-        patches.append(patch("services.zone_control.exclusive_start_zone", return_value=True))
         for p in patches:
             p.start()
         try:

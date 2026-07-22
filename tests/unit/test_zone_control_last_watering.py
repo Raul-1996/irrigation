@@ -23,6 +23,10 @@ os.environ["TESTING"] = "1"
 _FMT = "%Y-%m-%d %H:%M:%S"
 
 
+def _water_monitor_patch():
+    return patch("services.zone_control.water_monitor", **{"summarize_run.return_value": (None, None)})
+
+
 def _parse(ts):
     """Parse a 'YYYY-MM-DD HH:MM:SS' timestamp written by zone_control."""
     assert ts is not None, "expected non-NULL timestamp"
@@ -72,7 +76,7 @@ class TestStopZoneEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -134,7 +138,7 @@ class TestStopZoneEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -177,7 +181,7 @@ class TestStopZoneEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -236,7 +240,7 @@ class TestPeerOffEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import exclusive_start_zone
@@ -260,7 +264,7 @@ class TestPeerOffEndTime:
 
 
 class TestSchedulerAutoStopEndTime:
-    """Auto-stop fallback paths in irrigation_scheduler / zone_runner.
+    """Auto-stop fallback paths in irrigation_scheduler.
 
     The fallbacks no longer write last_watering_time directly (column
     is gone). They delegate state transitions to the audited helper or
@@ -305,18 +309,17 @@ class TestSchedulerAutoStopEndTime:
         test_db.mark_zone_run_confirmed(int(zone["id"]))
         from irrigation_scheduler import IrrigationScheduler
 
-        class _StubSched:
-            db = test_db
+        scheduler = IrrigationScheduler(test_db)
 
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             before = datetime.now().replace(microsecond=0)
             _time.sleep(0.01)
-            IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
+            assert scheduler._stop_zone(zone["id"]) is True
             after = datetime.now()
 
         z = test_db.get_zone(zone["id"])
@@ -328,9 +331,10 @@ class TestSchedulerAutoStopEndTime:
         assert before <= last <= after
 
     def test_irrigation_scheduler_fallback_when_central_fails(self, test_db):
-        """If the central stop_zone raises, the fallback still flips the
-        zone state to 'off'. The open zone_run is left for boot_sync to
-        abort — we assert state transition and clean watering_start_time.
+        """A central OFF failure stays visible and retains a hard retry.
+
+        A DB-only ``off`` fallback would hide a still-energised relay from the
+        watchdog and make the retry impossible.
         """
         zone = test_db.create_zone(
             {
@@ -350,41 +354,12 @@ class TestSchedulerAutoStopEndTime:
         )
         from irrigation_scheduler import IrrigationScheduler
 
-        class _StubSched:
-            db = test_db
+        scheduler = IrrigationScheduler(test_db)
 
         with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
-            IrrigationScheduler._stop_zone(_StubSched(), zone["id"])
+            assert scheduler._stop_zone(zone["id"]) is False
 
         z = test_db.get_zone(zone["id"])
-        assert z["state"] == "off"
-        assert z["watering_start_time"] is None
-
-    def test_zone_runner_fallback_when_central_fails(self, test_db):
-        """Same contract for the scheduler.zone_runner mixin path."""
-        zone = test_db.create_zone(
-            {
-                "name": "RunnerStop",
-                "duration": 10,
-                "group_id": 1,
-                "topic": "/test/runner",
-            }
-        )
-        test_db.update_zone(
-            zone["id"],
-            {
-                "state": "on",
-                "watering_start_time": "2026-01-01 10:00:00",
-            },
-        )
-        from scheduler.zone_runner import ZoneRunnerMixin
-
-        class _StubSched:
-            db = test_db
-
-        with patch("services.zone_control.stop_zone", side_effect=ValueError("forced fail for test")):
-            ZoneRunnerMixin._stop_zone(_StubSched(), zone["id"])
-
-        z = test_db.get_zone(zone["id"])
-        assert z["state"] == "off"
-        assert z["watering_start_time"] is None
+        assert z["state"] == "on"
+        assert z["watering_start_time"] == old_start
+        assert scheduler.scheduler.get_job(f"zone_hard_stop:{zone['id']}") is not None

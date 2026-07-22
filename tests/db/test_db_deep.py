@@ -60,6 +60,91 @@ class TestZonesDeep:
         # Daily program → next run within 24h.
         assert nxt < now + timedelta(days=2)
 
+    def test_compute_next_run_skips_disabled_program(self, test_db):
+        z = test_db.create_zone({"name": "NRD", "duration": 10, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "PD",
+                "time": "06:00",
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "zones": [z["id"]],
+                "enabled": False,
+            }
+        )
+        assert test_db.compute_next_run_for_zone(z["id"]) is None
+
+    def test_compute_next_run_uses_extra_times(self, test_db):
+        # Extra time is closer than the main time → extra time wins.
+        z = test_db.create_zone({"name": "NRE", "duration": 10, "group_id": 1})
+        now = datetime.now()
+        main_t = (now + timedelta(minutes=40)).strftime("%H:%M")
+        extra_t = (now + timedelta(minutes=20)).strftime("%H:%M")
+        test_db.create_program(
+            {
+                "name": "PE",
+                "time": main_t,
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "zones": [z["id"]],
+                "extra_times": [extra_t],
+            }
+        )
+        result = test_db.compute_next_run_for_zone(z["id"])
+        assert result is not None
+        nxt = datetime.strptime(result, "%Y-%m-%d %H:%M:%S")
+        expected = (now + timedelta(minutes=20)).replace(second=0, microsecond=0)
+        assert nxt == expected
+
+    def test_compute_next_run_interval_schedule(self, test_db):
+        # Daily interval programs have an unambiguous next occurrence even
+        # without access to APScheduler's in-memory interval anchor.
+        z = test_db.create_zone({"name": "NRI", "duration": 10, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "PI",
+                "time": "06:00",
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "interval",
+                "interval_days": 1,
+            }
+        )
+        result = test_db.compute_next_run_for_zone(z["id"])
+        assert result is not None
+        nxt = datetime.strptime(result, "%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        assert nxt > now
+        assert nxt <= now + timedelta(days=1)
+        assert (nxt.hour, nxt.minute) == (6, 0)
+
+    def test_compute_next_run_even_odd_schedule(self, test_db):
+        z = test_db.create_zone({"name": "NRO", "duration": 10, "group_id": 1})
+        test_db.create_program(
+            {
+                "name": "PO",
+                "time": "06:00",
+                "days": [],
+                "zones": [z["id"]],
+                "schedule_type": "even-odd",
+                "even_odd": "odd",
+            }
+        )
+        result = test_db.compute_next_run_for_zone(z["id"])
+        assert result is not None
+        nxt = datetime.strptime(result, "%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        assert nxt > now
+        assert nxt.day % 2 == 1
+        # Nearest odd day at 06:00 (day search mirrors compute logic).
+        expected = None
+        for off in range(0, 4):
+            d = now + timedelta(days=off)
+            if d.day % 2 == 1:
+                cand = d.replace(hour=6, minute=0, second=0, microsecond=0)
+                if cand > now:
+                    expected = cand
+                    break
+        assert nxt == expected
+
     def test_reschedule_group(self, test_db):
         g = test_db.create_group("Resched")
         z = test_db.create_zone({"name": "RS", "duration": 10, "group_id": g["id"]})

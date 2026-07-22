@@ -1,8 +1,4 @@
-"""Tests for Programs API v2: new endpoints and updated request/response formats.
-
-TDD approach: tests written BEFORE implementation.
-All tests use @pytest.mark.xfail for not-yet-implemented features.
-"""
+"""Tests for Programs API v2: new endpoints and updated request/response formats."""
 
 import json
 import os
@@ -15,7 +11,6 @@ os.environ["TESTING"] = "1"
 class TestCreateProgramWithNewFields:
     """Tests for POST /api/programs with v2 fields."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: create program with type")
     def test_create_program_with_new_fields(self, admin_client, app):
         """POST /api/programs с type, schedule_type, color, enabled."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -24,14 +19,14 @@ class TestCreateProgramWithNewFields:
             "/api/programs",
             data=json.dumps(
                 {
-                    "name": "Smart Program",
+                    "name": "Time Program",
                     "time": "06:00",
-                    "type": "smart",
+                    "type": "time-based",
                     "schedule_type": "weekdays",
                     "days": [0, 2, 4],
                     "zones": [1],
                     "color": "#66bb6a",
-                    "enabled": 1,
+                    "enabled": True,
                 }
             ),
             content_type="application/json",
@@ -39,13 +34,12 @@ class TestCreateProgramWithNewFields:
 
         assert resp.status_code == 201
         data = resp.get_json()
-        assert data["name"] == "Smart Program"
-        assert data["type"] == "smart"
+        assert data["name"] == "Time Program"
+        assert data["type"] == "time-based"
         assert data["schedule_type"] == "weekdays"
         assert data["color"] == "#66bb6a"
         assert data["enabled"] == 1
 
-    @pytest.mark.xfail(reason="Not yet implemented: create program with interval")
     def test_create_program_with_schedule_type_interval(self, admin_client, app):
         """POST /api/programs с schedule_type='interval' + interval_days."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -71,7 +65,6 @@ class TestCreateProgramWithNewFields:
         assert data["schedule_type"] == "interval"
         assert data["interval_days"] == 3
 
-    @pytest.mark.xfail(reason="Not yet implemented: create program with even-odd")
     def test_create_program_with_schedule_type_even_odd(self, admin_client, app):
         """POST /api/programs с schedule_type='even-odd' + even_odd='even'."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -96,7 +89,6 @@ class TestCreateProgramWithNewFields:
         assert data["schedule_type"] == "even-odd"
         assert data["even_odd"] == "even"
 
-    @pytest.mark.xfail(reason="Not yet implemented: create program with extra_times")
     def test_create_program_with_extra_times(self, admin_client, app):
         """POST /api/programs с extra_times (несколько времён старта)."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -126,7 +118,6 @@ class TestCreateProgramWithNewFields:
 class TestValidation:
     """Tests for API validation of new fields."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: schedule_type validation")
     def test_create_program_validates_schedule_type(self, admin_client, app):
         """POST /api/programs с невалидным schedule_type → 400."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -143,7 +134,6 @@ class TestValidation:
         data = resp.get_json()
         assert "schedule_type" in str(data).lower() or "invalid" in str(data).lower()
 
-    @pytest.mark.xfail(reason="Not yet implemented: interval_days validation")
     def test_create_program_interval_requires_interval_days(self, admin_client, app):
         """POST /api/programs с schedule_type='interval' без interval_days → 400."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -158,7 +148,6 @@ class TestValidation:
 
         assert resp.status_code == 400
 
-    @pytest.mark.xfail(reason="Not yet implemented: even_odd validation")
     def test_create_program_even_odd_requires_even_odd_field(self, admin_client, app):
         """POST /api/programs с schedule_type='even-odd' без even_odd → 400."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -173,7 +162,6 @@ class TestValidation:
 
         assert resp.status_code == 400
 
-    @pytest.mark.xfail(reason="Not yet implemented: type validation")
     def test_create_program_validates_type(self, admin_client, app):
         """POST /api/programs с невалидным type → 400."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -192,7 +180,6 @@ class TestValidation:
 class TestUpdateProgramWithNewFields:
     """Tests for PUT /api/programs/<id> with v2 fields."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: update program with new fields")
     def test_update_program_with_new_fields(self, admin_client, app):
         """PUT /api/programs/<id> обновляет новые поля."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -204,11 +191,11 @@ class TestUpdateProgramWithNewFields:
                 {
                     "name": "Updated",
                     "time": "07:00",
-                    "type": "smart",
+                    "type": "time-based",
                     "schedule_type": "interval",
                     "interval_days": 2,
                     "color": "#ffa726",
-                    "enabled": 1,
+                    "enabled": True,
                     "days": [],
                     "zones": [1],
                 }
@@ -219,12 +206,11 @@ class TestUpdateProgramWithNewFields:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["name"] == "Updated"
-        assert data["type"] == "smart"
+        assert data["type"] == "time-based"
         assert data["schedule_type"] == "interval"
         assert data["interval_days"] == 2
         assert data["color"] == "#ffa726"
 
-    @pytest.mark.xfail(reason="Not yet implemented: update schedule interval")
     def test_update_program_schedule_interval(self, admin_client, app):
         """PUT /api/programs/<id> обновление на interval расписание."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -256,7 +242,6 @@ class TestUpdateProgramWithNewFields:
 class TestGetProgramsReturnsNewFields:
     """Tests for GET /api/programs returning v2 fields."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: get programs returns new fields")
     def test_get_programs_returns_new_fields(self, admin_client, app):
         """GET /api/programs возвращает все новые поля v2."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -264,7 +249,7 @@ class TestGetProgramsReturnsNewFields:
             {
                 "name": "v2 Program",
                 "time": "06:00",
-                "type": "smart",
+                "type": "time-based",
                 "schedule_type": "interval",
                 "interval_days": 3,
                 "color": "#9c27b0",
@@ -289,7 +274,6 @@ class TestGetProgramsReturnsNewFields:
         assert "enabled" in prog
         assert "extra_times" in prog
 
-    @pytest.mark.xfail(reason="Not yet implemented: get single program returns new fields")
     def test_get_single_program_returns_new_fields(self, admin_client, app):
         """GET /api/programs/<id> возвращает все новые поля v2."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -321,41 +305,44 @@ class TestGetProgramsReturnsNewFields:
 class TestToggleProgramEnabled:
     """Tests for PATCH /api/programs/<id>/enabled."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: toggle enabled endpoint")
     def test_toggle_program_enabled_to_false(self, admin_client, app):
         """PATCH /api/programs/<id>/enabled переключает enabled на 0."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program({"name": "Test", "time": "06:00", "days": [0], "zones": [1], "enabled": 1})
 
         resp = admin_client.patch(
-            f"/api/programs/{prog['id']}/enabled", data=json.dumps({"enabled": 0}), content_type="application/json"
+            f"/api/programs/{prog['id']}/enabled",
+            data=json.dumps({"enabled": False}),
+            content_type="application/json",
         )
 
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
-        assert data["program"]["enabled"] == 0
+        assert data["program"]["enabled"] is False
 
-    @pytest.mark.xfail(reason="Not yet implemented: toggle enabled endpoint")
     def test_toggle_program_enabled_to_true(self, admin_client, app):
         """PATCH /api/programs/<id>/enabled переключает enabled на 1."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program({"name": "Test", "time": "06:00", "days": [0], "zones": [1], "enabled": 0})
 
         resp = admin_client.patch(
-            f"/api/programs/{prog['id']}/enabled", data=json.dumps({"enabled": 1}), content_type="application/json"
+            f"/api/programs/{prog['id']}/enabled",
+            data=json.dumps({"enabled": True}),
+            content_type="application/json",
         )
 
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["success"] is True
-        assert data["program"]["enabled"] == 1
+        assert data["program"]["enabled"] is True
 
-    @pytest.mark.xfail(reason="Not yet implemented: toggle enabled not found")
     def test_toggle_program_enabled_not_found(self, admin_client):
         """PATCH /api/programs/<id>/enabled для несуществующей программы → 404."""
         resp = admin_client.patch(
-            "/api/programs/99999/enabled", data=json.dumps({"enabled": 0}), content_type="application/json"
+            "/api/programs/99999/enabled",
+            data=json.dumps({"enabled": False}),
+            content_type="application/json",
         )
 
         assert resp.status_code == 404
@@ -364,7 +351,6 @@ class TestToggleProgramEnabled:
 class TestDuplicateProgram:
     """Tests for POST /api/programs/<id>/duplicate."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: duplicate endpoint")
     def test_duplicate_program(self, admin_client, app):
         """POST /api/programs/<id>/duplicate создаёт копию."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -374,7 +360,7 @@ class TestDuplicateProgram:
             {
                 "name": "Original",
                 "time": "06:00",
-                "type": "smart",
+                "type": "time-based",
                 "schedule_type": "interval",
                 "interval_days": 3,
                 "color": "#9c27b0",
@@ -399,12 +385,11 @@ class TestDuplicateProgram:
         assert dup["schedule_type"] == original["schedule_type"]
         assert dup["interval_days"] == original["interval_days"]
         assert dup["color"] == original["color"]
-        assert dup["enabled"] == original["enabled"]
+        assert dup["enabled"] is False
         assert dup["extra_times"] == original["extra_times"]
         assert dup["zones"] == original["zones"]
         assert dup["id"] != original["id"]
 
-    @pytest.mark.xfail(reason="Not yet implemented: duplicate not found")
     def test_duplicate_program_not_found(self, admin_client):
         """POST /api/programs/<id>/duplicate для несуществующей → 404."""
         resp = admin_client.post("/api/programs/99999/duplicate")
@@ -417,7 +402,6 @@ class TestDuplicateProgram:
 class TestProgramLog:
     """Tests for GET /api/programs/<id>/log."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: log endpoint")
     def test_get_program_log(self, admin_client, app):
         """GET /api/programs/<id>/log возвращает журнал поливов."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -425,13 +409,11 @@ class TestProgramLog:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/log")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 501
         data = resp.get_json()
-        assert "success" in data
-        assert "log" in data
-        assert isinstance(data["log"], list)
+        assert data["success"] is False
+        assert data["error_code"] == "PROGRAM_RUN_IDENTITY_UNAVAILABLE"
 
-    @pytest.mark.xfail(reason="Not yet implemented: log with period filter")
     def test_get_program_log_with_period_filter(self, admin_client, app):
         """GET /api/programs/<id>/log?period=week фильтрует по периоду."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -439,11 +421,9 @@ class TestProgramLog:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/log?period=week")
 
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "log" in data
+        assert resp.status_code == 501
+        assert resp.get_json()["capability"] == "program_log"
 
-    @pytest.mark.xfail(reason="Not yet implemented: log with limit")
     def test_get_program_log_with_limit(self, admin_client, app):
         """GET /api/programs/<id>/log?limit=10 ограничивает количество записей."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -451,18 +431,14 @@ class TestProgramLog:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/log?limit=10")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 501
         data = resp.get_json()
-        assert "log" in data
-        # Если есть записи, проверяем что не больше 10
-        if len(data["log"]) > 0:
-            assert len(data["log"]) <= 10
+        assert data["supported"] is False
 
 
 class TestProgramStats:
     """Tests for GET /api/programs/<id>/stats."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: stats endpoint")
     def test_get_program_stats(self, admin_client, app):
         """GET /api/programs/<id>/stats возвращает статистику."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -470,19 +446,12 @@ class TestProgramStats:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/stats")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 501
         data = resp.get_json()
-        assert "success" in data
-        assert "stats" in data
+        assert data["success"] is False
+        assert data["capability"] == "program_stats"
+        assert data["error_code"] == "PROGRAM_RUN_IDENTITY_UNAVAILABLE"
 
-        stats = data["stats"]
-        assert "total_runs" in stats
-        assert "total_water_calc" in stats
-        assert "total_water_fact" in stats
-        assert "avg_duration_min" in stats
-        assert isinstance(stats["total_runs"], int)
-
-    @pytest.mark.xfail(reason="Not yet implemented: stats endpoint not found")
     def test_get_program_stats_not_found(self, admin_client):
         """GET /api/programs/<id>/stats для несуществующей программы → 404."""
         resp = admin_client.get("/api/programs/99999/stats")
@@ -493,7 +462,6 @@ class TestProgramStats:
 class TestBackwardCompatibility:
     """Tests ensuring backward compatibility with old API format."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: backward compatible create")
     def test_create_program_backward_compatible(self, admin_client, app):
         """POST /api/programs со старым форматом (без новых полей) работает."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -522,7 +490,6 @@ class TestBackwardCompatibility:
         assert data["enabled"] == 1
         assert data["extra_times"] == []
 
-    @pytest.mark.xfail(reason="Not yet implemented: backward compatible update")
     def test_update_program_backward_compatible(self, admin_client, app):
         """PUT /api/programs/<id> со старым форматом работает."""
         app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -551,7 +518,6 @@ class TestBackwardCompatibility:
 class TestCheckConflictsWithExtraTimes:
     """Tests for POST /api/programs/check-conflicts with extra_times."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: conflicts with extra_times")
     def test_check_conflicts_with_extra_times(self, admin_client, app):
         """POST /api/programs/check-conflicts учитывает extra_times."""
         app.db.create_zone({"name": "Z1", "duration": 30, "group_id": 1})
@@ -577,11 +543,9 @@ class TestCheckConflictsWithExtraTimes:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "has_conflicts" in data
-        # Должен обнаружить конфликт
-        # assert data['has_conflicts'] is True
+        assert data["has_conflicts"] is True
+        assert data["conflicts"][0]["program_name"] == "Existing"
 
-    @pytest.mark.xfail(reason="Not yet implemented: conflicts with own extra_times")
     def test_check_conflicts_with_own_extra_times(self, admin_client, app):
         """POST /api/programs/check-conflicts проверяет конфликты между своими extra_times."""
         app.db.create_zone({"name": "Z1", "duration": 60, "group_id": 1})
@@ -601,4 +565,26 @@ class TestCheckConflictsWithExtraTimes:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "has_conflicts" in data
+        assert data["has_conflicts"] is True
+        assert data["conflicts"][0]["candidate_self_conflict"] is True
+
+
+class TestEvenOddCanonicalization:
+    """Мастер программ исторически шлёт 'even_odd' — API канонизирует в 'even-odd'."""
+
+    def test_create_with_legacy_even_odd_spelling(self, admin_client, app):
+        app.db.create_zone({"name": "ZEO", "duration": 10, "group_id": 1})
+        resp = admin_client.post(
+            "/api/programs",
+            json={
+                "name": "LegacyEO",
+                "time": "06:00",
+                "days": [],
+                "zones": [1],
+                "schedule_type": "even_odd",
+                "even_odd": "odd",
+            },
+        )
+        assert resp.status_code in (200, 201), resp.get_json()
+        progs = [p for p in app.db.get_programs() if p["name"] == "LegacyEO"]
+        assert progs and progs[0]["schedule_type"] == "even-odd"

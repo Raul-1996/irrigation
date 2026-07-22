@@ -12,10 +12,29 @@ production audit_log table is never touched.
 from __future__ import annotations
 
 import os
+import sqlite3
+import time
+from contextlib import contextmanager
 
 import pytest
 
 os.environ["TESTING"] = "1"
+
+
+@contextmanager
+def _system_timezone(name: str):
+    """Temporarily set the process timezone for SQLite/Python localtime."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +103,25 @@ class TestAuditRepository:
         ids1 = {r["id"] for r in page1}
         ids2 = {r["id"] for r in page2}
         assert ids1.isdisjoint(ids2)
+
+    def test_local_calendar_filter_is_converted_to_utc_for_get_and_count(self, test_db):
+        """A local day must include exactly the UTC rows displayed on that day."""
+        with _system_timezone("Asia/Bishkek"):
+            with sqlite3.connect(test_db.db_path) as conn:
+                conn.executemany(
+                    "INSERT INTO audit_log(ts, source, action_type) VALUES (?, 'unit', ?)",
+                    [
+                        ("2026-07-17 18:30:00", "local_july_18"),
+                        ("2026-07-18 18:30:00", "local_july_19"),
+                    ],
+                )
+                conn.commit()
+
+            rows = test_db.get_audit_logs(since="2026-07-18", until="2026-07-18")
+
+            assert [row["action_type"] for row in rows] == ["local_july_18"]
+            assert rows[0]["ts"] == "2026-07-18 00:30:00"
+            assert test_db.count_audit_logs(since="2026-07-18", until="2026-07-18") == 1
 
     def test_distinct_action_types(self, test_db):
         test_db.add_audit(action_type="a")
@@ -164,6 +202,27 @@ class TestRedact:
         assert _redact(3.14) == 3.14
         assert _redact(True) is True
         assert _redact(None) is None
+
+
+def test_audit_ip_uses_proxy_normalized_remote_addr_not_spoofed_leftmost_xff():
+    from flask import Flask, jsonify, request
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    from services.audit import _resolve_ip
+
+    flask_app = Flask(__name__)
+    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1)
+
+    @flask_app.post("/audit-ip")
+    def audit_ip():
+        return jsonify({"ip": _resolve_ip(request)})
+
+    response = flask_app.test_client().post(
+        "/audit-ip",
+        headers={"X-Forwarded-For": "198.51.100.66, 203.0.113.9"},
+    )
+
+    assert response.get_json() == {"ip": "203.0.113.9"}
 
 
 # --------------------------------------------------------------------------- #

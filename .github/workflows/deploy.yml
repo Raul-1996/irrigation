@@ -3,29 +3,102 @@ name: Deploy to Wirenboard
 on:
   workflow_dispatch:
     inputs:
+      commit_sha:
+        description: "Full 40-character commit SHA already present on main"
+        required: true
+        type: string
       confirmation:
         description: 'Type "deploy" to confirm deployment'
         required: true
         type: string
 
+permissions:
+  contents: read
+
+concurrency:
+  group: production-wb-irrigation
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: github.event.inputs.confirmation == 'deploy'
+    if: github.event.inputs.confirmation == 'deploy' && github.ref == 'refs/heads/main'
+    environment: production
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.WB_HOST }}
-          username: ${{ secrets.WB_USER }}
-          password: ${{ secrets.WB_PASSWORD }}
-          proxy_host: ${{ secrets.JUMP_HOST }}
-          proxy_username: ${{ secrets.JUMP_USER }}
-          proxy_key: ${{ secrets.JUMP_SSH_KEY }}
-          script: |
-            cd /opt/wb-irrigation/irrigation
-            git pull origin main
-            pip3 install -r requirements.txt
-            systemctl restart wb-irrigation
-            sleep 3
-            systemctl is-active wb-irrigation && echo "✅ Deploy OK" || echo "❌ Deploy FAILED"
+      - name: Deploy with native OpenSSH and pinned host keys
+        env:
+          TARGET_COMMIT: ${{ inputs.commit_sha }}
+          WB_HOST: ${{ secrets.WB_HOST }}
+          WB_USER: ${{ secrets.WB_USER }}
+          WB_PASSWORD: ${{ secrets.WB_PASSWORD }}
+          WB_SSH_FINGERPRINT: ${{ secrets.WB_SSH_FINGERPRINT }}
+          JUMP_HOST: ${{ secrets.JUMP_HOST }}
+          JUMP_USER: ${{ secrets.JUMP_USER }}
+          JUMP_SSH_KEY: ${{ secrets.JUMP_SSH_KEY }}
+          JUMP_SSH_FINGERPRINT: ${{ secrets.JUMP_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WB_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$JUMP_HOST" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$WB_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$JUMP_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$WB_SSH_FINGERPRINT" == SHA256:* ]]
+          [[ "$JUMP_SSH_FINGERPRINT" == SHA256:* ]]
+          [[ -n "$WB_SSH_FINGERPRINT" ]]
+          [[ -n "$JUMP_SSH_FINGERPRINT" ]]
+
+          SSH_STAGE=$(mktemp -d)
+          trap 'rm -rf "$SSH_STAGE"' EXIT
+          JUMP_KEY="$SSH_STAGE/jump_key"
+          KNOWN_HOSTS="$SSH_STAGE/known_hosts"
+          ASKPASS="$SSH_STAGE/askpass"
+          printf '%s\n' "$JUMP_SSH_KEY" >"$JUMP_KEY"
+          chmod 0600 "$JUMP_KEY"
+          : >"$KNOWN_HOSTS"
+
+          keep_pinned_host_key() {
+            local scan_file=$1
+            local expected_fingerprint=$2
+            local key_line
+            local actual_fingerprint
+            local matched=0
+            while IFS= read -r key_line; do
+              [[ -n "$key_line" && "$key_line" != '#'* ]] || continue
+              actual_fingerprint=$(printf '%s\n' "$key_line" | ssh-keygen -lf - | awk '{print $2}')
+              if [[ "$actual_fingerprint" == "$expected_fingerprint" ]]; then
+                printf '%s\n' "$key_line" >>"$KNOWN_HOSTS"
+                matched=1
+              fi
+            done <"$scan_file"
+            [[ "$matched" == "1" ]]
+          }
+
+          ssh-keyscan -T 10 "$JUMP_HOST" >"$SSH_STAGE/jump.scan"
+          keep_pinned_host_key "$SSH_STAGE/jump.scan" "$JUMP_SSH_FINGERPRINT"
+          ssh -i "$JUMP_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" \
+            "$JUMP_USER@$JUMP_HOST" "ssh-keyscan -T 10 '$WB_HOST'" >"$SSH_STAGE/target.scan"
+          keep_pinned_host_key "$SSH_STAGE/target.scan" "$WB_SSH_FINGERPRINT"
+
+          printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$WB_PASSWORD"' >"$ASKPASS"
+          chmod 0700 "$ASKPASS"
+          export SSH_ASKPASS="$ASKPASS" SSH_ASKPASS_REQUIRE=force DISPLAY=wb-irrigation
+
+          setsid -w ssh -o IdentitiesOnly=yes -o PubkeyAuthentication=no \
+            -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" \
+            -o "ProxyCommand=ssh -i $JUMP_KEY -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS -W %h:%p $JUMP_USER@$JUMP_HOST" \
+            "$WB_USER@$WB_HOST" "TARGET_COMMIT='$TARGET_COMMIT' bash -s" <<'REMOTE'
+          set -euo pipefail
+          [[ "$TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          cd /opt/wb-irrigation/irrigation
+          git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main'
+          [[ "$(git rev-parse --verify "${TARGET_COMMIT}^{commit}")" == "$TARGET_COMMIT" ]]
+          git merge-base --is-ancestor "$TARGET_COMMIT" "refs/remotes/origin/main"
+          STAGED_UPDATER=$(mktemp /tmp/wb-irrigation-update.XXXXXX)
+          trap 'rm -f "$STAGED_UPDATER"' EXIT
+          git show "${TARGET_COMMIT}:update_server.sh" >"$STAGED_UPDATER"
+          chmod 0700 "$STAGED_UPDATER"
+          bash "$STAGED_UPDATER" --yes --branch main --commit "$TARGET_COMMIT"
+          REMOTE

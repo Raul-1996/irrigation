@@ -2,8 +2,30 @@
 
 import json
 import os
+from unittest.mock import Mock, patch
 
 os.environ["TESTING"] = "1"
+
+
+def _scheduler_stop_barrier(app, group_id):
+    scheduler = Mock()
+
+    def complete_stop(requested_group_id):
+        zone_ids = [
+            int(zone["id"]) for zone in app.db.get_zones() if int(zone.get("group_id") or 0) == int(requested_group_id)
+        ]
+        return {
+            "success": True,
+            "group_id": int(requested_group_id),
+            "aggregate_valid": True,
+            "stopped": zone_ids,
+            "unresolved": [],
+            "unverified_zone_ids": [],
+            "retry_scheduled": False,
+        }
+
+    scheduler.cancel_group_jobs.side_effect = complete_stop
+    return patch("irrigation_scheduler.get_scheduler", return_value=scheduler)
 
 
 class TestZonesAPI:
@@ -58,7 +80,7 @@ class TestZonesAPI:
         z = app.db.create_zone({"name": "Old", "duration": 10, "group_id": 1})
         resp = admin_client.put(
             f"/api/zones/{z['id']}",
-            data=json.dumps({"name": "Updated", "duration": 20}),
+            data=json.dumps({"name": "Updated", "duration": 20, "expected_version": z["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -66,17 +88,27 @@ class TestZonesAPI:
     def test_update_zone_invalid_duration(self, admin_client, app):
         z = app.db.create_zone({"name": "Bad", "duration": 10, "group_id": 1})
         resp = admin_client.put(
-            f"/api/zones/{z['id']}", data=json.dumps({"duration": 99999}), content_type="application/json"
+            f"/api/zones/{z['id']}",
+            data=json.dumps({"duration": 99999, "expected_version": z["version"]}),
+            content_type="application/json",
         )
         assert resp.status_code == 400
 
     def test_update_zone_empty_name(self, admin_client, app):
         z = app.db.create_zone({"name": "X", "duration": 10, "group_id": 1})
-        resp = admin_client.put(f"/api/zones/{z['id']}", data=json.dumps({"name": ""}), content_type="application/json")
+        resp = admin_client.put(
+            f"/api/zones/{z['id']}",
+            data=json.dumps({"name": "", "expected_version": z["version"]}),
+            content_type="application/json",
+        )
         assert resp.status_code == 400
 
     def test_delete_zone(self, admin_client, app):
         z = app.db.create_zone({"name": "Del", "duration": 10, "group_id": 1})
+        assert app.db.update_zone(
+            z["id"],
+            {"state": "off", "commanded_state": "off", "observed_state": "off"},
+        )
         resp = admin_client.delete(f"/api/zones/{z['id']}")
         assert resp.status_code in (200, 204)
 
@@ -150,13 +182,21 @@ class TestViewerAccess:
         resp = viewer_client.get("/api/zones")
         assert resp.status_code == 200
 
-    def test_viewer_create_attempt(self, viewer_client):
-        """Viewer role may or may not be restricted from creating zones (depends on admin_required decorator)."""
-        resp = viewer_client.post(
-            "/api/zones", data=json.dumps({"name": "No", "duration": 10}), content_type="application/json"
-        )
-        # Accept any response — viewer may be allowed or forbidden
-        assert resp.status_code in (200, 201, 403, 401, 302)
+    def test_viewer_create_attempt(self, viewer_client, app):
+        """Viewer role is read-only even on routes without a decorator."""
+        zone_ids_before = {zone["id"] for zone in app.db.get_zones()}
+        testing_before = app.config["TESTING"]
+        app.config["TESTING"] = False
+        try:
+            resp = viewer_client.post(
+                "/api/zones", data=json.dumps({"name": "No", "duration": 10}), content_type="application/json"
+            )
+        finally:
+            app.config["TESTING"] = testing_before
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error_code"] == "FORBIDDEN"
+        assert {zone["id"] for zone in app.db.get_zones()} == zone_ids_before
 
 
 # ── Issue #12: %-of-norm override on /api/zones/<id>/mqtt/start ────────────
@@ -177,11 +217,12 @@ class TestZoneMqttStartPercent:
             }
         )
         before = datetime.now()
-        resp = admin_client.post(
-            f"/api/zones/{z['id']}/mqtt/start",
-            data=json.dumps({"duration_percent": 150}),
-            content_type="application/json",
-        )
+        with _scheduler_stop_barrier(app, 1):
+            resp = admin_client.post(
+                f"/api/zones/{z['id']}/mqtt/start",
+                data=json.dumps({"duration_percent": 150}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
         body = resp.get_json()
         assert body.get("success") is True
@@ -209,11 +250,12 @@ class TestZoneMqttStartPercent:
         # Force the corruption case the helper guards against.
         app.db.update_zone(z["id"], {"duration": 0})
         before = datetime.now()
-        resp = admin_client.post(
-            f"/api/zones/{z['id']}/mqtt/start",
-            data=json.dumps({"duration_percent": 100}),
-            content_type="application/json",
-        )
+        with _scheduler_stop_barrier(app, 1):
+            resp = admin_client.post(
+                f"/api/zones/{z['id']}/mqtt/start",
+                data=json.dumps({"duration_percent": 100}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
         body = resp.get_json()
         assert body.get("success") is True
@@ -243,11 +285,12 @@ class TestZoneMqttStartPercent:
         # Update path doesn't enforce 1..120 — direct write to exercise clip.
         app.db.update_zone(z["id"], {"duration": 200})
         before = datetime.now()
-        resp = admin_client.post(
-            f"/api/zones/{z['id']}/mqtt/start",
-            data=json.dumps({"duration_percent": 200}),
-            content_type="application/json",
-        )
+        with _scheduler_stop_barrier(app, 1):
+            resp = admin_client.post(
+                f"/api/zones/{z['id']}/mqtt/start",
+                data=json.dumps({"duration_percent": 200}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
         body = resp.get_json()
         assert body.get("success") is True
@@ -299,11 +342,12 @@ class TestZoneMqttStartMinutesWinsStrict:
             }
         )
         before = datetime.now()
-        resp = admin_client.post(
-            f"/api/zones/{z['id']}/mqtt/start",
-            data=json.dumps({"duration": None, "duration_percent": 100}),
-            content_type="application/json",
-        )
+        with _scheduler_stop_barrier(app, 1):
+            resp = admin_client.post(
+                f"/api/zones/{z['id']}/mqtt/start",
+                data=json.dumps({"duration": None, "duration_percent": 100}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
         body = resp.get_json()
         assert body.get("success") is True
@@ -327,11 +371,12 @@ class TestZoneMqttStartMinutesWinsStrict:
             }
         )
         before = datetime.now()
-        resp = admin_client.post(
-            f"/api/zones/{z['id']}/mqtt/start",
-            data=json.dumps({"duration": 30, "duration_percent": 100}),
-            content_type="application/json",
-        )
+        with _scheduler_stop_barrier(app, 1):
+            resp = admin_client.post(
+                f"/api/zones/{z['id']}/mqtt/start",
+                data=json.dumps({"duration": 30, "duration_percent": 100}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
         body = resp.get_json()
         assert body.get("success") is True

@@ -46,13 +46,19 @@ class TestGuestAccess:
 
     def test_viewer_cannot_mutate(self, viewer_client, app):
         """Viewer should not be able to create zones."""
-        # In test mode, mutation guard is relaxed
-        # But the _auth_before_request checks viewer role
-        resp = viewer_client.post(
-            "/api/zones", data=json.dumps({"name": "Z", "duration": 10}), content_type="application/json"
-        )
-        # In TESTING mode, this might be allowed
-        assert resp.status_code in (200, 201, 401, 403)
+        zone_ids_before = {zone["id"] for zone in app.db.get_zones()}
+        testing_before = app.config["TESTING"]
+        app.config["TESTING"] = False
+        try:
+            resp = viewer_client.post(
+                "/api/zones", data=json.dumps({"name": "Z", "duration": 10}), content_type="application/json"
+            )
+        finally:
+            app.config["TESTING"] = testing_before
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error_code"] == "FORBIDDEN"
+        assert {zone["id"] for zone in app.db.get_zones()} == zone_ids_before
 
 
 class TestAuthStatusAPI:

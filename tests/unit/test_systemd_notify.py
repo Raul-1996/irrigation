@@ -2,7 +2,9 @@
 
 import contextlib
 import os
+import shutil
 import socket
+import tempfile
 import threading
 import time
 
@@ -66,11 +68,16 @@ def test_notify_abstract_socket_prefix(monkeypatch):
     assert captured["data"] == b"READY=1\n"
 
 
-def test_notify_ready_sends_proper_payload(monkeypatch, tmp_path):
-    """Test 3: real AF_UNIX datagram socket roundtrip — READY=1 + STATUS line."""
+def test_notify_ready_sends_proper_payload(monkeypatch):
+    """Test 3: real AF_UNIX datagram socket roundtrip — READY=1 + STATUS line.
+
+    The socket lives in a short-named dir under /tmp, not tmp_path: AF_UNIX
+    paths are capped at ~104 bytes on macOS and pytest's tmp_path exceeds it.
+    """
     from services import systemd_notify as sn
 
-    sock_path = str(tmp_path / "notify.sock")
+    sock_dir = tempfile.mkdtemp(dir="/tmp")
+    sock_path = os.path.join(sock_dir, "notify.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     srv.bind(sock_path)
     srv.settimeout(2.0)
@@ -83,7 +90,7 @@ def test_notify_ready_sends_proper_payload(monkeypatch, tmp_path):
     finally:
         srv.close()
         with contextlib.suppress(OSError):
-            os.unlink(sock_path)
+            shutil.rmtree(sock_dir)
 
 
 def test_heartbeat_thread_starts_and_stops(monkeypatch):

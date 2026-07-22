@@ -6,29 +6,47 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - run: python tools/check_tracked_secrets.py
+
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.11'
-      - run: pip install ruff
+      - run: pip install ruff==0.15.22
       - run: ruff check .
       - run: ruff format --check .
 
   test:
-    needs: lint
+    needs: [lint, secret-scan]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.11'
-      - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: pytest tests/unit tests/db tests/api --tb=short -q --cov --cov-report=xml
-      - uses: actions/upload-artifact@v4
+      - run: pip install --require-hashes -r requirements.lock -r requirements-dev.lock
+      - run: pip check
+      # pytest.ini is the single selection source: the complete local suite runs
+      # by default, while hardware-backed e2e/mqtt_real tests remain opt-in.
+      - run: >-
+          pytest --tb=short -q --cov --cov-report=xml
+          -W error::pytest.PytestUnraisableExceptionWarning
+          -W error::pytest.PytestUnhandledThreadExceptionWarning
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: coverage-report
@@ -37,14 +55,14 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.11'
-      - run: pip install bandit
-      - run: bandit -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -f json -o bandit-report.json -ll || true
-      - run: bandit -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -ll
-      - uses: actions/upload-artifact@v4
+      - run: pip install 'bandit[toml]==1.9.4'
+      - run: bandit -c pyproject.toml -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -f json -o bandit-report.json -ll || true
+      - run: bandit -c pyproject.toml -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -ll
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: bandit-report

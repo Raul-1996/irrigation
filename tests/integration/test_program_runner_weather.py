@@ -42,7 +42,11 @@ def runner_db(tmp_path):
 
     _wsing._adjustment = None
     _wsing._weather_service = None
-    return db_instance
+    yield db_instance
+    # Do not leak a singleton bound to this fixture's soon-to-be-deleted DB
+    # into unrelated scheduler tests later in the same serial test process.
+    _wsing._adjustment = None
+    _wsing._weather_service = None
 
 
 def test_zero_coef_skips_zone(runner_db):

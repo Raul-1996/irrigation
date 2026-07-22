@@ -100,7 +100,9 @@ class TestEmergencyAPI:
     def test_emergency_stop(self, admin_client):
         with patch("services.zone_control.stop_all_in_group"):
             resp = admin_client.post("/api/emergency-stop")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        assert resp.get_json()["success"] is False
+        assert resp.get_json()["sessions_quiesced"] is False
 
     def test_emergency_resume(self, admin_client):
         resp = admin_client.post("/api/emergency-resume")

@@ -10,6 +10,13 @@ Tests verify:
 
 import json
 
+
+def _zone_version(client, zone_id):
+    data = client.get(f"/api/zones/{zone_id}").get_json()
+    zone = data.get("zone") if isinstance(data, dict) and isinstance(data.get("zone"), dict) else data
+    return zone["version"]
+
+
 # ============================================================
 # Template rendering tests — check that status.html has the
 # new Hunter-style zone UI elements
@@ -79,28 +86,14 @@ class TestZonesUITemplateElements:
         """Page has CSS classes for zone cards.
 
         After commit 791ff0e (refactor: extract CSS), 'zone-card' lives in
-        static/css/status.css instead of inline <style>.  Walk the linked
-        stylesheets, fetch each through the test client, and grep the
-        combined content — mirrors the helper in test_zones_functional.py
-        and test_desktop_sidebar.py.
+        static/css/status.css instead of inline <style>.  Fetch linked
+        stylesheets and grep the combined content.
         """
-        import re
+        from tests.fixtures.css import fetch_inline_and_external_css
 
         resp = client.get("/")
         assert resp.status_code == 200
-        html = resp.data.decode()
-        pieces = [html]
-        for href in re.findall(
-            r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']',
-            html,
-        ):
-            if href.startswith("http"):
-                continue
-            path = href if href.startswith("/") else "/" + href.lstrip("./")
-            css_resp = client.get(path)
-            if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
-        combined = "\n".join(pieces)
+        combined = fetch_inline_and_external_css(client, "/")
         assert "zone-card" in combined, "'zone-card' class missing from /status HTML and all linked stylesheets"
 
     def test_status_js_loaded(self, client):
@@ -171,15 +164,18 @@ class TestZonesAPIForUI:
 
         # Update duration (simulates +/- button)
         resp2 = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"duration": 15}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"duration": 15, "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp2.status_code == 200
         data2 = json.loads(resp2.data)
         updated = data2.get("zone") or data2
         assert updated.get("duration") == 15
 
-    def test_zone_update_name(self, admin_client):
+    def test_zone_update_name(self, admin_client, app):
         """Update zone name (simulates bottom sheet save)."""
+        target_group = app.db.create_group("UI edit target group")
         # Create
         resp = admin_client.post(
             "/api/zones",
@@ -198,7 +194,13 @@ class TestZonesAPIForUI:
         # Update name + group
         resp2 = admin_client.put(
             f"/api/zones/{zone_id}",
-            data=json.dumps({"name": "After Edit", "group_id": 2}),
+            data=json.dumps(
+                {
+                    "name": "After Edit",
+                    "group_id": target_group["id"],
+                    "expected_version": _zone_version(admin_client, zone_id),
+                }
+            ),
             content_type="application/json",
         )
         assert resp2.status_code == 200
@@ -256,7 +258,9 @@ class TestZoneCardInteractions:
         """Simulate +1 minute button press."""
         zone_id = self._create_zone(admin_client, dur=10)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"duration": 11}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"duration": 11, "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -267,29 +271,41 @@ class TestZoneCardInteractions:
         """Duration should not go below 1. API may reject 0."""
         zone_id = self._create_zone(admin_client, dur=2)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"duration": 1}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"duration": 1, "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
         updated = data.get("zone") or data
         assert updated.get("duration") == 1
 
-    def test_change_group(self, admin_client):
+    def test_change_group(self, admin_client, app):
         """Simulate changing zone group via bottom sheet."""
+        target_group = app.db.create_group("UI card target group")
         zone_id = self._create_zone(admin_client, group=1)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"group_id": 2}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps(
+                {
+                    "group_id": target_group["id"],
+                    "expected_version": _zone_version(admin_client, zone_id),
+                }
+            ),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
         updated = data.get("zone") or data
-        assert updated.get("group_id") == 2
+        assert updated.get("group_id") == target_group["id"]
 
     def test_change_icon(self, admin_client):
         """Simulate changing zone type/icon."""
         zone_id = self._create_zone(admin_client)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"icon": "💧"}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"icon": "💧", "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -305,15 +321,16 @@ class TestZoneCardInteractions:
         # Should return some structure
         assert isinstance(data, dict)
 
-    def test_zones_filtered_by_group(self, admin_client):
+    def test_zones_filtered_by_group(self, admin_client, app):
         """Can filter zones by group_id on client side."""
+        second_group = app.db.create_group("UI filter second group")
         self._create_zone(admin_client, name="G1 Zone", group=1)
-        self._create_zone(admin_client, name="G2 Zone", group=2)
+        self._create_zone(admin_client, name="G2 Zone", group=second_group["id"])
 
         resp = admin_client.get("/api/zones")
         data = json.loads(resp.data)
         g1_zones = [z for z in data if z["group_id"] == 1]
-        g2_zones = [z for z in data if z["group_id"] == 2]
+        g2_zones = [z for z in data if z["group_id"] == second_group["id"]]
         # At least one zone in each group
         assert len(g1_zones) >= 1
         assert len(g2_zones) >= 1

@@ -6,7 +6,6 @@ production data loss or double-rotation races.
 """
 
 import os
-import re
 
 import pytest
 
@@ -30,18 +29,24 @@ def test_managed_marker_header_present(config_text):
 
 
 def test_blocks_are_balanced(config_text):
-    """Each opening `{` must have a matching `}` at block-end."""
-    opens = config_text.count("{")
-    closes = config_text.count("}")
-    assert opens == closes and opens >= 2, f"brace count mismatch: {{ {opens} vs }} {closes}"
+    """The managed marker must remain target-free after retiring file logs."""
+    assert "{" not in config_text
+    assert "}" not in config_text
 
 
-def test_mosquitto_block_present(config_text):
-    assert "/var/log/mosquitto/mosquitto.log" in config_text
+def test_mosquitto_package_log_is_not_redeclared(config_text):
+    """Debian's mosquitto package owns this target in its own config.
+
+    Declaring the same path twice makes the complete logrotate run fail with
+    ``duplicate log entry`` and prevents the complete rotation run.
+    """
+    non_comment = "\n".join(line for line in config_text.splitlines() if not line.lstrip().startswith("#"))
+    assert "/var/log/mosquitto/mosquitto.log" not in non_comment
 
 
-def test_telegram_block_present(config_text):
-    assert "/opt/wb-irrigation/irrigation/services/logs/telegram.txt" in config_text
+def test_retired_telegram_block_is_absent(config_text):
+    non_comment = "\n".join(line for line in config_text.splitlines() if not line.lstrip().startswith("#"))
+    assert "telegram.txt" not in non_comment
 
 
 def test_app_log_NOT_in_config(config_text):
@@ -59,37 +64,8 @@ def test_app_log_NOT_in_config(config_text):
         )
 
 
-def test_copytruncate_used_on_all_blocks(config_text):
-    """Neither mosquitto nor telegram bot supports SIGHUP reopen contract;
-    both blocks must use `copytruncate`."""
-    blocks = re.findall(r"\{([^}]+)\}", config_text, flags=re.DOTALL)
-    assert len(blocks) >= 2
-    for i, block in enumerate(blocks):
-        assert "copytruncate" in block, f"block #{i + 1} is missing `copytruncate`: {block.strip()[:120]}"
-
-
-def test_compression_is_delayed(config_text):
-    """`compress` without `delaycompress` breaks live tailing of .log.1 —
-    enforce both always appear together."""
-    blocks = re.findall(r"\{([^}]+)\}", config_text, flags=re.DOTALL)
-    for i, block in enumerate(blocks):
-        if "compress" in block and "nocompress" not in block:
-            assert "delaycompress" in block, f"block #{i + 1} uses compress without delaycompress"
-
-
-def test_missingok_set_on_all_blocks(config_text):
-    """Fresh-install safety: if the file doesn't exist yet, logrotate must
-    not fail the cron job for other files."""
-    blocks = re.findall(r"\{([^}]+)\}", config_text, flags=re.DOTALL)
-    for i, block in enumerate(blocks):
-        assert "missingok" in block, f"block #{i + 1} is missing `missingok`"
-
-
-def test_rotate_count_sane(config_text):
-    """Guard against accidental `rotate 0` (immediate delete) or missing."""
-    blocks = re.findall(r"\{([^}]+)\}", config_text, flags=re.DOTALL)
-    for i, block in enumerate(blocks):
-        m = re.search(r"\brotate\s+(\d+)\b", block)
-        assert m, f"block #{i + 1} missing `rotate N` directive"
-        count = int(m.group(1))
-        assert 1 <= count <= 60, f"block #{i + 1} has suspicious rotate count: {count}"
+def test_managed_file_contains_no_active_directives(config_text):
+    active_lines = [
+        line.strip() for line in config_text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert active_lines == []
