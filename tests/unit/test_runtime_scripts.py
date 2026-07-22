@@ -47,6 +47,50 @@ def test_healthcheck_uses_status_only_readyz_at_resolved_custom_bind(tmp_path: P
     assert "--insecure" not in arguments
 
 
+def test_healthcheck_env_precedence_is_state_then_external_then_process(tmp_path: Path):
+    repository_root = Path(__file__).resolve().parents[2]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_args = tmp_path / "curl-args.txt"
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$WB_TEST_CURL_ARGS\"\nprintf '200'\n",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    state_env = tmp_path / "state.env"
+    state_env.write_text("WB_HTTP_BIND_HOST=127.0.0.3\nPORT=9101\n", encoding="utf-8")
+    external_env = tmp_path / "external.env"
+    external_env.write_text("WB_HTTP_BIND_HOST=127.0.0.4\nPORT=9102\n", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment.update(
+        PATH=f"{fake_bin}:{environment.get('PATH', '')}",
+        PORT="9103",
+        WB_IRRIGATION_APP_DIR=str(repository_root),
+        WB_IRRIGATION_STATE_ENV_FILE=str(state_env),
+        WB_IRRIGATION_ENV_FILE=str(external_env),
+        WB_IRRIGATION_PYTHON=sys.executable,
+        WB_TEST_CURL_ARGS=str(curl_args),
+    )
+    environment.pop("WB_HTTP_BIND_HOST", None)
+
+    result = subprocess.run(
+        ["/bin/sh", str(repository_root / "scripts" / "healthcheck.sh")],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = curl_args.read_text(encoding="utf-8")
+    assert "http://127.0.0.4:9103/readyz" in arguments
+    assert "127.0.0.3" not in arguments
+    assert ":9102/" not in arguments
+
+
 def test_run_rejects_invalid_tls_before_importing_stateful_app(tmp_path: Path):
     repository_root = Path(__file__).resolve().parents[2]
     cert = tmp_path / "invalid.crt"
