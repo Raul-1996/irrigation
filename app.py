@@ -207,7 +207,8 @@ csrf.exempt(_api_login_view)
 # weather settings, MQTT config, etc.) now requires the X-CSRFToken header
 # that `static/js/app.js` already attaches on all non-GET fetch calls.
 #
-# Guest-accessible endpoints (remain CSRF-exempt):
+# CSRF-exempt read-only/fail-safe endpoints. Authentication remains a
+# separate policy: the next-watering projection requires an explicit viewer.
 from routes.audit_api import api_audit_ui_event
 from routes.groups_api import api_stop_group
 from routes.system_config_api import api_postpone
@@ -521,9 +522,10 @@ _ALLOWED_PUBLIC_POSTS = {
     "/api/status",
     "/api/emergency-stop",
     "/api/postpone",
-    "/api/zones/next-watering-bulk",
     "/api/audit/ui",
 }
+
+_ALLOWED_AUTHENTICATED_READ_POSTS = {"/api/zones/next-watering-bulk"}
 
 # Anonymous callers get one identity/introspection endpoint only. Rich status,
 # topology, sensor configuration and history require the explicit viewer link
@@ -565,6 +567,11 @@ def _auth_before_request():
     # Static paths require no auth — early return is safe.
     if request.path.startswith("/static/"):
         return None
+    # Exact, safe-method-only bypass: liveness/readiness must never allocate a
+    # session or block behind password-policy SQLite work. Their own handlers
+    # expose only a minimal public contract.
+    if request.method in {"GET", "HEAD"} and request.path in {"/healthz", "/readyz"}:
+        return None
     if "role" not in session:
         session["role"] = "guest"
     try:
@@ -591,6 +598,19 @@ def _auth_before_request():
                 postpone_cancel = _is_postpone_cancel_request(pth)
                 is_admin = logged_in and role == "admin"
                 is_viewer = logged_in and role == "viewer"
+                is_authenticated_read = (
+                    request.method == "POST" and pth in _ALLOWED_AUTHENTICATED_READ_POSTS
+                )
+                if is_authenticated_read:
+                    if logged_in and role in {"viewer", "user", "admin"}:
+                        return None
+                    return jsonify(
+                        {
+                            "success": False,
+                            "message": "auth required",
+                            "error_code": "UNAUTHENTICATED",
+                        }
+                    ), 401
                 if is_viewer and request.method in ["POST", "PUT", "DELETE"]:
                     if pth != "/api/login":
                         return jsonify(

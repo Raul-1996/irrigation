@@ -241,6 +241,25 @@ def test_readyz_redacts_check_topology_from_unauthenticated_clients(client, app,
     assert response.get_json() == {"status": "ok"}
 
 
+def test_minimal_health_probes_bypass_session_and_password_policy_db(client, app, health_api, monkeypatch):
+    ensure_password_policy = MagicMock(side_effect=AssertionError("health probe touched auth DB"))
+    monkeypatch.setattr(app.db, "ensure_password_change_required", ensure_password_policy)
+    app.config["TESTING"] = False
+    try:
+        with _stub_all_checks_ok(health_api):
+            liveness = client.get("/healthz")
+            readiness = client.get("/readyz")
+    finally:
+        app.config["TESTING"] = True
+
+    assert liveness.status_code == 200
+    assert readiness.status_code == 200
+    assert readiness.get_json() == {"status": "ok"}
+    assert "Set-Cookie" not in liveness.headers
+    assert "Set-Cookie" not in readiness.headers
+    ensure_password_policy.assert_not_called()
+
+
 def test_metrics_requires_authenticated_admin(client, app):
     app.config["TESTING"] = False
     try:

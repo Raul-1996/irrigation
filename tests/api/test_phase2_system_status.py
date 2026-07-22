@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -460,6 +460,22 @@ def test_unauthenticated_gets_expose_only_explicit_minimal_contract(client, app,
 
     assert client.get("/healthz").get_json() == {"status": "ok"}
     assert client.get("/api/auth/status").status_code == 200
+
+
+def test_next_watering_bulk_requires_explicit_viewer_login(client, viewer_client, app, monkeypatch):
+    import routes.zones_crud_api as zones_crud_api
+
+    compute = MagicMock(return_value={})
+    monkeypatch.setattr(zones_crud_api, "compute_next_watering", compute)
+    monkeypatch.setitem(app.config, "TESTING", False)
+
+    anonymous = client.post("/api/zones/next-watering-bulk", json={})
+    viewer = viewer_client.post("/api/zones/next-watering-bulk", json={})
+
+    assert anonymous.status_code == 401
+    assert anonymous.get_json()["error_code"] == "UNAUTHENTICATED"
+    assert viewer.status_code == 200
+    compute.assert_called_once_with(None)
 
 
 def test_explicit_viewer_session_keeps_documented_read_only_status_ux(viewer_client, app, monkeypatch):
@@ -1037,7 +1053,7 @@ def test_status_allows_trusted_projection_beyond_public_zone_limit(admin_client,
     assert any(group["id"] == 1 for group in response.get_json()["groups"])
 
 
-def test_public_next_watering_projection_still_rejects_more_than_512_ids(admin_client):
+def test_authenticated_next_watering_projection_still_rejects_more_than_512_ids(admin_client):
     response = admin_client.post(
         "/api/zones/next-watering-bulk",
         json={"zone_ids": list(range(1, 514))},

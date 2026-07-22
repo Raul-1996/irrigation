@@ -213,10 +213,9 @@ def _resolve_actor(req) -> str:
 
 def _resolve_ip(req) -> str | None:
     try:
-        # Honour X-Forwarded-For if behind nginx
-        fwd = req.headers.get("X-Forwarded-For") if req.headers else None
-        if fwd:
-            return str(fwd).split(",")[0].strip()
+        # ProxyFix is the single authority for trusted forwarding headers.
+        # Reading X-Forwarded-For here would bypass its hop-count validation
+        # and let a client choose the audit identity with a left-most value.
         return req.remote_addr
     except (AttributeError, KeyError):
         return None

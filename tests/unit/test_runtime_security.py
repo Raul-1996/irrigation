@@ -43,7 +43,7 @@ def test_initialize_does_not_emit_ready_or_start_heartbeat_before_http_listener(
     notify_ready.assert_not_called()
 
 
-def test_http_listener_notification_orders_ready_before_watchdog(monkeypatch):
+def test_http_listener_notification_starts_armed_watchdog_before_ready(monkeypatch):
     from services import app_init, systemd_notify
 
     events: list[str] = []
@@ -59,13 +59,29 @@ def test_http_listener_notification_orders_ready_before_watchdog(monkeypatch):
     monkeypatch.setattr(
         app_init,
         "_start_health_bound_heartbeat",
-        lambda: events.append("WATCHDOG") or True,
+        lambda **_kwargs: events.append("WATCHDOG") or True,
     )
+    monkeypatch.setattr(systemd_notify, "watchdog_is_armed", lambda: True)
 
     assert app_init.notify_http_listener_ready() is True
-    assert events == ["READY=1", "WATCHDOG"]
+    assert events == ["WATCHDOG", "READY=1"]
     assert app_init.notify_http_listener_ready() is True
-    assert events == ["READY=1", "WATCHDOG"]
+    assert events == ["WATCHDOG", "READY=1"]
+
+
+def test_http_listener_withholds_ready_when_armed_watchdog_cannot_start(monkeypatch):
+    from services import app_init, systemd_notify
+
+    monkeypatch.setattr(app_init, "_boot_sync_done", True)
+    monkeypatch.setattr(app_init, "_boot_recovery_done", True)
+    monkeypatch.setattr(app_init, "_http_listener_ready_notified", False, raising=False)
+    monkeypatch.setattr(app_init, "_start_health_bound_heartbeat", lambda **_kwargs: False)
+    monkeypatch.setattr(systemd_notify, "watchdog_is_armed", lambda: True)
+    notify_ready = MagicMock(return_value=True)
+    monkeypatch.setattr(systemd_notify, "notify_ready", notify_ready)
+
+    assert app_init.notify_http_listener_ready() is False
+    notify_ready.assert_not_called()
 
 
 def test_http_listener_notification_refuses_unreconciled_boot(monkeypatch):
@@ -136,7 +152,9 @@ def test_ready_notification_runs_only_after_listener_probe_accepts(monkeypatch):
         threading.Event(),
     )
 
-    notify_ready.assert_called_once_with()
+    notify_ready.assert_called_once_with(
+        health_probe_url="http://127.0.0.1:8080/healthz"
+    )
 
 
 def test_listener_probe_retries_transient_systemd_notification_failure(monkeypatch):
@@ -174,6 +192,77 @@ def test_external_plain_http_requires_explicit_operator_acknowledgement():
     assert profile.external_bind is True
     assert profile.tls_enabled is False
     assert profile.insecure_external_acknowledged is True
+
+
+def test_empty_bracket_bind_is_rejected_before_listener_start():
+    from services.security import HttpTransportConfigurationError, resolve_http_transport
+
+    with pytest.raises(HttpTransportConfigurationError, match="WB_HTTP_BIND_HOST"):
+        resolve_http_transport(
+            {
+                "WB_HTTP_BIND_HOST": "[]",
+                "WB_HTTP_ALLOW_INSECURE_EXTERNAL": "1",
+            }
+        )
+
+
+def test_local_probe_url_uses_resolved_scheme_and_custom_bind(monkeypatch, tmp_path: Path):
+    from services import security
+
+    plaintext = security.resolve_http_transport(
+        {
+            "WB_HTTP_BIND_HOST": "127.0.0.2",
+            "PORT": "9123",
+        }
+    )
+    assert security.local_http_probe_url(plaintext, path="/readyz") == "http://127.0.0.2:9123/readyz"
+
+    cert = tmp_path / "server.crt"
+    key = tmp_path / "server.key"
+    cert.write_text("certificate", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    monkeypatch.setattr(security, "_validate_tls_cert_pair", lambda *_args: None, raising=False)
+    tls = security.resolve_http_transport(
+        {
+            "WB_HTTP_BIND_HOST": "192.0.2.20",
+            "PORT": "9443",
+            "WB_HTTP_TLS_CERTFILE": str(cert),
+            "WB_HTTP_TLS_KEYFILE": str(key),
+        }
+    )
+    assert security.local_http_probe_url(tls, path="/readyz") == "https://192.0.2.20:9443/readyz"
+
+
+def test_unauthenticated_https_probe_verifies_by_default_and_needs_explicit_bypass(tmp_path: Path):
+    from services import security
+
+    tls_profile = MagicMock(tls_enabled=True)
+    default = security.resolve_http_probe_tls(tls_profile, {})
+    assert default.ca_file is None
+    assert default.insecure_tls is False
+
+    ca_file = tmp_path / "controller-ca.crt"
+    ca_file.write_text("private CA bundle", encoding="utf-8")
+    private_ca = security.resolve_http_probe_tls(
+        tls_profile,
+        {"WB_HTTP_PROBE_CA_FILE": str(ca_file)},
+    )
+    assert private_ca.ca_file == str(ca_file)
+    assert private_ca.insecure_tls is False
+
+    explicit_bypass = security.resolve_http_probe_tls(
+        tls_profile,
+        {"WB_HTTP_PROBE_INSECURE_TLS": "1"},
+    )
+    assert explicit_bypass.insecure_tls is True
+    with pytest.raises(security.HttpTransportConfigurationError, match="mutually exclusive"):
+        security.resolve_http_probe_tls(
+            tls_profile,
+            {
+                "WB_HTTP_PROBE_CA_FILE": str(ca_file),
+                "WB_HTTP_PROBE_INSECURE_TLS": "1",
+            },
+        )
 
 
 def test_trusted_proxy_hops_are_rejected_on_direct_external_bind():
@@ -282,15 +371,15 @@ def test_proxy_client_identity_reaches_existing_api_rate_limiter(monkeypatch):
     assert observed_ips == ["203.0.113.44"]
 
 
-def test_tls_configuration_requires_a_complete_readable_certificate_pair(tmp_path: Path):
-    from services.security import HttpTransportConfigurationError, resolve_http_transport
+def test_tls_configuration_requires_a_complete_parseable_certificate_pair(monkeypatch, tmp_path: Path):
+    from services import security
 
     cert = tmp_path / "server.crt"
     key = tmp_path / "server.key"
     cert.write_text("certificate", encoding="utf-8")
 
-    with pytest.raises(HttpTransportConfigurationError, match="both be configured"):
-        resolve_http_transport(
+    with pytest.raises(security.HttpTransportConfigurationError, match="both be configured"):
+        security.resolve_http_transport(
             {
                 "WB_HTTP_BIND_HOST": "0.0.0.0",
                 "WB_HTTP_TLS_CERTFILE": str(cert),
@@ -298,19 +387,32 @@ def test_tls_configuration_requires_a_complete_readable_certificate_pair(tmp_pat
         )
 
     key.write_text("key", encoding="utf-8")
-    profile = resolve_http_transport(
+    with pytest.raises(security.HttpTransportConfigurationError, match="valid TLS certificate"):
+        security.resolve_http_transport(
+            {
+                "WB_HTTP_BIND_HOST": "0.0.0.0",
+                "WB_HTTP_TLS_CERTFILE": str(cert),
+                "WB_HTTP_TLS_KEYFILE": str(key),
+            }
+        )
+
+    validate_pair = MagicMock()
+    monkeypatch.setattr(security, "_validate_tls_cert_pair", validate_pair, raising=False)
+    profile = security.resolve_http_transport(
         {
             "WB_HTTP_BIND_HOST": "0.0.0.0",
             "WB_HTTP_TLS_CERTFILE": str(cert),
             "WB_HTTP_TLS_KEYFILE": str(key),
         }
     )
+    validate_pair.assert_called_once_with(str(cert), str(key))
     assert profile.tls_enabled is True
     assert profile.bind == "0.0.0.0:8080"
 
 
 def test_tls_transport_forces_secure_session_cookie(app, monkeypatch, tmp_path):
     from app import _configure_session_cookie_secure
+    from services import security
 
     cert = tmp_path / "server.crt"
     key = tmp_path / "server.key"
@@ -319,6 +421,7 @@ def test_tls_transport_forces_secure_session_cookie(app, monkeypatch, tmp_path):
     monkeypatch.setenv("WB_HTTP_TLS_CERTFILE", str(cert))
     monkeypatch.setenv("WB_HTTP_TLS_KEYFILE", str(key))
     monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.setattr(security, "_validate_tls_cert_pair", lambda *_args: None, raising=False)
 
     _configure_session_cookie_secure(app)
 
@@ -333,3 +436,62 @@ def test_invalid_secure_cookie_override_fails_closed(app, monkeypatch):
 
     with pytest.raises(HttpTransportConfigurationError, match="SESSION_COOKIE_SECURE"):
         _configure_session_cookie_secure(app)
+
+
+def test_heartbeat_recovers_after_tls_certificate_temporarily_disappears(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from services import app_init, security, systemd_notify
+
+    cert = tmp_path / "server.crt"
+    key = tmp_path / "server.key"
+    cert.write_text("certificate", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    monkeypatch.setenv("WB_HTTP_TLS_CERTFILE", str(cert))
+    monkeypatch.setenv("WB_HTTP_TLS_KEYFILE", str(key))
+    monkeypatch.setattr(security, "_validate_tls_cert_pair", lambda *_args: None, raising=False)
+    notify = MagicMock(return_value=True)
+    monkeypatch.setattr(systemd_notify, "notify_watchdog", notify)
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    urlopen = MagicMock(return_value=Response())
+    cert.unlink()
+    assert app_init._health_heartbeat_once(urlopen_fn=urlopen, timeout_sec=0.1) is False
+    cert.write_text("certificate", encoding="utf-8")
+    assert app_init._health_heartbeat_once(urlopen_fn=urlopen, timeout_sec=0.1) is True
+    notify.assert_called_once_with()
+
+
+def test_armed_systemd_watchdog_cannot_be_disabled_by_app_env(monkeypatch):
+    from services import app_init
+
+    fake_thread = MagicMock()
+    monkeypatch.setenv("NOTIFY_SOCKET", "/run/systemd/notify")
+    monkeypatch.setenv("WATCHDOG_USEC", "60000000")
+    monkeypatch.setenv("WB_WATCHDOG_ENABLED", "0")
+    monkeypatch.setattr(app_init, "_HEALTH_HEARTBEAT_THREAD", None)
+    monkeypatch.setattr(app_init.threading, "Thread", MagicMock(return_value=fake_thread))
+
+    assert app_init._start_health_bound_heartbeat() is True
+    fake_thread.start.assert_called_once_with()
+
+
+def test_example_environment_documents_each_supported_http_exposure_mode():
+    example = (Path(__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
+
+    assert "WB_HTTP_BIND_HOST=127.0.0.1" in example
+    assert "WB_HTTP_TLS_CERTFILE=" in example
+    assert "WB_HTTP_TLS_KEYFILE=" in example
+    assert "WB_HTTP_ALLOW_INSECURE_EXTERNAL=1" in example
+    assert "WB_HTTP_TRUSTED_PROXY_HOPS=1" in example
+    assert "WB_HTTP_PROBE_CA_FILE=" in example
+    assert "WB_HTTP_PROBE_INSECURE_TLS=1" in example

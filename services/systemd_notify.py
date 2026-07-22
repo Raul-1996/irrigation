@@ -23,6 +23,19 @@ _HEARTBEAT_STOP = threading.Event()
 _WATCHDOG_INTERVAL_SEC = 20  # WatchdogSec=60 in unit => send every 20s = 3x safety margin.
 
 
+def watchdog_is_armed() -> bool:
+    """Return whether systemd requires heartbeats from this process."""
+    raw = os.environ.get("WATCHDOG_USEC")
+    if raw is None:
+        return False
+    try:
+        return int(raw) > 0
+    except (TypeError, ValueError):
+        # A malformed inherited value is safer to treat as armed: silently
+        # disabling heartbeats under WatchdogSec creates a guaranteed restart.
+        return True
+
+
 def _notify(message: str) -> bool:
     addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
@@ -67,9 +80,12 @@ def _heartbeat_loop():
 
 def start_heartbeat() -> None:
     global _HEARTBEAT_THREAD
-    if os.environ.get("WB_WATCHDOG_ENABLED", "1") != "1":
+    disabled = os.environ.get("WB_WATCHDOG_ENABLED", "1") != "1"
+    if disabled and not watchdog_is_armed():
         logger.info("sd_notify heartbeat disabled via WB_WATCHDOG_ENABLED=0")
         return
+    if disabled:
+        logger.critical("WB_WATCHDOG_ENABLED=0 ignored because systemd WATCHDOG_USEC is armed")
     if _HEARTBEAT_THREAD is not None and _HEARTBEAT_THREAD.is_alive():
         return
     _HEARTBEAT_STOP.clear()

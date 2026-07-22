@@ -204,6 +204,27 @@ class TestRedact:
         assert _redact(None) is None
 
 
+def test_audit_ip_uses_proxy_normalized_remote_addr_not_spoofed_leftmost_xff():
+    from flask import Flask, jsonify, request
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    from services.audit import _resolve_ip
+
+    flask_app = Flask(__name__)
+    flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1)
+
+    @flask_app.post("/audit-ip")
+    def audit_ip():
+        return jsonify({"ip": _resolve_ip(request)})
+
+    response = flask_app.test_client().post(
+        "/audit-ip",
+        headers={"X-Forwarded-For": "198.51.100.66, 203.0.113.9"},
+    )
+
+    assert response.get_json() == {"ip": "203.0.113.9"}
+
+
 # --------------------------------------------------------------------------- #
 # record_audit helper                                                          #
 # --------------------------------------------------------------------------- #
