@@ -654,7 +654,11 @@ def test_new_stop_resets_stale_off_and_preserves_activation_until_fresh_echo(tes
             "watering_start_time": activation,
         },
     )
-    test_db.update_zone_versioned(zone["id"], {"command_id": activation_id})
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": activation_id},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
 
     def publish(_server, _topic, value, **_kwargs):
         during = test_db.get_zone(zone["id"])
@@ -799,7 +803,11 @@ def test_delayed_fresh_off_cannot_disarm_newer_commanded_on_activation(test_db):
             "watering_start_time": "2026-07-19 12:07:00",
         },
     )
-    test_db.update_zone_versioned(zone["id"], {"command_id": activation})
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": activation},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
     scheduler = MagicMock()
     with (
         patch.object(sse_hub, "_db", test_db),
@@ -836,7 +844,11 @@ def test_sse_fresh_off_snapshot_apply_aba_is_noop_for_new_activation(test_db):
             "watering_start_time": "2026-07-19 12:09:00",
         },
     )
-    test_db.update_zone_versioned(zone["id"], {"command_id": old_token})
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": old_token},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
     initial_read = threading.Event()
     release_initial_read = threading.Event()
     reads = 0
@@ -879,7 +891,11 @@ def test_sse_fresh_off_snapshot_apply_aba_is_noop_for_new_activation(test_db):
                     "watering_start_time": "2026-07-19 12:10:00",
                 },
             )
-            test_db.update_zone_versioned(zone["id"], {"command_id": new_token})
+            test_db.update_zone_versioned(
+                zone["id"],
+                {"command_id": new_token},
+                expected_version=test_db.get_zone(zone["id"])["version"],
+            )
         release_initial_read.set()
         worker.join(timeout=2)
 
@@ -911,7 +927,11 @@ def test_queued_old_off_received_before_new_activation_cannot_complete_new_stop(
             "watering_start_time": "2026-07-19 12:11:00",
         },
     )
-    test_db.update_zone_versioned(zone["id"], {"command_id": new_token})
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": new_token},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
     observed_state.state_verifier.register_command(zone["id"], "off")
     test_db.update_zone(zone["id"], {"state": "stopping", "commanded_state": "off"})
 
@@ -956,7 +976,11 @@ def test_off_received_before_fault_invalidation_still_completes_current_stop(tes
             "watering_start_time": "2026-07-19 12:12:00",
         },
     )
-    test_db.update_zone_versioned(zone["id"], {"command_id": command_id})
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": command_id},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
     verifier = observed_state.StateVerifier()
     verifier._db = test_db
     scheduler = MagicMock()
@@ -1475,7 +1499,11 @@ def test_consecutive_activations_never_reuse_durable_command_id(test_db):
     ):
         assert zone_control.exclusive_start_zone(zone["id"]) is True
         test_db.update_zone(zone["id"], {"state": "off", "observed_state": "off", "watering_start_time": None})
-        test_db.update_zone_versioned(zone["id"], {"command_id": None})
+        test_db.update_zone_versioned(
+            zone["id"],
+            {"command_id": None},
+            expected_version=test_db.get_zone(zone["id"])["version"],
+        )
         assert zone_control.exclusive_start_zone(zone["id"]) is True
 
     assert len(tokens) == 2
@@ -2231,7 +2259,11 @@ def test_verifier_cancels_cap_after_fresh_physical_off(test_db):
             "watering_start_time": "2026-07-19 12:30:00",
         },
     )
-    test_db.update_zone_versioned(zone["id"], {"command_id": "b" * 32})
+    test_db.update_zone_versioned(
+        zone["id"],
+        {"command_id": "b" * 32},
+        expected_version=test_db.get_zone(zone["id"])["version"],
+    )
     scheduler = MagicMock()
     verifier = StateVerifier()
     verifier._db = test_db

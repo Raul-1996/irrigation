@@ -70,7 +70,10 @@ class TestZoneTopologyMutationSafety:
         target = _group(app, "Virtual target")
         zone = _zone(app, source["id"], server_id=None, topic="")
 
-        moved = admin_client.put(f"/api/zones/{zone['id']}", json={"group_id": target["id"]})
+        moved = admin_client.put(
+            f"/api/zones/{zone['id']}",
+            json={"group_id": target["id"], "expected_version": zone["version"]},
+        )
         deleted = admin_client.delete(f"/api/zones/{zone['id']}")
 
         assert moved.status_code == 200
@@ -92,7 +95,9 @@ class TestZoneTopologyMutationSafety:
         app.db.update_zone(zone["id"], {"state": "on", "commanded_state": "on", "observed_state": "on"})
         before = app.db.get_zone(zone["id"])
 
-        response = admin_client.put(f"/api/zones/{zone['id']}", json=change)
+        response = admin_client.put(
+            f"/api/zones/{zone['id']}", json={**change, "expected_version": zone["version"]}
+        )
 
         assert response.status_code == 409
         assert app.db.get_zone(zone["id"])[field] == before[field]
@@ -125,7 +130,10 @@ class TestZoneTopologyMutationSafety:
         zone = _zone(app, group["id"], server["id"])
         app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
 
-        response = admin_client.put(f"/api/zones/{zone['id']}", json={"topic": "/zone/new"})
+        response = admin_client.put(
+            f"/api/zones/{zone['id']}",
+            json={"topic": "/zone/new", "expected_version": zone["version"]},
+        )
 
         assert response.status_code == 200
         assert app.db.get_zone(zone["id"])["topic"] == "/zone/new"
@@ -153,7 +161,10 @@ class TestZoneTopologyMutationSafety:
         group = _group(app)
         zone = _zone(app, group["id"])
 
-        response = admin_client.put(f"/api/zones/{zone['id']}", json={"group_id": 424242})
+        response = admin_client.put(
+            f"/api/zones/{zone['id']}",
+            json={"group_id": 424242, "expected_version": zone["version"]},
+        )
 
         assert response.status_code == 400
         assert app.db.get_zone(zone["id"])["group_id"] == group["id"]
@@ -162,7 +173,10 @@ class TestZoneTopologyMutationSafety:
         group = _group(app)
         zone = _zone(app, group["id"])
 
-        response = admin_client.put(f"/api/zones/{zone['id']}", json={"mqtt_server_id": 424242})
+        response = admin_client.put(
+            f"/api/zones/{zone['id']}",
+            json={"mqtt_server_id": 424242, "expected_version": zone["version"]},
+        )
 
         assert response.status_code == 400
         assert app.db.get_zone(zone["id"])["mqtt_server_id"] is None
@@ -192,7 +206,7 @@ class TestZoneTopologyMutationSafety:
             if method == "update":
                 response = admin_client.put(
                     f"/api/zones/{zone['id']}",
-                    json={"group_id": target["id"]},
+                    json={"group_id": target["id"], "expected_version": zone["version"]},
                 )
             else:
                 response = admin_client.delete(f"/api/zones/{zone['id']}")

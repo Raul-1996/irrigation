@@ -148,7 +148,14 @@ class TestZoneCRUDWorkflow:
             # Update
             resp = admin_client.put(
                 f"/api/zones/{zone_id}",
-                data=json.dumps({"name": "Updated Z", "duration": 20, "icon": "🌊"}),
+                data=json.dumps(
+                    {
+                        "name": "Updated Z",
+                        "duration": 20,
+                        "icon": "🌊",
+                        "expected_version": resp.get_json()["version"],
+                    }
+                ),
                 content_type="application/json",
             )
             assert resp.status_code == 200

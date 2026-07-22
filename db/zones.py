@@ -27,6 +27,34 @@ _ALLOWED_UPDATE_COLUMNS = frozenset(
     }
 )
 
+_VERSIONED_UPDATE_KEYS = frozenset(
+    {
+        "name",
+        "icon",
+        "duration",
+        "group_id",
+        "group",
+        "topic",
+        "state",
+        "postpone_until",
+        "postpone_reason",
+        "photo_path",
+        "watering_start_time",
+        "scheduled_start_time",
+        "last_avg_flow_lpm",
+        "last_total_liters",
+        "mqtt_server_id",
+        "planned_end_time",
+        "watering_start_source",
+        "commanded_state",
+        "observed_state",
+        "fault_count",
+        "last_fault",
+        "command_id",
+        "sequence_id",
+    }
+)
+
 
 class ZoneRepository(BaseRepository):
     """Repository for zone CRUD, bulk operations, and zone_runs."""
@@ -110,6 +138,32 @@ class ZoneRepository(BaseRepository):
         # parameter, and not user-controllable.
         fields.append("updated_at = CURRENT_TIMESTAMP")
         return fields, params
+
+    @staticmethod
+    def _unlink_zone_from_programs_for_group_999(
+        conn: sqlite3.Connection,
+        zone_id: int,
+        zone_data: dict[str, Any],
+    ) -> None:
+        """Preserve the established group-999 exclusion in every update path."""
+
+        if "group_id" not in zone_data and "group" not in zone_data:
+            return
+        if int(zone_data.get("group_id", zone_data.get("group"))) != 999:
+            return
+        cursor = conn.execute("SELECT id, zones FROM programs")
+        for row in cursor.fetchall():
+            try:
+                zones_list = json.loads(row[1])
+            except (json.JSONDecodeError, TypeError) as error:
+                logger.debug("zones list parse in program %s: %s", row[0], error)
+                continue
+            if zone_id not in zones_list:
+                continue
+            conn.execute(
+                "UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (json.dumps([item for item in zones_list if item != zone_id]), row[0]),
+            )
 
     def get_zones(self) -> list[dict[str, Any]]:
         """Получить все зоны.
@@ -276,24 +330,7 @@ class ZoneRepository(BaseRepository):
                 """
                 conn.execute(sql, params)
 
-                # Если зону переводят в группу 999 — исключаем из всех программ
-                target_group_id = None
-                if "group_id" in zone_data or "group" in zone_data:
-                    target_group_id = int(zone_data.get("group_id", zone_data.get("group")))
-                if target_group_id == 999:
-                    cursor = conn.execute("SELECT id, zones FROM programs")
-                    for row in cursor.fetchall():
-                        try:
-                            zones_list = json.loads(row[1])
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.debug("zones list parse in program %s: %s", row[0], e)
-                            continue
-                        if zone_id in zones_list:
-                            zones_list = [z for z in zones_list if z != zone_id]
-                            conn.execute(
-                                "UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (json.dumps(zones_list), row[0]),
-                            )
+                self._unlink_zone_from_programs_for_group_999(conn, zone_id, zone_data)
 
                 conn.commit()
                 return self.get_zone(zone_id)
@@ -305,53 +342,57 @@ class ZoneRepository(BaseRepository):
             return None
 
     @retry_on_busy()
-    def update_zone_versioned(self, zone_id: int, updates: dict[str, Any]) -> tuple:
-        """Обновить зону с инкрементом version (optimistic lock).
+    def update_zone_versioned(
+        self,
+        zone_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_version: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Compare-and-swap a zone against a caller-owned version.
 
-        Returns tuple ``(ok: bool, prev_zone: dict | None)`` where ``prev_zone``
-        is the row snapshot **before** the update was applied (None if the row
-        didn't exist).  The pre-read and the UPDATE happen in a single
-        ``BEGIN IMMEDIATE`` transaction so callers (services.zones_state.
-        update_zone_state) can compare prev/new state atomically without a
-        TOCTOU race against concurrent writers — important for emitting
-        ``zone_state_change`` audit rows that always reflect the actual
-        transition.
-
-        Backwards-compat: legacy callers that did ``ok = update_zone_versioned(...)``
-        relied on the bool return value.  Tuples are truthy when ok=True, so
-        a plain ``if update_zone_versioned(...):`` still works, but
-        ``ok = update_zone_versioned(...)`` will now bind ``ok`` to the tuple
-        — those few sites have been updated alongside this change.
+        ``expected_version`` must come from the caller's earlier read.  On a
+        stale version the method returns ``(False, current_zone)`` and performs
+        no write.  On success it returns ``(True, previous_zone)``.  A missing
+        row returns ``(False, None)``.
         """
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
+            raise ValueError("expected_version must be a non-negative integer")
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("updates must be a non-empty object")
+        unsupported = sorted(set(updates) - _VERSIONED_UPDATE_KEYS)
+        if unsupported:
+            raise ValueError(f"unsupported zone update fields: {unsupported}")
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                # BEGIN IMMEDIATE → take a write lock right away so the
-                # pre-read snapshot is consistent with the row we then UPDATE.
-                # Without this, two concurrent versioned updates can both
-                # observe the same prev_state and emit duplicate / wrong
-                # zone_state_change audit rows.
                 conn.execute("BEGIN IMMEDIATE")
                 cur = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,))
                 row = cur.fetchone()
                 if not row:
-                    conn.commit()
+                    conn.rollback()
                     return (False, None)
                 prev_zone = dict(row)
-                old_version = int(prev_zone.get("version") or 0)
-                fields = []
-                params = []
-                for k, v in updates.items():
-                    fields.append(f"{k} = ?")
-                    params.append(v)
+                current_version = int(prev_zone.get("version") or 0)
+                if current_version != expected_version:
+                    conn.rollback()
+                    return (False, prev_zone)
+
+                fields, params = self._build_zone_update_fields(updates, updates)
                 fields.append("version = version + 1")
-                params.extend([zone_id, old_version])
-                sql = (
-                    f"UPDATE zones SET {', '.join(fields)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?"
-                )
+                params.extend([zone_id, expected_version])
+                sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ? AND version = ?"
                 cur2 = conn.execute(sql, params)
+                if cur2.rowcount != 1:
+                    conn.rollback()
+                    current = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,)).fetchone()
+                    return (False, dict(current) if current is not None else None)
+                self._unlink_zone_from_programs_for_group_999(conn, zone_id, updates)
                 conn.commit()
-                return (cur2.rowcount == 1, prev_zone)
+                return (True, prev_zone)
+        except (TypeError, ValueError) as error:
+            logger.warning("Некорректные данные versioned-обновления зоны %s: %s", zone_id, error)
+            return (False, None)
         except sqlite3.Error as e:
             logger.error("Ошибка versioned-обновления зоны %s: %s", zone_id, e)
             return (False, None)

@@ -159,8 +159,11 @@ def _isolated_hub(monkeypatch):
     monkeypatch.setattr(sse_hub, "_publish_mqtt_value_fn", MagicMock(return_value=True))
     monkeypatch.setattr(sse_hub, "_get_scheduler_fn", lambda: None)
     monkeypatch.setattr(
-        "services.zones_state.update_zone_state",
-        lambda zone_id, updates, *, audit_reason, db: db.update_zone(zone_id, updates),
+        "services.zones_state.update_zone_state_internal",
+        lambda zone_id, updates, *, snapshot, audit_reason, db: (
+            bool(db.update_zone(zone_id, updates)),
+            snapshot,
+        ),
     )
     yield
     # Let any short-lived asynchronous rebuild finish before monkeypatch restores

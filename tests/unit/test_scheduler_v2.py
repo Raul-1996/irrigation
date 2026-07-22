@@ -463,26 +463,22 @@ class TestEnabledField:
 
 
 class TestSmartTypeWeatherAdjustment:
-    """Tests for type='smart' with enhanced weather correction."""
+    """Smart has no proven semantics and must not alias time-based."""
 
     def test_smart_type_weather_adjustment(self, test_scheduler):
-        """Программа с type='smart' применяет расширенную погодокоррекцию."""
+        """Программа с type='smart' отклоняется без scheduler jobs."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
             {"name": "Smart Program", "time": "06:00", "type": "smart", "days": [0], "zones": [1], "enabled": 1}
         )
 
-        # Планируем (проверяем что не падает)
-        test_scheduler.schedule_program(prog["id"], prog)
+        assert test_scheduler.schedule_program(prog["id"], prog) is False
 
         jobs = test_scheduler.scheduler.get_jobs()
         prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
-
-        # TODO: проверить что при запуске используется smart weather adjustment
-        # Это требует мока weather_adjustment и проверки вызова adjust_duration
+        assert prog_jobs == []
 
     def test_time_based_uses_standard_weather(self, test_scheduler):
         """Программа с type='time-based' использует стандартную погодокоррекцию."""
@@ -520,7 +516,7 @@ class TestSchedulerIntegration:
                 "name": "Full v2 Program",
                 "time": "06:00",
                 "extra_times": ["18:00"],
-                "type": "smart",
+                "type": "time-based",
                 "schedule_type": "interval",
                 "interval_days": 2,
                 "color": "#9c27b0",

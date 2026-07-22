@@ -77,13 +77,15 @@ class TestVersionedUpdate:
     def test_versioned_update(self, test_db):
         zone = test_db.create_zone({"name": "V", "duration": 5, "group_id": 1})
         # Returns (ok: bool, prev_zone: dict | None) since AUDIT-LOGGING-EXPANSION.
-        ok, prev = test_db.update_zone_versioned(zone["id"], {"state": "on"})
+        ok, prev = test_db.update_zone_versioned(
+            zone["id"], {"state": "on"}, expected_version=zone["version"]
+        )
         assert isinstance(ok, bool)
         assert isinstance(prev, dict)
         assert prev["state"] != "on"  # snapshot was taken BEFORE the update
 
     def test_versioned_update_not_found(self, test_db):
-        ok, prev = test_db.update_zone_versioned(9999, {"state": "on"})
+        ok, prev = test_db.update_zone_versioned(9999, {"state": "on"}, expected_version=0)
         assert ok is False
         assert prev is None
 

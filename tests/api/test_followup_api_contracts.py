@@ -67,7 +67,9 @@ class TestZoneCrudOwnership:
         if method == "create":
             response = admin_client.post("/api/zones", json={"name": "New", **payload})
         elif method == "update":
-            response = admin_client.put(f"/api/zones/{zone['id']}", json=payload)
+            response = admin_client.put(
+                f"/api/zones/{zone['id']}", json={**payload, "expected_version": zone["version"]}
+            )
         else:
             response = admin_client.post(
                 "/api/zones/import",
@@ -112,7 +114,9 @@ class TestZoneCrudOwnership:
         if method == "create":
             response = admin_client.post("/api/zones", json={"name": "Must not exist", **payload})
         elif method == "update":
-            response = admin_client.put(f"/api/zones/{zone['id']}", json=payload)
+            response = admin_client.put(
+                f"/api/zones/{zone['id']}", json={**payload, "expected_version": zone["version"]}
+            )
         else:
             response = admin_client.post(
                 "/api/zones/import",
@@ -134,7 +138,10 @@ class TestZoneCrudOwnership:
         if method == "create":
             response = admin_client.post("/api/zones", json={"name": "Must not exist", **payload})
         elif method == "update":
-            response = admin_client.put(f"/api/zones/{zone['id']}", json={"name": "Must not commit", **payload})
+            response = admin_client.put(
+                f"/api/zones/{zone['id']}",
+                json={"name": "Must not commit", **payload, "expected_version": zone["version"]},
+            )
         else:
             headers = {"X-Import-Op": "csv"} if method == "csv" else None
             response = admin_client.post(
@@ -170,7 +177,9 @@ class TestZoneCrudOwnership:
         if method == "create":
             response = admin_client.post("/api/zones", json={"name": "Must not exist", **mutation})
         elif method == "update":
-            response = admin_client.put(f"/api/zones/{zone['id']}", json=mutation)
+            response = admin_client.put(
+                f"/api/zones/{zone['id']}", json={**mutation, "expected_version": zone["version"]}
+            )
         else:
             headers = {"X-Import-Op": "csv"} if method == "csv" else None
             response = admin_client.post(

@@ -325,17 +325,23 @@ def _schedule_counter_off_safety(zone_id: int, activation_token: str) -> None:
         logger.exception("sse_hub: schedule counter-OFF safety failed zone=%s", zone_id)
 
 
-def _audited_zone_update(zone_id: int, updates: dict) -> None:
+def _audited_zone_update(zone_id: int, updates: dict, *, snapshot: dict) -> bool:
     try:
-        from services.zones_state import update_zone_state
+        from services.zones_state import update_zone_state_internal
 
-        update_zone_state(int(zone_id), updates, audit_reason="mqtt_observed_change", db=_db)
-    except (sqlite3.Error, OSError, ImportError):
-        logger.exception(
-            "sse_hub: audited mqtt_observed_change failed zone=%s — doing raw update_zone",
-            zone_id,
+        applied, _current = update_zone_state_internal(
+            int(zone_id),
+            updates,
+            snapshot=snapshot,
+            audit_reason="mqtt_observed_change",
+            db=_db,
         )
-        _db.update_zone(int(zone_id), updates)
+        if not applied:
+            logger.warning("sse_hub: mqtt observed-state CAS conflicted zone=%s", zone_id)
+        return applied
+    except (sqlite3.Error, OSError, ImportError):
+        logger.exception("sse_hub: audited mqtt_observed_change CAS failed zone=%s", zone_id)
+        return False
 
 
 def _finish_observed_run(zone_id: int) -> None:
@@ -514,7 +520,7 @@ def _process_mqtt_message(
                     # Physical evidence for a still-commanded ON is retained,
                     # but cannot complete or disarm that activation.
                     updates = {"observed_state": "off"}
-                _audited_zone_update(zid, updates)
+                _audited_zone_update(zid, updates, snapshot=current)
             broadcast(
                 json.dumps(
                     {
@@ -545,9 +551,9 @@ def _process_mqtt_message(
                     "command_id": activation_token,
                 }
             )
-            _audited_zone_update(zid, updates)
-            persisted = True
-            _schedule_counter_off_safety(zid, activation_token)
+            persisted = _audited_zone_update(zid, updates, snapshot=zone)
+            if persisted:
+                _schedule_counter_off_safety(zid, activation_token)
         elif relay_high:
             # Application commands are published only to ``<topic>/on`` and
             # rejected by ``_incoming_report_topic``. A live base-topic event
@@ -567,9 +573,10 @@ def _process_mqtt_message(
                     updates["planned_end_time"] = (now + timedelta(minutes=duration)).strftime("%Y-%m-%d %H:%M:%S")
                     # The scheduler captures this token when jobs are planted.
                     # Make the activation durable before any callback exists.
-                    _audited_zone_update(zid, updates)
-                    persisted = True
+                    persisted = _audited_zone_update(zid, updates, snapshot=zone)
                     try:
+                        if not persisted:
+                            continue
                         scheduler = _get_scheduler_fn()
                         if scheduler:
                             scheduler.cancel_zone_jobs(zid)
@@ -597,7 +604,7 @@ def _process_mqtt_message(
             # In particular they never cancel or reset override/hard-stop jobs.
         if not persisted:
             try:
-                _audited_zone_update(zid, updates)
+                _audited_zone_update(zid, updates, snapshot=zone)
             except (sqlite3.Error, OSError) as e:
                 logger.debug("sse_hub: zone update failed zone=%s: %s", zid, e)
 

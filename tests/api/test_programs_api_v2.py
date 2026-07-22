@@ -19,9 +19,9 @@ class TestCreateProgramWithNewFields:
             "/api/programs",
             data=json.dumps(
                 {
-                    "name": "Smart Program",
+                    "name": "Time Program",
                     "time": "06:00",
-                    "type": "smart",
+                    "type": "time-based",
                     "schedule_type": "weekdays",
                     "days": [0, 2, 4],
                     "zones": [1],
@@ -34,8 +34,8 @@ class TestCreateProgramWithNewFields:
 
         assert resp.status_code == 201
         data = resp.get_json()
-        assert data["name"] == "Smart Program"
-        assert data["type"] == "smart"
+        assert data["name"] == "Time Program"
+        assert data["type"] == "time-based"
         assert data["schedule_type"] == "weekdays"
         assert data["color"] == "#66bb6a"
         assert data["enabled"] == 1
@@ -191,7 +191,7 @@ class TestUpdateProgramWithNewFields:
                 {
                     "name": "Updated",
                     "time": "07:00",
-                    "type": "smart",
+                    "type": "time-based",
                     "schedule_type": "interval",
                     "interval_days": 2,
                     "color": "#ffa726",
@@ -206,7 +206,7 @@ class TestUpdateProgramWithNewFields:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["name"] == "Updated"
-        assert data["type"] == "smart"
+        assert data["type"] == "time-based"
         assert data["schedule_type"] == "interval"
         assert data["interval_days"] == 2
         assert data["color"] == "#ffa726"
@@ -249,7 +249,7 @@ class TestGetProgramsReturnsNewFields:
             {
                 "name": "v2 Program",
                 "time": "06:00",
-                "type": "smart",
+                "type": "time-based",
                 "schedule_type": "interval",
                 "interval_days": 3,
                 "color": "#9c27b0",
@@ -360,7 +360,7 @@ class TestDuplicateProgram:
             {
                 "name": "Original",
                 "time": "06:00",
-                "type": "smart",
+                "type": "time-based",
                 "schedule_type": "interval",
                 "interval_days": 3,
                 "color": "#9c27b0",
@@ -409,11 +409,10 @@ class TestProgramLog:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/log")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 501
         data = resp.get_json()
-        assert "success" in data
-        assert "log" in data
-        assert isinstance(data["log"], list)
+        assert data["success"] is False
+        assert data["error_code"] == "PROGRAM_RUN_IDENTITY_UNAVAILABLE"
 
     def test_get_program_log_with_period_filter(self, admin_client, app):
         """GET /api/programs/<id>/log?period=week фильтрует по периоду."""
@@ -422,9 +421,8 @@ class TestProgramLog:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/log?period=week")
 
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "log" in data
+        assert resp.status_code == 501
+        assert resp.get_json()["capability"] == "program_log"
 
     def test_get_program_log_with_limit(self, admin_client, app):
         """GET /api/programs/<id>/log?limit=10 ограничивает количество записей."""
@@ -433,12 +431,9 @@ class TestProgramLog:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/log?limit=10")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 501
         data = resp.get_json()
-        assert "log" in data
-        # Если есть записи, проверяем что не больше 10
-        if len(data["log"]) > 0:
-            assert len(data["log"]) <= 10
+        assert data["supported"] is False
 
 
 class TestProgramStats:
@@ -451,17 +446,11 @@ class TestProgramStats:
 
         resp = admin_client.get(f"/api/programs/{prog['id']}/stats")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 501
         data = resp.get_json()
-        assert "success" in data
-        assert "stats" in data
-
-        stats = data["stats"]
-        assert "total_runs" in stats
-        assert "total_water_calc" in stats
-        assert "total_water_fact" in stats
-        assert "avg_duration_min" in stats
-        assert isinstance(stats["total_runs"], int)
+        assert data["success"] is False
+        assert data["capability"] == "program_stats"
+        assert data["error_code"] == "PROGRAM_RUN_IDENTITY_UNAVAILABLE"
 
     def test_get_program_stats_not_found(self, admin_client):
         """GET /api/programs/<id>/stats для несуществующей программы → 404."""

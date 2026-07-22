@@ -6,7 +6,6 @@ import shutil
 import sqlite3
 import tempfile
 from contextlib import closing
-from datetime import UTC
 from urllib.parse import quote
 
 from db.identity import DURABLE_ENTITIES, MAX_ENTITY_ID, parse_explicit_entity_id
@@ -1166,35 +1165,43 @@ class MigrationRunner:
             raise
 
     def rollback_migration(self, name: str) -> bool:
-        """Rollback (downgrade) a single named migration.
+        """Refuse in-place downgrade; recovery requires a known-good backup."""
+        preview = self.preview_rollback_migration(name)
+        logger.error(
+            "Live migration downgrade refused migration=%s known=%s applied=%s; %s",
+            name,
+            preview["known"],
+            preview["applied"],
+            preview["recovery"],
+        )
+        return False
 
-        Returns True if rollback succeeded, False otherwise.
-        The migration must be in the DOWNGRADE_REGISTRY and must have been applied.
-        """
-        method_name = self.DOWNGRADE_REGISTRY.get(name)
-        if method_name is None:
-            logger.error("Миграция %s не поддерживает downgrade", name)
-            return False
-        down_func = getattr(self, method_name, None)
-        if down_func is None:
-            logger.error("Метод %s не найден для миграции %s", method_name, name)
-            return False
+    def preview_rollback_migration(self, name: str) -> dict[str, object]:
+        """Describe downgrade state without opening the database for writes."""
+        known = name in self.DOWNGRADE_REGISTRY
+        applied = False
+        uri = f"file:{quote(os.path.abspath(self.db_path))}?mode=ro"
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
-                conn.execute("PRAGMA foreign_keys=OFF")
-                cur = conn.execute("SELECT name FROM migrations WHERE name = ? LIMIT 1", (name,))
-                if cur.fetchone() is None:
-                    logger.warning("Миграция %s не была применена, пропуск rollback", name)
-                    return False
-                down_func(conn)
-                conn.execute("DELETE FROM migrations WHERE name = ?", (name,))
-                conn.execute("PRAGMA foreign_keys=ON")
-                conn.commit()
-                logger.info("Миграция %s откачена успешно", name)
-                return True
-        except sqlite3.Error as e:
-            logger.error("Ошибка отката миграции %s: %s", name, e)
-            return False
+            with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+                table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'migrations'"
+                ).fetchone()
+                if table is not None:
+                    applied = (
+                        conn.execute("SELECT 1 FROM migrations WHERE name = ? LIMIT 1", (name,)).fetchone()
+                        is not None
+                    )
+        except sqlite3.Error:
+            logger.exception("Migration downgrade preview failed migration=%s", name)
+        return {
+            "migration": name,
+            "known": known,
+            "applied": applied,
+            "supported": False,
+            "would_mutate": False,
+            "error_code": "LIVE_DOWNGRADE_UNSUPPORTED",
+            "recovery": "restore a pre-upgrade database backup",
+        }
 
     @staticmethod
     def _recreate_table_without_columns(conn, table: str, drop_columns: list):
@@ -2797,9 +2804,8 @@ class MigrationRunner:
           - 'program' — opened by the scheduler (irrigation_scheduler)
           - 'manual'  — opened via the UI/API (services.zone_control)
 
-        NULL is allowed for rows written before this migration; the follow-up
-        backfill migration ``zone_runs_backfill_source`` fills them in by
-        matching start_utc against the active programs' schedules.
+        NULL is preserved for rows written before this migration.  A schedule
+        timestamp cannot prove which program (or manual action) owned a run.
         """
         if self._add_column_if_missing(conn, "zone_runs", "source", "TEXT"):
             logger.info("Добавлено поле source в таблицу zone_runs")
@@ -2826,162 +2832,38 @@ class MigrationRunner:
         conn.commit()
 
     def _backfill_zone_runs_source(self, conn):
-        """Issue #35: backfill source on pre-existing zone_runs.
-
-        Algorithm (decisions Q3=a):
-          For each row with source IS NULL:
-            - parse start_utc (ISO 8601, possibly with trailing 'Z')
-            - convert to local time-of-day (HH:MM:SS) and weekday/day-of-month
-            - look up active programs that include the run's zone
-            - if any program's scheduled time on that calendar day is within
-              ±120 seconds of start_utc, mark as 'program', else 'manual'
-
-        Only enabled programs that contain the zone are considered. Programs
-        that were deleted/disabled after the run will produce a false-positive
-        'manual' — accepted per decisions Q3.
-        """
-        # Guard: zone_runs may be absent on very old/odd DBs.
-        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='zone_runs'")
-        if cur.fetchone() is None:
-            logger.info("zone_runs_backfill_source: zone_runs absent, skip")
-            return
-        # Pull NULL rows.
-        cur = conn.execute("SELECT id, zone_id, start_utc FROM zone_runs WHERE source IS NULL")
-        null_rows = cur.fetchall()
-        if not null_rows:
-            logger.info("zone_runs_backfill_source: nothing to backfill")
-            return
-        # Load programs (raw, since we run inside migration before
-        # repositories are guaranteed wired). Treat 'enabled' missing as 1.
-        cur = conn.execute("PRAGMA table_info(programs)")
-        prog_cols = {row[1] for row in cur.fetchall()}
-        has_enabled = "enabled" in prog_cols
-        has_extra = "extra_times" in prog_cols
-        has_sched_type = "schedule_type" in prog_cols
-        has_iv_days = "interval_days" in prog_cols
-        has_eo = "even_odd" in prog_cols
-        select_cols = ["id", "time", "days", "zones"]
-        if has_enabled:
-            select_cols.append("enabled")
-        if has_extra:
-            select_cols.append("extra_times")
-        if has_sched_type:
-            select_cols.append("schedule_type")
-        if has_iv_days:
-            select_cols.append("interval_days")
-        if has_eo:
-            select_cols.append("even_odd")
-        cur = conn.execute(f"SELECT {', '.join(select_cols)} FROM programs")
-        programs = []
-        for row in cur.fetchall():
-            rec = dict(zip(select_cols, row))
-            if has_enabled and int(rec.get("enabled") or 0) == 0:
-                continue
-            try:
-                rec_zones = set(int(z) for z in json.loads(rec.get("zones") or "[]"))
-            except (ValueError, TypeError):
-                rec_zones = set()
-            if not rec_zones:
-                continue
-            try:
-                rec_days = [int(d) for d in json.loads(rec.get("days") or "[]")]
-            except (ValueError, TypeError):
-                rec_days = []
-            times = [rec.get("time")] if rec.get("time") else []
-            if has_extra:
-                try:
-                    extra = json.loads(rec.get("extra_times") or "[]")
-                    times.extend([t for t in extra if t])
-                except (ValueError, TypeError):
-                    pass
-            programs.append(
-                {
-                    "id": int(rec.get("id") or 0),
-                    "zones": rec_zones,
-                    "days": rec_days,
-                    "times": times,
-                    "schedule_type": rec.get("schedule_type") or "weekdays",
-                    "interval_days": rec.get("interval_days"),
-                    "even_odd": rec.get("even_odd"),
-                }
+        """Leave historical rows unresolved when their execution owner is unknown."""
+        preview = self._zone_runs_source_backfill_preview(conn)
+        if preview["unresolved_rows"]:
+            logger.warning(
+                "zone_runs_backfill_source: %s rows left NULL; historical program identity is unavailable",
+                preview["unresolved_rows"],
             )
 
-        from datetime import datetime
-
-        updated_program = 0
-        updated_manual = 0
-        for run_id, zone_id, start_utc in null_rows:
-            if not start_utc:
-                # No timestamp — default to 'manual' (nothing to match against).
-                conn.execute(
-                    "UPDATE zone_runs SET source = ? WHERE id = ?",
-                    ("manual", run_id),
+    @staticmethod
+    def _zone_runs_source_backfill_preview(conn: sqlite3.Connection) -> dict[str, object]:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zone_runs'"
+        ).fetchone()
+        unresolved_rows = 0
+        if table is not None:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(zone_runs)").fetchall()}
+            if "source" in columns:
+                unresolved_rows = int(
+                    conn.execute("SELECT COUNT(*) FROM zone_runs WHERE source IS NULL").fetchone()[0]
                 )
-                updated_manual += 1
-                continue
-            # Parse start_utc — be tolerant: accept '...Z' or '+00:00'.
-            ts_str = start_utc.replace("Z", "+00:00") if isinstance(start_utc, str) else None
-            try:
-                dt_utc = datetime.fromisoformat(ts_str)
-            except (ValueError, TypeError):
-                conn.execute(
-                    "UPDATE zone_runs SET source = ? WHERE id = ?",
-                    ("manual", run_id),
-                )
-                updated_manual += 1
-                continue
-            # Use the server's local time for comparison: scheduler uses
-            # local time for triggers. astimezone() returns local TZ when
-            # passed no argument (Python 3.6+).
-            if dt_utc.tzinfo is None:
-                dt_utc = dt_utc.replace(tzinfo=UTC)
-            dt_local = dt_utc.astimezone()
-            weekday = dt_local.weekday()  # 0=Mon..6=Sun (matches programs.days)
-            day_of_month = dt_local.day
-            run_seconds = dt_local.hour * 3600 + dt_local.minute * 60 + dt_local.second
+        return {
+            "supported": False,
+            "would_mutate": False,
+            "error_code": "HISTORICAL_SOURCE_IDENTITY_UNAVAILABLE",
+            "unresolved_rows": unresolved_rows,
+        }
 
-            matched = False
-            for prog in programs:
-                if int(zone_id) not in prog["zones"]:
-                    continue
-                # Day-of-schedule check.
-                if prog["schedule_type"] == "weekdays":
-                    if weekday not in prog["days"]:
-                        continue
-                elif prog["schedule_type"] == "even-odd":
-                    is_even = day_of_month % 2 == 0
-                    if prog["even_odd"] == "even" and not is_even:
-                        continue
-                    if prog["even_odd"] == "odd" and is_even:
-                        continue
-                # 'interval' — no reliable anchor for the past, treat as
-                # matching by time only (best-effort).
-                for t_str in prog["times"]:
-                    try:
-                        hh, mm = t_str.split(":")[:2]
-                        prog_sec = int(hh) * 3600 + int(mm) * 60
-                    except (ValueError, AttributeError):
-                        continue
-                    if abs(run_seconds - prog_sec) <= 120:
-                        matched = True
-                        break
-                if matched:
-                    break
-            src = "program" if matched else "manual"
-            conn.execute(
-                "UPDATE zone_runs SET source = ? WHERE id = ?",
-                (src, run_id),
-            )
-            if matched:
-                updated_program += 1
-            else:
-                updated_manual += 1
-        conn.commit()
-        logger.info(
-            "zone_runs_backfill_source: marked %d program, %d manual",
-            updated_program,
-            updated_manual,
-        )
+    def preview_zone_runs_source_backfill(self) -> dict[str, object]:
+        """Count unresolved historical runs through a read-only connection."""
+        uri = f"file:{quote(os.path.abspath(self.db_path))}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+            return self._zone_runs_source_backfill_preview(conn)
 
     def _migrate_create_audit_log(self, conn):
         """Create the audit_log table for principal-critical mutation tracking.
