@@ -248,8 +248,8 @@ def test_finding_114_status_requires_admin_before_loading_credentials(client, ap
     with patch.object(mqtt_api.db, "get_mqtt_server") as get_server:
         response = client.get("/api/mqtt/114/status")
 
-    assert response.status_code == 403
-    assert response.get_json()["error_code"] == "FORBIDDEN"
+    assert response.status_code == 401
+    assert response.get_json()["error_code"] == "UNAUTHENTICATED"
     get_server.assert_not_called()
 
 

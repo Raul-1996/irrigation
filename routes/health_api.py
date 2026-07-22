@@ -4,14 +4,12 @@ Liveness, readiness, and Prometheus metrics for SRE / monitoring.
 
 Endpoint contract:
   * GET /healthz — liveness (200 if Flask event loop is not wedged).
-  * GET /readyz  — readiness (aggregates 5 checks; 200 all-ok / 503 any-fail).
-  * GET /metrics — Prometheus text exposition (dedicated CollectorRegistry).
+  * GET /readyz  — minimal public readiness; detailed checks only for admin.
+  * GET /metrics — admin-only Prometheus exposition.
 
 Design doc: irrigation-audit/design/wave2-observability-design.md §3.
-All three endpoints are GET-only, do not require session auth, and live
-under a dedicated blueprint so they are trivially CSRF-exempt.
-
-Future hardening (Wave 3, MASTER-M5): nginx IP allow-list for /metrics.
+All three endpoints are GET-only and live under a dedicated blueprint so they
+are trivially CSRF-exempt. Only the minimal liveness/readiness result is public.
 """
 
 from __future__ import annotations
@@ -20,11 +18,12 @@ import contextlib
 import logging
 import os
 import platform
+import secrets
 import sqlite3
 import time
 from typing import Any, Callable
 
-from flask import Blueprint, Response, jsonify
+from flask import Blueprint, Response, current_app, jsonify, request, session
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -34,6 +33,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from services.security import admin_required
 from services.version import get_app_version as _get_app_version
 
 logger = logging.getLogger(__name__)
@@ -335,28 +335,68 @@ def _check_mqtt(db) -> dict[str, Any]:
             "duration_ms": int((time.perf_counter() - t0) * 1000),
             "brokers": 0,
         }
+    enabled_servers = []
+    for server in servers:
+        try:
+            if int(server.get("enabled", 1) or 0) == 1:
+                enabled_servers.append(server)
+        except (AttributeError, TypeError, ValueError):
+            enabled_servers.append(server)
+    if not enabled_servers:
+        return {
+            "status": "skipped",
+            "reason": "no enabled brokers configured",
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+            "brokers": 0,
+            "configured": len(servers),
+            "connected": 0,
+            "unavailable": 0,
+        }
     try:
-        from services.mqtt_pub import _MQTT_CLIENTS
+        from services import mqtt_pub
     except ImportError as e:
         return {
             "status": "fail",
             "reason": f"mqtt_pub import: {e}",
             "duration_ms": int((time.perf_counter() - t0) * 1000),
         }
+    try:
+        snapshots = mqtt_pub.snapshot_mqtt_clients()
+    except (AttributeError, RuntimeError, TypeError, ValueError) as e:
+        return {
+            "status": "fail",
+            "reason": f"mqtt client snapshot: {type(e).__name__}",
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+            "brokers": len(enabled_servers),
+            "connected": 0,
+            "unavailable": len(enabled_servers),
+        }
+
     connected = 0
-    for cl in list(_MQTT_CLIENTS.values()):
+    for server in enabled_servers:
         try:
-            if cl is not None and bool(cl.is_connected()):
+            sid = int(server.get("id"))
+            snapshot = snapshots.get(sid)
+            if snapshot is None:
+                continue
+            if snapshot.config_fingerprint != mqtt_pub.mqtt_server_config_fingerprint(server):
+                continue
+            client = snapshot.client
+            if client is not None and bool(client.is_connected()):
                 connected += 1
-        except Exception:
-            pass
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+            continue
+    broker_count = len(enabled_servers)
+    unavailable = broker_count - connected
     dur_ms = int((time.perf_counter() - t0) * 1000)
     return {
-        "status": "ok" if connected >= 1 else "fail",
+        "status": "ok" if unavailable == 0 else "fail",
         "duration_ms": dur_ms,
-        "brokers": len(servers),
+        "brokers": broker_count,
+        "configured": len(servers),
         "connected": connected,
-        "reason": None if connected >= 1 else "no broker client reports is_connected()",
+        "unavailable": unavailable,
+        "reason": None if unavailable == 0 else "one or more enabled brokers are unavailable",
     }
 
 
@@ -395,14 +435,19 @@ def _readiness_checks(db) -> list[tuple[str, Callable[[], dict[str, Any]]]]:
 
 
 @health_api_bp.route("/healthz", methods=["GET"])
-def healthz() -> tuple[dict[str, str], int]:
+def healthz() -> Response:
     """Liveness probe.  200 iff the Flask event loop is alive enough to answer.
 
     Does NOT touch DB / MQTT / scheduler — those failures are handled by
     /readyz.  If this endpoint stops responding, the systemd watchdog (F4)
     will kill the process.
     """
-    return {"status": "ok"}, 200
+    response = jsonify({"status": "ok"})
+    configured_token = str(current_app.config.get("HTTP_STARTUP_PROBE_TOKEN") or "")
+    supplied_token = str(request.headers.get("X-WB-Startup-Probe") or "")
+    if configured_token and supplied_token and secrets.compare_digest(configured_token, supplied_token):
+        response.headers["X-WB-Startup-Probe"] = configured_token
+    return response
 
 
 @health_api_bp.route("/readyz", methods=["GET"])
@@ -433,12 +478,18 @@ def readyz() -> Response:
         "status": "ok" if all_ok else "fail",
         "checks": results,
     }
+    disclose_details = current_app.config.get("TESTING") or (
+        session.get("logged_in") is True and session.get("role") == "admin"
+    )
+    if not disclose_details:
+        payload = {"status": payload["status"]}
     resp = jsonify(payload)
     resp.status_code = 200 if all_ok else 503
     return resp
 
 
 @health_api_bp.route("/metrics", methods=["GET"])
+@admin_required
 def metrics() -> Response:
     """Prometheus text exposition.
 
@@ -446,7 +497,8 @@ def metrics() -> Response:
     MQTT connected) just before rendering so consumers see current state
     without a background thread.
 
-    Wave 2: no auth.  Wave 3 (MASTER-M5): nginx IP allow-list.
+    Requires an authenticated admin session because label values and counts
+    expose operational topology.
     """
     from flask import current_app
 

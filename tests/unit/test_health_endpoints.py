@@ -9,6 +9,7 @@ Covers design doc §3.2 and §3.3 (healthz + readyz behaviours):
 import os
 import sqlite3
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,6 +51,19 @@ def test_healthz_does_not_touch_db(client):
     with patch.object(sqlite3, "connect", side_effect=sqlite3.OperationalError("boom")):
         resp = client.get("/healthz")
     assert resp.status_code == 200
+
+
+def test_healthz_echoes_startup_token_only_to_matching_private_probe(client, app):
+    app.config["HTTP_STARTUP_PROBE_TOKEN"] = "current-process-token"
+
+    public = client.get("/healthz")
+    stale = client.get("/healthz", headers={"X-WB-Startup-Probe": "old-process-token"})
+    matching = client.get("/healthz", headers={"X-WB-Startup-Probe": "current-process-token"})
+
+    assert public.get_json() == {"status": "ok"}
+    assert "X-WB-Startup-Probe" not in public.headers
+    assert "X-WB-Startup-Probe" not in stale.headers
+    assert matching.headers["X-WB-Startup-Probe"] == "current-process-token"
 
 
 # ── /readyz ────────────────────────────────────────────────────────────────
@@ -215,6 +229,29 @@ def test_readyz_mqtt_skipped_does_not_fail(client, health_api):
     assert data["checks"]["mqtt"]["status"] == "skipped"
 
 
+def test_readyz_redacts_check_topology_from_unauthenticated_clients(client, app, health_api):
+    app.config["TESTING"] = False
+    try:
+        with _stub_all_checks_ok(health_api):
+            response = client.get("/readyz")
+    finally:
+        app.config["TESTING"] = True
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
+
+
+def test_metrics_requires_authenticated_admin(client, app):
+    app.config["TESTING"] = False
+    try:
+        response = client.get("/metrics")
+    finally:
+        app.config["TESTING"] = True
+
+    assert response.status_code == 401
+    assert response.get_json()["error_code"] == "UNAUTHENTICATED"
+
+
 # ── Individual check function unit tests (no Flask) ────────────────────────
 
 
@@ -232,3 +269,77 @@ def test_check_disk_space_reports_free_mb(health_api):
     assert result["status"] == "ok"
     assert isinstance(result["free_mb"], int)
     assert result["free_mb"] >= 1
+
+
+def test_check_mqtt_fails_when_only_one_of_two_enabled_brokers_is_connected(health_api, monkeypatch):
+    from services import mqtt_pub
+
+    class ConnectedClient:
+        @staticmethod
+        def is_connected():
+            return True
+
+    db = MagicMock()
+    db.get_mqtt_servers.return_value = [
+        {"id": 11, "host": "broker-a", "port": 1883, "enabled": 1},
+        {"id": 12, "host": "broker-b", "port": 1883, "enabled": 1},
+    ]
+    monkeypatch.setattr(
+        mqtt_pub,
+        "snapshot_mqtt_clients",
+        lambda: {
+            11: SimpleNamespace(
+                client=ConnectedClient(),
+                config_fingerprint="fp:11",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        mqtt_pub,
+        "mqtt_server_config_fingerprint",
+        lambda server: f"fp:{server['id']}",
+    )
+
+    result = health_api._check_mqtt(db)
+
+    assert result["status"] == "fail"
+    assert result["brokers"] == 2
+    assert result["connected"] == 1
+    assert result["unavailable"] == 1
+
+
+def test_check_mqtt_ignores_explicitly_disabled_brokers(health_api, monkeypatch):
+    from services import mqtt_pub
+
+    class ConnectedClient:
+        @staticmethod
+        def is_connected():
+            return True
+
+    db = MagicMock()
+    db.get_mqtt_servers.return_value = [
+        {"id": 21, "host": "broker-a", "port": 1883, "enabled": 1},
+        {"id": 22, "host": "broker-disabled", "port": 1883, "enabled": 0},
+    ]
+    monkeypatch.setattr(
+        mqtt_pub,
+        "snapshot_mqtt_clients",
+        lambda: {
+            21: SimpleNamespace(
+                client=ConnectedClient(),
+                config_fingerprint="fp:21",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        mqtt_pub,
+        "mqtt_server_config_fingerprint",
+        lambda server: f"fp:{server['id']}",
+    )
+
+    result = health_api._check_mqtt(db)
+
+    assert result["status"] == "ok"
+    assert result["brokers"] == 1
+    assert result["connected"] == 1
+    assert result["unavailable"] == 0

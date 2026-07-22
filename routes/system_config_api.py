@@ -21,7 +21,7 @@ from database import db
 from irrigation_scheduler import get_scheduler
 from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
-from services.helpers import ALLOWED_MIME_TYPES
+from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
 from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
 from services.monitors import env_monitor, probe_env_values, rain_config_transaction_lock, rain_monitor
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
@@ -53,7 +53,7 @@ _MAP_MIME_TYPES = {
     ".gif": "image/gif",
     ".webp": "image/webp",
 }
-_TRUSTED_MAP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static", "media", "maps"))
+_TRUSTED_MAP_DIR = os.path.abspath(MAP_DIR)
 _MAP_STORAGE_LOCK = threading.RLock()
 
 # ===== Auth / Password =====

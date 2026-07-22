@@ -29,6 +29,8 @@ _boot_recovery_done = False
 _boot_reconcile_error = "boot reconciliation not started"
 _boot_interrupted_zone_ids: set[int] = set()
 _boot_zone_count = 0
+_http_listener_ready_notified = False
+_HTTP_LISTENER_READY_LOCK = threading.Lock()
 
 _HEALTH_HEARTBEAT_THREAD: threading.Thread | None = None
 _HEALTH_HEARTBEAT_STOP = threading.Event()
@@ -41,7 +43,7 @@ _BOOT_EVIDENCE_CLEAR_TIMEOUT_SEC = 5.0
 def reset_init():
     """Allow re-init in tests."""
     global _INIT_DONE, _boot_sync_done, _boot_recovery_done, _boot_reconcile_error
-    global _boot_interrupted_zone_ids, _boot_zone_count
+    global _boot_interrupted_zone_ids, _boot_zone_count, _http_listener_ready_notified
     _stop_health_bound_heartbeat(timeout=0.2)
     _INIT_DONE = False
     _boot_sync_done = False
@@ -49,6 +51,7 @@ def reset_init():
     _boot_reconcile_error = "boot reconciliation not started"
     _boot_interrupted_zone_ids = set()
     _boot_zone_count = 0
+    _http_listener_ready_notified = False
 
 
 def initialize_app(app, db, *, start_watchdog_fn=None):
@@ -172,20 +175,12 @@ def initialize_app(app, db, *, start_watchdog_fn=None):
     except Exception:
         logger.exception("init_metrics failed")
 
-    # ── 6. systemd sd_notify: health-bound watchdog + READY=1 ───────
-    # Fail closed: Type=notify must not become active while physical OFF or
-    # scheduler recovery remains unresolved.  Unlike the legacy unconditional
-    # heartbeat thread, this heartbeat is emitted only after the real HTTP
-    # health endpoint responds, so an exhausted/wedged request plane is visible
-    # to systemd.
+    # ── 6. systemd readiness is deferred to the real HTTP listener ──
+    # run.py performs a process-token-bound /healthz request after Hypercorn
+    # has bound the socket, then calls notify_http_listener_ready(). Import-time
+    # boot completion alone must never transition Type=notify to active.
     if _boot_sync_done and _boot_recovery_done:
-        try:
-            from services.systemd_notify import notify_ready
-
-            _start_health_bound_heartbeat()
-            notify_ready(status=f"boot reconciliation done, {_boot_zone_count} zones loaded")
-        except Exception:
-            logger.exception("systemd_notify wiring failed (non-fatal)")
+        logger.info("Boot recovery complete; waiting for HTTP listener acceptance before READY=1")
     else:
         logger.critical("Application remains NOT READY: %s", _boot_reconcile_error)
 
@@ -493,17 +488,58 @@ def _warm_mqtt_clients(db):
         logger.exception("MQTT warm-up failed")
 
 
+def notify_http_listener_ready() -> bool:
+    """Emit READY exactly once, after run.py proves this process accepts HTTP."""
+    global _http_listener_ready_notified
+    with _HTTP_LISTENER_READY_LOCK:
+        if _http_listener_ready_notified:
+            return True
+        if not (_boot_sync_done and _boot_recovery_done):
+            logger.critical("HTTP listener is live but boot recovery is unresolved; READY=1 withheld")
+            return False
+        try:
+            from services.systemd_notify import notify_ready
+
+            sent = bool(notify_ready(status=f"HTTP ready, {_boot_zone_count} zones reconciled"))
+        except Exception:
+            logger.exception("systemd READY=1 notification failed")
+            return False
+        if not sent:
+            return False
+        _http_listener_ready_notified = True
+
+    # READY has already been accepted by systemd. Start only the health-bound
+    # heartbeat now; the legacy unconditional notifier remains unused.
+    try:
+        _start_health_bound_heartbeat()
+    except Exception:
+        logger.exception("health-bound systemd watchdog start failed")
+    return True
+
+
 def _health_heartbeat_once(*, urlopen_fn=None, port: int | None = None, timeout_sec: float = 2.0) -> bool:
     """Probe the real HTTP request plane, then emit one systemd heartbeat."""
     if urlopen_fn is None:
         from urllib.request import urlopen as urlopen_fn
 
     try:
-        resolved_port = int(port if port is not None else os.environ.get("PORT", "8080"))
-        with urlopen_fn(
-            f"http://127.0.0.1:{resolved_port}/healthz",
-            timeout=max(0.05, float(timeout_sec)),
-        ) as response:
+        from services.security import resolve_http_transport
+
+        profile = resolve_http_transport()
+        resolved_port = int(port if port is not None else profile.port)
+        scheme = "https" if profile.tls_enabled else "http"
+        host = profile.probe_host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        kwargs = {"timeout": max(0.05, float(timeout_sec))}
+        if profile.tls_enabled:
+            import ssl
+
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            kwargs["context"] = context
+        with urlopen_fn(f"{scheme}://{host}:{resolved_port}/healthz", **kwargs) as response:
             if int(getattr(response, "status", 0)) != 200:
                 return False
     except (OSError, TimeoutError, ValueError, TypeError):

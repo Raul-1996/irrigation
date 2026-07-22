@@ -440,15 +440,58 @@ def test_status_degrades_structurally_when_mqtt_secret_cannot_be_decrypted(admin
     assert any(fault["type"] == "mqtt_secret_unavailable" for fault in payload["system_health"]["faults"])
 
 
-def test_sensitive_status_gets_require_admin_but_public_status_remains_available(client, app, monkeypatch):
+def test_unauthenticated_gets_expose_only_explicit_minimal_contract(client, app, monkeypatch):
     monkeypatch.setitem(app.config, "TESTING", False)
 
-    for path in ("/api/logs", "/api/scheduler/status", "/api/scheduler/jobs"):
+    for path in (
+        "/api/logs",
+        "/api/scheduler/status",
+        "/api/scheduler/jobs",
+        "/api/status",
+        "/api/zones",
+        "/api/groups",
+        "/api/programs",
+        "/api/env",
+        "/api/rain",
+    ):
         response = client.get(path)
-        assert response.status_code == 403
-        assert response.get_json()["error_code"] == "FORBIDDEN"
+        assert response.status_code == 401
+        assert response.get_json()["error_code"] == "UNAUTHENTICATED"
 
-    assert client.get("/api/status").status_code == 200
+    assert client.get("/healthz").get_json() == {"status": "ok"}
+    assert client.get("/api/auth/status").status_code == 200
+
+
+def test_explicit_viewer_session_keeps_documented_read_only_status_ux(viewer_client, app, monkeypatch):
+    monkeypatch.setitem(app.config, "TESTING", False)
+
+    assert viewer_client.get("/").status_code == 200
+    assert viewer_client.get("/api/status").status_code == 200
+    assert viewer_client.get("/api/zones").status_code == 200
+    assert viewer_client.get("/api/groups").status_code == 200
+
+
+def test_login_page_guest_link_still_establishes_explicit_viewer_session(client, app, monkeypatch):
+    monkeypatch.setitem(app.config, "TESTING", False)
+
+    response = client.get("/?guest=1", follow_redirects=True)
+
+    assert response.status_code == 200
+    with client.session_transaction() as flask_session:
+        assert flask_session["logged_in"] is True
+        assert flask_session["role"] == "viewer"
+
+
+def test_legacy_health_redacts_operational_details_from_unauthenticated_client(client, app, monkeypatch):
+    monkeypatch.setitem(app.config, "TESTING", False)
+    monkeypatch.setattr("routes.system_status_api._database_is_healthy", lambda: True)
+    scheduler = SimpleNamespace(is_running=True)
+    monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
 
 
 def test_legacy_health_does_not_claim_empty_mqtt_configuration(admin_client):

@@ -5,11 +5,16 @@
 
 import logging
 import os
+import secrets
 import signal
+import ssl
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from urllib.request import Request
 
 from app import app
+from services.security import HttpTransportConfig, resolve_http_transport
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +73,88 @@ def _get_asgi_app(flask_app):
     raise ImportError("Cannot find WSGI-to-ASGI middleware in hypercorn")
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
+def _listener_probe_url(profile: HttpTransportConfig) -> str:
+    scheme = "https" if profile.tls_enabled else "http"
+    host = profile.probe_host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{scheme}://{host}:{profile.port}/healthz"
+
+
+def _probe_http_listener(
+    url: str,
+    startup_token: str,
+    *,
+    urlopen_fn=None,
+    timeout_sec: float = 1.0,
+) -> bool:
+    """Prove the listener belongs to this process, not an old port owner."""
+    if urlopen_fn is None:
+        from urllib.request import urlopen as urlopen_fn
+
+    request = Request(url, headers={"X-WB-Startup-Probe": startup_token})
+    kwargs = {"timeout": max(0.05, float(timeout_sec))}
+    if url.lower().startswith("https://"):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        kwargs["context"] = context
+    try:
+        with urlopen_fn(request, **kwargs) as response:
+            echoed = str(getattr(response, "headers", {}).get("X-WB-Startup-Probe") or "")
+            return int(getattr(response, "status", 0)) == 200 and secrets.compare_digest(echoed, startup_token)
+    except (OSError, TimeoutError, TypeError, ValueError):
+        return False
+
+
+def _listener_ready_loop(
+    flask_app,
+    profile: HttpTransportConfig,
+    startup_token: str,
+    stop_event: threading.Event,
+) -> None:
+    url = _listener_probe_url(profile)
+    while not stop_event.is_set():
+        if _probe_http_listener(url, startup_token):
+            try:
+                from services.app_init import notify_http_listener_ready
+
+                if notify_http_listener_ready():
+                    return
+            except Exception:
+                logger.exception("HTTP listener is accepting requests but READY=1 notification failed")
+        stop_event.wait(0.1)
+
+
+def _start_listener_ready_notifier(flask_app, profile: HttpTransportConfig):
+    stop_event = threading.Event()
+    if not os.environ.get("NOTIFY_SOCKET"):
+        return None, stop_event
+    startup_token = secrets.token_urlsafe(32)
+    flask_app.config["HTTP_STARTUP_PROBE_TOKEN"] = startup_token
+    thread = threading.Thread(
+        target=_listener_ready_loop,
+        args=(flask_app, profile, startup_token, stop_event),
+        name="http-listener-ready",
+        daemon=True,
+    )
+    thread.start()
+    return thread, stop_event
+
+
+def main(flask_app=app) -> int:
+    profile = resolve_http_transport()
+    if profile.insecure_external_acknowledged:
+        logger.critical(
+            "External plaintext HTTP explicitly enabled on %s; admin credentials and sessions are not transport-secure",
+            profile.bind,
+        )
 
     # Register signal handlers before starting the server
     signal.signal(signal.SIGTERM, _graceful_shutdown)
     signal.signal(signal.SIGINT, _graceful_shutdown)
 
+    ready_thread, ready_stop = _start_listener_ready_notifier(flask_app, profile)
     try:
         import asyncio
 
@@ -82,13 +162,16 @@ if __name__ == "__main__":
         from hypercorn.config import Config
 
         cfg = Config()
-        cfg.bind = [f"0.0.0.0:{port}"]
-        asgi_app = _get_asgi_app(app)
+        cfg.bind = [profile.bind]
+        if profile.tls_enabled:
+            cfg.certfile = profile.tls_certfile
+            cfg.keyfile = profile.tls_keyfile
+        asgi_app = _get_asgi_app(flask_app)
 
         async def _serve_with_bounded_executor():
             loop = asyncio.get_running_loop()
             executor = ThreadPoolExecutor(
-                max_workers=_http_executor_workers(app),
+                max_workers=_http_executor_workers(flask_app),
                 thread_name_prefix="wb-http",
             )
             loop.set_default_executor(executor)
@@ -98,4 +181,19 @@ if __name__ == "__main__":
     except ImportError:
         # Fallback to Flask dev server
         logger.info("Hypercorn not available, using Flask dev server")
-        app.run(debug=False, host="0.0.0.0", port=port)
+        ssl_context = (profile.tls_certfile, profile.tls_keyfile) if profile.tls_enabled else None
+        flask_app.run(
+            debug=False,
+            host=profile.bind_host,
+            port=profile.port,
+            ssl_context=ssl_context,
+        )
+    finally:
+        ready_stop.set()
+        if ready_thread is not None and ready_thread is not threading.current_thread():
+            ready_thread.join(timeout=2.0)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
