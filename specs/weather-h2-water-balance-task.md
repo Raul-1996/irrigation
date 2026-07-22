@@ -98,7 +98,7 @@ Dr(сегодня) = clamp( Dr(вчера) + ETc − P_eff − Irrigation , 0 , 
 ## 7. Доступы и инфраструктура
 - **Объект:** контроллер WB-Techpom **10.2.5.244**, код `/mnt/data/wb-irrigation`, БД `irrigation.db`, systemd `wb-irrigation.service`, домен `https://poliv-kg.ops-lab.dev`, порт API 8080.
 - **Локальный клон для разработки:** `/opt/claude-agents/irrigation` (на origin/main).
-- **SSH:** алиас `ssh wb-techpom` (root@10.2.5.244, **парольная** авторизация). Пароль — из Vaultwarden, item **«WB-Techpom (.244)»**. Инструкция bw CLI — в `/opt/claude-agents/main/CLAUDE.md` → «Управление секретами» (нужен `NODE_TLS_REJECT_UNAUTHORIZED=0`, креды сервисного аккаунта в SOPS). Файла пароля на диске НЕТ — брать из VW каждый раз. Субагентам SSH давать через `/tmp/server-access.env` (chmod 600, удалить после).
+- **SSH к .244:** через jump host; пароль root хранится вне репозитория и передаётся через `WB_ROOT_PASSWORD`. Для Node.js укажите доверенный CA: `NODE_EXTRA_CA_CERTS=/path/to/approved-ca.pem`; проверку TLS не отключать.
 - **Прод read-only по умолчанию.** Диагностика (curl на чтение, journalctl, git log) — можно. Любая запись/деплой/рестарт — с подтверждения.
 - **Граф знаний:** `graphify` CLI (локальные graph.json), Neo4j отключён — не пушить.
 
