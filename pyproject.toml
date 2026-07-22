@@ -1,5 +1,8 @@
 [project]
 name = "wb-irrigation"
+# Runtime version is derived from Git by services/version.py; this repository
+# is deployed in-place and is not built as a distributable Python package.
+dynamic = ["version"]
 # Минимум Python 3.11. Причины:
 # - используется PEP 604 union-синтаксис (`X | None`) везде в коде;
 # - используется `datetime.UTC` (появился в 3.11).

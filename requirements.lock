@@ -1,0 +1,55 @@
+# Version-locked production dependency closure for Python 3.11.
+#
+# Regenerate from requirements.txt only after the full test suite passes on the
+# resolved set. Deployment installs this file directly so the same application
+# commit cannot silently receive newer transitive packages.
+aiofiles==25.1.0
+aiogram==3.29.1
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.1
+aiosignal==1.4.0
+annotated-types==0.7.0
+APScheduler==3.10.4
+attrs==26.1.0
+blinker==1.9.0
+certifi==2026.6.17
+charset-normalizer==3.4.9
+click==8.4.2
+Flask==3.1.3
+Flask-Sock==0.7.0
+Flask-WTF==1.3.0
+frozenlist==1.8.0
+h11==0.16.0
+h2==4.3.0
+hpack==4.2.0
+hypercorn==0.18.0
+hyperframe==6.1.0
+idna==3.18
+itsdangerous==2.2.0
+Jinja2==3.1.6
+magic-filter==1.0.12
+MarkupSafe==3.0.3
+multidict==6.7.1
+paho-mqtt==2.1.0
+Pillow==12.3.0
+priority==2.0.0
+prometheus-client==0.25.0
+propcache==0.5.2
+pycryptodome==3.23.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+python-dotenv==1.2.2
+python-json-logger==2.0.7
+pytz==2026.2
+requests==2.34.2
+simple-websocket==1.1.0
+six==1.17.0
+SQLAlchemy==2.0.51
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+tzlocal==5.4.4
+urllib3==2.7.0
+Werkzeug==3.1.8
+wsproto==1.3.2
+WTForms==3.2.2
+yarl==1.24.2
