@@ -3,35 +3,65 @@ name: Deploy to Wirenboard
 on:
   workflow_dispatch:
     inputs:
+      commit_sha:
+        description: "Full 40-character commit SHA already present on main"
+        required: true
+        type: string
       confirmation:
         description: 'Type "deploy" to confirm deployment'
         required: true
         type: string
 
+permissions:
+  contents: read
+
+concurrency:
+  group: production-wb-irrigation
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     if: github.event.inputs.confirmation == 'deploy'
+    environment: production
     steps:
+      - name: Validate immutable target and SSH host keys
+        env:
+          TARGET_COMMIT: ${{ inputs.commit_sha }}
+          WB_SSH_FINGERPRINT: ${{ secrets.WB_SSH_FINGERPRINT }}
+          JUMP_SSH_FINGERPRINT: ${{ secrets.JUMP_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ -n "$WB_SSH_FINGERPRINT" ]]
+          [[ -n "$JUMP_SSH_FINGERPRINT" ]]
+
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+        # v1.2.5, pinned to the immutable commit advertised by the upstream tag.
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        env:
+          TARGET_COMMIT: ${{ inputs.commit_sha }}
         with:
           host: ${{ secrets.WB_HOST }}
           username: ${{ secrets.WB_USER }}
           password: ${{ secrets.WB_PASSWORD }}
+          fingerprint: ${{ secrets.WB_SSH_FINGERPRINT }}
           proxy_host: ${{ secrets.JUMP_HOST }}
           proxy_username: ${{ secrets.JUMP_USER }}
           proxy_key: ${{ secrets.JUMP_SSH_KEY }}
+          proxy_fingerprint: ${{ secrets.JUMP_SSH_FINGERPRINT }}
+          envs: TARGET_COMMIT
           command_timeout: 20m
           script: |
             set -euo pipefail
+            [[ "$TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]]
             cd /opt/wb-irrigation/irrigation
-            git fetch --quiet origin main
-            TARGET_COMMIT=$(git rev-parse --verify 'origin/main^{commit}')
+            git fetch --quiet origin \
+              '+refs/heads/main:refs/remotes/origin/main'
+            [[ "$(git rev-parse --verify "${TARGET_COMMIT}^{commit}")" == "$TARGET_COMMIT" ]]
+            git merge-base --is-ancestor "$TARGET_COMMIT" "refs/remotes/origin/main"
             STAGED_UPDATER=$(mktemp /tmp/wb-irrigation-update.XXXXXX)
             trap 'rm -f "$STAGED_UPDATER"' EXIT
             git show "${TARGET_COMMIT}:update_server.sh" > "$STAGED_UPDATER"
             chmod 0700 "$STAGED_UPDATER"
-            export BRANCH=main
-            export TARGET_COMMIT
-            bash "$STAGED_UPDATER" --yes
+            bash "$STAGED_UPDATER" --yes --branch main --commit "$TARGET_COMMIT"

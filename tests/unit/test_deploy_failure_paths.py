@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 UPDATE = ROOT / "update_server.sh"
 INSTALL = ROOT / "install_wb.sh"
+UNINSTALL = ROOT / "uninstall_wb.sh"
 
 
 def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -47,20 +48,116 @@ def test_port_resolution_matches_runtime_environment_precedence(tmp_path):
     )
 
 
+def test_http_transport_contract_defaults_safe_and_rejects_implicit_external_plaintext(tmp_path):
+    environment_file = tmp_path / "systemd.env"
+    repository_file = tmp_path / "repo.env"
+    external = shlex.quote(str(environment_file))
+    repository = shlex.quote(str(repository_file))
+
+    for deploy_script in (UPDATE, INSTALL):
+        _bash(
+            f"""
+            source {shlex.quote(str(deploy_script))}
+            [[ $(configured_http_scheme {external} {repository}) == http ]]
+
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=0.0.0.0' \
+              'WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt' \
+              'WB_HTTP_TLS_KEYFILE=/etc/wb-irrigation/tls.key' > {external}
+            validate_http_transport_contract {external} {repository}
+            [[ $(configured_http_scheme {external} {repository}) == https ]]
+
+            printf '%s\n' 'WB_HTTP_BIND_HOST=0.0.0.0' > {external}
+            if validate_http_transport_contract {external} {repository}; then
+              exit 107
+            fi
+
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=0.0.0.0' \
+              'WB_HTTP_ALLOW_INSECURE_EXTERNAL=1' > {external}
+            validate_http_transport_contract {external} {repository}
+            [[ $(configured_http_scheme {external} {repository}) == http ]]
+
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=127.0.0.1' \
+              'WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt' > {external}
+            if validate_http_transport_contract {external} {repository}; then
+              exit 108
+            fi
+            """
+        )
+
+
+def test_ready_probe_derives_safe_host_and_requires_explicit_tls_verification_override(tmp_path):
+    environment_file = tmp_path / "systemd.env"
+    repository_file = tmp_path / "state.env"
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("test CA\n", encoding="utf-8")
+    external = shlex.quote(str(environment_file))
+    repository = shlex.quote(str(repository_file))
+    for deploy_script in (UPDATE, INSTALL):
+        _bash(
+            f"""
+            source {shlex.quote(str(deploy_script))}
+            APP_PORT=8443
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=0.0.0.0' \
+              'WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt' \
+              'WB_HTTP_TLS_KEYFILE=/etc/wb-irrigation/tls.key' \
+              'WB_HTTP_PROBE_HOST=wb.local' \
+              'WB_HTTP_PROBE_CA_FILE={ca_file}' > {external}
+            validate_http_transport_contract {external} {repository}
+            configure_ready_probe {external} {repository}
+            [[ "$APP_READY_URL" == 'https://wb.local:8443/readyz' ]]
+            [[ " ${{READY_CURL_ARGS[*]}} " == *' --cacert {ca_file} '* ]]
+            [[ " ${{READY_CURL_ARGS[*]}} " != *' --insecure '* ]]
+
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=::' \
+              'WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt' \
+              'WB_HTTP_TLS_KEYFILE=/etc/wb-irrigation/tls.key' \
+              'WB_HTTP_PROBE_INSECURE_TLS=1' > {external}
+            validate_http_transport_contract {external} {repository}
+            configure_ready_probe {external} {repository}
+            [[ "$APP_READY_URL" == 'https://[::1]:8443/readyz' ]]
+            [[ " ${{READY_CURL_ARGS[*]}} " == *' --insecure '* ]]
+
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=0.0.0.0' \
+              'WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt' \
+              'WB_HTTP_TLS_KEYFILE=/etc/wb-irrigation/tls.key' \
+              'WB_HTTP_PROBE_HOST=127.0.0.1/path' > {external}
+            if validate_http_transport_contract {external} {repository}; then
+              exit 110
+            fi
+
+            printf '%s\n' \
+              'WB_HTTP_BIND_HOST=0.0.0.0' \
+              'WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt' \
+              'WB_HTTP_TLS_KEYFILE=/etc/wb-irrigation/tls.key' \
+              'WB_HTTP_PROBE_CA_FILE={ca_file}' \
+              'WB_HTTP_PROBE_INSECURE_TLS=1' > {external}
+            if validate_http_transport_contract {external} {repository}; then
+              exit 111
+            fi
+            """
+        )
+
+
 def test_backup_base_rejects_broad_relative_noncanonical_and_symlink_paths(tmp_path):
-    repository = tmp_path / "repo"
+    state_dir = tmp_path / "state"
     outside = tmp_path / "outside"
-    repository.mkdir()
+    state_dir.mkdir()
     outside.mkdir()
     update = shlex.quote(str(UPDATE))
-    repo = shlex.quote(str(repository))
-    valid = shlex.quote(str(repository / "backups"))
-    wrong_child = shlex.quote(str(repository / "snapshots"))
+    state = shlex.quote(str(state_dir))
+    valid = shlex.quote(str(state_dir / "deploy-backups"))
+    wrong_child = shlex.quote(str(state_dir / "snapshots"))
 
     _bash(
         f"""
         source {update}
-        REPO_DIR_REAL={repo}
+        STATE_DIR={state}
         BACKUP_BASE={valid}
         canonicalize_backup_base
         [[ "$BACKUP_BASE" == {valid} ]]
@@ -73,6 +170,182 @@ def test_backup_base_rejects_broad_relative_noncanonical_and_symlink_paths(tmp_p
         if (BACKUP_BASE={valid}; canonicalize_backup_base); then
           exit 92
         fi
+        """
+    )
+
+
+def test_mutable_state_sync_copies_databases_secrets_backups_and_media(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    (source / "backups").mkdir(parents=True)
+    (source / "static" / "media" / "zones").mkdir(parents=True)
+    (source / "backups" / "app.log").write_text("log\n", encoding="utf-8")
+    (source / "static" / "media" / "zones" / "ZONE_1.webp").write_bytes(b"image")
+    (source / ".secret_key").write_text("session-key\n", encoding="utf-8")
+    (source / ".irrig_secret_key").write_bytes(b"x" * 32)
+    for database_name in ("irrigation.db", "jobs.db"):
+        with sqlite3.connect(source / database_name) as connection:
+            connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO marker VALUES ('state')")
+
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        chown() {{ :; }}
+        sync_mutable_state_tree \
+          {shlex.quote(str(source))} {shlex.quote(str(target))} root root
+        """
+    )
+
+    assert (target / ".secret_key").read_text(encoding="utf-8") == "session-key\n"
+    assert (target / ".irrig_secret_key").read_bytes() == b"x" * 32
+    assert (target / "backups" / "app.log").read_text(encoding="utf-8") == "log\n"
+    assert (target / "static" / "media" / "zones" / "ZONE_1.webp").read_bytes() == b"image"
+    for database_name in ("irrigation.db", "jobs.db"):
+        with sqlite3.connect(target / database_name) as connection:
+            assert connection.execute("SELECT value FROM marker").fetchone() == ("state",)
+
+
+def test_mutable_state_sync_refuses_symlinked_source_tree(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    outside = tmp_path / "outside"
+    source.mkdir()
+    outside.mkdir()
+    (source / "backups").symlink_to(outside, target_is_directory=True)
+
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        chown() {{ :; }}
+        if sync_mutable_state_tree \
+          {shlex.quote(str(source))} {shlex.quote(str(target))} root root; then
+          exit 109
+        fi
+        [[ ! -e {shlex.quote(str(target / "backups"))} ]]
+        """
+    )
+
+
+def test_full_commit_validation_rejects_floating_and_unauthorized_revisions(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.email", "deploy-test@example.invalid"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Deploy Test"], cwd=repository, check=True)
+    tracked = repository / "tracked.txt"
+    tracked.write_text("authorized\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "authorized"], cwd=repository, check=True)
+    authorized = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", authorized],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(["git", "checkout", "-q", "--orphan", "untrusted"], cwd=repository, check=True)
+    subprocess.run(["git", "rm", "-q", "-f", "tracked.txt"], cwd=repository, check=True)
+    tracked.write_text("untrusted\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "untrusted"], cwd=repository, check=True)
+    untrusted = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+
+    for deploy_script in (UPDATE, INSTALL):
+        _bash(
+            f"""
+            source {shlex.quote(str(deploy_script))}
+            BRANCH=main
+            require_full_commit_sha {shlex.quote(authorized)}
+            [[ $(resolve_authorized_target_commit \
+              {shlex.quote(str(repository))} {shlex.quote(authorized)}) == {shlex.quote(authorized)} ]]
+            for invalid in '' main HEAD {shlex.quote(authorized[:12])} {shlex.quote(authorized.upper())}; do
+              if require_full_commit_sha "$invalid"; then
+                exit 102
+              fi
+            done
+            if resolve_authorized_target_commit \
+              {shlex.quote(str(repository))} {shlex.quote(untrusted)}; then
+              exit 103
+            fi
+            """
+        )
+
+
+def test_install_update_and_uninstall_contend_on_the_same_process_lock(tmp_path):
+    lock_file = tmp_path / "deploy.lock"
+    quoted_lock = shlex.quote(str(lock_file))
+    quoted_install = shlex.quote(str(INSTALL))
+    quoted_update = shlex.quote(str(UPDATE))
+    quoted_uninstall = shlex.quote(str(UNINSTALL))
+
+    _bash(
+        f"""
+        if ! command -v flock >/dev/null 2>&1; then
+          flock() {{
+            local descriptor=$2
+            python3 - "$descriptor" <<'PY'
+import fcntl
+import sys
+
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+PY
+          }}
+          export -f flock
+        fi
+        source {quoted_update}
+        DEPLOY_LOCK_FILE={quoted_lock}
+        acquire_deploy_lock
+        for contender in {quoted_install} {quoted_update} {quoted_uninstall}; do
+          if env -u WB_IRRIGATION_DEPLOY_LOCK_FD DEPLOY_LOCK_FILE={quoted_lock} \
+            bash -c 'deploy_script=$1; set --; source "$deploy_script"; acquire_deploy_lock' \
+            _ "$contender"; then
+            exit 104
+          fi
+        done
+        WB_IRRIGATION_DEPLOY_LOCK_FD=9 DEPLOY_LOCK_FILE={quoted_lock} \
+          bash -c 'deploy_script=$1; set --; source "$deploy_script"; acquire_deploy_lock' \
+          _ {quoted_update}
+        """
+    )
+
+
+def test_fixed_unit_contract_rejects_inconsistent_runtime_overrides():
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        validate_fixed_deployment_contract
+        for assignment in \
+          'REPO_DIR=/srv/irrigation' \
+          'BRANCH=release' \
+          'SERVICE=other-service' \
+          'ENV_FILE=/tmp/irrigation.env' \
+          'PY_VERSION=3.11.14' \
+          'UV_BIN=/usr/local/bin/uv'; do
+          if (eval "$assignment"; validate_fixed_deployment_contract); then
+            exit 105
+          fi
+        done
+        """
+    )
+    _bash(
+        f"""
+        source {shlex.quote(str(INSTALL))}
+        validate_fixed_deployment_contract
+        for assignment in \
+          'DATA_DIR=/srv/irrigation' \
+          'BRANCH=release' \
+          'APP_LINK=/srv/irrigation-link' \
+          'SERVICE_NAME=other-service' \
+          'ENV_FILE=/tmp/irrigation.env' \
+          'PY_VERSION=3.11.14' \
+          'UV_BIN=/usr/local/bin/uv'; do
+          if (eval "$assignment"; validate_fixed_deployment_contract); then
+            exit 106
+          fi
+        done
         """
     )
 
@@ -127,7 +400,7 @@ def test_rollback_restores_previous_commit_and_venv_after_activation_failure(tmp
         CODE_UPDATED=1
         VENV_DIR={shlex.quote(str(live_venv))}
         OLD_VENV_BACKUP={shlex.quote(str(old_venv))}
-        STAGED_VENV={shlex.quote(str(repository / '.venv-staged-test'))}
+        STAGED_VENV={shlex.quote(str(repository / ".venv-staged-test"))}
         VENV_SWAPPED=1
         HAD_OLD_VENV=1
         DB_PATH={shlex.quote(str(live_db))}
@@ -177,6 +450,34 @@ def test_legacy_migration_enospc_keeps_live_tree_and_link_untouched(tmp_path):
         if compgen -G "${{DATA_DIR}}.migration-*" >/dev/null; then
           exit 94
         fi
+        """
+    )
+
+
+def test_prelayout_real_opt_tree_migration_can_be_fully_rolled_back(tmp_path):
+    app_link = tmp_path / "opt" / "wb-irrigation" / "irrigation"
+    data_dir = tmp_path / "mnt" / "data" / "wb-irrigation"
+    app_link.mkdir(parents=True)
+    (app_link / ".git").mkdir()
+    (app_link / "marker").write_text("original\n", encoding="utf-8")
+
+    _bash(
+        f"""
+        source {shlex.quote(str(INSTALL))}
+        APP_LINK={shlex.quote(str(app_link))}
+        DATA_DIR={shlex.quote(str(data_dir))}
+        reset_legacy_migration_tracking
+        migrate_legacy_app_tree
+        [[ -L "$APP_LINK" ]]
+        [[ $(readlink -f "$APP_LINK") == $(readlink -f "$DATA_DIR") ]]
+        [[ $(<"$DATA_DIR/marker") == original ]]
+        [[ -d "$LEGACY_MIGRATION_APP_BACKUP" ]]
+
+        printf '%s\n' changed > "$DATA_DIR/marker"
+        rollback_legacy_app_tree_migration
+        [[ -d "$APP_LINK" && ! -L "$APP_LINK" ]]
+        [[ $(<"$APP_LINK/marker") == original ]]
+        [[ ! -e "$DATA_DIR" ]]
         """
     )
 

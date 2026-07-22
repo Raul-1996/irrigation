@@ -11,7 +11,7 @@
   - Не пытайтесь запустить на 3.9 или 3.10 — упадёт на импортах.
 - pip (менеджер пакетов Python)
 
-На Wirenboard (Debian 11, системный `python3.9`) изолированный Python 3.11
+На Wirenboard (Debian 11, системный `python3.9`) изолированный Python 3.11.15
 ставится автоматически через `uv` — см. раздел [Wirenboard](#-wirenboard-установка-без-docker) ниже.
 
 ## 📋 Инструкции по установке и запуску
@@ -65,49 +65,123 @@ pytest -q
 ### 🧰 Wirenboard (установка без Docker)
 
 Целевая платформа: Wirenboard на Debian 11/12, архитектура aarch64.
-Системный Python там — 3.9.2; его не трогаем. Изолированный Python 3.11
-ставится через [uv](https://docs.astral.sh/uv/) (Astral, prebuilt
+Системный Python там — 3.9.2; его не трогаем. Изолированный Python 3.11.15
+ставится через hash-verified `uv 0.11.31` (Astral, prebuilt
 `python-build-standalone` — без компиляции).
 
 #### Свежий контроллер: полный bootstrap
 ```bash
-# На устройстве Wirenboard под root
-curl -fsSL https://raw.githubusercontent.com/Raul-1996/irrigation/main/install_wb.sh -o /tmp/install_wb.sh
-sudo bash /tmp/install_wb.sh --yes
-# Открыть http://<ip-wirenboard>:8080
+# На устройстве Wirenboard укажите заранее проверенный commit из main.
+# Короткие SHA, ветки и теги production-скрипты намеренно не принимают.
+RELEASE_SHA=0123456789abcdef0123456789abcdef01234567
+curl -fsSL "https://raw.githubusercontent.com/Raul-1996/irrigation/${RELEASE_SHA}/install_wb.sh" \
+  -o /tmp/install_wb.sh
+sudo bash /tmp/install_wb.sh --yes --branch main --commit "$RELEASE_SHA"
+# По умолчанию endpoint доступен только локально на 127.0.0.1:8080.
 ```
 
 Что делает `install_wb.sh`:
 1. Ставит системные пакеты: `curl git build-essential libssl-dev sqlite3 mosquitto`.
-2. Ставит `uv` и через него — Python 3.11 (prebuilt aarch64-бинарь, ~30 секунд).
-3. Клонирует репо в `/mnt/data/wb-irrigation` и делает симлинк
+2. Ставит pinned `uv 0.11.31` из immutable aarch64 archive с проверкой SHA-256
+   и через него — Python 3.11.15 в общем read-only runtime
+   `/mnt/data/wb-irrigation-python` (prebuilt aarch64-бинарь, ~30 секунд).
+3. Проверяет, что указанный полный SHA принадлежит `origin/main`, разворачивает
+   именно этот commit в `/mnt/data/wb-irrigation` и делает симлинк
    `/opt/wb-irrigation/irrigation` → `/mnt/data/wb-irrigation`
    (корневой раздел WB маленький, `/mnt/data` большой).
-4. Создаёт venv на Python 3.11 в `venv/`, ставит `requirements.txt`.
-5. Копирует `wb-irrigation.service` в `/etc/systemd/system/`, включает и стартует.
-6. Smoke check: ждёт ответа `/readyz` до 30 секунд.
+4. Создаёт venv на Python 3.11.15 в `venv/`, ставит только зафиксированный
+   hash-locked production closure из `requirements.lock`.
+5. Создаёт системного пользователя `wb-irrigation`, приватный state-каталог
+   `/mnt/data/wb-irrigation-state`, устанавливает unit и стартует сервис без root.
+6. Smoke check: ждёт ответа `/readyz` до 30 секунд и только после успеха
+   фиксирует завершённую state-layout миграцию.
 
-Скрипт идемпотентен — безопасно перезапускать.
+При обнаружении существующей canonical установки bootstrap до установки пакетов
+передаёт выбранный SHA transactional `update_server.sh`. Для старой установки с
+реальным code tree в `/opt` он сначала останавливает сервис, копирует дерево в
+staging на `/mnt/data`, атомарно переключает symlink и проверяет SQLite; updater
+получает stopped-service handoff. При любой ошибке updater оставляет сервис
+остановленным, bootstrap восстанавливает исходный `/opt` layout и лишь затем
+запускает прежний сервис. Параллельные install/update/uninstall блокируются общим lock.
+Production paths и имя сервиса фиксированы unit-файлом; несовместимые override'ы
+завершаются ошибкой до изменения установки.
 
 #### Обновление существующей установки
 ```bash
-sudo bash /opt/wb-irrigation/irrigation/update_server.sh --yes
+RELEASE_SHA=0123456789abcdef0123456789abcdef01234567
+sudo bash /opt/wb-irrigation/irrigation/update_server.sh \
+  --yes --branch main --commit "$RELEASE_SHA"
 ```
 
-#### Быстрое удаление (чистое)
+Updater принимает только полный immutable SHA, проверяет его принадлежность
+`origin/main`, делает верифицированный backup на data-разделе и откатывает
+code, venv, state, базы, unit и env при неуспешной активации. Первый update
+старой root-установки копирует DB/jobs/ключи/backup/media в staging, проверяет
+SQLite и лишь затем переключает unit на пользователя `wb-irrigation`. Старые
+runtime-файлы убираются из code tree только после успешного `/readyz`; при
+ошибке они восстанавливаются, а неуспешный state сохраняется с суффиксом
+`.failed-*` для диагностики.
+
+GitHub Actions deploy требует тот же SHA как ручной input, использует защищённое
+environment `production` и отказывается подключаться без secrets
+`WB_SSH_FINGERPRINT` и `JUMP_SSH_FINGERPRINT`. В настройках репозитория для
+environment `production` должны быть включены required reviewers.
+
+Unit сначала загружает мигрированный `/mnt/data/wb-irrigation-state/.env`, затем
+`/opt/wb-irrigation/.env`; внешний файл имеет приоритет и остаётся основным
+местом для администраторских override'ов. Install/update добавляют туда
+безопасный bind, только если ключ ещё отсутствует:
+
+```dotenv
+WB_HTTP_BIND_HOST=127.0.0.1
+```
+
+Для внешнего bind нужно задать оба файла native TLS:
+
+```dotenv
+WB_HTTP_BIND_HOST=0.0.0.0
+WB_HTTP_TLS_CERTFILE=/etc/wb-irrigation/tls.crt
+WB_HTTP_TLS_KEYFILE=/etc/wb-irrigation/tls.key
+```
+
+При native TLS runtime принудительно включает secure cookie, а deploy smoke
+проверяет `/readyz` по адресу, выведенному из bind host. Для wildcard bind
+используются `127.0.0.1`/`::1`. Если TLS certificate выписан на DNS-имя,
+задайте `WB_HTTP_PROBE_HOST=wb.local`. По умолчанию curl использует системное
+хранилище CA; отдельный обычный non-symlink CA-файл задаётся через
+`WB_HTTP_PROBE_CA_FILE`. Только для readiness probe можно явно отключить проверку
+сертификата с `WB_HTTP_PROBE_INSECURE_TLS=1` — deploy выведет предупреждение.
+Временная legacy-схема без TLS возможна только с явным
+`WB_HTTP_ALLOW_INSECURE_EXTERNAL=1`; без неё внешний plaintext bind завершается
+ошибкой. Пока bind остаётся безопасным значением по умолчанию `127.0.0.1`,
+installer намеренно не рекламирует LAN URL.
+
+#### Удаление
 ```bash
-cd /opt/wb-irrigation/irrigation || true
-chmod +x uninstall_wb.sh
-./uninstall_wb.sh
+sudo bash /opt/wb-irrigation/irrigation/uninstall_wb.sh --yes
+```
+
+По умолчанию удаляются service unit и logrotate-конфиг, а код, `.env`, state,
+базы, backup'ы и общий Python runtime явно сохраняются. Необратимая очистка
+всех этих данных и dedicated service account требует отдельной опции (в
+интерактивном режиме скрипт дополнительно попросит подтверждение):
+
+```bash
+sudo bash /opt/wb-irrigation/irrigation/uninstall_wb.sh --yes --purge-data
 ```
 
 Примечания:
-- `uninstall_wb.sh` останавливает и отключает сервис, удаляет юнит и весь
-  каталог `/opt/wb-irrigation` без остатка.
 - На WB уровень логов по умолчанию WARNING; включить подробные логи можно через Настройки.
 - Для HTTPS куки выставьте `SESSION_COOKIE_SECURE=1` в окружении сервиса.
 - Docker на Wirenboard **не используется**. Скрипты `install_docker.sh` /
   `update_docker.sh` были удалены как мёртвый код.
+
+Production unit запускается как `wb-irrigation:wb-irrigation`. Относительные
+DB/jobs/keys/backups живут в `/mnt/data/wb-irrigation-state`; maps/zones
+подключены writable bind-mount'ами из state в read-only code tree. Код, venv и
+общий Python принадлежат root и недоступны сервису для записи. Unit дополнительно
+использует `ProtectSystem=strict`, `NoNewPrivileges`, приватный `/tmp` и защиту
+system/kernel деревьев.
 
 ### 🪟 Windows
 
@@ -341,7 +415,8 @@ wb-irrigation/
 ├── configs/                 # Примеры конфигов (nginx и т.п.)
 ├── scripts/, tools/         # Вспомогательные скрипты
 ├── docs/archive/            # Исторические документы и отчёты
-├── requirements.txt         # Зависимости Python (prod)
+├── requirements.txt         # Исходный список зависимостей
+├── requirements.lock        # Точный production closure для install/update
 ├── requirements-dev.txt     # Зависимости для разработки/тестов
 ├── wb-irrigation.service    # systemd unit для Wirenboard
 ├── install_wb.sh            # Установка на Wirenboard
