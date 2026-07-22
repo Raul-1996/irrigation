@@ -147,13 +147,13 @@ def test_ready_notification_runs_only_after_listener_probe_accepts(monkeypatch):
 
     run._listener_ready_loop(
         MagicMock(),
-        resolve_http_transport({}),
+        resolve_http_transport({"WB_HTTP_PROBE_HOST": "controller.example.test"}),
         "current-process",
         threading.Event(),
     )
 
     notify_ready.assert_called_once_with(
-        health_probe_url="http://127.0.0.1:8080/healthz"
+        health_probe_url="http://controller.example.test:8080/healthz"
     )
 
 
@@ -231,6 +231,56 @@ def test_local_probe_url_uses_resolved_scheme_and_custom_bind(monkeypatch, tmp_p
         }
     )
     assert security.local_http_probe_url(tls, path="/readyz") == "https://192.0.2.20:9443/readyz"
+
+
+@pytest.mark.parametrize(
+    ("configured", "normalized", "url_host"),
+    [
+        ("controller.example.test", "controller.example.test", "controller.example.test"),
+        ("CONTROLLER.LOCAL.", "controller.local.", "controller.local."),
+        ("192.0.2.44", "192.0.2.44", "192.0.2.44"),
+        ("2001:db8::44", "2001:db8::44", "[2001:db8::44]"),
+        ("[2001:db8::45]", "2001:db8::45", "[2001:db8::45]"),
+    ],
+)
+def test_explicit_probe_host_override_accepts_host_only_dns_and_ip(
+    configured,
+    normalized,
+    url_host,
+):
+    from services.security import local_http_probe_url, resolve_http_transport
+
+    profile = resolve_http_transport({"WB_HTTP_PROBE_HOST": configured, "PORT": "9123"})
+
+    assert profile.probe_host == normalized
+    assert local_http_probe_url(profile, path="/readyz") == f"http://{url_host}:9123/readyz"
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "https://controller.example.test",
+        "controller.example.test/path",
+        "controller.example.test?check=1",
+        "user@controller.example.test",
+        "controller.example.test:8080",
+        "0.0.0.0",
+        "::",
+        "*",
+        "*.example.test",
+        "bad host",
+        "bad\nhost",
+        "bad_host.example.test",
+        "[::1]:8080",
+        "fe80::1%eth0",
+        "999.999.999.999",
+    ],
+)
+def test_explicit_probe_host_override_rejects_non_host_and_wildcard_values(configured):
+    from services.security import HttpTransportConfigurationError, resolve_http_transport
+
+    with pytest.raises(HttpTransportConfigurationError, match="WB_HTTP_PROBE_HOST"):
+        resolve_http_transport({"WB_HTTP_PROBE_HOST": configured})
 
 
 def test_unauthenticated_https_probe_verifies_by_default_and_needs_explicit_bypass(tmp_path: Path):

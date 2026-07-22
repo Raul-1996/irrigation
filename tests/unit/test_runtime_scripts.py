@@ -61,7 +61,10 @@ def test_healthcheck_env_precedence_is_state_then_external_then_process(tmp_path
     state_env = tmp_path / "state.env"
     state_env.write_text("WB_HTTP_BIND_HOST=127.0.0.3\nPORT=9101\n", encoding="utf-8")
     external_env = tmp_path / "external.env"
-    external_env.write_text("WB_HTTP_BIND_HOST=127.0.0.4\nPORT=9102\n", encoding="utf-8")
+    external_env.write_text(
+        "WB_HTTP_BIND_HOST=127.0.0.4\nPORT=9102\nWB_HTTP_PROBE_HOST=probe.example.test\n",
+        encoding="utf-8",
+    )
 
     environment = os.environ.copy()
     environment.update(
@@ -74,6 +77,7 @@ def test_healthcheck_env_precedence_is_state_then_external_then_process(tmp_path
         WB_TEST_CURL_ARGS=str(curl_args),
     )
     environment.pop("WB_HTTP_BIND_HOST", None)
+    environment.pop("WB_HTTP_PROBE_HOST", None)
 
     result = subprocess.run(
         ["/bin/sh", str(repository_root / "scripts" / "healthcheck.sh")],
@@ -86,7 +90,7 @@ def test_healthcheck_env_precedence_is_state_then_external_then_process(tmp_path
 
     assert result.returncode == 0, result.stderr
     arguments = curl_args.read_text(encoding="utf-8")
-    assert "http://127.0.0.4:9103/readyz" in arguments
+    assert "http://probe.example.test:9103/readyz" in arguments
     assert "127.0.0.3" not in arguments
     assert ":9102/" not in arguments
 

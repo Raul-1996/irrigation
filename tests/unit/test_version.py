@@ -1,7 +1,7 @@
 """Unit tests for services.version.get_app_version.
 
 Format under test: ``2.<N>+<short_sha>[+dirty]`` (URL-safe, semver build metadata).
-Resolution chain: git (rev-list count + describe sha) → ``VERSION`` file → ``'unknown'``.
+Resolution chain: ``WB_APP_VERSION`` → git → ``VERSION`` file → ``'unknown'``.
 
 The function is exercised in isolation via ``monkeypatch`` — we never spawn
 a real ``git`` subprocess and never touch the on-disk ``VERSION`` file.
@@ -19,8 +19,9 @@ from services.version import get_app_version, reset_cache
 
 
 @pytest.fixture(autouse=True)
-def _reset_version_cache():
+def _reset_version_cache(monkeypatch):
     """Ensure each test starts with a clean module-level cache."""
+    monkeypatch.delenv("WB_APP_VERSION", raising=False)
     reset_cache()
     yield
     reset_cache()
@@ -52,6 +53,65 @@ def _scripted_run(scripts):
         raise AssertionError(f"unexpected git invocation: {argv}")
 
     return fake_run
+
+
+# ── trusted deployment override ───────────────────────────────────────────
+
+
+def test_deploy_sha_override_busts_assets_without_readable_git(monkeypatch, tmp_path):
+    """The exact deployed SHA remains the asset key when .git is unavailable."""
+    deployed_sha = "0123456789abcdef0123456789abcdef01234567"
+    git_calls = []
+
+    def unreadable_git(*args, **kwargs):
+        git_calls.append((args, kwargs))
+        raise FileNotFoundError("runtime user cannot read .git")
+
+    monkeypatch.setenv("WB_APP_VERSION", deployed_sha)
+    monkeypatch.setattr(subprocess, "run", unreadable_git)
+    monkeypatch.setattr(version_mod, "REPO_ROOT", tmp_path)
+
+    resolved = get_app_version()
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "APP_VERSION", resolved)
+    monkeypatch.setattr(app_module.db, "get_setting_value", lambda _key: "")
+    with app_module.app.app_context():
+        asset = app_module._inject_app_version()["asset"]
+
+    assert resolved == deployed_sha
+    assert asset("/static/js/app.js") == f"/static/js/app.js?v={deployed_sha}"
+    assert git_calls == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        " leading-space",
+        "trailing-space ",
+        "contains space",
+        "../release",
+        "release?candidate",
+        "release&other=value",
+        "релиз",
+        "x" * 129,
+    ],
+)
+def test_invalid_deploy_version_override_is_rejected_with_safe_fallback(
+    monkeypatch,
+    tmp_path,
+    invalid,
+):
+    monkeypatch.setenv("WB_APP_VERSION", invalid)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    (tmp_path / "VERSION").write_text("3.2.1-safe\n", encoding="utf-8")
+    monkeypatch.setattr(version_mod, "REPO_ROOT", tmp_path)
+
+    assert get_app_version() == "3.2.1-safe"
 
 
 # ── git success: 2.<N>+<sha> ───────────────────────────────────────────────

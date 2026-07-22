@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import re
 import ssl
 from dataclasses import dataclass
 from functools import wraps
@@ -22,6 +23,7 @@ class HttpTransportConfig:
     external_bind: bool
     trusted_proxy_hops: int
     insecure_external_acknowledged: bool
+    probe_host_override: str | None = None
 
     @property
     def tls_enabled(self) -> bool:
@@ -36,6 +38,8 @@ class HttpTransportConfig:
 
     @property
     def probe_host(self) -> str:
+        if self.probe_host_override is not None:
+            return self.probe_host_override
         if self.bind_host in {"::", "[::]"}:
             return "::1"
         if self.bind_host == "0.0.0.0":
@@ -53,6 +57,7 @@ class HttpProbeTlsConfig:
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_DNS_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 
 def parse_strict_bool(value: object, *, name: str) -> bool:
@@ -74,6 +79,58 @@ def _is_external_bind(host: str) -> bool:
     except ValueError:
         # A hostname can resolve beyond the controller; treat it as external.
         return True
+
+
+def _normalize_http_probe_host(value: object) -> str:
+    """Validate and normalize a host-only local probe target."""
+    raw = str(value)
+    if (
+        not raw
+        or raw != raw.strip()
+        or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
+        or any(char in raw for char in "/?#@%\\")
+    ):
+        raise HttpTransportConfigurationError(
+            "WB_HTTP_PROBE_HOST must be a host only, without URL components or whitespace"
+        )
+
+    bracketed = raw.startswith("[") or raw.endswith("]")
+    if bracketed:
+        if not (raw.startswith("[") and raw.endswith("]")):
+            raise HttpTransportConfigurationError("WB_HTTP_PROBE_HOST contains invalid IPv6 brackets")
+        candidate = raw[1:-1]
+        try:
+            address = ipaddress.IPv6Address(candidate)
+        except ipaddress.AddressValueError as error:
+            raise HttpTransportConfigurationError(
+                "WB_HTTP_PROBE_HOST must be a valid DNS name, IPv4 address, or IPv6 address"
+            ) from error
+        if address.is_unspecified:
+            raise HttpTransportConfigurationError("WB_HTTP_PROBE_HOST cannot be a wildcard address")
+        return str(address)
+
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        if ":" in raw or re.fullmatch(r"[0-9.]+", raw):
+            raise HttpTransportConfigurationError(
+                "WB_HTTP_PROBE_HOST must not include a port and must contain a valid host"
+            ) from None
+    else:
+        if address.is_unspecified:
+            raise HttpTransportConfigurationError("WB_HTTP_PROBE_HOST cannot be a wildcard address")
+        return str(address)
+
+    dns_name = raw[:-1] if raw.endswith(".") else raw
+    if (
+        not dns_name
+        or len(dns_name) > 253
+        or any(not _DNS_LABEL_RE.fullmatch(label) for label in dns_name.split("."))
+    ):
+        raise HttpTransportConfigurationError(
+            "WB_HTTP_PROBE_HOST must be a valid DNS name, IPv4 address, or IPv6 address"
+        )
+    return raw.lower()
 
 
 def _readable_regular_file(raw_path: str, *, name: str) -> str:
@@ -171,6 +228,13 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
     if not 1 <= port <= 65535:
         raise HttpTransportConfigurationError("PORT must be an integer in 1..65535")
 
+    probe_host_raw = env.get("WB_HTTP_PROBE_HOST")
+    probe_host_override = (
+        None
+        if probe_host_raw is None or probe_host_raw == ""
+        else _normalize_http_probe_host(probe_host_raw)
+    )
+
     try:
         trusted_proxy_hops = int(str(env.get("WB_HTTP_TRUSTED_PROXY_HOPS", "0")).strip())
     except (TypeError, ValueError) as error:
@@ -232,6 +296,7 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
         insecure_external_acknowledged=bool(
             (external_bind or trusted_proxy_hops) and not tls_enabled and allow_insecure
         ),
+        probe_host_override=probe_host_override,
     )
 
 
