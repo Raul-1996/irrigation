@@ -13,8 +13,8 @@ NotifyAccess=main
 User=wb-irrigation
 Group=wb-irrigation
 WorkingDirectory=/mnt/data/wb-irrigation-state
-EnvironmentFile=-/mnt/data/wb-irrigation-state/.env
 EnvironmentFile=-/opt/wb-irrigation/.env
+EnvironmentFile=/opt/wb-irrigation/release.env
 Environment=TESTING=0
 Environment=UI_THEME=auto
 Environment=WB_WATCHDOG_ENABLED=1

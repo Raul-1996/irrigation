@@ -25,29 +25,39 @@ APP_LINK=${APP_LINK:-/opt/wb-irrigation/irrigation}
 SERVICE_NAME=${SERVICE_NAME:-wb-irrigation}
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE=${ENV_FILE:-/opt/wb-irrigation/.env}
+RELEASE_ENV_FILE=${RELEASE_ENV_FILE:-/opt/wb-irrigation/release.env}
+MQTT_TLS_DIR=${MQTT_TLS_DIR:-/opt/wb-irrigation/mqtt-tls}
 PY_VERSION=${PY_VERSION:-3.11.15}
 UV_BIN=${UV_BIN:-/mnt/data/wb-irrigation-tools/uv}
 STATE_DIR=${STATE_DIR:-/mnt/data/wb-irrigation-state}
+DEPLOY_CONTROL_DIR=${DEPLOY_CONTROL_DIR:-/mnt/data/wb-irrigation-deploy}
 PYTHON_INSTALL_DIR=${PYTHON_INSTALL_DIR:-/mnt/data/wb-irrigation-python}
 SERVICE_USER=${SERVICE_USER:-wb-irrigation}
 SERVICE_GROUP=${SERVICE_GROUP:-wb-irrigation}
 NONINTERACTIVE=${NONINTERACTIVE:-0}
-DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation-deploy.lock}
+DEPLOY_LOCK_DIR=${DEPLOY_LOCK_DIR:-/run/lock/wb-irrigation}
+DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation/deploy.lock}
 readonly FIXED_DATA_DIR=/mnt/data/wb-irrigation
 readonly FIXED_APP_LINK=/opt/wb-irrigation/irrigation
 readonly FIXED_SERVICE_NAME=wb-irrigation
 readonly FIXED_ENV_FILE=/opt/wb-irrigation/.env
+readonly FIXED_RELEASE_ENV_FILE=/opt/wb-irrigation/release.env
+readonly FIXED_MQTT_TLS_DIR=/opt/wb-irrigation/mqtt-tls
 readonly FIXED_STATE_DIR=/mnt/data/wb-irrigation-state
+readonly FIXED_DEPLOY_CONTROL_DIR=/mnt/data/wb-irrigation-deploy
 readonly FIXED_PYTHON_INSTALL_DIR=/mnt/data/wb-irrigation-python
 readonly FIXED_PY_VERSION=3.11.15
 readonly FIXED_UV_BIN=/mnt/data/wb-irrigation-tools/uv
-readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation-deploy.lock
+readonly FIXED_DEPLOY_LOCK_DIR=/run/lock/wb-irrigation
+readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation/deploy.lock
 readonly UV_VERSION=0.11.31
 readonly UV_ARCHIVE_URL=https://releases.astral.sh/github/uv/releases/download/0.11.31/uv-aarch64-unknown-linux-gnu.tar.gz
 readonly UV_ARCHIVE_SHA256=d74f23949fd07be4970f293d06ca99d87cd2a78a341c3d7b7fc0df7bc2d8a145
 # Versioned security contract for the currently integrated Telegram runtime.
 # Any legitimate edit to that runtime must deliberately update this allowlist.
 readonly TELEGRAM_LOG_RETIREMENT_BLOB=e4fc7b282236aac7675c879b892cbf1192dc66f0
+MQTT_TLS_CREATED_FILES=()
+MQTT_TLS_DIR_CREATED=0
 
 usage(){
   cat <<EOF
@@ -145,8 +155,20 @@ validate_fixed_deployment_contract() {
     err "ENV_FILE override не поддерживается production unit: $ENV_FILE"
     return 1
   fi
+  if [[ "$RELEASE_ENV_FILE" != "$FIXED_RELEASE_ENV_FILE" ]]; then
+    err "RELEASE_ENV_FILE override не поддерживается production unit"
+    return 1
+  fi
+  if [[ "$MQTT_TLS_DIR" != "$FIXED_MQTT_TLS_DIR" ]]; then
+    err "MQTT_TLS_DIR override не поддерживается production unit"
+    return 1
+  fi
   if [[ "$STATE_DIR" != "$FIXED_STATE_DIR" ]]; then
     err "STATE_DIR override не поддерживается production unit: $STATE_DIR"
+    return 1
+  fi
+  if [[ "$DEPLOY_CONTROL_DIR" != "$FIXED_DEPLOY_CONTROL_DIR" ]]; then
+    err "DEPLOY_CONTROL_DIR override не поддерживается production deployment"
     return 1
   fi
   if [[ "$PYTHON_INSTALL_DIR" != "$FIXED_PYTHON_INSTALL_DIR" ]]; then
@@ -165,31 +187,89 @@ validate_fixed_deployment_contract() {
     err "SERVICE_USER/SERVICE_GROUP overrides не поддерживаются"
     return 1
   fi
-  if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
-    err "DEPLOY_LOCK_FILE override не поддерживается production deployment"
+  if [[ "$DEPLOY_LOCK_DIR" != "$FIXED_DEPLOY_LOCK_DIR" \
+    || "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+    err "Deployment lock path override не поддерживается production deployment"
     return 1
   fi
+}
+
+stat_owner_uid() {
+  stat -c %u "$1" 2>/dev/null || stat -f %u "$1"
+}
+
+stat_link_count() {
+  stat -c %h "$1" 2>/dev/null || stat -f %l "$1"
+}
+
+stat_followed_identity() {
+  stat -Lc '%u:%h:%i' "$1" 2>/dev/null || stat -Lf '%u:%l:%i' "$1"
 }
 
 acquire_deploy_lock() {
   local inherited_fd=${WB_IRRIGATION_DEPLOY_LOCK_FD:-}
   local inherited_path=""
+  local expected_uid=0
+  local lock_parent
+  local path_identity
+  local descriptor_identity
+  local descriptor_path=/proc/$$/fd/9
+
+  lock_parent=$(dirname -- "$DEPLOY_LOCK_DIR")
+  [[ -e "$descriptor_path" ]] || descriptor_path=/dev/fd/9
+  if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+    expected_uid=$(id -u)
+  fi
 
   if ! command -v flock >/dev/null 2>&1; then
     err "Для сериализации install/update/uninstall требуется flock"
     return 1
+  fi
+  if [[ -L "$lock_parent" || ! -d "$lock_parent" \
+    || "$(stat_owner_uid "$lock_parent")" != "$expected_uid" ]]; then
+    err "Deployment lock parent не является trusted real directory: $lock_parent"
+    return 1
+  fi
+  if [[ ! -e "$DEPLOY_LOCK_DIR" ]]; then
+    if ! install -d -m 0700 "$DEPLOY_LOCK_DIR"; then
+      err "Не удалось создать private deployment lock directory"
+      return 1
+    fi
+  fi
+  if [[ -L "$DEPLOY_LOCK_DIR" || ! -d "$DEPLOY_LOCK_DIR" \
+    || "$(stat_owner_uid "$DEPLOY_LOCK_DIR")" != "$expected_uid" ]]; then
+    err "Deployment lock directory не является trusted: $DEPLOY_LOCK_DIR"
+    return 1
+  fi
+  if ! chmod 0700 "$DEPLOY_LOCK_DIR"; then
+    err "Не удалось защитить deployment lock directory"
+    return 1
+  fi
+  if [[ -e "$DEPLOY_LOCK_FILE" || -L "$DEPLOY_LOCK_FILE" ]]; then
+    if [[ -L "$DEPLOY_LOCK_FILE" || ! -f "$DEPLOY_LOCK_FILE" \
+      || "$(stat_owner_uid "$DEPLOY_LOCK_FILE")" != "$expected_uid" \
+      || "$(stat_link_count "$DEPLOY_LOCK_FILE")" != "1" ]]; then
+      err "Deployment lock file не является trusted regular file: $DEPLOY_LOCK_FILE"
+      return 1
+    fi
   fi
   if [[ -n "$inherited_fd" ]]; then
     if [[ "$inherited_fd" != "9" ]] || ! : >&9 2>/dev/null; then
       err "Некорректный унаследованный descriptor deployment lock"
       return 1
     fi
-    if [[ -e "/proc/$$/fd/9" ]]; then
-      inherited_path=$(readlink -f "/proc/$$/fd/9")
-      if [[ "$inherited_path" != "$DEPLOY_LOCK_FILE" ]]; then
-        err "Унаследованный descriptor не указывает на $DEPLOY_LOCK_FILE"
-        return 1
-      fi
+    inherited_path=$(realpath "$descriptor_path") || return 1
+    if [[ ( "$descriptor_path" == /proc/* && "$inherited_path" != "$DEPLOY_LOCK_FILE" ) \
+      || ! -f "$DEPLOY_LOCK_FILE" || -L "$DEPLOY_LOCK_FILE" ]]; then
+      err "Унаследованный descriptor не указывает на $DEPLOY_LOCK_FILE"
+      return 1
+    fi
+    path_identity=$(stat_followed_identity "$DEPLOY_LOCK_FILE") || return 1
+    descriptor_identity=$(stat_followed_identity "$descriptor_path") || return 1
+    if [[ "$path_identity" != "$descriptor_identity" \
+      || "$path_identity" != "$expected_uid:1:"* ]]; then
+      err "Унаследованный deployment lock descriptor имеет unsafe identity"
+      return 1
     fi
     if ! flock -n 9; then
       err "Унаследованный deployment lock некорректен"
@@ -198,10 +278,25 @@ acquire_deploy_lock() {
     return 0
   fi
 
-  exec 9>"$DEPLOY_LOCK_FILE"
-  chmod 0600 "$DEPLOY_LOCK_FILE"
+  exec 9>>"$DEPLOY_LOCK_FILE"
+  if [[ -L "$DEPLOY_LOCK_FILE" || ! -f "$DEPLOY_LOCK_FILE" ]] \
+    || ! chmod 0600 "$DEPLOY_LOCK_FILE"; then
+    err "Не удалось защитить deployment lock file"
+    return 1
+  fi
+  path_identity=$(stat_followed_identity "$DEPLOY_LOCK_FILE") || return 1
+  descriptor_identity=$(stat_followed_identity "$descriptor_path") || return 1
+  if [[ "$path_identity" != "$descriptor_identity" \
+    || "$path_identity" != "$expected_uid:1:"* ]]; then
+    err "Deployment lock path изменился во время открытия"
+    return 1
+  fi
   if ! flock -n 9; then
     err "Другой install, update или uninstall уже удерживает $DEPLOY_LOCK_FILE"
+    return 1
+  fi
+  if [[ "$(stat_followed_identity "$DEPLOY_LOCK_FILE")" != "$descriptor_identity" ]]; then
+    err "Deployment lock path изменился после flock"
     return 1
   fi
   export WB_IRRIGATION_DEPLOY_LOCK_FD=9
@@ -328,6 +423,10 @@ ensure_service_account() {
     useradd --system --gid "$SERVICE_GROUP" --home-dir "$STATE_DIR" \
       --shell /usr/sbin/nologin --no-create-home "$SERVICE_USER"
   fi
+  if [[ "$(id -Gn "$SERVICE_USER")" != "$SERVICE_GROUP" ]]; then
+    err "$SERVICE_USER не должна входить в supplementary groups"
+    return 1
+  fi
 }
 
 assert_safe_state_source() {
@@ -383,6 +482,139 @@ copy_state_database() {
   mv -f -- "$staged_path" "$target_path"
 }
 
+migrate_mqtt_tls_paths() {
+  local database_path=$1 legacy_root=$2
+  local table_exists schema_columns invalid_paths rows column server_id configured_path
+  local source_path source_real destination_path staged_path check_result
+  local sql_updates=""
+
+  [[ -f "$database_path" && ! -L "$database_path" ]] || return 0
+  table_exists=$(sqlite3 "$database_path" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='mqtt_servers';") || return 1
+  [[ "$table_exists" == "1" ]] || return 0
+  schema_columns=$(sqlite3 "$database_path" \
+    "SELECT group_concat(name, ',') FROM pragma_table_info('mqtt_servers');") || return 1
+  for column in enabled tls_enabled tls_ca_path tls_cert_path tls_key_path; do
+    [[ ",$schema_columns," == *",$column,"* ]] || return 0
+  done
+  if [[ -L "$MQTT_TLS_DIR" || ( -e "$MQTT_TLS_DIR" && ! -d "$MQTT_TLS_DIR" ) ]]; then
+    err "MQTT TLS material directory небезопасен: $MQTT_TLS_DIR"
+    return 1
+  fi
+  [[ -e "$MQTT_TLS_DIR" ]] || MQTT_TLS_DIR_CREATED=1
+  if ! install -d -m 0750 "$MQTT_TLS_DIR" \
+    || ! chown root:"$SERVICE_GROUP" "$MQTT_TLS_DIR" \
+    || ! chmod 0750 "$MQTT_TLS_DIR"; then
+    err "Не удалось защитить MQTT TLS material directory"
+    return 1
+  fi
+  for column in tls_ca_path tls_cert_path tls_key_path; do
+    invalid_paths=$(sqlite3 "$database_path" \
+      "SELECT count(*) FROM mqtt_servers WHERE enabled=1 AND tls_enabled=1
+       AND coalesce($column, '') != ''
+       AND (instr($column, '|') > 0 OR instr($column, char(10)) > 0 OR instr($column, char(13)) > 0);") \
+      || return 1
+    if [[ "$invalid_paths" != "0" ]]; then
+      err "MQTT TLS path содержит unsupported control characters: $column"
+      return 1
+    fi
+    rows=$(sqlite3 -separator '|' "$database_path" \
+      "SELECT id, $column FROM mqtt_servers WHERE enabled=1 AND tls_enabled=1
+       AND coalesce($column, '') != '' ORDER BY id;") || return 1
+    while IFS='|' read -r server_id configured_path; do
+      [[ -n "$server_id" ]] || continue
+      if [[ ! "$server_id" =~ ^[0-9]+$ || -z "$configured_path" ]]; then
+        err "Invalid MQTT TLS database row"
+        return 1
+      fi
+      if [[ "$configured_path" == /* ]]; then
+        source_path=$configured_path
+        if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+          err "MQTT TLS material отсутствует или является symlink: $source_path"
+          return 1
+        fi
+        if runuser -u "$SERVICE_USER" -- test -r "$source_path"; then
+          continue
+        fi
+      else
+        if [[ "$configured_path" == ".." || "$configured_path" == ../* \
+          || "$configured_path" == */../* || "$configured_path" == */.. ]]; then
+          err "Unsafe relative MQTT TLS path: $configured_path"
+          return 1
+        fi
+        source_path="$legacy_root/$configured_path"
+      fi
+      if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+        err "MQTT TLS material недоступен: $source_path"
+        return 1
+      fi
+      source_real=$(readlink -f -- "$source_path") || return 1
+      if [[ "$configured_path" != /* && "$source_real" != "$legacy_root"/* ]]; then
+        err "Relative MQTT TLS material выходит за legacy repository"
+        return 1
+      fi
+      destination_path="$MQTT_TLS_DIR/server-${server_id}-${column}.pem"
+      if [[ -L "$destination_path" || ( -e "$destination_path" && ! -f "$destination_path" ) ]]; then
+        err "MQTT TLS destination небезопасен: $destination_path"
+        return 1
+      fi
+      if [[ -f "$destination_path" ]]; then
+        if ! cmp -s -- "$source_real" "$destination_path"; then
+          err "Existing MQTT TLS destination отличается от migration source"
+          return 1
+        fi
+      else
+        staged_path=""
+        if ! staged_path=$(mktemp "$MQTT_TLS_DIR/.mqtt-tls.XXXXXX") \
+          || ! cp -- "$source_real" "$staged_path" \
+          || ! chmod 0640 "$staged_path" \
+          || ! chown root:"$SERVICE_GROUP" "$staged_path" \
+          || ! mv -- "$staged_path" "$destination_path"; then
+          [[ -n "${staged_path:-}" ]] && rm -f -- "$staged_path"
+          err "Не удалось publish MQTT TLS material"
+          return 1
+        fi
+        MQTT_TLS_CREATED_FILES+=("$destination_path")
+      fi
+      if ! runuser -u "$SERVICE_USER" -- test -r "$destination_path"; then
+        err "Migrated MQTT TLS material не читается service user"
+        return 1
+      fi
+      sql_updates+="UPDATE mqtt_servers SET $column='$destination_path' WHERE id=$server_id;"
+    done <<<"$rows"
+  done
+  if [[ -n "$sql_updates" ]]; then
+    if ! sqlite3 "$database_path" "BEGIN IMMEDIATE;${sql_updates}COMMIT;"; then
+      err "Не удалось atomically update MQTT TLS paths"
+      return 1
+    fi
+    check_result=$(sqlite3 "$database_path" "PRAGMA quick_check;") || return 1
+    if [[ "$check_result" != "ok" ]]; then
+      err "Database failed quick_check after MQTT TLS path migration"
+      return 1
+    fi
+  fi
+}
+
+cleanup_created_mqtt_tls_material() {
+  local created_file
+
+  for created_file in "${MQTT_TLS_CREATED_FILES[@]-}"; do
+    [[ -n "$created_file" ]] || continue
+    if [[ "$created_file" != "$MQTT_TLS_DIR"/server-*-tls_*_path.pem \
+      || -L "$created_file" || ! -f "$created_file" ]]; then
+      err "Refusing unsafe MQTT TLS rollback cleanup: $created_file"
+      return 1
+    fi
+    rm -f -- "$created_file" || return 1
+  done
+  MQTT_TLS_CREATED_FILES=()
+  if [[ "$MQTT_TLS_DIR_CREATED" == "1" && -d "$MQTT_TLS_DIR" && ! -L "$MQTT_TLS_DIR" ]]; then
+    rmdir -- "$MQTT_TLS_DIR" || return 1
+    MQTT_TLS_DIR_CREATED=0
+  fi
+}
+
 copy_state_file() {
   local source_path=$1 target_path=$2 owner=$3 group=$4 mode=$5
   local staged_path="${target_path}.state-stage-$$"
@@ -430,7 +662,6 @@ sync_mutable_state_tree() {
   copy_state_database "$source_root/jobs.db" "$target_root/jobs.db" "$owner" "$group" || return 1
   copy_state_file "$source_root/.secret_key" "$target_root/.secret_key" "$owner" "$group" 0600 || return 1
   copy_state_file "$source_root/.irrig_secret_key" "$target_root/.irrig_secret_key" "$owner" "$group" 0600 || return 1
-  copy_state_file "$source_root/.env" "$target_root/.env" root root 0600 || return 1
   for state_dir in backups static/media/maps static/media/zones; do
     if [[ -d "$source_root/$state_dir" || -L "$source_root/$state_dir" ]]; then
       copy_state_directory "$source_root/$state_dir" "$target_root/$state_dir" "$owner" "$group" || return 1
@@ -495,9 +726,6 @@ normalize_state_permissions() {
   chmod 0700 "$STATE_DIR"
   find -P "$STATE_DIR" -type d -exec chmod 0700 {} +
   find -P "$STATE_DIR" -type f -exec chmod 0600 {} +
-  if [[ -f "$STATE_DIR/.env" ]]; then
-    chown root:root "$STATE_DIR/.env"
-  fi
 }
 
 verify_service_runtime_access() {
@@ -505,6 +733,7 @@ verify_service_runtime_access() {
 
   runuser -u "$SERVICE_USER" -- "$VENV_DIR/bin/python" -V >/dev/null
   runuser -u "$SERVICE_USER" -- test -r "$APP_DIR/run.py"
+  runuser -u "$SERVICE_USER" -- test -r "$RELEASE_ENV_FILE"
   runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR"
   runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR/static/media/maps"
   runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR/static/media/zones"
@@ -515,8 +744,8 @@ verify_service_runtime_access() {
     return 1
   fi
   for tls_path in \
-    "$(configured_env_value WB_HTTP_TLS_CERTFILE "$ENV_FILE" "$STATE_DIR/.env" || true)" \
-    "$(configured_env_value WB_HTTP_TLS_KEYFILE "$ENV_FILE" "$STATE_DIR/.env" || true)"; do
+    "$(configured_env_value WB_HTTP_TLS_CERTFILE "$ENV_FILE" || true)" \
+    "$(configured_env_value WB_HTTP_TLS_KEYFILE "$ENV_FILE" || true)"; do
     if [[ -n "$tls_path" ]]; then
       runuser -u "$SERVICE_USER" -- test -r "$tls_path"
     fi
@@ -709,8 +938,8 @@ configured_port() {
   if [[ "$found" == "0" ]]; then
     port=8080
   fi
-  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
-    err "Некорректное значение PORT: ${port:-<пусто>}"
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1024 || port > 65535)); then
+    err "Некорректный unprivileged PORT (требуется 1024-65535): ${port:-<пусто>}"
     return 1
   fi
   printf '%s\n' "$port"
@@ -841,6 +1070,16 @@ configure_ready_probe() {
   fi
 }
 
+probe_ready_endpoint() {
+  local http_status
+
+  if ! http_status=$(curl "${READY_CURL_ARGS[@]}" \
+    --output /dev/null --write-out '%{http_code}' "$APP_READY_URL"); then
+    return 1
+  fi
+  [[ "$http_status" == "200" ]]
+}
+
 validate_http_transport_contract() {
   local environment_file=$1
   local repository_file=${2:-}
@@ -914,6 +1153,97 @@ ensure_env_default() {
   fi
 }
 
+merge_legacy_env_defaults() {
+  local source_file=$1 target_file=$2
+  local target_parent staged_file line key
+
+  [[ -e "$source_file" || -L "$source_file" ]] || return 0
+  if [[ -L "$source_file" || ! -f "$source_file" ]]; then
+    err "Legacy environment source не является regular file: $source_file"
+    return 1
+  fi
+  target_parent=$(dirname -- "$target_file")
+  if [[ -L "$target_parent" || ! -d "$target_parent" ]]; then
+    err "Environment destination parent небезопасен: $target_parent"
+    return 1
+  fi
+  if [[ -e "$target_file" || -L "$target_file" ]]; then
+    if [[ -L "$target_file" || ! -f "$target_file" ]]; then
+      err "Environment destination небезопасен: $target_file"
+      return 1
+    fi
+  fi
+  if ! staged_file=$(mktemp "$target_parent/.wb-irrigation-env.XXXXXX"); then
+    err "Не удалось создать environment migration staging file"
+    return 1
+  fi
+  if [[ -f "$target_file" ]] && ! cp -a -- "$target_file" "$staged_file"; then
+    rm -f -- "$staged_file"
+    err "Не удалось stage operator environment"
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*= ]]; then
+      key=${BASH_REMATCH[2]}
+    else
+      rm -f -- "$staged_file"
+      err "Legacy environment содержит unsupported line"
+      return 1
+    fi
+    if ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$staged_file"; then
+      if ! printf '%s\n' "$line" >>"$staged_file"; then
+        rm -f -- "$staged_file"
+        err "Не удалось merge legacy environment key: $key"
+        return 1
+      fi
+    fi
+  done <"$source_file"
+  if ! chmod 0640 "$staged_file" \
+    || ! chown root:"$SERVICE_GROUP" "$staged_file" \
+    || ! mv -f -- "$staged_file" "$target_file"; then
+    rm -f -- "$staged_file"
+    err "Не удалось publish merged root-owned environment"
+    return 1
+  fi
+  if ! rm -f -- "$source_file"; then
+    err "Не удалось retire legacy environment source: $source_file"
+    return 1
+  fi
+}
+
+publish_release_environment() {
+  local commit_sha=$1
+  local release_parent staged_release
+
+  require_full_commit_sha "$commit_sha" || return 1
+  release_parent=$(dirname -- "$RELEASE_ENV_FILE")
+  if [[ -L "$release_parent" || ! -d "$release_parent" ]]; then
+    err "Release environment parent небезопасен: $release_parent"
+    return 1
+  fi
+  if [[ -e "$RELEASE_ENV_FILE" || -L "$RELEASE_ENV_FILE" ]]; then
+    if [[ -L "$RELEASE_ENV_FILE" || ! -f "$RELEASE_ENV_FILE" ]]; then
+      err "Release environment target небезопасен: $RELEASE_ENV_FILE"
+      return 1
+    fi
+  fi
+  if ! staged_release=$(mktemp "$release_parent/.wb-irrigation-release.XXXXXX"); then
+    err "Не удалось создать release environment staging file"
+    return 1
+  fi
+  if ! printf 'WB_APP_VERSION=%s\nGIT_COMMIT=%s\n' "$commit_sha" "$commit_sha" >"$staged_release" \
+    || ! chmod 0640 "$staged_release" \
+    || ! chown root:"$SERVICE_GROUP" "$staged_release" \
+    || ! mv -f -- "$staged_release" "$RELEASE_ENV_FILE"; then
+    rm -f -- "$staged_release"
+    err "Не удалось atomically publish release environment"
+    return 1
+  fi
+}
+
 persist_http_environment() {
   local env_file=$1
   local key
@@ -931,6 +1261,36 @@ persist_http_environment() {
     fi
   done
   ensure_env_default WB_HTTP_BIND_HOST 127.0.0.1 "$env_file"
+}
+
+ensure_deploy_control_dir() {
+  local control_parent
+  local expected_uid=0
+
+  control_parent=$(dirname -- "$DEPLOY_CONTROL_DIR")
+  if [[ "$DEPLOY_CONTROL_DIR" != "$FIXED_DEPLOY_CONTROL_DIR" ]]; then
+    expected_uid=$(id -u)
+  fi
+  if [[ -L "$control_parent" || ! -d "$control_parent" \
+    || "$(stat -c %u "$control_parent")" != "$expected_uid" ]]; then
+    err "Deploy control parent не является trusted real directory: $control_parent"
+    return 1
+  fi
+  if [[ ! -e "$DEPLOY_CONTROL_DIR" ]]; then
+    if ! install -d -m 0700 "$DEPLOY_CONTROL_DIR"; then
+      err "Не удалось создать deploy control directory"
+      return 1
+    fi
+  fi
+  if [[ -L "$DEPLOY_CONTROL_DIR" || ! -d "$DEPLOY_CONTROL_DIR" \
+    || "$(stat -c %u "$DEPLOY_CONTROL_DIR")" != "$expected_uid" ]]; then
+    err "Deploy control directory небезопасен: $DEPLOY_CONTROL_DIR"
+    return 1
+  fi
+  if ! chmod 0700 "$DEPLOY_CONTROL_DIR"; then
+    err "Не удалось защитить deploy control directory"
+    return 1
+  fi
 }
 
 ensure_logrotate_ready() {
@@ -1315,6 +1675,7 @@ if [[ ! -d /mnt/data ]]; then
   exit 1
 fi
 if [[ -e "$DATA_DIR" || -L "$DATA_DIR" || -e "$STATE_DIR" || -L "$STATE_DIR" \
+  || -e "$DEPLOY_CONTROL_DIR" || -L "$DEPLOY_CONTROL_DIR" \
   || -e "$APP_LINK" || -L "$APP_LINK" || -e "$SERVICE_FILE" ]]; then
   err "Обнаружена неполная свежая установка; автоматический bootstrap не будет перезаписывать её"
   exit 1
@@ -1381,11 +1742,15 @@ INSTALL_TARGET_COMMIT=""
 INSTALL_SUCCEEDED=0
 FRESH_DATA_CREATED=0
 STATE_ACTIVATED=0
+DEPLOY_CONTROL_CREATED=0
 APP_LINK_CREATED=0
 UNIT_INSTALLED=0
 ENV_CHANGED=0
 HAD_ENV_FILE=0
 ENV_BACKUP=""
+RELEASE_ENV_CHANGED=0
+HAD_RELEASE_ENV_FILE=0
+RELEASE_ENV_BACKUP=""
 LOGROTATE_CHANGED=0
 HAD_LOGROTATE_FILE=0
 LOGROTATE_BACKUP=""
@@ -1415,6 +1780,11 @@ restore_service_on_failure() {
     if [[ "$STATE_ACTIVATED" == "1" && -d "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
       rm -rf -- "$STATE_DIR"
     fi
+    if [[ "$DEPLOY_CONTROL_CREATED" == "1" \
+      && -d "$DEPLOY_CONTROL_DIR" && ! -L "$DEPLOY_CONTROL_DIR" ]]; then
+      rm -rf -- "$DEPLOY_CONTROL_DIR"
+    fi
+    cleanup_created_mqtt_tls_material || true
     if [[ "$APP_LINK_CREATED" == "1" && -L "$APP_LINK" ]]; then
       rm -f -- "$APP_LINK"
     fi
@@ -1428,12 +1798,25 @@ restore_service_on_failure() {
         rm -f -- "$ENV_FILE"
       fi
     fi
+    if [[ "$RELEASE_ENV_CHANGED" == "1" ]]; then
+      if [[ "$HAD_RELEASE_ENV_FILE" == "1" && -f "$RELEASE_ENV_BACKUP" ]]; then
+        cp -a "$RELEASE_ENV_BACKUP" "$RELEASE_ENV_FILE"
+      else
+        rm -f -- "$RELEASE_ENV_FILE"
+      fi
+    fi
   fi
   [[ -n "$ENV_BACKUP" ]] && rm -f -- "$ENV_BACKUP"
+  [[ -n "$RELEASE_ENV_BACKUP" ]] && rm -f -- "$RELEASE_ENV_BACKUP"
   [[ -n "$LOGROTATE_BACKUP" ]] && rm -f -- "$LOGROTATE_BACKUP"
   exit "$status"
 }
 trap restore_service_on_failure EXIT
+
+if [[ ! -e "$DEPLOY_CONTROL_DIR" ]]; then
+  DEPLOY_CONTROL_CREATED=1
+fi
+ensure_deploy_control_dir
 
 if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
   SERVICE_WAS_ACTIVE=1
@@ -1473,6 +1856,7 @@ for secret_file in "$APP_DIR/.secret_key" "$APP_DIR/.irrig_secret_key" "$APP_DIR
 done
 prepare_state_layout "$APP_DIR"
 normalize_state_permissions
+migrate_mqtt_tls_paths "$STATE_DIR/irrigation.db" "$APP_DIR"
 ok "Код приложения: $APP_DIR"
 
 # -----------------------------------------------------------------------------
@@ -1541,18 +1925,27 @@ if [[ -f "$ENV_FILE" ]]; then
   ENV_BACKUP=$(mktemp /tmp/wb-irrigation-install-env.XXXXXX)
   cp -a "$ENV_FILE" "$ENV_BACKUP"
 fi
+if [[ -f "$RELEASE_ENV_FILE" ]]; then
+  HAD_RELEASE_ENV_FILE=1
+  RELEASE_ENV_BACKUP=$(mktemp /tmp/wb-irrigation-install-release.XXXXXX)
+  cp -a "$RELEASE_ENV_FILE" "$RELEASE_ENV_BACKUP"
+fi
 ENV_CHANGED=1
+RELEASE_ENV_CHANGED=1
+merge_legacy_env_defaults "$STATE_DIR/.env" "$ENV_FILE"
+merge_legacy_env_defaults "$APP_DIR/.env" "$ENV_FILE"
 upsert_env_value GIT_COMMIT "$CURRENT_COMMIT" "$ENV_FILE"
+publish_release_environment "$CURRENT_COMMIT"
 if [[ ${PORT+x} ]]; then
-  APP_PORT=$(configured_port "$ENV_FILE" "$STATE_DIR/.env")
+  APP_PORT=$(configured_port "$ENV_FILE")
   upsert_env_value PORT "$APP_PORT" "$ENV_FILE"
 fi
 persist_http_environment "$ENV_FILE"
 chown root:"$SERVICE_GROUP" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
-validate_http_transport_contract "$ENV_FILE" "$STATE_DIR/.env"
-APP_PORT=$(configured_port "$ENV_FILE" "$STATE_DIR/.env")
-configure_ready_probe "$ENV_FILE" "$STATE_DIR/.env"
+validate_http_transport_contract "$ENV_FILE"
+APP_PORT=$(configured_port "$ENV_FILE")
+configure_ready_probe "$ENV_FILE"
 verify_service_runtime_access
 
 # `enable --now` is a no-op for an already active service. Always restart so a
@@ -1572,7 +1965,7 @@ info "Шаг 6/6 — smoke check /readyz"
 
 # Дать сервису подняться (sd_notify READY ставится после старта планировщика).
 for i in $(seq 1 15); do
-  if curl "${READY_CURL_ARGS[@]}" "$APP_READY_URL" >/dev/null 2>&1; then
+  if probe_ready_endpoint; then
     ok "/readyz отвечает 200 (попытка $i)"
     READYZ_OK=1
     break
@@ -1586,11 +1979,12 @@ if [[ "${READYZ_OK:-0}" != "1" ]]; then
   exit 1
 fi
 
-install -m 0600 /dev/null "$STATE_DIR/.layout-v1"
-chown root:root "$STATE_DIR/.layout-v1"
+install -m 0600 /dev/null "$DEPLOY_CONTROL_DIR/layout-v1"
 INSTALL_SUCCEEDED=1
 [[ -n "$ENV_BACKUP" ]] && rm -f -- "$ENV_BACKUP"
 ENV_BACKUP=""
+[[ -n "$RELEASE_ENV_BACKUP" ]] && rm -f -- "$RELEASE_ENV_BACKUP"
+RELEASE_ENV_BACKUP=""
 [[ -n "$LOGROTATE_BACKUP" ]] && rm -f -- "$LOGROTATE_BACKUP"
 LOGROTATE_BACKUP=""
 

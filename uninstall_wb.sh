@@ -13,11 +13,14 @@ APP_ROOT=/opt/wb-irrigation
 APP_LINK=/opt/wb-irrigation/irrigation
 DATA_DIR=/mnt/data/wb-irrigation
 STATE_DIR=/mnt/data/wb-irrigation-state
+DEPLOY_CONTROL_DIR=/mnt/data/wb-irrigation-deploy
 PYTHON_INSTALL_DIR=/mnt/data/wb-irrigation-python
 SERVICE_USER=wb-irrigation
 SERVICE_GROUP=wb-irrigation
-DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation-deploy.lock}
-readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation-deploy.lock
+DEPLOY_LOCK_DIR=${DEPLOY_LOCK_DIR:-/run/lock/wb-irrigation}
+DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation/deploy.lock}
+readonly FIXED_DEPLOY_LOCK_DIR=/run/lock/wb-irrigation
+readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation/deploy.lock
 
 ASSUME_YES=0
 PURGE_DATA=0
@@ -31,32 +34,90 @@ but code, state, shared Python and /opt/wb-irrigation/.env are preserved.
 
 --yes         confirm removal of service integration without a prompt
 --purge-data  also remove code, /mnt/data/wb-irrigation-state, the shared
-              /mnt/data/wb-irrigation-python runtime and the service account;
+              /mnt/data/wb-irrigation-python runtime, root-owned deploy
+              control data, failed-state quarantines and the service account;
               this irreversible option has its own explicit confirmation
 EOF
 }
 
 err() { echo "ERROR: $*" >&2; }
 
+stat_owner_uid() {
+  stat -c %u "$1" 2>/dev/null || stat -f %u "$1"
+}
+
+stat_link_count() {
+  stat -c %h "$1" 2>/dev/null || stat -f %l "$1"
+}
+
+stat_followed_identity() {
+  stat -Lc '%u:%h:%i' "$1" 2>/dev/null || stat -Lf '%u:%l:%i' "$1"
+}
+
 acquire_deploy_lock() {
   local inherited_fd=${WB_IRRIGATION_DEPLOY_LOCK_FD:-}
   local inherited_path=""
+  local expected_uid=0
+  local lock_parent
+  local path_identity
+  local descriptor_identity
+  local descriptor_path=/proc/$$/fd/9
+
+  lock_parent=$(dirname -- "$DEPLOY_LOCK_DIR")
+  [[ -e "$descriptor_path" ]] || descriptor_path=/dev/fd/9
+  if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+    expected_uid=$(id -u)
+  fi
 
   if ! command -v flock >/dev/null 2>&1; then
     err "flock is required to serialize install, update and uninstall operations"
     return 1
+  fi
+  if [[ -L "$lock_parent" || ! -d "$lock_parent" \
+    || "$(stat_owner_uid "$lock_parent")" != "$expected_uid" ]]; then
+    err "Deployment lock parent is not a trusted real directory: $lock_parent"
+    return 1
+  fi
+  if [[ ! -e "$DEPLOY_LOCK_DIR" ]]; then
+    if ! install -d -m 0700 "$DEPLOY_LOCK_DIR"; then
+      err "Could not create private deployment lock directory"
+      return 1
+    fi
+  fi
+  if [[ -L "$DEPLOY_LOCK_DIR" || ! -d "$DEPLOY_LOCK_DIR" \
+    || "$(stat_owner_uid "$DEPLOY_LOCK_DIR")" != "$expected_uid" ]]; then
+    err "Deployment lock directory is not trusted: $DEPLOY_LOCK_DIR"
+    return 1
+  fi
+  if ! chmod 0700 "$DEPLOY_LOCK_DIR"; then
+    err "Could not secure deployment lock directory"
+    return 1
+  fi
+  if [[ -e "$DEPLOY_LOCK_FILE" || -L "$DEPLOY_LOCK_FILE" ]]; then
+    if [[ -L "$DEPLOY_LOCK_FILE" || ! -f "$DEPLOY_LOCK_FILE" \
+      || "$(stat_owner_uid "$DEPLOY_LOCK_FILE")" != "$expected_uid" \
+      || "$(stat_link_count "$DEPLOY_LOCK_FILE")" != "1" ]]; then
+      err "Deployment lock file is not a trusted regular file: $DEPLOY_LOCK_FILE"
+      return 1
+    fi
   fi
   if [[ -n "$inherited_fd" ]]; then
     if [[ "$inherited_fd" != "9" ]] || ! : >&9 2>/dev/null; then
       err "Invalid inherited deployment lock descriptor"
       return 1
     fi
-    if [[ -e "/proc/$$/fd/9" ]]; then
-      inherited_path=$(readlink -f "/proc/$$/fd/9")
-      if [[ "$inherited_path" != "$DEPLOY_LOCK_FILE" ]]; then
-        err "Inherited descriptor does not reference $DEPLOY_LOCK_FILE"
-        return 1
-      fi
+    inherited_path=$(realpath "$descriptor_path") || return 1
+    if [[ ( "$descriptor_path" == /proc/* && "$inherited_path" != "$DEPLOY_LOCK_FILE" ) \
+      || ! -f "$DEPLOY_LOCK_FILE" || -L "$DEPLOY_LOCK_FILE" ]]; then
+      err "Inherited descriptor does not reference $DEPLOY_LOCK_FILE"
+      return 1
+    fi
+    path_identity=$(stat_followed_identity "$DEPLOY_LOCK_FILE") || return 1
+    descriptor_identity=$(stat_followed_identity "$descriptor_path") || return 1
+    if [[ "$path_identity" != "$descriptor_identity" \
+      || "$path_identity" != "$expected_uid:1:"* ]]; then
+      err "Inherited deployment lock descriptor identity is unsafe"
+      return 1
     fi
     if ! flock -n 9; then
       err "Inherited deployment lock is invalid"
@@ -65,10 +126,25 @@ acquire_deploy_lock() {
     return 0
   fi
 
-  exec 9>"$DEPLOY_LOCK_FILE"
-  chmod 0600 "$DEPLOY_LOCK_FILE"
+  exec 9>>"$DEPLOY_LOCK_FILE"
+  if [[ -L "$DEPLOY_LOCK_FILE" || ! -f "$DEPLOY_LOCK_FILE" ]] \
+    || ! chmod 0600 "$DEPLOY_LOCK_FILE"; then
+    err "Could not secure deployment lock file"
+    return 1
+  fi
+  path_identity=$(stat_followed_identity "$DEPLOY_LOCK_FILE") || return 1
+  descriptor_identity=$(stat_followed_identity "$descriptor_path") || return 1
+  if [[ "$path_identity" != "$descriptor_identity" \
+    || "$path_identity" != "$expected_uid:1:"* ]]; then
+    err "Deployment lock path changed while it was opened"
+    return 1
+  fi
   if ! flock -n 9; then
     err "Another install, update or uninstall operation holds $DEPLOY_LOCK_FILE"
+    return 1
+  fi
+  if [[ "$(stat_followed_identity "$DEPLOY_LOCK_FILE")" != "$descriptor_identity" ]]; then
+    err "Deployment lock path changed after locking"
     return 1
   fi
   export WB_IRRIGATION_DEPLOY_LOCK_FD=9
@@ -115,15 +191,26 @@ remove_service_integration() {
 purge_application_data() {
   local passwd_entry account_name password uid gid gecos account_home account_shell
   local group_entry group_gid group_members conflicting_primary
+  local failed_state
+  local -a failed_states=(/mnt/data/wb-irrigation-state.failed-*)
 
   # These are fixed, validated deployment paths; never derive recursive-delete
   # targets from symlinks, globs or environment variables.
   if [[ "$DATA_DIR" != "/mnt/data/wb-irrigation" || "$STATE_DIR" != "/mnt/data/wb-irrigation-state" \
     || "$PYTHON_INSTALL_DIR" != "/mnt/data/wb-irrigation-python" \
+    || "$DEPLOY_CONTROL_DIR" != "/mnt/data/wb-irrigation-deploy" \
     || "$APP_ROOT" != "/opt/wb-irrigation" ]]; then
     err "Refusing to purge unexpected paths"
     return 1
   fi
+  for failed_state in "${failed_states[@]}"; do
+    [[ -e "$failed_state" || -L "$failed_state" ]] || continue
+    if [[ "$failed_state" != "$STATE_DIR.failed-"* \
+      || -L "$failed_state" || ! -d "$failed_state" ]]; then
+      err "Refusing unsafe failed-state quarantine during purge: $failed_state"
+      return 1
+    fi
+  done
   if id "$SERVICE_USER" >/dev/null 2>&1; then
     passwd_entry=$(getent passwd "$SERVICE_USER")
     IFS=: read -r account_name password uid gid gecos account_home account_shell <<<"$passwd_entry"
@@ -148,6 +235,10 @@ purge_application_data() {
   fi
   rm -rf -- "$DATA_DIR"
   rm -rf -- "$STATE_DIR"
+  for failed_state in "${failed_states[@]}"; do
+    [[ -d "$failed_state" ]] && rm -rf -- "$failed_state"
+  done
+  rm -rf -- "$DEPLOY_CONTROL_DIR"
   rm -rf -- "$PYTHON_INSTALL_DIR"
   rm -rf -- "$APP_ROOT"
   if id "$SERVICE_USER" >/dev/null 2>&1; then
@@ -189,8 +280,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
   err "Please run as root (sudo bash $0)"
   exit 1
 fi
-if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
-  err "DEPLOY_LOCK_FILE override is unsupported for production uninstall"
+if [[ "$DEPLOY_LOCK_DIR" != "$FIXED_DEPLOY_LOCK_DIR" \
+  || "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+  err "Deployment lock path override is unsupported for production uninstall"
   exit 1
 fi
 if ! confirm_service_removal; then

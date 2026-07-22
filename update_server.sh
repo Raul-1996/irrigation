@@ -17,29 +17,39 @@ UV_BIN=${UV_BIN:-/mnt/data/wb-irrigation-tools/uv}
 BACKUP_BASE=${BACKUP_BASE:-}
 BACKUP_KEEP=${BACKUP_KEEP:-10}
 ENV_FILE=${ENV_FILE:-/opt/wb-irrigation/.env}
+RELEASE_ENV_FILE=${RELEASE_ENV_FILE:-/opt/wb-irrigation/release.env}
+MQTT_TLS_DIR=${MQTT_TLS_DIR:-/opt/wb-irrigation/mqtt-tls}
 STATE_DIR=${STATE_DIR:-/mnt/data/wb-irrigation-state}
+DEPLOY_CONTROL_DIR=${DEPLOY_CONTROL_DIR:-/mnt/data/wb-irrigation-deploy}
 PYTHON_INSTALL_DIR=${PYTHON_INSTALL_DIR:-/mnt/data/wb-irrigation-python}
 SERVICE_USER=${SERVICE_USER:-wb-irrigation}
 SERVICE_GROUP=${SERVICE_GROUP:-wb-irrigation}
 NONINTERACTIVE=${NONINTERACTIVE:-0}
 HANDOFF_SERVICE_WAS_ACTIVE=${WB_IRRIGATION_HANDOFF_SERVICE_WAS_ACTIVE:-0}
 DEFER_ROLLBACK_RESTART=${WB_IRRIGATION_DEFER_ROLLBACK_RESTART:-0}
-DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation-deploy.lock}
+DEPLOY_LOCK_DIR=${DEPLOY_LOCK_DIR:-/run/lock/wb-irrigation}
+DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation/deploy.lock}
 readonly FIXED_REPO_DIR=/opt/wb-irrigation/irrigation
 readonly FIXED_REPO_DIR_REAL=/mnt/data/wb-irrigation
 readonly FIXED_SERVICE=wb-irrigation
 readonly FIXED_ENV_FILE=/opt/wb-irrigation/.env
+readonly FIXED_RELEASE_ENV_FILE=/opt/wb-irrigation/release.env
+readonly FIXED_MQTT_TLS_DIR=/opt/wb-irrigation/mqtt-tls
 readonly FIXED_STATE_DIR=/mnt/data/wb-irrigation-state
+readonly FIXED_DEPLOY_CONTROL_DIR=/mnt/data/wb-irrigation-deploy
 readonly FIXED_PYTHON_INSTALL_DIR=/mnt/data/wb-irrigation-python
 readonly FIXED_PY_VERSION=3.11.15
 readonly FIXED_UV_BIN=/mnt/data/wb-irrigation-tools/uv
-readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation-deploy.lock
+readonly FIXED_DEPLOY_LOCK_DIR=/run/lock/wb-irrigation
+readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation/deploy.lock
 readonly UV_VERSION=0.11.31
 readonly UV_ARCHIVE_URL=https://releases.astral.sh/github/uv/releases/download/0.11.31/uv-aarch64-unknown-linux-gnu.tar.gz
 readonly UV_ARCHIVE_SHA256=d74f23949fd07be4970f293d06ca99d87cd2a78a341c3d7b7fc0df7bc2d8a145
 # Versioned security contract for the currently integrated Telegram runtime.
 # Any legitimate edit to that runtime must deliberately update this allowlist.
 readonly TELEGRAM_LOG_RETIREMENT_BLOB=e4fc7b282236aac7675c879b892cbf1192dc66f0
+MQTT_TLS_CREATED_FILES=()
+MQTT_TLS_DIR_CREATED=0
 
 usage() {
   cat <<EOF
@@ -157,8 +167,20 @@ validate_fixed_deployment_contract() {
     err "ENV_FILE override is unsupported by the fixed systemd unit: $ENV_FILE"
     return 1
   fi
+  if [[ "$RELEASE_ENV_FILE" != "$FIXED_RELEASE_ENV_FILE" ]]; then
+    err "RELEASE_ENV_FILE override is unsupported by the fixed systemd unit"
+    return 1
+  fi
+  if [[ "$MQTT_TLS_DIR" != "$FIXED_MQTT_TLS_DIR" ]]; then
+    err "MQTT_TLS_DIR override is unsupported by the fixed systemd unit"
+    return 1
+  fi
   if [[ "$STATE_DIR" != "$FIXED_STATE_DIR" ]]; then
     err "STATE_DIR override is unsupported by the fixed systemd unit: $STATE_DIR"
+    return 1
+  fi
+  if [[ "$DEPLOY_CONTROL_DIR" != "$FIXED_DEPLOY_CONTROL_DIR" ]]; then
+    err "DEPLOY_CONTROL_DIR override is unsupported for production deployment"
     return 1
   fi
   if [[ "$PYTHON_INSTALL_DIR" != "$FIXED_PYTHON_INSTALL_DIR" ]]; then
@@ -177,8 +199,9 @@ validate_fixed_deployment_contract() {
     err "SERVICE_USER/SERVICE_GROUP overrides are unsupported"
     return 1
   fi
-  if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
-    err "DEPLOY_LOCK_FILE override is unsupported for production deployment"
+  if [[ "$DEPLOY_LOCK_DIR" != "$FIXED_DEPLOY_LOCK_DIR" \
+    || "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+    err "Deployment lock path override is unsupported for production deployment"
     return 1
   fi
   if [[ "$HANDOFF_SERVICE_WAS_ACTIVE" != "0" && "$HANDOFF_SERVICE_WAS_ACTIVE" != "1" ]]; then
@@ -195,25 +218,82 @@ validate_fixed_deployment_contract() {
   fi
 }
 
+stat_owner_uid() {
+  stat -c %u "$1" 2>/dev/null || stat -f %u "$1"
+}
+
+stat_link_count() {
+  stat -c %h "$1" 2>/dev/null || stat -f %l "$1"
+}
+
+stat_followed_identity() {
+  stat -Lc '%u:%h:%i' "$1" 2>/dev/null || stat -Lf '%u:%l:%i' "$1"
+}
+
 acquire_deploy_lock() {
   local inherited_fd=${WB_IRRIGATION_DEPLOY_LOCK_FD:-}
   local inherited_path=""
+  local expected_uid=0
+  local lock_parent
+  local path_identity
+  local descriptor_identity
+  local descriptor_path=/proc/$$/fd/9
+
+  lock_parent=$(dirname -- "$DEPLOY_LOCK_DIR")
+  [[ -e "$descriptor_path" ]] || descriptor_path=/dev/fd/9
+  if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+    expected_uid=$(id -u)
+  fi
 
   if ! command -v flock >/dev/null 2>&1; then
     err "flock is required to serialize install, update and uninstall operations"
     return 1
+  fi
+  if [[ -L "$lock_parent" || ! -d "$lock_parent" \
+    || "$(stat_owner_uid "$lock_parent")" != "$expected_uid" ]]; then
+    err "Deployment lock parent is not a trusted real directory: $lock_parent"
+    return 1
+  fi
+  if [[ ! -e "$DEPLOY_LOCK_DIR" ]]; then
+    if ! install -d -m 0700 "$DEPLOY_LOCK_DIR"; then
+      err "Could not create private deployment lock directory"
+      return 1
+    fi
+  fi
+  if [[ -L "$DEPLOY_LOCK_DIR" || ! -d "$DEPLOY_LOCK_DIR" \
+    || "$(stat_owner_uid "$DEPLOY_LOCK_DIR")" != "$expected_uid" ]]; then
+    err "Deployment lock directory is not trusted: $DEPLOY_LOCK_DIR"
+    return 1
+  fi
+  if ! chmod 0700 "$DEPLOY_LOCK_DIR"; then
+    err "Could not secure deployment lock directory"
+    return 1
+  fi
+  if [[ -e "$DEPLOY_LOCK_FILE" || -L "$DEPLOY_LOCK_FILE" ]]; then
+    if [[ -L "$DEPLOY_LOCK_FILE" || ! -f "$DEPLOY_LOCK_FILE" \
+      || "$(stat_owner_uid "$DEPLOY_LOCK_FILE")" != "$expected_uid" \
+      || "$(stat_link_count "$DEPLOY_LOCK_FILE")" != "1" ]]; then
+      err "Deployment lock file is not a trusted regular file: $DEPLOY_LOCK_FILE"
+      return 1
+    fi
   fi
   if [[ -n "$inherited_fd" ]]; then
     if [[ "$inherited_fd" != "9" ]] || ! : >&9 2>/dev/null; then
       err "Invalid inherited deployment lock descriptor"
       return 1
     fi
-    if [[ -e "/proc/$$/fd/9" ]]; then
-      inherited_path=$(readlink -f "/proc/$$/fd/9")
-      if [[ "$inherited_path" != "$DEPLOY_LOCK_FILE" ]]; then
-        err "Inherited descriptor does not reference $DEPLOY_LOCK_FILE"
-        return 1
-      fi
+    inherited_path=$(realpath "$descriptor_path") || return 1
+    if [[ ( "$descriptor_path" == /proc/* && "$inherited_path" != "$DEPLOY_LOCK_FILE" ) \
+      || ! -f "$DEPLOY_LOCK_FILE" || -L "$DEPLOY_LOCK_FILE" ]]; then
+      err "Inherited descriptor does not reference $DEPLOY_LOCK_FILE"
+      return 1
+    fi
+    path_identity=$(stat_followed_identity "$DEPLOY_LOCK_FILE") || return 1
+    descriptor_identity=$(stat_followed_identity "$descriptor_path") || return 1
+    if [[ "$path_identity" != "$descriptor_identity" \
+      || "$path_identity" != "$expected_uid:1:"* ]]; then
+      err "Inherited deployment lock descriptor identity is unsafe"
+      return 1
     fi
     if ! flock -n 9; then
       err "Inherited deployment lock is invalid"
@@ -222,10 +302,25 @@ acquire_deploy_lock() {
     return 0
   fi
 
-  exec 9>"$DEPLOY_LOCK_FILE"
-  chmod 0600 "$DEPLOY_LOCK_FILE"
+  exec 9>>"$DEPLOY_LOCK_FILE"
+  if [[ -L "$DEPLOY_LOCK_FILE" || ! -f "$DEPLOY_LOCK_FILE" ]] \
+    || ! chmod 0600 "$DEPLOY_LOCK_FILE"; then
+    err "Could not secure deployment lock file"
+    return 1
+  fi
+  path_identity=$(stat_followed_identity "$DEPLOY_LOCK_FILE") || return 1
+  descriptor_identity=$(stat_followed_identity "$descriptor_path") || return 1
+  if [[ "$path_identity" != "$descriptor_identity" \
+    || "$path_identity" != "$expected_uid:1:"* ]]; then
+    err "Deployment lock path changed while it was opened"
+    return 1
+  fi
   if ! flock -n 9; then
     err "Another install, update or uninstall operation holds $DEPLOY_LOCK_FILE"
+    return 1
+  fi
+  if [[ "$(stat_followed_identity "$DEPLOY_LOCK_FILE")" != "$descriptor_identity" ]]; then
+    err "Deployment lock path changed after locking"
     return 1
   fi
   export WB_IRRIGATION_DEPLOY_LOCK_FD=9
@@ -361,6 +456,10 @@ ensure_service_account() {
     useradd --system --gid "$SERVICE_GROUP" --home-dir "$STATE_DIR" \
       --shell /usr/sbin/nologin --no-create-home "$SERVICE_USER"
   fi
+  if [[ "$(id -Gn "$SERVICE_USER")" != "$SERVICE_GROUP" ]]; then
+    err "$SERVICE_USER must not belong to supplementary groups"
+    return 1
+  fi
 }
 
 assert_safe_state_source() {
@@ -487,10 +586,6 @@ sync_mutable_state_tree() {
   copy_state_database "$source_root/jobs.db" "$target_root/jobs.db" "$owner" "$group" || return 1
   copy_state_file "$source_root/.secret_key" "$target_root/.secret_key" "$owner" "$group" 0600 || return 1
   copy_state_file "$source_root/.irrig_secret_key" "$target_root/.irrig_secret_key" "$owner" "$group" 0600 || return 1
-  # A repository .env is dotenv state. The external systemd EnvironmentFile
-  # remains at /opt/wb-irrigation/.env and is handled separately.
-  copy_state_file "$source_root/.env" "$target_root/.env" root root 0600 || return 1
-
   for state_dir in backups static/media/maps static/media/zones; do
     if [[ -d "$source_root/$state_dir" || -L "$source_root/$state_dir" ]]; then
       copy_state_directory "$source_root/$state_dir" "$target_root/$state_dir" "$owner" "$group" || return 1
@@ -539,7 +634,10 @@ prepare_state_layout() {
     return 1
   fi
   if [[ "$import_legacy" == "0" ]]; then
-    if [[ ! -d "$STATE_DIR" || ! -f "$STATE_DIR/.layout-v1" ]]; then
+    if [[ ! -d "$STATE_DIR" || -L "$STATE_DIR" \
+      || ! -d "$STATE_DIR/backups" \
+      || ! -d "$STATE_DIR/static/media/maps" \
+      || ! -d "$STATE_DIR/static/media/zones" ]]; then
       err "Active non-root unit requires a complete marked state layout"
       return 1
     fi
@@ -605,21 +703,31 @@ secure_code_tree() {
 }
 
 normalize_state_permissions() {
-  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR"
-  chmod 0700 "$STATE_DIR"
-  find -P "$STATE_DIR" -type d -exec chmod 0700 {} +
-  find -P "$STATE_DIR" -type f -exec chmod 0600 {} +
-  if [[ -f "$STATE_DIR/.env" ]]; then
-    chown root:root "$STATE_DIR/.env"
-    chmod 0600 "$STATE_DIR/.env"
+  normalize_state_tree_permissions "$STATE_DIR"
+}
+
+normalize_state_tree_permissions() {
+  local state_root=$1
+
+  if [[ -L "$state_root" || ! -d "$state_root" ]]; then
+    err "State permission target is not a real directory: $state_root"
+    return 1
   fi
-  if [[ -d "$STATE_DIR/deploy-backups" ]]; then
-    chown -R root:root "$STATE_DIR/deploy-backups"
-    chmod -R go-rwx "$STATE_DIR/deploy-backups"
+  if ! chown -R "$SERVICE_USER:$SERVICE_GROUP" "$state_root"; then
+    err "Could not set state ownership: $state_root"
+    return 1
   fi
-  if [[ -f "$STATE_DIR/.layout-v1" ]]; then
-    chown root:root "$STATE_DIR/.layout-v1"
-    chmod 0600 "$STATE_DIR/.layout-v1"
+  if ! chmod 0700 "$state_root"; then
+    err "Could not secure state root: $state_root"
+    return 1
+  fi
+  if ! find -P "$state_root" -type d -exec chmod 0700 {} +; then
+    err "Could not secure state directories: $state_root"
+    return 1
+  fi
+  if ! find -P "$state_root" -type f -exec chmod 0600 {} +; then
+    err "Could not secure state files: $state_root"
+    return 1
   fi
 }
 
@@ -628,6 +736,7 @@ verify_service_runtime_access() {
 
   runuser -u "$SERVICE_USER" -- "$VENV_DIR/bin/python" -V >/dev/null
   runuser -u "$SERVICE_USER" -- test -r "$REPO_DIR_REAL/run.py"
+  runuser -u "$SERVICE_USER" -- test -r "$RELEASE_ENV_FILE"
   runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR"
   runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR/static/media/maps"
   runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR/static/media/zones"
@@ -638,8 +747,8 @@ verify_service_runtime_access() {
     return 1
   fi
   for tls_path in \
-    "$(configured_env_value WB_HTTP_TLS_CERTFILE "$ENV_FILE" "$STATE_DIR/.env" || true)" \
-    "$(configured_env_value WB_HTTP_TLS_KEYFILE "$ENV_FILE" "$STATE_DIR/.env" || true)"; do
+    "$(configured_env_value WB_HTTP_TLS_CERTFILE "$ENV_FILE" || true)" \
+    "$(configured_env_value WB_HTTP_TLS_KEYFILE "$ENV_FILE" || true)"; do
     if [[ -n "$tls_path" ]]; then
       runuser -u "$SERVICE_USER" -- test -r "$tls_path"
     fi
@@ -673,8 +782,8 @@ configured_port() {
   if [[ "$found" == "0" ]]; then
     port=8080
   fi
-  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
-    err "Invalid PORT value: ${port:-<empty>}"
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1024 || port > 65535)); then
+    err "Invalid unprivileged PORT value (1024-65535 required): ${port:-<empty>}"
     return 1
   fi
   printf '%s\n' "$port"
@@ -805,6 +914,16 @@ configure_ready_probe() {
   fi
 }
 
+probe_ready_endpoint() {
+  local http_status
+
+  if ! http_status=$(curl "${READY_CURL_ARGS[@]}" \
+    --output /dev/null --write-out '%{http_code}' "$APP_READY_URL"); then
+    return 1
+  fi
+  [[ "$http_status" == "200" ]]
+}
+
 validate_http_transport_contract() {
   local environment_file=$1
   local repository_file=${2:-}
@@ -878,6 +997,102 @@ ensure_env_default() {
   fi
 }
 
+merge_legacy_env_defaults() {
+  local source_file=$1
+  local target_file=$2
+  local target_parent
+  local staged_file
+  local line
+  local key
+
+  [[ -e "$source_file" || -L "$source_file" ]] || return 0
+  if [[ -L "$source_file" || ! -f "$source_file" ]]; then
+    err "Legacy environment source is not a regular file: $source_file"
+    return 1
+  fi
+  target_parent=$(dirname -- "$target_file")
+  if [[ -L "$target_parent" || ! -d "$target_parent" ]]; then
+    err "Environment destination parent is unsafe: $target_parent"
+    return 1
+  fi
+  if [[ -e "$target_file" || -L "$target_file" ]]; then
+    if [[ -L "$target_file" || ! -f "$target_file" ]]; then
+      err "Environment destination is unsafe: $target_file"
+      return 1
+    fi
+  fi
+  if ! staged_file=$(mktemp "$target_parent/.wb-irrigation-env.XXXXXX"); then
+    err "Could not create environment migration staging file"
+    return 1
+  fi
+  if [[ -f "$target_file" ]] && ! cp -a -- "$target_file" "$staged_file"; then
+    rm -f -- "$staged_file"
+    err "Could not stage the operator environment"
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*= ]]; then
+      key=${BASH_REMATCH[2]}
+    else
+      rm -f -- "$staged_file"
+      err "Legacy environment contains an unsupported line"
+      return 1
+    fi
+    if ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$staged_file"; then
+      if ! printf '%s\n' "$line" >>"$staged_file"; then
+        rm -f -- "$staged_file"
+        err "Could not merge legacy environment key: $key"
+        return 1
+      fi
+    fi
+  done <"$source_file"
+  if ! chmod 0640 "$staged_file" \
+    || ! chown root:"$SERVICE_GROUP" "$staged_file" \
+    || ! mv -f -- "$staged_file" "$target_file"; then
+    rm -f -- "$staged_file"
+    err "Could not publish the merged root-owned environment"
+    return 1
+  fi
+  if ! rm -f -- "$source_file"; then
+    err "Could not retire legacy environment source: $source_file"
+    return 1
+  fi
+}
+
+publish_release_environment() {
+  local commit_sha=$1
+  local release_parent
+  local staged_release
+
+  require_full_commit_sha "$commit_sha" || return 1
+  release_parent=$(dirname -- "$RELEASE_ENV_FILE")
+  if [[ -L "$release_parent" || ! -d "$release_parent" ]]; then
+    err "Release environment parent is unsafe: $release_parent"
+    return 1
+  fi
+  if [[ -e "$RELEASE_ENV_FILE" || -L "$RELEASE_ENV_FILE" ]]; then
+    if [[ -L "$RELEASE_ENV_FILE" || ! -f "$RELEASE_ENV_FILE" ]]; then
+      err "Release environment target is unsafe: $RELEASE_ENV_FILE"
+      return 1
+    fi
+  fi
+  if ! staged_release=$(mktemp "$release_parent/.wb-irrigation-release.XXXXXX"); then
+    err "Could not create release environment staging file"
+    return 1
+  fi
+  if ! printf 'WB_APP_VERSION=%s\nGIT_COMMIT=%s\n' "$commit_sha" "$commit_sha" >"$staged_release" \
+    || ! chmod 0640 "$staged_release" \
+    || ! chown root:"$SERVICE_GROUP" "$staged_release" \
+    || ! mv -f -- "$staged_release" "$RELEASE_ENV_FILE"; then
+    rm -f -- "$staged_release"
+    err "Could not atomically publish release environment"
+    return 1
+  fi
+}
+
 persist_http_environment() {
   local env_file=$1
   local key
@@ -897,12 +1112,57 @@ persist_http_environment() {
   ensure_env_default WB_HTTP_BIND_HOST 127.0.0.1 "$env_file"
 }
 
+ensure_deploy_control_dir() {
+  local control_parent
+  local expected_uid=0
+
+  control_parent=$(dirname -- "$DEPLOY_CONTROL_DIR")
+  if [[ "$DEPLOY_CONTROL_DIR" != "$FIXED_DEPLOY_CONTROL_DIR" ]]; then
+    expected_uid=$(id -u)
+  fi
+  if [[ -L "$control_parent" || ! -d "$control_parent" \
+    || "$(stat -c %u "$control_parent")" != "$expected_uid" ]]; then
+    err "Deploy control parent is not a trusted real directory: $control_parent"
+    return 1
+  fi
+  if [[ ! -e "$DEPLOY_CONTROL_DIR" ]]; then
+    if ! install -d -m 0700 "$DEPLOY_CONTROL_DIR"; then
+      err "Could not create deploy control directory"
+      return 1
+    fi
+  fi
+  if [[ -L "$DEPLOY_CONTROL_DIR" || ! -d "$DEPLOY_CONTROL_DIR" \
+    || "$(stat -c %u "$DEPLOY_CONTROL_DIR")" != "$expected_uid" ]]; then
+    err "Deploy control directory is unsafe: $DEPLOY_CONTROL_DIR"
+    return 1
+  fi
+  if ! chmod 0700 "$DEPLOY_CONTROL_DIR"; then
+    err "Could not secure deploy control directory"
+    return 1
+  fi
+}
+
+validate_layout_marker() {
+  local marker="$DEPLOY_CONTROL_DIR/layout-v1"
+  local expected_uid=0
+
+  if [[ "$DEPLOY_CONTROL_DIR" != "$FIXED_DEPLOY_CONTROL_DIR" ]]; then
+    expected_uid=$(id -u)
+  fi
+  if [[ -L "$marker" || ! -f "$marker" \
+    || "$(stat -c %u "$marker")" != "$expected_uid" \
+    || "$(stat -c %h "$marker")" != "1" ]]; then
+    err "Trusted state layout marker is unavailable: $marker"
+    return 1
+  fi
+}
+
 canonicalize_backup_base() {
   local backup_parent
   local backup_name
 
-  if [[ -z "${STATE_DIR:-}" || "$STATE_DIR" != /* ]]; then
-    err "State path must be absolute before validating backups"
+  if [[ -z "${DEPLOY_CONTROL_DIR:-}" || "$DEPLOY_CONTROL_DIR" != /* ]]; then
+    err "Deploy control path must be absolute before validating backups"
     return 1
   fi
   if [[ -z "${BACKUP_BASE:-}" || "$BACKUP_BASE" != /* ]]; then
@@ -916,8 +1176,8 @@ canonicalize_backup_base() {
 
   backup_parent=$(dirname -- "$BACKUP_BASE")
   backup_name=$(basename -- "$BACKUP_BASE")
-  if [[ "$backup_name" != "deploy-backups" || "$backup_parent" != "$STATE_DIR" ]]; then
-    err "BACKUP_BASE must be the dedicated child $STATE_DIR/deploy-backups"
+  if [[ "$backup_name" != "backups" || "$backup_parent" != "$DEPLOY_CONTROL_DIR" ]]; then
+    err "BACKUP_BASE must be the dedicated child $DEPLOY_CONTROL_DIR/backups"
     return 1
   fi
   if [[ -e "$BACKUP_BASE" && ! -d "$BACKUP_BASE" ]]; then
@@ -925,7 +1185,7 @@ canonicalize_backup_base() {
     return 1
   fi
 
-  BACKUP_BASE="$STATE_DIR/deploy-backups"
+  BACKUP_BASE="$DEPLOY_CONTROL_DIR/backups"
 }
 
 ensure_logrotate_ready() {
@@ -1076,12 +1336,16 @@ retire_telegram_file_logs() {
 prune_old_backups() {
   local -a backups=()
   local old_backup
+  local retained_previous
+
+  retained_previous=$((BACKUP_KEEP - 1))
 
   while IFS= read -r -d '' old_backup; do
+    [[ "$old_backup" == "${BACKUP_DIR:-}" ]] && continue
     backups+=("$old_backup")
   done < <(find "$BACKUP_BASE" -mindepth 1 -maxdepth 1 -type d -name '????????_??????' -print0 | sort -z)
 
-  while ((${#backups[@]} > BACKUP_KEEP)); do
+  while ((${#backups[@]} > retained_previous)); do
     old_backup=${backups[0]}
     info "Removing expired backup: $old_backup"
     rm -rf -- "$old_backup"
@@ -1107,64 +1371,439 @@ backup_sqlite_database() {
     err "$database_name backup verification failed: $check_result"
     return 1
   fi
-  chmod 600 "$backup_path"
+  if ! chmod 600 "$backup_path"; then
+    err "Could not secure $database_name backup"
+    return 1
+  fi
+}
+
+migrate_mqtt_tls_paths() {
+  local database_path=$1
+  local legacy_root=$2
+  local table_exists
+  local schema_columns
+  local invalid_paths
+  local rows
+  local column
+  local server_id
+  local configured_path
+  local source_path
+  local source_real
+  local destination_path
+  local staged_path
+  local check_result
+  local sql_updates=""
+
+  [[ -f "$database_path" && ! -L "$database_path" ]] || return 0
+  table_exists=$(sqlite3 "$database_path" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='mqtt_servers';") || return 1
+  [[ "$table_exists" == "1" ]] || return 0
+  schema_columns=$(sqlite3 "$database_path" \
+    "SELECT group_concat(name, ',') FROM pragma_table_info('mqtt_servers');") || return 1
+  for column in enabled tls_enabled tls_ca_path tls_cert_path tls_key_path; do
+    if [[ ",$schema_columns," != *",$column,"* ]]; then
+      return 0
+    fi
+  done
+  if [[ -L "$MQTT_TLS_DIR" || ( -e "$MQTT_TLS_DIR" && ! -d "$MQTT_TLS_DIR" ) ]]; then
+    err "MQTT TLS material directory is unsafe: $MQTT_TLS_DIR"
+    return 1
+  fi
+  [[ -e "$MQTT_TLS_DIR" ]] || MQTT_TLS_DIR_CREATED=1
+  if ! install -d -m 0750 "$MQTT_TLS_DIR" \
+    || ! chown root:"$SERVICE_GROUP" "$MQTT_TLS_DIR" \
+    || ! chmod 0750 "$MQTT_TLS_DIR"; then
+    err "Could not secure MQTT TLS material directory"
+    return 1
+  fi
+
+  for column in tls_ca_path tls_cert_path tls_key_path; do
+    invalid_paths=$(sqlite3 "$database_path" \
+      "SELECT count(*) FROM mqtt_servers WHERE enabled=1 AND tls_enabled=1
+       AND coalesce($column, '') != ''
+       AND (instr($column, '|') > 0 OR instr($column, char(10)) > 0 OR instr($column, char(13)) > 0);") \
+      || return 1
+    if [[ "$invalid_paths" != "0" ]]; then
+      err "MQTT TLS path contains unsupported control characters: $column"
+      return 1
+    fi
+    rows=$(sqlite3 -separator '|' "$database_path" \
+      "SELECT id, $column FROM mqtt_servers WHERE enabled=1 AND tls_enabled=1
+       AND coalesce($column, '') != '' ORDER BY id;") || return 1
+    while IFS='|' read -r server_id configured_path; do
+      [[ -n "$server_id" ]] || continue
+      if [[ ! "$server_id" =~ ^[0-9]+$ || -z "$configured_path" ]]; then
+        err "Invalid MQTT TLS database row"
+        return 1
+      fi
+      if [[ "$configured_path" == /* ]]; then
+        source_path=$configured_path
+        if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+          err "MQTT TLS material is unavailable or symlinked: $source_path"
+          return 1
+        fi
+        if runuser -u "$SERVICE_USER" -- test -r "$source_path"; then
+          continue
+        fi
+      else
+        if [[ "$configured_path" == ".." || "$configured_path" == ../* \
+          || "$configured_path" == */../* || "$configured_path" == */.. ]]; then
+          err "Unsafe relative MQTT TLS path: $configured_path"
+          return 1
+        fi
+        source_path="$legacy_root/$configured_path"
+      fi
+      if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+        err "MQTT TLS material is unavailable: $source_path"
+        return 1
+      fi
+      source_real=$(readlink -f -- "$source_path") || return 1
+      if [[ "$configured_path" != /* && "$source_real" != "$legacy_root"/* ]]; then
+        err "Relative MQTT TLS material escapes the legacy repository"
+        return 1
+      fi
+      destination_path="$MQTT_TLS_DIR/server-${server_id}-${column}.pem"
+      if [[ -L "$destination_path" || ( -e "$destination_path" && ! -f "$destination_path" ) ]]; then
+        err "MQTT TLS destination is unsafe: $destination_path"
+        return 1
+      fi
+      if [[ -f "$destination_path" ]]; then
+        if ! cmp -s -- "$source_real" "$destination_path"; then
+          err "Existing MQTT TLS destination differs from migration source"
+          return 1
+        fi
+      else
+        staged_path=""
+        if ! staged_path=$(mktemp "$MQTT_TLS_DIR/.mqtt-tls.XXXXXX") \
+          || ! cp -- "$source_real" "$staged_path" \
+          || ! chmod 0640 "$staged_path" \
+          || ! chown root:"$SERVICE_GROUP" "$staged_path" \
+          || ! mv -- "$staged_path" "$destination_path"; then
+          [[ -n "${staged_path:-}" ]] && rm -f -- "$staged_path"
+          err "Could not publish MQTT TLS material"
+          return 1
+        fi
+        MQTT_TLS_CREATED_FILES+=("$destination_path")
+      fi
+      if ! runuser -u "$SERVICE_USER" -- test -r "$destination_path"; then
+        err "Migrated MQTT TLS material is not service-readable"
+        return 1
+      fi
+      sql_updates+="UPDATE mqtt_servers SET $column='$destination_path' WHERE id=$server_id;"
+    done <<<"$rows"
+  done
+  if [[ -n "$sql_updates" ]]; then
+    DATABASES_MAY_HAVE_MUTATED=1
+    if ! sqlite3 "$database_path" "BEGIN IMMEDIATE;${sql_updates}COMMIT;"; then
+      err "Could not atomically update MQTT TLS paths"
+      return 1
+    fi
+    check_result=$(sqlite3 "$database_path" "PRAGMA quick_check;") || return 1
+    if [[ "$check_result" != "ok" ]]; then
+      err "Database failed quick_check after MQTT TLS path migration"
+      return 1
+    fi
+  fi
+}
+
+cleanup_created_mqtt_tls_material() {
+  local created_file
+
+  for created_file in "${MQTT_TLS_CREATED_FILES[@]-}"; do
+    [[ -n "$created_file" ]] || continue
+    if [[ "$created_file" != "$MQTT_TLS_DIR"/server-*-tls_*_path.pem \
+      || -L "$created_file" || ! -f "$created_file" ]]; then
+      err "Refusing unsafe MQTT TLS rollback cleanup: $created_file"
+      return 1
+    fi
+    if ! rm -f -- "$created_file"; then
+      return 1
+    fi
+  done
+  MQTT_TLS_CREATED_FILES=()
+  if [[ "$MQTT_TLS_DIR_CREATED" == "1" && -d "$MQTT_TLS_DIR" && ! -L "$MQTT_TLS_DIR" ]]; then
+    if ! rmdir -- "$MQTT_TLS_DIR"; then
+      err "Could not remove empty MQTT TLS migration directory"
+      return 1
+    fi
+    MQTT_TLS_DIR_CREATED=0
+  fi
 }
 
 restore_sqlite_database() {
   local database_path=$1
   local backup_path=$2
   local existed_before=$3
-  local database_name=$4
+  local backup_verified=$4
+  local database_name=$5
   local check_result
+  local database_dir
+  local database_dir_real
+  local staged_path
 
-  if ! rm -f -- "${database_path}-wal" "${database_path}-shm"; then
-    err "Could not remove stale $database_name WAL files"
+  if [[ "$existed_before" != "0" && "$existed_before" != "1" \
+    || "$backup_verified" != "0" && "$backup_verified" != "1" ]]; then
+    err "Invalid $database_name rollback state"
     return 1
   fi
   if [[ "$existed_before" == "0" ]]; then
+    if ! rm -f -- "${database_path}-wal" "${database_path}-shm"; then
+      err "Could not remove new $database_name WAL files"
+      return 1
+    fi
     if ! rm -f -- "$database_path"; then
       err "Could not remove $database_name created by the failed update"
       return 1
     fi
     return 0
   fi
-  if [[ ! -f "$backup_path" ]]; then
-    err "$database_name rollback backup is missing: $backup_path"
+  if [[ "$backup_verified" != "1" || -L "$backup_path" || ! -f "$backup_path" ]]; then
+    err "$database_name rollback requires a verified regular backup: $backup_path"
     return 1
   fi
-  if ! rm -f -- "$database_path"; then
-    err "Could not remove the failed-update copy of $database_name"
+  if [[ -L "$database_path" || ! -f "$database_path" ]]; then
+    err "$database_name live rollback target must remain a regular non-symlink file"
     return 1
   fi
-  if ! sqlite3 "$database_path" ".restore '$backup_path'"; then
+  database_dir=$(dirname "$database_path")
+  if [[ -L "$database_dir" || ! -d "$database_dir" ]]; then
+    err "$database_name rollback destination directory is unsafe: $database_dir"
+    return 1
+  fi
+  database_dir_real=$(cd "$database_dir" && pwd -P) || return 1
+  if [[ "$database_dir_real" != "$database_dir" ]]; then
+    err "$database_name rollback destination directory is not canonical: $database_dir"
+    return 1
+  fi
+  if ! staged_path=$(mktemp "$database_dir/.${database_name}.rollback-stage.XXXXXX"); then
+    err "Could not create $database_name rollback staging file"
+    return 1
+  fi
+  if ! sqlite3 "$staged_path" ".restore '$backup_path'"; then
+    rm -f -- "$staged_path" "${staged_path}-wal" "${staged_path}-shm"
     err "Could not restore $database_name"
     return 1
   fi
-  if ! check_result=$(sqlite3 "$database_path" "PRAGMA quick_check;"); then
+  if ! check_result=$(sqlite3 "$staged_path" "PRAGMA quick_check;"); then
+    rm -f -- "$staged_path" "${staged_path}-wal" "${staged_path}-shm"
     err "Could not verify restored $database_name"
     return 1
   fi
   if [[ "$check_result" != "ok" ]]; then
+    rm -f -- "$staged_path" "${staged_path}-wal" "${staged_path}-shm"
     err "$database_name rollback verification failed: $check_result"
     return 1
   fi
-  chmod 600 "$database_path"
+  if ! chmod 600 "$staged_path" \
+    || ! chown "$SERVICE_USER:$SERVICE_GROUP" "$staged_path"; then
+    rm -f -- "$staged_path" "${staged_path}-wal" "${staged_path}-shm"
+    err "Could not secure restored $database_name staging file"
+    return 1
+  fi
+  if ! rm -f -- "${database_path}-wal" "${database_path}-shm"; then
+    rm -f -- "$staged_path" "${staged_path}-wal" "${staged_path}-shm"
+    err "Could not remove stale $database_name WAL files"
+    return 1
+  fi
+  if ! mv -f -- "$staged_path" "$database_path"; then
+    rm -f -- "$staged_path" "${staged_path}-wal" "${staged_path}-shm"
+    err "Could not atomically publish restored $database_name"
+    return 1
+  fi
+}
+
+validate_legacy_runtime_relative_path() {
+  local relative_path=$1
+
+  if [[ -z "$relative_path" || "$relative_path" == /* \
+    || "$relative_path" == ".." || "$relative_path" == ../* \
+    || "$relative_path" == */../* || "$relative_path" == */.. ]]; then
+    return 1
+  fi
+  case "$relative_path" in
+    irrigation.db | irrigation.db-wal | irrigation.db-shm \
+      | jobs.db | jobs.db-wal | jobs.db-shm \
+      | .secret_key | .irrig_secret_key | .env \
+      | backups/* | static/media/maps/* | static/media/zones/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ensure_safe_repository_parent() {
+  local repository=$1
+  local relative_parent=$2
+  local repository_real
+  local current
+  local component
+  local current_real
+  local -a parent_components=()
+
+  repository_real=$(cd "$repository" && pwd -P) || return 1
+  current=$repository_real
+  if [[ "$relative_parent" == "." ]]; then
+    return 0
+  fi
+  IFS=/ read -r -a parent_components <<<"$relative_parent"
+  for component in "${parent_components[@]}"; do
+    if [[ -z "$component" || "$component" == "." || "$component" == ".." ]]; then
+      err "Unsafe legacy rollback destination component"
+      return 1
+    fi
+    current="$current/$component"
+    if [[ -L "$current" || ( -e "$current" && ! -d "$current" ) ]]; then
+      err "Unsafe legacy rollback destination parent: $current"
+      return 1
+    fi
+    if [[ ! -d "$current" ]] && ! mkdir -- "$current"; then
+      err "Could not create legacy rollback destination parent: $current"
+      return 1
+    fi
+    current_real=$(cd "$current" && pwd -P) || return 1
+    if [[ "$current_real" != "$current" || "$current_real" != "$repository_real"/* ]]; then
+      err "Legacy rollback destination escapes the repository: $current"
+      return 1
+    fi
+  done
 }
 
 restore_state_snapshot() {
+  local state_parent
+  local state_parent_real
+  local state_name
+  local staged_state
+  local previous_state
+  local relative_path
+  local staged_path
+  local live_path
+  local previous_path
+  local symlink_path
+  local publication_failed=0
+  local rollback_publication_failed=0
+  local index
+  local -a managed_paths=(.secret_key .irrig_secret_key .env backups static)
+  local -a published_paths=()
+
   if [[ "${STATE_SNAPSHOT_CREATED:-0}" != "1" ]]; then
     return 0
   fi
-  if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" || ! -f "$STATE_ARCHIVE" ]]; then
+  if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" \
+    || -L "$STATE_ARCHIVE" || ! -f "$STATE_ARCHIVE" ]]; then
     err "State rollback snapshot or destination is unavailable"
     return 1
   fi
-  rm -rf -- \
-    "$STATE_DIR/.secret_key" "$STATE_DIR/.irrig_secret_key" "$STATE_DIR/.env" \
-    "$STATE_DIR/backups" "$STATE_DIR/static/media/maps" "$STATE_DIR/static/media/zones"
-  mkdir -p "$STATE_DIR"
-  tar -xzf "$STATE_ARCHIVE" -C "$STATE_DIR"
-  normalize_state_permissions
+  state_parent=$(dirname -- "$STATE_DIR")
+  state_name=$(basename -- "$STATE_DIR")
+  if [[ -L "$state_parent" || ! -d "$state_parent" ]]; then
+    err "State rollback parent is unsafe: $state_parent"
+    return 1
+  fi
+  state_parent_real=$(cd "$state_parent" && pwd -P) || return 1
+  if [[ "$state_parent_real" != "$state_parent" ]]; then
+    err "State rollback parent is not canonical: $state_parent"
+    return 1
+  fi
+  if ! staged_state=$(mktemp -d "$state_parent/.${state_name}.rollback-stage.XXXXXX"); then
+    err "Could not create state rollback staging directory"
+    return 1
+  fi
+  if ! tar -xzf "$STATE_ARCHIVE" -C "$staged_state"; then
+    rm -rf -- "$staged_state" || true
+    err "Could not extract state rollback snapshot"
+    return 1
+  fi
+  if ! symlink_path=$(find -P "$staged_state" -type l -print -quit); then
+    rm -rf -- "$staged_state" || true
+    err "Could not validate state rollback snapshot"
+    return 1
+  fi
+  if [[ -n "$symlink_path" \
+    || ! -d "$staged_state/backups" \
+    || ! -d "$staged_state/static/media/maps" \
+    || ! -d "$staged_state/static/media/zones" ]]; then
+    rm -rf -- "$staged_state" || true
+    err "State rollback snapshot has an unsafe or incomplete layout"
+    return 1
+  fi
+  if ! normalize_state_tree_permissions "$staged_state"; then
+    rm -rf -- "$staged_state" || true
+    err "Could not normalize staged state rollback snapshot"
+    return 1
+  fi
+
+  for relative_path in "${managed_paths[@]}"; do
+    staged_path="$staged_state/$relative_path"
+    live_path="$STATE_DIR/$relative_path"
+    if [[ -L "$staged_path" || -L "$live_path" ]]; then
+      rm -rf -- "$staged_state" || true
+      err "State rollback refuses symlinked managed path: $relative_path"
+      return 1
+    fi
+    case "$relative_path" in
+      backups | static)
+        if { [[ -e "$staged_path" ]] && [[ ! -d "$staged_path" ]]; } \
+          || { [[ -e "$live_path" ]] && [[ ! -d "$live_path" ]]; }; then
+          rm -rf -- "$staged_state" || true
+          err "State rollback managed directory has an unexpected type: $relative_path"
+          return 1
+        fi
+        ;;
+      *)
+        if { [[ -e "$staged_path" ]] && [[ ! -f "$staged_path" ]]; } \
+          || { [[ -e "$live_path" ]] && [[ ! -f "$live_path" ]]; }; then
+          rm -rf -- "$staged_state" || true
+          err "State rollback managed file has an unexpected type: $relative_path"
+          return 1
+        fi
+        ;;
+    esac
+  done
+
+  if ! previous_state=$(mktemp -d "$state_parent/.${state_name}.rollback-previous.XXXXXX"); then
+    rm -rf -- "$staged_state" || true
+    err "Could not create state rollback holding directory"
+    return 1
+  fi
+  for relative_path in "${managed_paths[@]}"; do
+    staged_path="$staged_state/$relative_path"
+    live_path="$STATE_DIR/$relative_path"
+    previous_path="$previous_state/$relative_path"
+    published_paths+=("$relative_path")
+    if [[ -e "$live_path" ]]; then
+      if ! mv -- "$live_path" "$previous_path"; then
+        publication_failed=1
+        break
+      fi
+    fi
+    if [[ -e "$staged_path" ]] && ! mv -- "$staged_path" "$live_path"; then
+      publication_failed=1
+      break
+    fi
+  done
+  if [[ "$publication_failed" == "1" ]]; then
+    for ((index = ${#published_paths[@]} - 1; index >= 0; index--)); do
+      relative_path=${published_paths[index]}
+      live_path="$STATE_DIR/$relative_path"
+      previous_path="$previous_state/$relative_path"
+      if [[ -e "$live_path" ]] && ! rm -rf -- "$live_path"; then
+        rollback_publication_failed=1
+      fi
+      if [[ -e "$previous_path" ]] && ! mv -- "$previous_path" "$live_path"; then
+        rollback_publication_failed=1
+      fi
+    done
+    rm -rf -- "$staged_state" "$previous_state" || rollback_publication_failed=1
+    err "Could not transactionally publish restored state"
+    [[ "$rollback_publication_failed" == "0" ]] || err "State publication rollback was incomplete"
+    return 1
+  fi
+  if ! rm -rf -- "$staged_state" "$previous_state"; then
+    err "Could not remove state rollback staging directories"
+    return 1
+  fi
 }
 
 quarantine_legacy_runtime_state() {
@@ -1172,6 +1811,8 @@ quarantine_legacy_runtime_state() {
   local relative_path
   local source_path
   local target_path
+  local manifest_complete=0
+  local readonly manifest_sentinel=WB_IRRIGATION_LEGACY_MANIFEST_COMPLETE
 
   LEGACY_QUARANTINE="$BACKUP_DIR/legacy-runtime"
   LEGACY_MANIFEST="$BACKUP_DIR/legacy-runtime.manifest"
@@ -1187,11 +1828,19 @@ quarantine_legacy_runtime_state() {
     err "Could not enumerate legacy mutable state"
     return 1
   fi
-  chmod 0600 "$LEGACY_MANIFEST"
+  if ! printf '%s\0' "$manifest_sentinel" >>"$LEGACY_MANIFEST" \
+    || ! chmod 0600 "$LEGACY_MANIFEST"; then
+    rm -rf -- "$LEGACY_QUARANTINE" "$LEGACY_MANIFEST" || true
+    err "Could not finalize legacy mutable state manifest"
+    return 1
+  fi
   LEGACY_CLEANUP_STARTED=1
   while IFS= read -r -d '' relative_path; do
-    if [[ "$relative_path" == /* || "$relative_path" == ".." || "$relative_path" == ../* \
-      || "$relative_path" == */../* ]]; then
+    if [[ "$relative_path" == "$manifest_sentinel" ]]; then
+      manifest_complete=1
+      continue
+    fi
+    if ! validate_legacy_runtime_relative_path "$relative_path"; then
       err "Unsafe legacy runtime path: $relative_path"
       return 1
     fi
@@ -1201,8 +1850,20 @@ quarantine_legacy_runtime_state() {
       err "Refusing unexpected legacy runtime entry: $source_path"
       return 1
     fi
-    mkdir -p "$(dirname "$target_path")"
-    mv "$source_path" "$target_path"
+  done <"$LEGACY_MANIFEST"
+  if [[ "$manifest_complete" != "1" ]]; then
+    err "Legacy runtime manifest is incomplete"
+    return 1
+  fi
+  while IFS= read -r -d '' relative_path; do
+    [[ "$relative_path" == "$manifest_sentinel" ]] && continue
+    source_path="$repository/$relative_path"
+    target_path="$LEGACY_QUARANTINE/$relative_path"
+    if ! mkdir -p "$(dirname "$target_path")" \
+      || ! mv "$source_path" "$target_path"; then
+      err "Could not quarantine legacy runtime path: $relative_path"
+      return 1
+    fi
   done <"$LEGACY_MANIFEST"
 }
 
@@ -1211,28 +1872,62 @@ restore_legacy_runtime_state() {
   local relative_path
   local source_path
   local target_path
+  local manifest_path
+  local quarantine_path
+  local manifest_complete=0
+  local readonly manifest_sentinel=WB_IRRIGATION_LEGACY_MANIFEST_COMPLETE
 
   [[ "${LEGACY_CLEANUP_STARTED:-0}" == "1" ]] || return 0
-  if [[ ! -f "${LEGACY_MANIFEST:-}" || ! -d "${LEGACY_QUARANTINE:-}" ]]; then
+  manifest_path="${BACKUP_DIR:-}/legacy-runtime.manifest"
+  quarantine_path="${BACKUP_DIR:-}/legacy-runtime"
+  if [[ -z "${BACKUP_DIR:-}" || -L "$manifest_path" || ! -f "$manifest_path" \
+    || -L "$quarantine_path" || ! -d "$quarantine_path" ]]; then
     err "Legacy runtime rollback manifest is unavailable"
     return 1
   fi
   while IFS= read -r -d '' relative_path; do
-    source_path="$LEGACY_QUARANTINE/$relative_path"
+    if [[ "$relative_path" == "$manifest_sentinel" ]]; then
+      manifest_complete=1
+      continue
+    fi
+    if ! validate_legacy_runtime_relative_path "$relative_path"; then
+      err "Unsafe legacy rollback manifest entry: $relative_path"
+      return 1
+    fi
+    source_path="$quarantine_path/$relative_path"
     target_path="$repository/$relative_path"
-    [[ -e "$source_path" ]] || continue
+    if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+      err "Legacy rollback source is not a regular file: $source_path"
+      return 1
+    fi
     if [[ -e "$target_path" || -L "$target_path" ]]; then
       err "Legacy runtime rollback target already exists: $target_path"
       return 1
     fi
-    mkdir -p "$(dirname "$target_path")"
-    mv "$source_path" "$target_path"
-  done <"$LEGACY_MANIFEST"
+  done <"$manifest_path"
+  if [[ "$manifest_complete" != "1" ]]; then
+    err "Legacy rollback manifest is incomplete"
+    return 1
+  fi
+  while IFS= read -r -d '' relative_path; do
+    [[ "$relative_path" == "$manifest_sentinel" ]] && continue
+    source_path="$quarantine_path/$relative_path"
+    target_path="$repository/$relative_path"
+    if ! ensure_safe_repository_parent "$repository" "$(dirname -- "$relative_path")"; then
+      return 1
+    fi
+    if ! mv "$source_path" "$target_path"; then
+      err "Could not restore legacy runtime path: $relative_path"
+      return 1
+    fi
+  done <"$manifest_path"
 }
 
 activate_state_layout_marker() {
-  install -m 0600 /dev/null "$STATE_DIR/.layout-v1"
-  chown root:root "$STATE_DIR/.layout-v1"
+  if ! install -m 0600 /dev/null "$DEPLOY_CONTROL_DIR/layout-v1"; then
+    err "Could not publish trusted state layout marker"
+    return 1
+  fi
 }
 
 quarantine_failed_state_layout() {
@@ -1254,6 +1949,7 @@ quarantine_failed_state_layout() {
 
 rollback_update() {
   local rollback_failed=0
+  local database_restore_failed=0
 
   warn "Update failed; restoring previous code and runtime"
   if [[ "${CODE_UPDATED:-0}" == "1" || "${SERVICE_WAS_ACTIVE:-0}" == "1" ]]; then
@@ -1289,13 +1985,23 @@ rollback_update() {
   if ! restore_state_snapshot; then
     rollback_failed=1
   fi
-  if [[ -n "${DB_PATH:-}" && -n "${DB_BACKUP:-}" ]]; then
-    if ! restore_sqlite_database "$DB_PATH" "$DB_BACKUP" "${HAD_DB:-0}" "irrigation.db"; then
+  if [[ "${DATABASES_MAY_HAVE_MUTATED:-0}" == "1" \
+    && -n "${DB_PATH:-}" && -n "${DB_BACKUP:-}" ]]; then
+    if ! restore_sqlite_database "$DB_PATH" "$DB_BACKUP" \
+      "${DB_EXISTED_BEFORE:-0}" "${DB_BACKUP_VERIFIED:-0}" "irrigation.db"; then
+      rollback_failed=1
+      database_restore_failed=1
+    fi
+  fi
+  if [[ "${DATABASES_MAY_HAVE_MUTATED:-0}" == "0" || "$database_restore_failed" == "0" ]]; then
+    if ! cleanup_created_mqtt_tls_material; then
       rollback_failed=1
     fi
   fi
-  if [[ -n "${JOBS_DB_PATH:-}" && -n "${JOBS_DB_BACKUP:-}" ]]; then
-    if ! restore_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "${HAD_JOBS_DB:-0}" "jobs.db"; then
+  if [[ "${DATABASES_MAY_HAVE_MUTATED:-0}" == "1" \
+    && -n "${JOBS_DB_PATH:-}" && -n "${JOBS_DB_BACKUP:-}" ]]; then
+    if ! restore_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" \
+      "${JOBS_DB_EXISTED_BEFORE:-0}" "${JOBS_DB_BACKUP_VERIFIED:-0}" "jobs.db"; then
       rollback_failed=1
     fi
   fi
@@ -1306,6 +2012,9 @@ rollback_update() {
   fi
 
   if [[ "${UNIT_CHANGED:-0}" == "1" ]]; then
+    if [[ "${SERVICE_ENABLE_CHANGED:-0}" == "1" ]]; then
+      systemctl disable "${SERVICE:-wb-irrigation}" || rollback_failed=1
+    fi
     if [[ "${HAD_SERVICE_FILE:-0}" == "1" ]]; then
       install -m 0644 "$SERVICE_FILE_BACKUP" "$SERVICE_FILE" || rollback_failed=1
     else
@@ -1326,6 +2035,14 @@ rollback_update() {
       chown root:"${SERVICE_GROUP:-wb-irrigation}" "$ENV_FILE" || rollback_failed=1
     else
       rm -f -- "$ENV_FILE" || rollback_failed=1
+    fi
+  fi
+  if [[ "${RELEASE_ENV_CHANGED:-0}" == "1" ]]; then
+    if [[ "${HAD_RELEASE_ENV_FILE:-0}" == "1" ]]; then
+      install -m 0640 "$RELEASE_ENV_FILE_BACKUP" "$RELEASE_ENV_FILE" || rollback_failed=1
+      chown root:"${SERVICE_GROUP:-wb-irrigation}" "$RELEASE_ENV_FILE" || rollback_failed=1
+    else
+      rm -f -- "$RELEASE_ENV_FILE" || rollback_failed=1
     fi
   fi
 
@@ -1372,6 +2089,51 @@ finish_update() {
   exit "$status"
 }
 
+initialize_rollback_state() {
+  UPDATE_SUCCEEDED=0
+  SERVICE_WAS_ACTIVE=$HANDOFF_SERVICE_WAS_ACTIVE
+  ORIGINAL_USES_STATE=0
+  STATE_ACTIVATED=0
+  STATE_SNAPSHOT_CREATED=0
+  LEGACY_CLEANUP_STARTED=0
+  CODE_UPDATED=0
+  VENV_SWAPPED=0
+  HAD_OLD_VENV=0
+  UNIT_CHANGED=0
+  SERVICE_ENABLE_CHANGED=0
+  LOGROTATE_CHANGED=0
+  ENV_CHANGED=0
+  RELEASE_ENV_CHANGED=0
+  HAD_SERVICE_FILE=0
+  HAD_LOGROTATE_FILE=0
+  HAD_ENV_FILE=0
+  HAD_RELEASE_ENV_FILE=0
+  DB_EXISTED_BEFORE=0
+  DB_BACKUP_VERIFIED=0
+  JOBS_DB_EXISTED_BEFORE=0
+  JOBS_DB_BACKUP_VERIFIED=0
+  DATABASES_MAY_HAVE_MUTATED=0
+  MQTT_TLS_CREATED_FILES=()
+  MQTT_TLS_DIR_CREATED=0
+  VENV_DIR="$REPO_DIR_REAL/venv"
+  STAGED_VENV=""
+  OLD_VENV_BACKUP=""
+  BACKUP_DIR=""
+  STATE_ARCHIVE=""
+  LEGACY_QUARANTINE=""
+  LEGACY_MANIFEST=""
+  DB_PATH="$STATE_DIR/irrigation.db"
+  DB_BACKUP=""
+  JOBS_DB_PATH="$STATE_DIR/jobs.db"
+  JOBS_DB_BACKUP=""
+  SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+  SERVICE_FILE_BACKUP=""
+  LOGROTATE_TARGET="/etc/logrotate.d/wb-irrigation"
+  LOGROTATE_FILE_BACKUP=""
+  ENV_FILE_BACKUP=""
+  RELEASE_ENV_FILE_BACKUP=""
+}
+
 # Unit tests source the real helper functions and inject failures without
 # executing the privileged deployment body.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
@@ -1414,31 +2176,13 @@ RESOLVED_TARGET=$(resolve_authorized_target_commit "$REPO_DIR_REAL" "$TARGET_COM
 # legacy file before this deploy migration is allowed to purge it.
 require_retired_telegram_runtime_commit "$REPO_DIR_REAL" "$RESOLVED_TARGET"
 
-UPDATE_SUCCEEDED=0
-SERVICE_WAS_ACTIVE=$HANDOFF_SERVICE_WAS_ACTIVE
-ORIGINAL_USES_STATE=0
-STATE_ACTIVATED=0
-STATE_SNAPSHOT_CREATED=0
-LEGACY_CLEANUP_STARTED=0
-CODE_UPDATED=0
-VENV_SWAPPED=0
-HAD_OLD_VENV=0
-UNIT_CHANGED=0
-LOGROTATE_CHANGED=0
-ENV_CHANGED=0
-HAD_SERVICE_FILE=0
-HAD_LOGROTATE_FILE=0
-HAD_ENV_FILE=0
-HAD_DB=0
-HAD_JOBS_DB=0
-STAGED_VENV=""
-OLD_VENV_BACKUP=""
-BACKUP_DIR=""
-STATE_ARCHIVE=""
-LEGACY_QUARANTINE=""
-LEGACY_MANIFEST=""
-SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
-LOGROTATE_TARGET="/etc/logrotate.d/wb-irrigation"
+initialize_rollback_state
+ensure_deploy_control_dir
+TRUSTED_LAYOUT_MARKER=0
+if [[ -e "$DEPLOY_CONTROL_DIR/layout-v1" || -L "$DEPLOY_CONTROL_DIR/layout-v1" ]]; then
+  validate_layout_marker
+  TRUSTED_LAYOUT_MARKER=1
+fi
 if [[ -f "$SERVICE_FILE" ]]; then
   if grep -Fxq "User=$SERVICE_USER" "$SERVICE_FILE" \
     && grep -Fxq "WorkingDirectory=$STATE_DIR" "$SERVICE_FILE"; then
@@ -1448,6 +2192,14 @@ if [[ -f "$SERVICE_FILE" ]]; then
     err "Installed unit contains a partial non-root state contract; refusing migration"
     exit 1
   fi
+elif [[ "$TRUSTED_LAYOUT_MARKER" == "1" ]]; then
+  ORIGINAL_USES_STATE=1
+elif [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" \
+  && -d "$STATE_DIR/backups" \
+  && -d "$STATE_DIR/static/media/maps" \
+  && -d "$STATE_DIR/static/media/zones" ]]; then
+  warn "Migrating a pre-control-directory state layout"
+  ORIGINAL_USES_STATE=1
 fi
 trap finish_update EXIT
 
@@ -1472,7 +2224,7 @@ else
 fi
 normalize_state_permissions
 
-BACKUP_BASE=${BACKUP_BASE:-"${STATE_DIR}/deploy-backups"}
+BACKUP_BASE=${BACKUP_BASE:-"${DEPLOY_CONTROL_DIR}/backups"}
 canonicalize_backup_base
 mkdir -p -m 700 "$BACKUP_BASE"
 chmod 700 "$BACKUP_BASE"
@@ -1481,19 +2233,19 @@ BACKUP_DIR="$BACKUP_BASE/$STAMP"
 mkdir -m 700 "$BACKUP_DIR"
 info "Creating verified backup at $BACKUP_DIR"
 
-DB_PATH="$STATE_DIR/irrigation.db"
 DB_BACKUP="$BACKUP_DIR/irrigation.db"
-JOBS_DB_PATH="$STATE_DIR/jobs.db"
 JOBS_DB_BACKUP="$BACKUP_DIR/jobs.db"
 if [[ -f "$DB_PATH" ]]; then
+  DB_EXISTED_BEFORE=1
   backup_sqlite_database "$DB_PATH" "$DB_BACKUP" "irrigation.db"
-  HAD_DB=1
+  DB_BACKUP_VERIFIED=1
 else
   warn "Database does not exist yet; code and secrets will still be backed up"
 fi
 if [[ -f "$JOBS_DB_PATH" ]]; then
+  JOBS_DB_EXISTED_BEFORE=1
   backup_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "jobs.db"
-  HAD_JOBS_DB=1
+  JOBS_DB_BACKUP_VERIFIED=1
 fi
 
 for secret_file in "$STATE_DIR/.secret_key" "$STATE_DIR/.irrig_secret_key" "$STATE_DIR/.env"; do
@@ -1511,7 +2263,7 @@ tar --exclude="./venv" --exclude="./.git" --exclude="./__pycache__" \
 chmod 600 "$ARCHIVE"
 
 STATE_ARCHIVE="$BACKUP_DIR/state_snapshot.tar.gz"
-tar --exclude="./deploy-backups" \
+tar \
   --exclude="./irrigation.db" --exclude="./irrigation.db-wal" --exclude="./irrigation.db-shm" \
   --exclude="./jobs.db" --exclude="./jobs.db-wal" --exclude="./jobs.db-shm" \
   -czf "$STATE_ARCHIVE" -C "$STATE_DIR" .
@@ -1521,6 +2273,7 @@ STATE_SNAPSHOT_CREATED=1
 SERVICE_FILE_BACKUP="$BACKUP_DIR/systemd-unit.service"
 LOGROTATE_FILE_BACKUP="$BACKUP_DIR/logrotate.conf"
 ENV_FILE_BACKUP="$BACKUP_DIR/environment.env"
+RELEASE_ENV_FILE_BACKUP="$BACKUP_DIR/release.env"
 if [[ -f "$SERVICE_FILE" ]]; then
   HAD_SERVICE_FILE=1
   install -m 0600 "$SERVICE_FILE" "$SERVICE_FILE_BACKUP"
@@ -1534,7 +2287,12 @@ if [[ -f "$ENV_FILE" ]]; then
   chmod 600 "$ENV_FILE"
   install -m 0600 "$ENV_FILE" "$ENV_FILE_BACKUP"
 fi
+if [[ -f "$RELEASE_ENV_FILE" ]]; then
+  HAD_RELEASE_ENV_FILE=1
+  install -m 0600 "$RELEASE_ENV_FILE" "$RELEASE_ENV_FILE_BACKUP"
+fi
 ok "Verified backup created: $BACKUP_DIR"
+migrate_mqtt_tls_paths "$DB_PATH" "$REPO_DIR_REAL"
 
 info "Activating target code $RESOLVED_TARGET"
 CODE_UPDATED=1
@@ -1554,7 +2312,6 @@ if [[ ! -x "$PY_BIN" || "$PY_BIN" != "$PYTHON_INSTALL_DIR"/* ]]; then
 fi
 secure_python_runtime
 
-VENV_DIR="$REPO_DIR_REAL/venv"
 STAGED_VENV="$REPO_DIR_REAL/.venv-staged-$STAMP-$$"
 OLD_VENV_BACKUP="$REPO_DIR_REAL/.venv-rollback-$STAMP-$$"
 if [[ ! -f "$REPO_DIR_REAL/requirements.lock" ]]; then
@@ -1605,33 +2362,44 @@ ensure_logrotate_ready
 
 CURRENT_COMMIT=$(git rev-parse HEAD)
 ENV_CHANGED=1
+RELEASE_ENV_CHANGED=1
+quarantine_legacy_runtime_state "$REPO_DIR_REAL"
+merge_legacy_env_defaults "$STATE_DIR/.env" "$ENV_FILE"
+merge_legacy_env_defaults "$LEGACY_QUARANTINE/.env" "$ENV_FILE"
 upsert_env_value GIT_COMMIT "$CURRENT_COMMIT" "$ENV_FILE"
+publish_release_environment "$CURRENT_COMMIT"
 if [[ ${PORT+x} ]]; then
-  VALIDATED_PORT=$(configured_port "$ENV_FILE" "$STATE_DIR/.env")
+  VALIDATED_PORT=$(configured_port "$ENV_FILE")
   upsert_env_value PORT "$VALIDATED_PORT" "$ENV_FILE"
 fi
 persist_http_environment "$ENV_FILE"
 chown root:"$SERVICE_GROUP" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
-validate_http_transport_contract "$ENV_FILE" "$STATE_DIR/.env"
+validate_http_transport_contract "$ENV_FILE"
 verify_service_runtime_access
 info "GIT_COMMIT updated in $ENV_FILE -> ${CURRENT_COMMIT:0:12}"
 
 if ! systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then
-  err "Service is not enabled: $SERVICE"
-  exit 1
+  if [[ "$HAD_SERVICE_FILE" == "0" ]]; then
+    systemctl enable "$SERVICE"
+    SERVICE_ENABLE_CHANGED=1
+  else
+    err "Existing service is not enabled: $SERVICE"
+    exit 1
+  fi
 fi
+DATABASES_MAY_HAVE_MUTATED=1
 systemctl restart "$SERVICE"
 if ! systemctl is-active "$SERVICE" >/dev/null 2>&1; then
   err "Service failed to start. Check: journalctl -u $SERVICE -n 200"
   exit 1
 fi
 
-APP_PORT=$(configured_port "$ENV_FILE" "$STATE_DIR/.env")
-configure_ready_probe "$ENV_FILE" "$STATE_DIR/.env"
+APP_PORT=$(configured_port "$ENV_FILE")
+configure_ready_probe "$ENV_FILE"
 info "Waiting up to 30s for $APP_READY_URL"
 for attempt in $(seq 1 15); do
-  if curl "${READY_CURL_ARGS[@]}" "$APP_READY_URL" >/dev/null 2>&1; then
+  if probe_ready_endpoint; then
     ok "/readyz returned a successful HTTP status (attempt $attempt)"
     break
   fi
@@ -1642,9 +2410,6 @@ for attempt in $(seq 1 15); do
   sleep 2
 done
 
-if [[ "$ORIGINAL_USES_STATE" == "0" ]]; then
-  quarantine_legacy_runtime_state "$REPO_DIR_REAL"
-fi
 activate_state_layout_marker
 normalize_state_permissions
 prune_old_backups
