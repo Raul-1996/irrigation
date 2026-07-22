@@ -34,9 +34,9 @@ _ADMIN_ONLY_PATHS_REQUIRING_CSRF = [
 ]
 
 
-# Endpoints that MUST remain CSRF-exempt — login/read-only POSTs and fail-safe
-# OFF actions which must stay reachable during an incident.
-_GUEST_PUBLIC_POSTS = [
+# Endpoints that MUST remain CSRF-exempt — login, authenticated read-only POSTs,
+# and fail-safe OFF actions. Authentication is tested independently.
+_CSRF_EXEMPT_POSTS = [
     "/api/login",
     "/api/status",
     "/api/postpone",
@@ -75,8 +75,8 @@ def test_csrf_ext_is_wired(app):
     assert "csrf" in app.extensions or app.config.get("WTF_CSRF_ENABLED") is False
 
 
-def test_guest_endpoints_are_exempt(app):
-    """All endpoints in _GUEST_PUBLIC_POSTS must be CSRF-exempt."""
+def test_read_only_and_fail_safe_endpoints_are_exempt(app):
+    """All endpoints in _CSRF_EXEMPT_POSTS must be CSRF-exempt."""
     # In TESTING mode WTF_CSRF is disabled, so we can't detect enforcement
     # via a 400 response. Instead, verify the exempt set directly.
     exempt = _csrf_exempt_view_names(app)
@@ -92,8 +92,7 @@ def test_guest_endpoints_are_exempt(app):
     }
     missing = expected_exempt - exempt
     assert not missing, (
-        f"SEC-003 regression: these fail-safe endpoints are NOT CSRF-exempt "
-        f"and will be unavailable without an admin session: {missing}. "
+        f"SEC-003 regression: these read-only/fail-safe endpoints are NOT CSRF-exempt: {missing}. "
         f"Current exempt set: {exempt}"
     )
 

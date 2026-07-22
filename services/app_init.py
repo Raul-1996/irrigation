@@ -488,7 +488,7 @@ def _warm_mqtt_clients(db):
         logger.exception("MQTT warm-up failed")
 
 
-def notify_http_listener_ready() -> bool:
+def notify_http_listener_ready(*, health_probe_url: str | None = None) -> bool:
     """Emit READY exactly once, after run.py proves this process accepts HTTP."""
     global _http_listener_ready_notified
     with _HTTP_LISTENER_READY_LOCK:
@@ -498,8 +498,29 @@ def notify_http_listener_ready() -> bool:
             logger.critical("HTTP listener is live but boot recovery is unresolved; READY=1 withheld")
             return False
         try:
-            from services.systemd_notify import notify_ready
+            from services.systemd_notify import notify_ready, watchdog_is_armed
 
+            watchdog_required = watchdog_is_armed()
+        except Exception:
+            logger.exception("systemd watchdog contract resolution failed")
+            return False
+
+        # Start the sole health-bound thread first. It waits one interval before
+        # sending, so READY still remains the first systemd notification. If
+        # WatchdogSec is armed, claiming readiness without a live sender would
+        # guarantee a restart loop one period later.
+        try:
+            heartbeat_started = _start_health_bound_heartbeat(
+                health_probe_url=health_probe_url
+            )
+        except Exception:
+            logger.exception("health-bound systemd watchdog start failed")
+            heartbeat_started = False
+        if watchdog_required and not heartbeat_started:
+            logger.critical("READY=1 withheld because the armed watchdog thread did not start")
+            return False
+
+        try:
             sent = bool(notify_ready(status=f"HTTP ready, {_boot_zone_count} zones reconciled"))
         except Exception:
             logger.exception("systemd READY=1 notification failed")
@@ -507,42 +528,40 @@ def notify_http_listener_ready() -> bool:
         if not sent:
             return False
         _http_listener_ready_notified = True
-
-    # READY has already been accepted by systemd. Start only the health-bound
-    # heartbeat now; the legacy unconditional notifier remains unused.
-    try:
-        _start_health_bound_heartbeat()
-    except Exception:
-        logger.exception("health-bound systemd watchdog start failed")
     return True
 
 
-def _health_heartbeat_once(*, urlopen_fn=None, port: int | None = None, timeout_sec: float = 2.0) -> bool:
+def _health_heartbeat_once(
+    *,
+    urlopen_fn=None,
+    port: int | None = None,
+    timeout_sec: float = 2.0,
+    health_probe_url: str | None = None,
+) -> bool:
     """Probe the real HTTP request plane, then emit one systemd heartbeat."""
     if urlopen_fn is None:
         from urllib.request import urlopen as urlopen_fn
 
     try:
-        from services.security import resolve_http_transport
+        from services.security import local_http_probe_url, resolve_http_transport
 
-        profile = resolve_http_transport()
-        resolved_port = int(port if port is not None else profile.port)
-        scheme = "https" if profile.tls_enabled else "http"
-        host = profile.probe_host
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
+        if health_probe_url is None:
+            profile = resolve_http_transport()
+            probe_url = local_http_probe_url(profile, port=port)
+        else:
+            probe_url = health_probe_url
         kwargs = {"timeout": max(0.05, float(timeout_sec))}
-        if profile.tls_enabled:
+        if probe_url.lower().startswith("https://"):
             import ssl
 
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             kwargs["context"] = context
-        with urlopen_fn(f"{scheme}://{host}:{resolved_port}/healthz", **kwargs) as response:
+        with urlopen_fn(probe_url, **kwargs) as response:
             if int(getattr(response, "status", 0)) != 200:
                 return False
-    except (OSError, TimeoutError, ValueError, TypeError):
+    except (OSError, RuntimeError, TimeoutError, ValueError, TypeError):
         logger.warning("systemd watchdog HTTP health probe failed", exc_info=True)
         return False
 
@@ -570,28 +589,44 @@ def _watchdog_interval_sec() -> float:
         return 20.0
 
 
-def _health_heartbeat_loop() -> None:
+def _health_heartbeat_loop(health_probe_url: str | None = None) -> None:
     interval = _watchdog_interval_sec()
     probe_timeout = min(5.0, max(0.5, interval / 4.0))
     logger.info("health-bound systemd heartbeat started (interval=%.1fs)", interval)
     while not _HEALTH_HEARTBEAT_STOP.wait(interval):
-        _health_heartbeat_once(timeout_sec=probe_timeout)
+        try:
+            _health_heartbeat_once(
+                timeout_sec=probe_timeout,
+                health_probe_url=health_probe_url,
+            )
+        except Exception:
+            # The sole watchdog thread must survive any transient probe/config
+            # failure and retry on the next interval.
+            logger.exception("unexpected systemd watchdog heartbeat failure")
     logger.info("health-bound systemd heartbeat stopped")
 
 
-def _start_health_bound_heartbeat() -> bool:
+def _start_health_bound_heartbeat(*, health_probe_url: str | None = None) -> bool:
     """Start the only production heartbeat, conditional on HTTP liveness."""
     global _HEALTH_HEARTBEAT_THREAD, _HEALTH_HEARTBEAT_STOP
-    if os.environ.get("WB_WATCHDOG_ENABLED", "1") != "1":
-        logger.info("systemd watchdog disabled via WB_WATCHDOG_ENABLED=0")
-        return False
     if not os.environ.get("NOTIFY_SOCKET"):
         return False
+    from services.systemd_notify import watchdog_is_armed
+
+    watchdog_disabled = os.environ.get("WB_WATCHDOG_ENABLED", "1") != "1"
+    if watchdog_disabled and not watchdog_is_armed():
+        logger.info("systemd watchdog disabled via WB_WATCHDOG_ENABLED=0")
+        return False
+    if watchdog_disabled:
+        logger.critical(
+            "WB_WATCHDOG_ENABLED=0 ignored because systemd WATCHDOG_USEC is armed"
+        )
     if _HEALTH_HEARTBEAT_THREAD is not None and _HEALTH_HEARTBEAT_THREAD.is_alive():
         return True
     _HEALTH_HEARTBEAT_STOP = threading.Event()
     _HEALTH_HEARTBEAT_THREAD = threading.Thread(
         target=_health_heartbeat_loop,
+        args=(health_probe_url,),
         name="sd-notify-health-heartbeat",
         daemon=True,
     )

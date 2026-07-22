@@ -75,6 +75,9 @@ class TestIsStatusAction:
     def test_zones_crud_denied(self):
         assert not self._is_status_action("/api/zones")
 
+    def test_next_watering_projection_is_not_anonymous(self):
+        assert not self._is_status_action("/api/zones/next-watering-bulk")
+
     def test_groups_crud_denied(self):
         assert not self._is_status_action("/api/groups")
 

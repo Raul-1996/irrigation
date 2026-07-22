@@ -13,6 +13,7 @@ from services.audit import audit_log, debug_audit
 from services.duration_conflicts import compute_duration_conflicts
 from services.locks import group_lock, zone_lock
 from services.next_watering import NextWateringLimitError, compute_next_watering, normalize_requested_zone_ids
+from services.security import user_required
 from services.zones_state import compare_and_swap_zone
 from utils import normalize_topic, to_iso_with_tz
 
@@ -732,6 +733,7 @@ def api_zone_next_watering(zone_id):
 
 
 @zones_crud_api_bp.route("/api/zones/next-watering-bulk", methods=["POST"])
+@user_required
 def api_zones_next_watering_bulk():
     try:
         if request.content_length is not None and request.content_length > _MAX_NEXT_WATERING_BODY_BYTES:

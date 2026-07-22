@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import ssl
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
@@ -44,6 +45,12 @@ class HttpTransportConfig:
         return self.bind_host
 
 
+@dataclass(frozen=True, slots=True)
+class HttpProbeTlsConfig:
+    ca_file: str | None
+    insecure_tls: bool
+
+
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -76,6 +83,70 @@ def _readable_regular_file(raw_path: str, *, name: str) -> str:
     return str(path)
 
 
+def _validate_tls_cert_pair(certfile: str, keyfile: str) -> None:
+    """Fail before boot reconciliation when Hypercorn cannot load the pair."""
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile, keyfile)
+    except (OSError, ValueError) as error:
+        raise HttpTransportConfigurationError(
+            "WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE must form a valid TLS "
+            "certificate/private key pair"
+        ) from error
+
+
+def local_http_probe_url(
+    profile: HttpTransportConfig,
+    *,
+    path: str = "/healthz",
+    port: int | None = None,
+) -> str:
+    """Build a local smoke URL from the same validated listener profile."""
+    if not path.startswith("/") or path.startswith("//") or any(ord(char) < 32 for char in path):
+        raise HttpTransportConfigurationError("HTTP probe path must be a local absolute path")
+    scheme = "https" if profile.tls_enabled else "http"
+    host = profile.probe_host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    resolved_port = profile.port if port is None else int(port)
+    if not 1 <= resolved_port <= 65535:
+        raise HttpTransportConfigurationError("HTTP probe port must be an integer in 1..65535")
+    return f"{scheme}://{host}:{resolved_port}{path}"
+
+
+def resolve_http_probe_tls(
+    profile: HttpTransportConfig,
+    environ: Mapping[str, str] | None = None,
+) -> HttpProbeTlsConfig:
+    """Resolve certificate verification for an unauthenticated local probe.
+
+    Native HTTPS is verified by default. Operators using a private CA may set
+    ``WB_HTTP_PROBE_CA_FILE``. Disabling verification requires the explicit
+    ``WB_HTTP_PROBE_INSECURE_TLS=1`` acknowledgement; the two modes cannot be
+    combined.
+    """
+    env = os.environ if environ is None else environ
+    ca_raw = str(env.get("WB_HTTP_PROBE_CA_FILE", "")).strip()
+    insecure_raw = env.get("WB_HTTP_PROBE_INSECURE_TLS")
+    insecure_tls = (
+        parse_strict_bool(insecure_raw, name="WB_HTTP_PROBE_INSECURE_TLS")
+        if insecure_raw is not None
+        else False
+    )
+    if not profile.tls_enabled:
+        if ca_raw or insecure_tls:
+            raise HttpTransportConfigurationError(
+                "HTTP probe TLS options require WB HTTP TLS to be enabled"
+            )
+        return HttpProbeTlsConfig(ca_file=None, insecure_tls=False)
+    if ca_raw and insecure_tls:
+        raise HttpTransportConfigurationError(
+            "WB_HTTP_PROBE_CA_FILE and WB_HTTP_PROBE_INSECURE_TLS=1 are mutually exclusive"
+        )
+    ca_file = _readable_regular_file(ca_raw, name="WB_HTTP_PROBE_CA_FILE") if ca_raw else None
+    return HttpProbeTlsConfig(ca_file=ca_file, insecure_tls=insecure_tls)
+
+
 def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTransportConfig:
     """Resolve the native WB listener with an explicit external-HTTP gate.
 
@@ -86,7 +157,12 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
     """
     env = os.environ if environ is None else environ
     bind_host = str(env.get("WB_HTTP_BIND_HOST", "127.0.0.1")).strip()
-    if not bind_host or any(char.isspace() or ord(char) < 32 for char in bind_host):
+    normalized_bind_host = bind_host.strip("[]")
+    if (
+        not bind_host
+        or not normalized_bind_host
+        or any(char.isspace() or ord(char) < 32 for char in bind_host)
+    ):
         raise HttpTransportConfigurationError("WB_HTTP_BIND_HOST must be a non-empty host without whitespace")
     try:
         port = int(str(env.get("PORT", "8080")).strip())
@@ -112,8 +188,10 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
         )
     certfile = _readable_regular_file(cert_raw, name="WB_HTTP_TLS_CERTFILE") if cert_raw else None
     keyfile = _readable_regular_file(key_raw, name="WB_HTTP_TLS_KEYFILE") if key_raw else None
+    if certfile is not None and keyfile is not None:
+        _validate_tls_cert_pair(certfile, keyfile)
 
-    external_bind = _is_external_bind(bind_host)
+    external_bind = _is_external_bind(normalized_bind_host)
     allow_raw = env.get("WB_HTTP_ALLOW_INSECURE_EXTERNAL")
     allow_insecure = (
         parse_strict_bool(allow_raw, name="WB_HTTP_ALLOW_INSECURE_EXTERNAL")
@@ -145,7 +223,7 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
             )
 
     return HttpTransportConfig(
-        bind_host=bind_host.strip("[]"),
+        bind_host=normalized_bind_host,
         port=port,
         tls_certfile=certfile,
         tls_keyfile=keyfile,

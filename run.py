@@ -13,8 +13,17 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from urllib.request import Request
 
-from app import app
-from services.security import HttpTransportConfig, resolve_http_transport
+from dotenv import load_dotenv
+
+from services.security import HttpTransportConfig, local_http_probe_url, resolve_http_transport
+
+# Validate bind/TLS before importing app.py, whose imports initialise SQLite
+# and whose module-level boot path reconciles physical state. This also loads
+# the same deployment .env that app.py would load later.
+load_dotenv()
+_STARTUP_HTTP_PROFILE = resolve_http_transport()
+
+from app import app  # transport validation must precede stateful app import
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +83,7 @@ def _get_asgi_app(flask_app):
 
 
 def _listener_probe_url(profile: HttpTransportConfig) -> str:
-    scheme = "https" if profile.tls_enabled else "http"
-    host = profile.probe_host
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"{scheme}://{host}:{profile.port}/healthz"
+    return local_http_probe_url(profile, path="/healthz")
 
 
 def _probe_http_listener(
@@ -119,7 +124,7 @@ def _listener_ready_loop(
             try:
                 from services.app_init import notify_http_listener_ready
 
-                if notify_http_listener_ready():
+                if notify_http_listener_ready(health_probe_url=url):
                     return
             except Exception:
                 logger.exception("HTTP listener is accepting requests but READY=1 notification failed")
@@ -142,8 +147,8 @@ def _start_listener_ready_notifier(flask_app, profile: HttpTransportConfig):
     return thread, stop_event
 
 
-def main(flask_app=app) -> int:
-    profile = resolve_http_transport()
+def main(flask_app=app, *, profile: HttpTransportConfig | None = None) -> int:
+    profile = profile or _STARTUP_HTTP_PROFILE
     if profile.insecure_external_acknowledged:
         logger.critical(
             "External plaintext HTTP explicitly enabled on %s; admin credentials and sessions are not transport-secure",
