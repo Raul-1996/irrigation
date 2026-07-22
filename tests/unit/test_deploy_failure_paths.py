@@ -58,6 +58,8 @@ def test_http_transport_contract_defaults_safe_and_rejects_implicit_external_pla
     repository = shlex.quote(str(repository_file))
 
     for deploy_script in (UPDATE, INSTALL):
+        environment_file.unlink(missing_ok=True)
+        repository_file.unlink(missing_ok=True)
         _bash(
             f"""
             source {shlex.quote(str(deploy_script))}
