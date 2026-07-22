@@ -35,18 +35,21 @@ def _create_env_servers(db) -> None:
     assert (first["id"], second["id"]) == (1, 2)
 
 
-def test_env_post_requires_admin_and_csrf_but_get_remains_public(app, guest_client, admin_client):
+def test_env_get_and_post_require_explicit_login_and_admin_csrf(app, guest_client, admin_client):
     _create_env_servers(app.db)
     _enable_native_security(app)
 
-    assert guest_client.get("/api/env").status_code == 200
+    assert guest_client.get("/api/env").status_code == 401
+    assert guest_client.get("/").status_code == 302
 
-    guest_token = _csrf_token(guest_client.get("/"))
-    guest_response = guest_client.post(
-        "/api/env",
-        json=_env_config(temp_topic="/guest", temp_server_id=1),
-        headers={"X-CSRFToken": guest_token},
-    )
+    app.config["WTF_CSRF_ENABLED"] = False
+    try:
+        guest_response = guest_client.post(
+            "/api/env",
+            json=_env_config(temp_topic="/guest", temp_server_id=1),
+        )
+    finally:
+        app.config["WTF_CSRF_ENABLED"] = True
     assert guest_response.status_code == 401
     assert guest_response.get_json()["error_code"] == "UNAUTHENTICATED"
 

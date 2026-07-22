@@ -69,8 +69,9 @@ import os
 import sqlite3
 from datetime import datetime
 
-from flask import Flask, Response, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from flask_wtf.csrf import CSRFProtect
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from database import db
 from irrigation_scheduler import get_scheduler, init_scheduler
@@ -142,6 +143,10 @@ except ImportError as e:
 from services import sse_hub as _sse_hub
 from services.api_rate_limiter import _is_allowed as _rate_check
 from services.app_init import initialize_app as _initialize_app
+from services.security import HttpTransportConfig as _HttpTransportConfig
+from services.security import HttpTransportConfigurationError as _HttpTransportConfigurationError
+from services.security import parse_strict_bool as _parse_strict_bool
+from services.security import resolve_http_transport as _resolve_http_transport
 
 # ── Logging already configured at the top of the file (MASTER-C2) ──────────
 
@@ -406,6 +411,8 @@ def add_security_headers(resp):
         "img-src 'self' data:; "
         "connect-src 'self'"
     )
+    if app.config.get("HTTP_TLS_ENABLED") or request.is_secure:
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000"
     return resp
 
 
@@ -426,23 +433,65 @@ def _strip_conditional_revalidation(resp):
     return resp
 
 
-def _configure_session_cookie_secure(flask_app: Flask) -> None:
-    """Apply an explicit SESSION_COOKIE_SECURE env override.
+def _configure_session_cookie_secure(flask_app: Flask) -> _HttpTransportConfig:
+    """Resolve cookie security from the validated listener transport.
 
-    Flask pre-populates this config key with ``False``, so checking whether
-    the key exists silently ignores the deployment environment.
+    TLS always implies a Secure cookie and cannot be weakened by an env typo
+    or explicit false. A loopback/reverse-proxy deployment may explicitly set
+    ``SESSION_COOKIE_SECURE=1`` when TLS terminates in front of Flask.
     """
+    profile = _resolve_http_transport()
     raw = os.environ.get("SESSION_COOKIE_SECURE")
-    if raw is not None:
-        flask_app.config["SESSION_COOKIE_SECURE"] = raw.strip().lower() in {"1", "true", "yes", "on"}
+    explicit_secure = _parse_strict_bool(raw, name="SESSION_COOKIE_SECURE") if raw is not None else None
+    if profile.tls_enabled and explicit_secure is False:
+        raise _HttpTransportConfigurationError(
+            "SESSION_COOKIE_SECURE cannot be disabled for WB HTTP TLS"
+        )
+    flask_app.config["HTTP_BIND_HOST"] = profile.bind_host
+    flask_app.config["HTTP_TLS_ENABLED"] = profile.tls_enabled
+    flask_app.config["HTTP_INSECURE_EXTERNAL_ACKNOWLEDGED"] = profile.insecure_external_acknowledged
+    flask_app.config["SESSION_COOKIE_SECURE"] = profile.tls_enabled or explicit_secure is True
+    return profile
 
 
-try:
-    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
-    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
-    _configure_session_cookie_secure(app)
-except (TypeError, KeyError) as e:
-    logger.debug("Session cookie config: %s", e)
+def _configure_trusted_proxy(
+    flask_app: Flask,
+    profile: _HttpTransportConfig | None = None,
+) -> _HttpTransportConfig:
+    """Trust forwarding headers only for an explicit loopback proxy chain.
+
+    ``ProxyFix`` selects the right-most configured values, so untrusted values
+    prepended by a client cannot become the rate-limit identity. The transport
+    resolver prevents clients from reaching this WSGI listener directly when
+    forwarding headers are enabled.
+    """
+    profile = profile or _resolve_http_transport()
+    trusted_proxy_hops = profile.trusted_proxy_hops
+    configured_hops = flask_app.config.get("_WB_TRUSTED_PROXY_HOPS_CONFIGURED")
+    if configured_hops is not None:
+        if configured_hops != trusted_proxy_hops:
+            raise _HttpTransportConfigurationError(
+                "trusted proxy middleware is already configured with a different hop count"
+            )
+        return profile
+
+    flask_app.config["HTTP_TRUSTED_PROXY_HOPS"] = trusted_proxy_hops
+    flask_app.config["_WB_TRUSTED_PROXY_HOPS_CONFIGURED"] = trusted_proxy_hops
+    if trusted_proxy_hops:
+        flask_app.wsgi_app = ProxyFix(
+            flask_app.wsgi_app,
+            x_for=trusted_proxy_hops,
+            x_proto=trusted_proxy_hops,
+        )
+    return profile
+
+
+# Flask pre-populates these keys, so ``setdefault`` would silently preserve
+# SESSION_COOKIE_SAMESITE=None and SESSION_COOKIE_SECURE=False.
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+_http_transport_profile = _configure_session_cookie_secure(app)
+_configure_trusted_proxy(app, _http_transport_profile)
 
 
 # ── Debug logging helpers ──────────────────────────────────────────────────
@@ -475,6 +524,12 @@ _ALLOWED_PUBLIC_POSTS = {
     "/api/zones/next-watering-bulk",
     "/api/audit/ui",
 }
+
+# Anonymous callers get one identity/introspection endpoint only. Rich status,
+# topology, sensor configuration and history require the explicit viewer link
+# (/login?guest=1) or an authenticated admin session. Liveness/readiness live
+# outside /api and have their own deliberately minimal contracts.
+_ALLOWED_PUBLIC_GETS = {"/api/auth/status"}
 
 # Explicit OFF actions remain available for incident response.
 _ALLOWED_PUBLIC_PATTERNS = [
@@ -514,17 +569,26 @@ def _auth_before_request():
         session["role"] = "guest"
     try:
         if not app.config.get("TESTING"):
+            pth = request.path or ""
+            logged_in = session.get("logged_in") is True
+            role = session.get("role")
+            # The shipped login button historically points at `/?guest=1`.
+            # Route that legacy URL through the canonical guest-login handler,
+            # which regenerates the session and refuses to downgrade admins.
+            if pth in {"/", "/status"} and request.args.get("guest") == "1":
+                return redirect(url_for("auth_bp.login_page", guest="1"))
+            if pth.startswith("/api/") and request.method in {"GET", "HEAD"}:
+                if not logged_in and pth not in _ALLOWED_PUBLIC_GETS:
+                    return jsonify(
+                        {"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}
+                    ), 401
+                return None
             try:
                 db.ensure_password_change_required()
             except (sqlite3.Error, OSError) as e:
                 logger.debug("ensure_password_change_required: %s", e)
-            if request.path.startswith("/api/"):
-                if request.method == "GET":
-                    return None
-                pth = request.path or ""
+            if pth.startswith("/api/"):
                 postpone_cancel = _is_postpone_cancel_request(pth)
-                logged_in = bool(session.get("logged_in"))
-                role = session.get("role")
                 is_admin = logged_in and role == "admin"
                 is_viewer = logged_in and role == "viewer"
                 if is_viewer and request.method in ["POST", "PUT", "DELETE"]:
@@ -836,4 +900,13 @@ if __name__ == "__main__":
     init_scheduler(db)
     # Direct `python app.py` is dev-only. Production uses run.py via hypercorn.
     # debug flag follows FLASK_DEBUG env var (default off).
-    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", host="0.0.0.0", port=8080)  # nosec B104
+    _dev_profile = _resolve_http_transport()
+    _dev_ssl_context = (
+        (_dev_profile.tls_certfile, _dev_profile.tls_keyfile) if _dev_profile.tls_enabled else None
+    )
+    app.run(
+        debug=os.environ.get("FLASK_DEBUG") == "1",
+        host=_dev_profile.bind_host,
+        port=_dev_profile.port,
+        ssl_context=_dev_ssl_context,
+    )

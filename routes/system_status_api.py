@@ -732,6 +732,20 @@ def api_scheduler_jobs():
 # ===== Health check =====
 
 
+def _health_response(payload: dict[str, Any], status_code: int):
+    """Return details only to an authenticated administrator.
+
+    Legacy watchdogs consume only the HTTP code/``ok`` bit. Keeping that
+    minimal contract public avoids disclosing broker and scheduler topology.
+    """
+    disclose = current_app.config.get("TESTING") or (
+        session.get("logged_in") is True and session.get("role") == "admin"
+    )
+    if disclose:
+        return jsonify(payload), status_code
+    return jsonify({"ok": bool(payload.get("ok"))}), status_code
+
+
 @system_status_api_bp.route("/health")
 def health_check():
     try:
@@ -779,11 +793,11 @@ def health_check():
         # signal (HTTP 200) instead of failing health-check.  In production a
         # missing scheduler is a real incident — keep the 503.
         if TESTING and not sched_ok:
-            return jsonify(payload), 200 if payload["ok"] else 503
+            return _health_response(payload, 200 if payload["ok"] else 503)
         overall = db_ok and sched_ok and mqtt_ready
         code = 200 if overall else 503
         payload["ok"] = overall
-        return jsonify(payload), code
+        return _health_response(payload, code)
     except (ConnectionError, TimeoutError, OSError, sqlite3.Error) as e:
         logger.exception("health check failed")
         return jsonify({"ok": False, "error_code": "HEALTH_CHECK_FAILED"}), 500
@@ -1075,7 +1089,6 @@ def api_status():
     # Feature A: aggregate system health so the UI can show a prominent alert.
     # A zone in state='fault' means its relay did not confirm switching — the
     # zone is excluded from the schedule and is NOT being watered.
-    # TODO: master-valve-stuck faults are not aggregated yet.
     faults = []
     try:
         for z in zones:
@@ -1093,6 +1106,34 @@ def api_status():
                 )
     except (KeyError, TypeError, ValueError) as e:
         logger.debug("api_status: fault aggregation failed: %s", e)
+
+    # A fresh observed CLOSED state while a zone is actively watering is an
+    # unambiguous master-valve mismatch: command delivery may look healthy,
+    # but the zone cannot receive water. Do not infer the inverse mismatch
+    # from an idle/open master because manual maintenance opens and configured
+    # close delays are valid transient states without a persisted deadline.
+    try:
+        for group_status in groups_status:
+            if (
+                group_status.get("use_master_valve") is True
+                and group_status.get("status") == "watering"
+                and group_status.get("master_valve_state") == "closed"
+            ):
+                group_id = group_status.get("id")
+                faults.append(
+                    {
+                        "type": "master_valve_closed",
+                        "severity": "critical",
+                        "group_id": int(group_id) if group_id is not None else None,
+                        "group_name": group_status.get("name") or (f"#{group_id}" if group_id is not None else "?"),
+                        "zone_id": group_status.get("current_zone"),
+                        "zone_name": None,
+                        "reason": "Мастер-клапан подтверждён закрытым во время полива",
+                        "since": None,
+                    }
+                )
+    except (KeyError, TypeError, ValueError) as e:
+        logger.debug("api_status: master-valve fault aggregation failed: %s", e)
 
     rain_error_code = rain_runtime["health"].get("error_code")
     if rain_error_code:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import os
 import stat
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +37,27 @@ def _seed_maps(directory: Path, count: int) -> list[Path]:
         os.utime(path, (1_000 + index, 1_000 + index))
         files.append(path)
     return files
+
+
+def test_default_map_directory_follows_runtime_working_directory(tmp_path) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment.update(TESTING="1", PYTHONPATH=str(repository_root))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from routes.system_config_api import _TRUSTED_MAP_DIR; print(_TRUSTED_MAP_DIR)",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert Path(result.stdout.strip()) == tmp_path / "static" / "media" / "maps"
 
 
 def test_map_api_lists_only_the_newest_bounded_set(admin_client, tmp_path, monkeypatch) -> None:
