@@ -23,6 +23,7 @@ programs_api_bp = Blueprint("programs_api", __name__)
 # IrrigationScheduler._schedule_single_time — другие значения молча
 # приводят к программе без jobs).
 VALID_PROGRAM_TYPES = ("time-based", "smart")
+_UNSUPPORTED_PROGRAM_TYPE_ERROR = "program type 'smart' has no implemented execution semantics"
 VALID_SCHEDULE_TYPES = ("weekdays", "interval", "even-odd")
 MIN_INTERVAL_DAYS = 1
 MAX_INTERVAL_DAYS = 30
@@ -72,6 +73,23 @@ def _missing_program_zones_response(error: ProgramZonesNotFoundError):
         ),
         409,
     )
+
+
+def _program_type_unsupported_response():
+    return jsonify(
+        {
+            "success": False,
+            "supported": False,
+            "error_code": "PROGRAM_TYPE_UNSUPPORTED",
+            "message": "Program type 'smart' is not supported",
+        }
+    ), 422
+
+
+def _program_validation_error_response(error: str):
+    if error == _UNSUPPORTED_PROGRAM_TYPE_ERROR:
+        return _program_type_unsupported_response()
+    return jsonify({"success": False, "message": error}), 400
 
 
 def _normalize_program_payload(
@@ -150,6 +168,8 @@ def _normalize_program_payload(
             effective,
             f"Invalid type: {program_type!r} (expected one of: {', '.join(VALID_PROGRAM_TYPES)})",
         )
+    if program_type == "smart":
+        return {}, effective, _UNSUPPORTED_PROGRAM_TYPE_ERROR
     schedule_type = effective.get("schedule_type", "weekdays")
     if not isinstance(schedule_type, str) or schedule_type not in VALID_SCHEDULE_TYPES:
         return (
@@ -476,7 +496,7 @@ def api_program(prog_id):
                 creating=False,
             )
             if validation_error:
-                return jsonify({"success": False, "message": validation_error}), 400
+                return _program_validation_error_response(validation_error)
             preserve_candidate_anchor = all(
                 current_program.get(field) == effective_data.get(field)
                 for field in ("schedule_type", "time", "extra_times", "interval_days")
@@ -597,7 +617,7 @@ def api_create_program():
         return jsonify({"success": False, "message": "JSON body must be an object"}), 400
     normalized, effective_data, validation_error = _normalize_program_payload(data, creating=True)
     if validation_error:
-        return jsonify({"success": False, "message": validation_error}), 400
+        return _program_validation_error_response(validation_error)
 
     with _PROGRAM_MUTATION_LOCK:
         candidate_anchors, stored_anchors = _interval_anchor_context(
@@ -772,6 +792,11 @@ def api_duplicate_program(prog_id):
     """Duplicate program (create copy with '(копия)' suffix)."""
     try:
         with _PROGRAM_MUTATION_LOCK:
+            source_program = db.get_program(prog_id)
+            if source_program is None:
+                return jsonify({"success": False, "message": "Program not found"}), 404
+            if source_program.get("type") == "smart":
+                return _program_type_unsupported_response()
             try:
                 new_program = db.duplicate_program(prog_id)
             except ProgramZonesNotFoundError as error:
@@ -821,6 +846,8 @@ def api_toggle_program_enabled(prog_id):
                     creating=True,
                 )
                 if validation_error:
+                    if validation_error == _UNSUPPORTED_PROGRAM_TYPE_ERROR:
+                        return _program_type_unsupported_response()
                     return (
                         jsonify(
                             {
@@ -938,6 +965,8 @@ def api_run_program(prog_id):
     program = db.get_program(prog_id)
     if not program:
         return jsonify({"success": False, "message": "Program not found"}), 404
+    if program.get("type") == "smart":
+        return _program_type_unsupported_response()
     if not program.get("enabled", True):
         return jsonify(
             {
@@ -1023,38 +1052,42 @@ def api_run_program(prog_id):
 
 @programs_api_bp.route("/api/programs/<int:prog_id>/log", methods=["GET"])
 def api_program_log(prog_id):
-    """Get watering log for specific program."""
+    """Report the unavailable run-history capability truthfully."""
     try:
         program = db.get_program(prog_id)
         if not program:
             return jsonify({"success": False, "message": "Program not found"}), 404
-
-        period = request.args.get("period", "today")
-        limit = int(request.args.get("limit", 50))
-
-        # TODO: implement actual log fetching from zone_runs + logs tables
-        # For now return stub
-        log_entries = []
-
-        return jsonify({"success": True, "log": log_entries})
-    except (ValueError, sqlite3.Error, OSError) as e:
+        return jsonify(
+            {
+                "success": False,
+                "supported": False,
+                "capability": "program_log",
+                "error_code": "PROGRAM_RUN_IDENTITY_UNAVAILABLE",
+                "message": "Program execution identity is not stored; this capability is unavailable",
+            }
+        ), 501
+    except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения журнала программы {prog_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка получения журнала"}), 500
 
 
 @programs_api_bp.route("/api/programs/<int:prog_id>/stats", methods=["GET"])
 def api_program_stats(prog_id):
-    """Get statistics for specific program."""
+    """Report the unavailable program-statistics capability truthfully."""
     try:
         program = db.get_program(prog_id)
         if not program:
             return jsonify({"success": False, "message": "Program not found"}), 404
 
-        # TODO: implement actual stats aggregation from zone_runs table
-        # For now return stub
-        stats = {"total_runs": 0, "total_water_calc": 0, "total_water_fact": 0, "avg_duration_min": 0, "last_run": None}
-
-        return jsonify({"success": True, "stats": stats})
+        return jsonify(
+            {
+                "success": False,
+                "supported": False,
+                "capability": "program_stats",
+                "error_code": "PROGRAM_RUN_IDENTITY_UNAVAILABLE",
+                "message": "Program execution identity is not stored; this capability is unavailable",
+            }
+        ), 501
     except (sqlite3.Error, OSError) as e:
         logger.error(f"Ошибка получения статистики программы {prog_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка получения статистики"}), 500

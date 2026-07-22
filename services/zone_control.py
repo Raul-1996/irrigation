@@ -627,18 +627,21 @@ def _schedule_master_close(group_dict: dict, immediate: bool = False) -> None:
 # continue to work unchanged.
 import contextlib
 
-from services.zones_state import update_zone_state as _update_zone_state
+from services.zones_state import update_zone_state_internal as _update_zone_state_internal
 
 
 def _versioned_update(zone_id: int, updates: dict, *, audit_reason: str = "") -> tuple[bool, dict | None]:
-    """Backwards-compatible thin wrapper around ``zones_state.update_zone_state``.
-
-    Pre-existing callers in this module (and in tests) invoke
-    ``_versioned_update`` and ignore the return value; we preserve that
-    contract here while delegating the actual write + audit emit to the
-    canonical helper.
-    """
-    return _update_zone_state(zone_id, updates, audit_reason=audit_reason)
+    """Apply an internal transition against a freshly read row snapshot."""
+    snapshot = db.get_zone(int(zone_id))
+    if not snapshot:
+        return False, None
+    return _update_zone_state_internal(
+        zone_id,
+        updates,
+        snapshot=snapshot,
+        audit_reason=audit_reason,
+        db=db,
+    )
 
 
 def _is_valid_start_state(state: str) -> bool:
@@ -671,10 +674,12 @@ def mark_zone_command_fault(zone_id: int, expected: str, *, reason: str) -> None
         state_verifier.invalidate_verifiers(int(zone_id))
     except (AttributeError, ValueError, TypeError):
         logger.debug("command-fault verifier invalidation failed zone=%s", zone_id)
-    _update_zone_state(
+    _update_zone_state_internal(
         int(zone_id),
         fields,
+        snapshot=zone,
         audit_reason=f"mqtt_publish_failed_{reason}",
+        db=db,
     )
     logger.critical(
         "zone command publish failed: zone=%s expected=%s reason=%s; state pinned to fault",
@@ -1473,21 +1478,15 @@ def start_zone_orchestrated(
     now_dt = datetime.now()
     planned_end = (now_dt + timedelta(minutes=dur_min)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        _update_zone_state(
+        updated, _snapshot = _versioned_update(
             int(zone_id),
             {"planned_end_time": planned_end, "watering_start_source": "manual"},
             audit_reason="manual_start_planned_end",
         )
+        if not updated:
+            logger.warning("start_zone_orchestrated: planned metadata CAS conflicted zone=%s", zone_id)
     except (sqlite3.Error, OSError, ImportError):
-        logger.exception(
-            "start_zone_orchestrated: audited planned_end_time update failed zone=%s — "
-            "falling back to raw update_zone",
-            zone_id,
-        )
-        try:
-            db.update_zone(int(zone_id), {"planned_end_time": planned_end, "watering_start_source": "manual"})
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("start_zone_orchestrated: planned_end_time fallback update failed: %s", e)
+        logger.exception("start_zone_orchestrated: planned metadata CAS failed zone=%s", zone_id)
 
     # Schedule auto-stop synchronously (sched calls are non-blocking).
     try:

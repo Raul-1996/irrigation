@@ -104,7 +104,7 @@ class TestZoneCSVImport:
         z = app.db.create_zone({"name": "CSV", "duration": 10, "group_id": 1})
         resp = admin_client.put(
             f"/api/zones/{z['id']}?source=csv",
-            data=json.dumps({"name": "CSV Updated"}),
+            data=json.dumps({"name": "CSV Updated", "expected_version": z["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200

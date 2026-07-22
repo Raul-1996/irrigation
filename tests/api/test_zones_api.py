@@ -55,7 +55,7 @@ class TestZoneSingleAPI:
         zone = app.db.create_zone({"name": "Old", "duration": 10, "group_id": 1})
         resp = admin_client.put(
             f"/api/zones/{zone['id']}",
-            data=json.dumps({"name": "Updated", "duration": 20}),
+            data=json.dumps({"name": "Updated", "duration": 20, "expected_version": zone["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200

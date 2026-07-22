@@ -503,6 +503,7 @@ def test_postpone_scheduler_unresolved_is_pending_without_raw_fallback(app, monk
             "watering_start_time": started_at,
             "command_id": command_id,
         },
+        expected_version=zone["version"],
     )
     scheduler = Mock()
     scheduler.cancel_group_jobs.return_value = {
@@ -767,6 +768,7 @@ def test_postpone_without_scheduler_still_calls_actual_confirmed_stop_and_return
             "watering_start_time": "2026-07-19 10:00:00",
             "command_id": "no-scheduler-postpone",
         },
+        expected_version=zone["version"],
     )
     app.db.set_setting_value("password_must_change", "0")
     app.config.update(TESTING=False, WTF_CSRF_ENABLED=False)
@@ -820,6 +822,7 @@ def test_postpone_api_returns_503_with_durable_deadline_when_stop_is_unresolved(
             "watering_start_time": "2026-07-19 10:00:00",
             "command_id": "pending-http-command",
         },
+        expected_version=zone["version"],
     )
     scheduler = Mock()
     scheduler.cancel_group_jobs.return_value = {
@@ -931,6 +934,7 @@ def test_postpone_ack_without_fresh_off_echo_keeps_activation_and_safety_jobs(gu
             "watering_start_time": started_at,
             "command_id": command_id,
         },
+        expected_version=zone["version"],
     )
 
     scheduler = IrrigationScheduler(app.db)
@@ -1010,6 +1014,7 @@ def test_postpone_ack_without_fresh_off_echo_keeps_activation_and_safety_jobs(gu
             "mqtt_server_id": None,
             "topic": "",
         },
+        expected_version=app.db.get_zone(zone["id"])["version"],
     )
     scheduler.cancel_zone_jobs(zone["id"], include_cap=True)
 

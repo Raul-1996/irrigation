@@ -82,7 +82,7 @@ class TestZonesAPI:
         z = app.db.create_zone({"name": "Old", "duration": 10, "group_id": 1})
         resp = admin_client.put(
             f"/api/zones/{z['id']}",
-            data=json.dumps({"name": "Updated", "duration": 20}),
+            data=json.dumps({"name": "Updated", "duration": 20, "expected_version": z["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -90,13 +90,19 @@ class TestZonesAPI:
     def test_update_zone_invalid_duration(self, admin_client, app):
         z = app.db.create_zone({"name": "Bad", "duration": 10, "group_id": 1})
         resp = admin_client.put(
-            f"/api/zones/{z['id']}", data=json.dumps({"duration": 99999}), content_type="application/json"
+            f"/api/zones/{z['id']}",
+            data=json.dumps({"duration": 99999, "expected_version": z["version"]}),
+            content_type="application/json",
         )
         assert resp.status_code == 400
 
     def test_update_zone_empty_name(self, admin_client, app):
         z = app.db.create_zone({"name": "X", "duration": 10, "group_id": 1})
-        resp = admin_client.put(f"/api/zones/{z['id']}", data=json.dumps({"name": ""}), content_type="application/json")
+        resp = admin_client.put(
+            f"/api/zones/{z['id']}",
+            data=json.dumps({"name": "", "expected_version": z["version"]}),
+            content_type="application/json",
+        )
         assert resp.status_code == 400
 
     def test_delete_zone(self, admin_client, app):

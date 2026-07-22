@@ -463,6 +463,9 @@ class StateVerifier:
         state = self._canonical_state(expected)
         if state is None:
             return
+        snapshot = db.get_zone(int(zone_id))
+        if not snapshot:
+            return
         fields: dict[str, object] = {"observed_state": state}
         cleanup_ok = True
         if state == "off":
@@ -484,18 +487,19 @@ class StateVerifier:
                 fields["watering_start_time"] = None
                 fields["command_id"] = None
         try:
-            from services.zones_state import update_zone_state
+            from services.zones_state import update_zone_state_internal
 
-            update_zone_state(
+            applied, _current = update_zone_state_internal(
                 int(zone_id),
                 fields,
+                snapshot=snapshot,
                 audit_reason=f"mqtt_verified_{state}",
                 db=db,
             )
+            if not applied:
+                logger.warning("StateVerifier: confirmation CAS conflicted zone=%s", zone_id)
         except (sqlite3.Error, OSError, ImportError):
             logger.exception("StateVerifier: audited confirmation persist failed zone=%s", zone_id)
-            with contextlib.suppress(sqlite3.Error, OSError, AttributeError):
-                db.update_zone(int(zone_id), fields)
 
         if state == "on":
             try:
@@ -781,6 +785,11 @@ class StateVerifier:
             )
             return
 
+        current = db.get_zone(int(zone_id))
+        if not current:
+            return
+        zone = current
+
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         current_faults = int(zone.get("fault_count") or 0)
         fields = {
@@ -803,19 +812,19 @@ class StateVerifier:
         # the same instance they later read from.
         db_inst = self.db
         try:
-            from services.zones_state import update_zone_state as _uzs
+            from services.zones_state import update_zone_state_internal as _uzs
 
-            _uzs(zone_id, fields, audit_reason="fault_detected", db=db_inst)
-        except (sqlite3.Error, OSError, ImportError):
-            logger.exception(
-                "StateVerifier: audited fault persist failed zone=%s — falling back to raw update_zone",
+            applied, _current = _uzs(
                 zone_id,
+                fields,
+                snapshot=zone,
+                audit_reason="fault_detected",
+                db=db_inst,
             )
-            try:
-                if db_inst is not None:
-                    db_inst.update_zone(zone_id, fields)
-            except (sqlite3.Error, OSError):
-                logger.exception("StateVerifier: failed to persist fault state zone=%s", zone_id)
+            if not applied:
+                logger.critical("StateVerifier: fault CAS conflicted zone=%s", zone_id)
+        except (sqlite3.Error, OSError, ImportError):
+            logger.exception("StateVerifier: audited fault CAS failed zone=%s", zone_id)
 
         zone_name = zone.get("name") or f"#{zone_id}"
         alert_text = (

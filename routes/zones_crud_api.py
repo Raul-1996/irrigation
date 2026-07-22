@@ -13,6 +13,7 @@ from services.audit import audit_log, debug_audit
 from services.duration_conflicts import compute_duration_conflicts
 from services.locks import group_lock, zone_lock
 from services.next_watering import NextWateringLimitError, compute_next_watering, normalize_requested_zone_ids
+from services.zones_state import compare_and_swap_zone
 from utils import normalize_topic, to_iso_with_tz
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,20 @@ def _zone_reference_ids() -> tuple[set[int], set[int]]:
     return group_ids, mqtt_server_ids
 
 
+def _zone_version_conflict(expected_version: int, current: dict | None):
+    if current is None:
+        return jsonify({"success": False, "message": "Zone not found"}), 404
+    return jsonify(
+        {
+            "success": False,
+            "message": "Zone version conflict",
+            "error_code": "ZONE_VERSION_CONFLICT",
+            "expected_version": expected_version,
+            "current_version": int(current.get("version") or 0),
+        }
+    ), 409
+
+
 # ---- Zone CRUD ----
 
 
@@ -277,6 +292,30 @@ def api_zone(zone_id):
         raw_data = request.get_json() or {}
         if not isinstance(raw_data, dict):
             return jsonify({"success": False, "message": "invalid zone payload"}), 400
+        if "expected_version" not in raw_data:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "expected_version is required",
+                    "error_code": "EXPECTED_VERSION_REQUIRED",
+                }
+            ), 428
+        expected_version = raw_data.get("expected_version")
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 0
+        ):
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "expected_version must be a non-negative integer",
+                    "error_code": "INVALID_EXPECTED_VERSION",
+                }
+            ), 400
+        raw_data = {key: value for key, value in raw_data.items() if key != "expected_version"}
+        if not raw_data:
+            return jsonify({"success": False, "message": "zone update must contain at least one field"}), 400
         # Reject state-machine fields in the generic CRUD endpoint — they
         # MUST go through services.zones_state.update_zone_state so audit
         # rows are emitted and the optimistic-lock state machine isn't
@@ -301,6 +340,8 @@ def api_zone(zone_id):
         prev = db.get_zone(zone_id)
         if not prev:
             return ("Zone not found", 404)
+        if int(prev.get("version") or 0) != expected_version:
+            return _zone_version_conflict(expected_version, prev)
         try:
             group_ids, mqtt_server_ids = _zone_reference_ids()
             data, validation_error = _normalise_zone_payload(
@@ -334,6 +375,8 @@ def api_zone(zone_id):
             with _stable_zone_topology_lock(zone_id, group_ids_to_lock) as latest:
                 if not latest:
                     return ("Zone not found", 404)
+                if int(latest.get("version") or 0) != expected_version:
+                    return _zone_version_conflict(expected_version, latest)
                 data, validation_error = _normalise_zone_payload(
                     data,
                     group_ids=group_ids,
@@ -350,10 +393,33 @@ def api_zone(zone_id):
                             "message": "Zone topology cannot change until the relay is confirmed off",
                         }
                     ), 409
-                prev = latest
-                zone = db.update_zone(zone_id, data)
+                applied, snapshot = compare_and_swap_zone(
+                    zone_id,
+                    data,
+                    expected_version=expected_version,
+                    audit_reason="zone_crud",
+                    db=db,
+                )
         else:
-            zone = db.update_zone(zone_id, data)
+            applied, snapshot = compare_and_swap_zone(
+                zone_id,
+                data,
+                expected_version=expected_version,
+                audit_reason="zone_crud",
+                db=db,
+            )
+        if not applied:
+            return _zone_version_conflict(expected_version, snapshot)
+
+        # Build the response from the exact pre-write snapshot and accepted
+        # fields.  A concurrent writer may commit immediately after our CAS;
+        # re-reading here would return that writer's version and make this
+        # response unusable as the caller's next expected_version.
+        assert snapshot is not None
+        zone = dict(snapshot)
+        zone.update(data)
+        zone["version"] = expected_version + 1
+        zone["success"] = True
         if zone:
             if is_csv:
                 try:
@@ -361,9 +427,9 @@ def api_zone(zone_id):
                 except (OSError, ValueError) as e:
                     logger.debug("Handled exception in line_128: %s", e)
             db.add_log("zone_edit", json.dumps({"zone": zone_id, "changes": data}))
-            if prev and any(zone.get(f) != prev.get(f) for f in _MQTT_WIRING_FIELDS):
+            if any(zone.get(f) != snapshot.get(f) for f in _MQTT_WIRING_FIELDS):
                 _sse_hub.reload_hub()
-            return jsonify(zone)
+            return jsonify(_zone_ts_to_iso(zone))
         if is_csv:
             try:
                 logging.getLogger("import_export").info(f"PUT result id={zone_id} NOT_FOUND")

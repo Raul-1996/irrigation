@@ -47,7 +47,9 @@ class TestZonesCRUD:
         zid = zones[0]["id"]
         resp = admin_client.put(
             f"/api/zones/{zid}",
-            data=json.dumps({"name": "Z1 Updated", "duration": 20}),
+            data=json.dumps(
+                {"name": "Z1 Updated", "duration": 20, "expected_version": zones[0]["version"]}
+            ),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -129,7 +131,7 @@ class TestSseHubReloadOnWiringChange:
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
-                data=json.dumps({"topic": "/devices/test/K2"}),
+                data=json.dumps({"topic": "/devices/test/K2", "expected_version": z["version"]}),
                 content_type="application/json",
             )
         assert resp.status_code == 200
@@ -144,7 +146,7 @@ class TestSseHubReloadOnWiringChange:
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
-                data=json.dumps({"name": "Renamed", "duration": 20}),
+                data=json.dumps({"name": "Renamed", "duration": 20, "expected_version": z["version"]}),
                 content_type="application/json",
             )
         assert resp.status_code == 200
@@ -158,7 +160,7 @@ class TestSseHubReloadOnWiringChange:
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
-                data=json.dumps({"topic": "/devices/test/K1"}),
+                data=json.dumps({"topic": "/devices/test/K1", "expected_version": z["version"]}),
                 content_type="application/json",
             )
         assert resp.status_code == 200

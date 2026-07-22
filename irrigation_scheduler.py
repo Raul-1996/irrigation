@@ -183,6 +183,10 @@ def job_run_program(
                 if not current or not current.get("enabled", True) or not current.get("zones"):
                     s.cancel_program(int(program_id))
                     return
+                if current.get("type", "time-based") != "time-based":
+                    logger.error("Unsupported program type rejected at fire program_id=%s", program_id)
+                    s.cancel_program(int(program_id))
+                    return
                 if expected_fingerprint is not None:
                     current_fingerprint = s.program_schedule_fingerprint(int(program_id), current)
                     if current_fingerprint != str(expected_fingerprint):
@@ -1841,6 +1845,10 @@ class IrrigationScheduler:
         if not enabled:
             return {"id": int(program_id), "enabled": False}
 
+        program_type = str(raw.get("type") or "time-based")
+        if program_type != "time-based":
+            raise ValueError(f"unsupported program type: {program_type}")
+
         hours, minutes, time_value = self._parse_program_time(raw.get("time"))
         name = str(raw.get("name") or f"program_{program_id}")
         raw_zones = raw.get("zones")
@@ -1888,6 +1896,7 @@ class IrrigationScheduler:
         return {
             "id": int(program_id),
             "enabled": True,
+            "type": program_type,
             "name": name,
             "time": time_value,
             "hours": hours,
@@ -1908,6 +1917,7 @@ class IrrigationScheduler:
             for key in (
                 "id",
                 "enabled",
+                "type",
                 "name",
                 "time",
                 "zones",
@@ -2963,22 +2973,21 @@ class IrrigationScheduler:
                 # TESTING-mode start — flagged via audit_reason so any audit
                 # log scrub on prod can filter these synthetic transitions out.
                 try:
-                    from services.zones_state import update_zone_state as _uzs
+                    from services.zones_state import update_zone_state_internal as _uzs
 
-                    _uzs(
+                    applied, _current = _uzs(
                         zone_id,
                         {"state": "on", "watering_start_time": start_ts, "planned_end_time": planned_end},
+                        snapshot=zone,
                         audit_reason="testing_mode_start",
                         db=self.db,
                     )
+                    if not applied:
+                        logger.warning("irrigation_scheduler: TESTING start CAS conflicted zone=%s", zone_id)
+                        continue
                 except (sqlite3.Error, OSError, ImportError):
-                    logger.exception(
-                        "irrigation_scheduler: TESTING start audited path failed zone=%s",
-                        zone_id,
-                    )
-                    self.db.update_zone(
-                        zone_id, {"state": "on", "watering_start_time": start_ts, "planned_end_time": planned_end}
-                    )
+                    logger.exception("irrigation_scheduler: TESTING start CAS failed zone=%s", zone_id)
+                    continue
                 synthetic_started = True
                 break  # Only start the first zone in TESTING mode
             if not synthetic_started:

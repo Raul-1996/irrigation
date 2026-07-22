@@ -733,9 +733,15 @@ def api_zone_mqtt_stop(zone_id: int):
             return jsonify({"success": False, "message": "MQTT publish failed"}), 500
         try:
             # Manual MQTT stop — operator action, audited.
-            from services.zones_state import update_zone_state as _uzs
+            from services.zones_state import update_zone_state_internal as _uzs
 
-            _uzs(zone_id, {"state": "off", "watering_start_time": None}, audit_reason="mqtt_stop")
+            _uzs(
+                zone_id,
+                {"state": "off", "watering_start_time": None},
+                snapshot=z,
+                audit_reason="mqtt_stop",
+                db=db,
+            )
         except (sqlite3.Error, OSError, ImportError) as e:
             logger.debug("Handled exception in api_zone_mqtt_stop: %s", e)
         return jsonify({"success": True, "message": "Зона остановлена"})

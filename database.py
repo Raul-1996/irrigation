@@ -80,14 +80,18 @@ class IrrigationDB:
     def update_zone(self, zone_id: int, zone_data: dict[str, Any]) -> dict[str, Any] | None:
         return self.zones.update_zone(zone_id, zone_data)
 
-    def update_zone_versioned(self, zone_id: int, updates: dict[str, Any]) -> tuple:
-        """Versioned zone update — see db.zones.update_zone_versioned for contract.
+    def update_zone_versioned(
+        self,
+        zone_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_version: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Caller-owned zone compare-and-swap.
 
-        Returns ``(ok: bool, prev_zone: dict | None)`` since the audit-logging
-        rework: callers that need atomic prev-state snapshots use this directly,
-        scheduler legacy paths use the bool ``ok`` portion.
+        See :meth:`db.zones.ZoneRepository.update_zone_versioned`.
         """
-        return self.zones.update_zone_versioned(zone_id, updates)
+        return self.zones.update_zone_versioned(zone_id, updates, expected_version=expected_version)
 
     def bulk_update_zones(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         return self.zones.bulk_update_zones(updates)
