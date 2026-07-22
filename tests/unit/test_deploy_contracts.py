@@ -79,10 +79,10 @@ def test_update_backups_are_private_restorable_and_retained_on_data_partition():
     assert 'REPO_DIR_REAL=$(cd "$REPO_DIR" && pwd -P)' in UPDATE
     assert '[[ "$REPO_DIR_REAL" != "$FIXED_REPO_DIR_REAL" ]]' in UPDATE
     assert "STATE_DIR=${STATE_DIR:-/mnt/data/wb-irrigation-state}" in UPDATE
-    assert 'BACKUP_BASE=${BACKUP_BASE:-"${STATE_DIR}/deploy-backups"}' in UPDATE
+    assert 'BACKUP_BASE=${BACKUP_BASE:-"${DEPLOY_CONTROL_DIR}/backups"}' in UPDATE
     assert "canonicalize_backup_base" in UPDATE
     assert '[[ -L "$BACKUP_BASE" ]]' in UPDATE
-    assert '[[ "$backup_name" != "deploy-backups"' in UPDATE
+    assert '[[ "$backup_name" != "backups"' in UPDATE
     assert 'mkdir -p -m 700 "$BACKUP_BASE"' in UPDATE
     assert 'mkdir -m 700 "$BACKUP_DIR"' in UPDATE
     assert 'chmod 600 "$backup_path"' in UPDATE
@@ -118,12 +118,13 @@ def test_deploy_workflow_uses_only_supported_update_path_and_propagates_failures
     assert "|| echo" not in DEPLOY
 
 
-def test_deploy_workflow_has_protected_transport_and_immutable_action():
-    action_ref = re.search(r"uses: appleboy/ssh-action@([^\s]+)", DEPLOY)
-    assert action_ref is not None
-    assert re.fullmatch(r"[0-9a-f]{40}", action_ref.group(1))
-    assert "fingerprint: ${{ secrets.WB_SSH_FINGERPRINT }}" in DEPLOY
-    assert "proxy_fingerprint: ${{ secrets.JUMP_SSH_FINGERPRINT }}" in DEPLOY
+def test_deploy_workflow_has_native_host_key_pinned_transport():
+    assert "appleboy/ssh-action" not in DEPLOY
+    assert "drone-ssh" not in DEPLOY
+    assert "ssh-keyscan" in DEPLOY
+    assert "ssh-keygen -lf -" in DEPLOY
+    assert "StrictHostKeyChecking=yes" in DEPLOY
+    assert "github.ref == 'refs/heads/main'" in DEPLOY
     assert '[[ -n "$WB_SSH_FINGERPRINT" ]]' in DEPLOY
     assert '[[ -n "$JUMP_SSH_FINGERPRINT" ]]' in DEPLOY
 
@@ -149,7 +150,9 @@ def test_native_installers_require_the_hash_locked_production_dependencies():
 
 def test_native_mutators_share_a_nonblocking_process_lock():
     for script in (INSTALL, UPDATE, UNINSTALL):
-        assert "/run/lock/wb-irrigation-deploy.lock" in script
+        assert "/run/lock/wb-irrigation/deploy.lock" in script
+        assert "chmod 0700 \"$DEPLOY_LOCK_DIR\"" in script
+        assert "descriptor_identity" in script
         assert "acquire_deploy_lock" in script
         assert "flock -n" in script
 
@@ -206,8 +209,8 @@ def test_systemd_restart_limits_are_unit_scoped_and_service_is_unprivileged():
         "ReadWritePaths=/mnt/data/wb-irrigation-state",
         "BindPaths=/mnt/data/wb-irrigation-state/static/media/maps:/mnt/data/wb-irrigation/static/media/maps",
         "BindPaths=/mnt/data/wb-irrigation-state/static/media/zones:/mnt/data/wb-irrigation/static/media/zones",
-        "EnvironmentFile=-/mnt/data/wb-irrigation-state/.env",
         "EnvironmentFile=-/opt/wb-irrigation/.env",
+        "EnvironmentFile=/opt/wb-irrigation/release.env",
         "Environment=PYTHONDONTWRITEBYTECODE=1",
         "ExecStart=/opt/wb-irrigation/irrigation/venv/bin/python /opt/wb-irrigation/irrigation/run.py",
     ):
@@ -268,15 +271,15 @@ def test_install_migrates_legacy_tree_and_restarts_on_rerun():
 
 
 def test_port_contract_is_shared_by_service_and_both_smoke_checks():
-    assert "EnvironmentFile=-/mnt/data/wb-irrigation-state/.env" in SERVICE
+    assert "EnvironmentFile=-/mnt/data/wb-irrigation-state/.env" not in SERVICE
     assert "EnvironmentFile=-/opt/wb-irrigation/.env" in SERVICE
     assert "configured_port" in INSTALL
     assert "configured_port" in UPDATE
     assert "SMOKE_PORT" not in INSTALL
     assert "SMOKE_PORT" not in UPDATE
     assert 'upsert_env_value PORT "$VALIDATED_PORT" "$ENV_FILE"' in UPDATE
-    assert 'configured_port "$ENV_FILE" "$STATE_DIR/.env"' in UPDATE
-    assert 'configured_port "$ENV_FILE" "$STATE_DIR/.env"' in INSTALL
+    assert 'configured_port "$ENV_FILE"' in UPDATE
+    assert 'configured_port "$ENV_FILE"' in INSTALL
     assert 'APP_READY_URL="${APP_SCHEME}://${url_host}:${APP_PORT}/readyz"' in INSTALL
     assert 'APP_READY_URL="${APP_SCHEME}://${url_host}:${APP_PORT}/readyz"' in UPDATE
     assert "checks', {}).get('scheduler'" not in UPDATE
@@ -294,7 +297,9 @@ def test_native_deploy_enforces_safe_http_transport_and_scheme_aware_smoke_check
         assert "WB_HTTP_PROBE_INSECURE_TLS" in script
         assert "WB_HTTP_ALLOW_INSECURE_EXTERNAL" in script
         assert 'ensure_env_default WB_HTTP_BIND_HOST 127.0.0.1 "$env_file"' in script
-        assert 'curl "${READY_CURL_ARGS[@]}" "$APP_READY_URL"' in script
+        assert "probe_ready_endpoint" in script
+        assert "--write-out '%{http_code}'" in script
+        assert '[[ "$http_status" == "200" ]]' in script
         assert '"${APP_SCHEME}://127.0.0.1:${APP_PORT}/readyz"' not in script
         assert "--insecure" in script
 
@@ -330,7 +335,7 @@ def test_deploy_requires_telegram_runtime_retirement_before_pii_cleanup():
     assert update_guard in UPDATE
     assert install_preflight_guard in INSTALL
     assert install_guard in INSTALL
-    assert UPDATE.index(update_guard) < UPDATE.index("UPDATE_SUCCEEDED=0")
+    assert UPDATE.index(update_guard) < UPDATE.rindex("initialize_rollback_state")
     assert INSTALL.index(install_preflight_guard) < INSTALL.index('retire_telegram_file_logs "$APP_DIR"')
     assert INSTALL.index(install_guard) < INSTALL.index('retire_telegram_file_logs "$APP_DIR"')
     assert INSTALL.index(install_guard) < INSTALL.index('systemctl restart "$SERVICE_NAME"')
@@ -358,3 +363,30 @@ def test_production_deploy_path_does_not_invoke_docker():
     assert "docker" not in shell_commands.lower()
     assert "docker" not in DEPLOY.lower()
     assert "docker" not in SERVICE.lower()
+
+
+def test_update_rollback_gates_databases_and_stages_restores_next_to_live_files():
+    assert UPDATE.index("DB_EXISTED_BEFORE=1") < UPDATE.index(
+        'backup_sqlite_database "$DB_PATH" "$DB_BACKUP" "irrigation.db"'
+    )
+    assert UPDATE.index("JOBS_DB_EXISTED_BEFORE=1") < UPDATE.index(
+        'backup_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "jobs.db"'
+    )
+    assert 'staged_path=$(mktemp "$database_dir/.${database_name}.rollback-stage.XXXXXX")' in UPDATE
+    assert 'mv -f -- "$staged_path" "$database_path"' in UPDATE
+    assert '"${DB_BACKUP_VERIFIED:-0}"' in UPDATE
+    assert UPDATE.index("DATABASES_MAY_HAVE_MUTATED=1") < UPDATE.rindex('systemctl restart "$SERVICE"')
+
+
+def test_native_state_trust_boundary_is_root_owned_and_external_to_service_state():
+    for script in (INSTALL, UPDATE):
+        assert "/mnt/data/wb-irrigation-deploy" in script
+        assert "merge_legacy_env_defaults" in script
+        assert 'configured_port "$ENV_FILE"' in script
+        assert 'configured_port "$ENV_FILE" "$STATE_DIR/.env"' not in script
+        assert "publish_release_environment" in script
+        assert "WB_APP_VERSION=" in script
+        assert "migrate_mqtt_tls_paths" in script
+    assert "EnvironmentFile=-/mnt/data/wb-irrigation-state/.env" not in SERVICE
+    assert "EnvironmentFile=/opt/wb-irrigation/release.env" in SERVICE
+    assert 'install -m 0600 /dev/null "$DEPLOY_CONTROL_DIR/layout-v1"' in INSTALL

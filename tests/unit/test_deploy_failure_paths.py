@@ -18,14 +18,19 @@ def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.Compl
     run_env.pop("PORT", None)
     if env:
         run_env.update(env)
-    return subprocess.run(
+    result = subprocess.run(
         ["bash", "-c", script],
         cwd=ROOT,
         env=run_env,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"bash failure ({result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+    return result
 
 
 def test_port_resolution_matches_runtime_environment_precedence(tmp_path):
@@ -146,18 +151,22 @@ def test_ready_probe_derives_safe_host_and_requires_explicit_tls_verification_ov
 
 def test_backup_base_rejects_broad_relative_noncanonical_and_symlink_paths(tmp_path):
     state_dir = tmp_path / "state"
+    control_dir = tmp_path / "deploy-control"
     outside = tmp_path / "outside"
     state_dir.mkdir()
+    control_dir.mkdir()
     outside.mkdir()
     update = shlex.quote(str(UPDATE))
     state = shlex.quote(str(state_dir))
-    valid = shlex.quote(str(state_dir / "deploy-backups"))
-    wrong_child = shlex.quote(str(state_dir / "snapshots"))
+    control = shlex.quote(str(control_dir))
+    valid = shlex.quote(str(control_dir / "backups"))
+    wrong_child = shlex.quote(str(control_dir / "snapshots"))
 
     _bash(
         f"""
         source {update}
         STATE_DIR={state}
+        DEPLOY_CONTROL_DIR={control}
         BACKUP_BASE={valid}
         canonicalize_backup_base
         [[ "$BACKUP_BASE" == {valid} ]]
@@ -272,7 +281,9 @@ def test_full_commit_validation_rejects_floating_and_unauthorized_revisions(tmp_
 
 
 def test_install_update_and_uninstall_contend_on_the_same_process_lock(tmp_path):
-    lock_file = tmp_path / "deploy.lock"
+    lock_dir = tmp_path / "wb-irrigation-lock"
+    lock_file = lock_dir / "deploy.lock"
+    quoted_lock_dir = shlex.quote(str(lock_dir))
     quoted_lock = shlex.quote(str(lock_file))
     quoted_install = shlex.quote(str(INSTALL))
     quoted_update = shlex.quote(str(UPDATE))
@@ -296,16 +307,19 @@ PY
           export -f flock
         fi
         source {quoted_update}
+        DEPLOY_LOCK_DIR={quoted_lock_dir}
         DEPLOY_LOCK_FILE={quoted_lock}
         acquire_deploy_lock
         for contender in {quoted_install} {quoted_update} {quoted_uninstall}; do
-          if env -u WB_IRRIGATION_DEPLOY_LOCK_FD DEPLOY_LOCK_FILE={quoted_lock} \
+          if env -u WB_IRRIGATION_DEPLOY_LOCK_FD DEPLOY_LOCK_DIR={quoted_lock_dir} \
+            DEPLOY_LOCK_FILE={quoted_lock} \
             bash -c 'deploy_script=$1; set --; source "$deploy_script"; acquire_deploy_lock' \
             _ "$contender"; then
             exit 104
           fi
         done
-        WB_IRRIGATION_DEPLOY_LOCK_FD=9 DEPLOY_LOCK_FILE={quoted_lock} \
+        WB_IRRIGATION_DEPLOY_LOCK_FD=9 DEPLOY_LOCK_DIR={quoted_lock_dir} \
+          DEPLOY_LOCK_FILE={quoted_lock} \
           bash -c 'deploy_script=$1; set --; source "$deploy_script"; acquire_deploy_lock' \
           _ {quoted_update}
         """
@@ -316,6 +330,7 @@ def test_fixed_unit_contract_rejects_inconsistent_runtime_overrides():
     _bash(
         f"""
         source {shlex.quote(str(UPDATE))}
+        chown() {{ :; }}
         validate_fixed_deployment_contract
         for assignment in \
           'REPO_DIR=/srv/irrigation' \
@@ -391,6 +406,7 @@ def test_rollback_restores_previous_commit_and_venv_after_activation_failure(tmp
     _bash(
         f"""
         source {shlex.quote(str(UPDATE))}
+        chown() {{ :; }}
         systemctl() {{
           printf '%s\n' "$*" >> {shlex.quote(str(service_log))}
           return 0
@@ -407,8 +423,11 @@ def test_rollback_restores_previous_commit_and_venv_after_activation_failure(tmp
         DB_BACKUP={shlex.quote(str(backup_db))}
         JOBS_DB_PATH={shlex.quote(str(live_jobs_db))}
         JOBS_DB_BACKUP={shlex.quote(str(backup_jobs_db))}
-        HAD_DB=1
-        HAD_JOBS_DB=1
+        DB_EXISTED_BEFORE=1
+        DB_BACKUP_VERIFIED=1
+        JOBS_DB_EXISTED_BEFORE=1
+        JOBS_DB_BACKUP_VERIFIED=1
+        DATABASES_MAY_HAVE_MUTATED=1
         SERVICE_WAS_ACTIVE=1
         SERVICE=wb-irrigation
         UNIT_CHANGED=0
@@ -426,6 +445,235 @@ def test_rollback_restores_previous_commit_and_venv_after_activation_failure(tmp
     calls = service_log.read_text(encoding="utf-8")
     assert "stop wb-irrigation" in calls
     assert "start wb-irrigation" in calls
+
+
+def test_backup_failures_never_delete_preexisting_live_databases(tmp_path):
+    for database_name in ("irrigation.db", "jobs.db"):
+        for failure_phase in ("backup", "quick_check", "chmod"):
+            case_dir = tmp_path / database_name / failure_phase
+            case_dir.mkdir(parents=True)
+            live_database = case_dir / database_name
+            backup_database = case_dir / f"{database_name}.backup"
+            with sqlite3.connect(live_database) as connection:
+                connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+                connection.execute("INSERT INTO marker VALUES ('original')")
+            original_bytes = live_database.read_bytes()
+            wal_file = Path(f"{live_database}-wal")
+
+            _bash(
+                f"""
+                source {shlex.quote(str(UPDATE))}
+                REAL_SQLITE3=$(command -v sqlite3)
+                LIVE={shlex.quote(str(live_database))}
+                BACKUP={shlex.quote(str(backup_database))}
+                PHASE={failure_phase}
+                sqlite3() {{
+                  if [[ "$PHASE" == backup && "$2" == .backup* ]]; then return 71; fi
+                  if [[ "$PHASE" == quick_check && "$1" == "$BACKUP" \
+                    && "$2" == 'PRAGMA quick_check;' ]]; then printf 'corrupt\n'; return 0; fi
+                  "$REAL_SQLITE3" "$@"
+                }}
+                chmod() {{
+                  if [[ "$PHASE" == chmod && "$1" == 600 && "$2" == "$BACKUP" ]]; then return 72; fi
+                  command chmod "$@"
+                }}
+                if backup_sqlite_database "$LIVE" "$BACKUP" {database_name}; then exit 120; fi
+                printf 'wal-sentinel' >"${{LIVE}}-wal"
+                REPO_DIR_REAL={shlex.quote(str(case_dir))}
+                DB_PATH=""
+                DB_BACKUP=""
+                JOBS_DB_PATH=""
+                JOBS_DB_BACKUP=""
+                if [[ {database_name} == irrigation.db ]]; then
+                  DB_PATH="$LIVE"; DB_BACKUP="$BACKUP"; DB_EXISTED_BEFORE=1; DB_BACKUP_VERIFIED=0
+                else
+                  JOBS_DB_PATH="$LIVE"; JOBS_DB_BACKUP="$BACKUP"
+                  JOBS_DB_EXISTED_BEFORE=1; JOBS_DB_BACKUP_VERIFIED=0
+                fi
+                DATABASES_MAY_HAVE_MUTATED=0
+                SERVICE_WAS_ACTIVE=0
+                CODE_UPDATED=0
+                rollback_update
+                """
+            )
+
+            assert live_database.read_bytes() == original_bytes
+            assert wal_file.read_bytes() == b"wal-sentinel"
+
+
+def test_staged_sqlite_restore_failures_leave_live_database_and_wal_untouched(tmp_path):
+    live_dir = tmp_path / "live"
+    backup_dir = tmp_path / "different-mount"
+    live_dir.mkdir()
+    backup_dir.mkdir()
+    live_database = live_dir / "irrigation.db"
+    backup_database = backup_dir / "irrigation.db"
+    for path, value in ((live_database, "new"), (backup_database, "old")):
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO marker VALUES (?)", (value,))
+    original_bytes = live_database.read_bytes()
+    wal_file = Path(f"{live_database}-wal")
+
+    for phase in ("restore", "quick_check", "unverified", "missing"):
+        wal_file.write_bytes(b"wal-sentinel")
+        verified = 0 if phase == "unverified" else 1
+        supplied_backup = tmp_path / "missing.db" if phase == "missing" else backup_database
+        _bash(
+            f"""
+            source {shlex.quote(str(UPDATE))}
+            REAL_SQLITE3=$(command -v sqlite3)
+            PHASE={phase}
+            sqlite3() {{
+              if [[ "$PHASE" == restore && "$1" == {shlex.quote(str(live_dir))}/.irrigation.db.rollback-stage.* \
+                && "$2" == .restore* ]]; then return 73; fi
+              if [[ "$PHASE" == quick_check \
+                && "$1" == {shlex.quote(str(live_dir))}/.irrigation.db.rollback-stage.* \
+                && "$2" == 'PRAGMA quick_check;' ]]; then printf 'corrupt\n'; return 0; fi
+              "$REAL_SQLITE3" "$@"
+            }}
+            chown() {{ :; }}
+            if restore_sqlite_database {shlex.quote(str(live_database))} \
+              {shlex.quote(str(supplied_backup))} 1 {verified} irrigation.db; then exit 121; fi
+            """
+        )
+        assert live_database.read_bytes() == original_bytes
+        assert wal_file.read_bytes() == b"wal-sentinel"
+        assert not list(live_dir.glob(".irrigation.db.rollback-stage.*"))
+
+
+def test_state_snapshot_extract_failure_is_fail_closed_and_does_not_restart(tmp_path):
+    state_dir = tmp_path / "state"
+    (state_dir / "backups").mkdir(parents=True)
+    (state_dir / "static" / "media" / "maps").mkdir(parents=True)
+    (state_dir / "static" / "media" / "zones").mkdir(parents=True)
+    secret = state_dir / ".secret_key"
+    secret.write_text("snapshot\n", encoding="utf-8")
+    archive = tmp_path / "state.tar.gz"
+    subprocess.run(["tar", "-czf", archive, "-C", state_dir, "."], check=True)
+    secret.write_text("live-must-survive\n", encoding="utf-8")
+    service_log = tmp_path / "systemctl.log"
+
+    result = _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        tar() {{ return 74; }}
+        chown() {{ :; }}
+        systemctl() {{ printf '%s\n' "$*" >>{shlex.quote(str(service_log))}; }}
+        STATE_DIR={shlex.quote(str(state_dir))}
+        STATE_ARCHIVE={shlex.quote(str(archive))}
+        STATE_SNAPSHOT_CREATED=1
+        REPO_DIR_REAL={shlex.quote(str(tmp_path))}
+        SERVICE_WAS_ACTIVE=1
+        ORIGINAL_USES_STATE=0
+        if rollback_update; then exit 122; fi
+        [[ $(< {shlex.quote(str(secret))}) == live-must-survive ]]
+        """
+    )
+    assert "Rollback completed with errors" in result.stderr
+    assert "Previous code and runtime restored" not in result.stdout
+    assert "start wb-irrigation" not in service_log.read_text(encoding="utf-8")
+
+
+def test_early_rollback_initialization_can_restart_previous_service(tmp_path):
+    service_log = tmp_path / "systemctl.log"
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        REPO_DIR_REAL={shlex.quote(str(tmp_path))}
+        initialize_rollback_state
+        [[ "$VENV_DIR" == "$REPO_DIR_REAL/venv" ]]
+        ORIGINAL_USES_STATE=1
+        SERVICE_WAS_ACTIVE=1
+        secure_code_tree() {{ :; }}
+        verify_service_runtime_access() {{ :; }}
+        chown() {{ :; }}
+        chmod() {{ :; }}
+        systemctl() {{ printf '%s\n' "$*" >>{shlex.quote(str(service_log))}; }}
+        rollback_update
+        """
+    )
+    assert "start wb-irrigation" in service_log.read_text(encoding="utf-8")
+
+
+def test_readiness_probe_rejects_redirects_and_accepts_only_200():
+    for deploy_script in (UPDATE, INSTALL):
+        _bash(
+            f"""
+            source {shlex.quote(str(deploy_script))}
+            READY_CURL_ARGS=(-fsS)
+            APP_READY_URL=http://127.0.0.1:8080/readyz
+            curl() {{ printf '302'; }}
+            if probe_ready_endpoint; then exit 123; fi
+            curl() {{ printf '200'; }}
+            probe_ready_endpoint
+            """
+        )
+
+
+def test_mqtt_tls_failure_cleanup_removes_only_new_material(tmp_path):
+    database = tmp_path / "irrigation.db"
+    legacy = tmp_path / "legacy"
+    tls_dir = tmp_path / "root-config" / "mqtt-tls"
+    legacy.mkdir()
+    (tls_dir.parent).mkdir()
+    (legacy / "ca.pem").write_text("ca\n", encoding="utf-8")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE mqtt_servers (id INTEGER PRIMARY KEY, enabled INTEGER, tls_enabled INTEGER, "
+            "tls_ca_path TEXT, tls_cert_path TEXT, tls_key_path TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO mqtt_servers VALUES (1, 1, 1, 'ca.pem', 'missing.pem', NULL)"
+        )
+
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        MQTT_TLS_DIR={shlex.quote(str(tls_dir))}
+        SERVICE_USER=$(id -un)
+        SERVICE_GROUP=$(id -gn)
+        chown() {{ :; }}
+        runuser() {{
+          while [[ "$1" != -- ]]; do shift; done
+          shift
+          "$@"
+        }}
+        if migrate_mqtt_tls_paths {shlex.quote(str(database))} {shlex.quote(str(legacy))}; then
+          exit 124
+        fi
+        cleanup_created_mqtt_tls_material
+        [[ ! -e {shlex.quote(str(tls_dir))} ]]
+        """
+    )
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT tls_ca_path, tls_cert_path FROM mqtt_servers WHERE id=1"
+        ).fetchone()
+    assert row == ("ca.pem", "missing.pem")
+
+
+def test_backup_pruning_never_removes_current_backup_under_clock_regression(tmp_path):
+    backup_base = tmp_path / "backups"
+    current = backup_base / "20260101_000000"
+    future_one = backup_base / "20270101_000000"
+    future_two = backup_base / "20280101_000000"
+    for path in (current, future_one, future_two):
+        path.mkdir(parents=True)
+
+    _bash(
+        f"""
+        source {shlex.quote(str(UPDATE))}
+        BACKUP_BASE={shlex.quote(str(backup_base))}
+        BACKUP_DIR={shlex.quote(str(current))}
+        BACKUP_KEEP=1
+        prune_old_backups
+        [[ -d "$BACKUP_DIR" ]]
+        """
+    )
+    assert current.is_dir()
+    assert not future_one.exists()
+    assert not future_two.exists()
 
 
 def test_legacy_migration_enospc_keeps_live_tree_and_link_untouched(tmp_path):
