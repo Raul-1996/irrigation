@@ -303,9 +303,7 @@ def _get_secret_key() -> bytes:
                 "IRRIG_SECRET_KEY is invalid; restore a valid base64-encoded 32-byte key"
             ) from error
         if len(decoded) != 32:
-            raise SecretKeyConfigurationError(
-                "IRRIG_SECRET_KEY is invalid; restore a valid base64-encoded 32-byte key"
-            )
+            raise SecretKeyConfigurationError("IRRIG_SECRET_KEY is invalid; restore a valid base64-encoded 32-byte key")
         return decoded
 
     # 2. Try reading from file
@@ -316,9 +314,7 @@ def _get_secret_key() -> bytes:
 
     if data is not None:
         if len(data) != 32:
-            raise SecretKeyConfigurationError(
-                "Encryption secret key file is invalid; restore the original 32-byte key"
-            )
+            raise SecretKeyConfigurationError("Encryption secret key file is invalid; restore the original 32-byte key")
         return data
 
     # 3. Generate new key and persist

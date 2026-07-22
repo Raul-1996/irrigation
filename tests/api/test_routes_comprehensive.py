@@ -404,9 +404,7 @@ class TestRainEnvAPI:
         assert resp.status_code == 200
 
     def test_post_rain(self, admin_client, app):
-        server = app.db.create_mqtt_server(
-            {"name": "rain", "host": "127.0.0.1", "port": 1883, "enabled": True}
-        )
+        server = app.db.create_mqtt_server({"name": "rain", "host": "127.0.0.1", "port": 1883, "enabled": True})
         with patch("routes.system_config_api.rain_monitor") as monitor:
             monitor.reconfigure.return_value = True
             resp = admin_client.post(

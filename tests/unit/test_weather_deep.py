@@ -95,14 +95,11 @@ class TestWeatherAdjustment:
         from services.weather_adjustment import WeatherAdjustment
 
         adj = WeatherAdjustment(test_db.db_path)
-        try:
-            adj.log_adjustment(zone_id=1, original_duration=10, adjusted_duration=8, coefficient=80, skipped=False)
-            with sqlite3.connect(test_db.db_path) as conn:
-                cur = conn.execute("SELECT COUNT(*) FROM weather_log")
-                count = cur.fetchone()[0]
-            assert count >= 1
-        except (sqlite3.Error, TypeError) as e:
-            pytest.skip(f"log_adjustment not supported: {e}")
+        adj.log_adjustment(zone_id=1, original_duration=10, adjusted_duration=8, coefficient=80, skip=False)
+        with sqlite3.connect(test_db.db_path) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM weather_log")
+            count = cur.fetchone()[0]
+        assert count >= 1
 
 
 class TestWeatherService:

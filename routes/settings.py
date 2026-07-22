@@ -133,11 +133,7 @@ def api_test_telegram():
             # Transport exceptions may embed the full /bot<TOKEN>/ URL.  Keep
             # both the operator response and logs stable and credential-free.
             logger.warning("Telegram test message transport or storage failure")
-            return jsonify(
-                {"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}
-            ), 500
+            return jsonify({"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}), 500
     except (sqlite3.Error, OSError):
         logger.warning("Telegram test message setup failure")
-        return jsonify(
-            {"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}
-        ), 500
+        return jsonify({"success": False, "message": "Не удалось отправить тестовое сообщение Telegram"}), 500

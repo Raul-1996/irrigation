@@ -135,14 +135,8 @@ class ZoneWatchdog(threading.Thread):
                 commanded_state = str(current_zone.get("commanded_state") or "").lower()
                 observed_state = str(current_zone.get("observed_state") or "").lower()
                 physical_channel = bool(
-                    (
-                        z.get("mqtt_server_id")
-                        and str(z.get("topic") or "").strip()
-                    )
-                    or (
-                        current_zone.get("mqtt_server_id")
-                        and str(current_zone.get("topic") or "").strip()
-                    )
+                    (z.get("mqtt_server_id") and str(z.get("topic") or "").strip())
+                    or (current_zone.get("mqtt_server_id") and str(current_zone.get("topic") or "").strip())
                 )
                 state_confirms_off = current_state == "off" and (
                     not physical_channel or (commanded_state == "off" and observed_state == "off")

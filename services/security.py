@@ -122,11 +122,7 @@ def _normalize_http_probe_host(value: object) -> str:
         return str(address)
 
     dns_name = raw[:-1] if raw.endswith(".") else raw
-    if (
-        not dns_name
-        or len(dns_name) > 253
-        or any(not _DNS_LABEL_RE.fullmatch(label) for label in dns_name.split("."))
-    ):
+    if not dns_name or len(dns_name) > 253 or any(not _DNS_LABEL_RE.fullmatch(label) for label in dns_name.split(".")):
         raise HttpTransportConfigurationError(
             "WB_HTTP_PROBE_HOST must be a valid DNS name, IPv4 address, or IPv6 address"
         )
@@ -147,8 +143,7 @@ def _validate_tls_cert_pair(certfile: str, keyfile: str) -> None:
         context.load_cert_chain(certfile, keyfile)
     except (OSError, ValueError) as error:
         raise HttpTransportConfigurationError(
-            "WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE must form a valid TLS "
-            "certificate/private key pair"
+            "WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE must form a valid TLS certificate/private key pair"
         ) from error
 
 
@@ -186,15 +181,11 @@ def resolve_http_probe_tls(
     ca_raw = str(env.get("WB_HTTP_PROBE_CA_FILE", "")).strip()
     insecure_raw = env.get("WB_HTTP_PROBE_INSECURE_TLS")
     insecure_tls = (
-        parse_strict_bool(insecure_raw, name="WB_HTTP_PROBE_INSECURE_TLS")
-        if insecure_raw is not None
-        else False
+        parse_strict_bool(insecure_raw, name="WB_HTTP_PROBE_INSECURE_TLS") if insecure_raw is not None else False
     )
     if not profile.tls_enabled:
         if ca_raw or insecure_tls:
-            raise HttpTransportConfigurationError(
-                "HTTP probe TLS options require WB HTTP TLS to be enabled"
-            )
+            raise HttpTransportConfigurationError("HTTP probe TLS options require WB HTTP TLS to be enabled")
         return HttpProbeTlsConfig(ca_file=None, insecure_tls=False)
     if ca_raw and insecure_tls:
         raise HttpTransportConfigurationError(
@@ -215,11 +206,7 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
     env = os.environ if environ is None else environ
     bind_host = str(env.get("WB_HTTP_BIND_HOST", "127.0.0.1")).strip()
     normalized_bind_host = bind_host.strip("[]")
-    if (
-        not bind_host
-        or not normalized_bind_host
-        or any(char.isspace() or ord(char) < 32 for char in bind_host)
-    ):
+    if not bind_host or not normalized_bind_host or any(char.isspace() or ord(char) < 32 for char in bind_host):
         raise HttpTransportConfigurationError("WB_HTTP_BIND_HOST must be a non-empty host without whitespace")
     try:
         port = int(str(env.get("PORT", "8080")).strip())
@@ -230,26 +217,20 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
 
     probe_host_raw = env.get("WB_HTTP_PROBE_HOST")
     probe_host_override = (
-        None
-        if probe_host_raw is None or probe_host_raw == ""
-        else _normalize_http_probe_host(probe_host_raw)
+        None if probe_host_raw is None or probe_host_raw == "" else _normalize_http_probe_host(probe_host_raw)
     )
 
     try:
         trusted_proxy_hops = int(str(env.get("WB_HTTP_TRUSTED_PROXY_HOPS", "0")).strip())
     except (TypeError, ValueError) as error:
-        raise HttpTransportConfigurationError(
-            "WB_HTTP_TRUSTED_PROXY_HOPS must be 0 or 1"
-        ) from error
+        raise HttpTransportConfigurationError("WB_HTTP_TRUSTED_PROXY_HOPS must be 0 or 1") from error
     if trusted_proxy_hops not in {0, 1}:
         raise HttpTransportConfigurationError("WB_HTTP_TRUSTED_PROXY_HOPS must be 0 or 1")
 
     cert_raw = str(env.get("WB_HTTP_TLS_CERTFILE", "")).strip()
     key_raw = str(env.get("WB_HTTP_TLS_KEYFILE", "")).strip()
     if bool(cert_raw) != bool(key_raw):
-        raise HttpTransportConfigurationError(
-            "WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE must both be configured"
-        )
+        raise HttpTransportConfigurationError("WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE must both be configured")
     certfile = _readable_regular_file(cert_raw, name="WB_HTTP_TLS_CERTFILE") if cert_raw else None
     keyfile = _readable_regular_file(key_raw, name="WB_HTTP_TLS_KEYFILE") if key_raw else None
     if certfile is not None and keyfile is not None:
@@ -258,9 +239,7 @@ def resolve_http_transport(environ: Mapping[str, str] | None = None) -> HttpTran
     external_bind = _is_external_bind(normalized_bind_host)
     allow_raw = env.get("WB_HTTP_ALLOW_INSECURE_EXTERNAL")
     allow_insecure = (
-        parse_strict_bool(allow_raw, name="WB_HTTP_ALLOW_INSECURE_EXTERNAL")
-        if allow_raw is not None
-        else False
+        parse_strict_bool(allow_raw, name="WB_HTTP_ALLOW_INSECURE_EXTERNAL") if allow_raw is not None else False
     )
     tls_enabled = certfile is not None and keyfile is not None
     if trusted_proxy_hops and external_bind:

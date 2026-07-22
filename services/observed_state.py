@@ -50,6 +50,7 @@ def canonical_relay_state(value: object) -> str | None:
         return "off"
     return None
 
+
 try:
     import paho.mqtt.client as mqtt
 except ImportError as e:

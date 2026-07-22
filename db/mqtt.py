@@ -272,7 +272,7 @@ class MqttRepository(BaseRepository):
             mutable_columns = tuple(column for column in columns if column != "id")
             assignments = ", ".join(f'"{column}" = ?' for column in mutable_columns)
             conn.execute(
-                f'UPDATE mqtt_servers SET {assignments} WHERE id = ?',
+                f"UPDATE mqtt_servers SET {assignments} WHERE id = ?",
                 (*[before[column] for column in mutable_columns], server_id),
             )
             conn.commit()

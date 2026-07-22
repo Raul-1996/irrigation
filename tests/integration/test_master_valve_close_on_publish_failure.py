@@ -94,9 +94,7 @@ class TestMasterCloseDesyncIssue38:
 
         # CRITICAL: no SSE broadcast announcing mv_state='closed'.
         for payload in broadcasts:
-            assert "closed" not in str(payload), (
-                f"SSE must not broadcast 'closed' on publish failure; got {payload!r}"
-            )
+            assert "closed" not in str(payload), f"SSE must not broadcast 'closed' on publish failure; got {payload!r}"
 
     def test_publish_success_still_waits_for_fresh_physical_closed_echo(self, test_db):
         """Broker ACK is command delivery, never physical observed truth."""

@@ -1217,10 +1217,7 @@ def test_scheduler_boot_aborts_crash_open_run_before_forced_stop(sched, test_db)
 
 def test_manual_crash_inside_program_window_is_not_scheduler_recovery_evidence(sched, test_db):
     group = test_db.create_group("manual-not-program-evidence")
-    zones = [
-        test_db.create_zone({"name": f"z{index}", "duration": 20, "group_id": group["id"]})
-        for index in range(2)
-    ]
+    zones = [test_db.create_zone({"name": f"z{index}", "duration": 20, "group_id": group["id"]}) for index in range(2)]
     test_db.create_program(
         {
             "name": "coincident schedule",
@@ -2076,9 +2073,7 @@ def test_expected_fingerprint_db_read_error_is_failure_not_deleted_stale_success
 
 def test_queued_recurring_fire_is_bound_to_its_scheduled_revision(sched, test_db):
     zone, original = _create_interval_program(test_db)
-    replacement = test_db.create_zone(
-        {"name": "replacement", "duration": 5, "group_id": zone["group_id"]}
-    )
+    replacement = test_db.create_zone({"name": "replacement", "duration": 5, "group_id": zone["group_id"]})
     sched.start(paused=True)
     original_fingerprint = sched.program_schedule_fingerprint(original["id"], original)
     assert sched.schedule_program(

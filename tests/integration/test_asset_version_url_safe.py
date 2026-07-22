@@ -17,5 +17,4 @@ def test_asset_url_safe(client):
     matches = re.findall(r'(?:href|src)="[^"]*\?v=([^"]+)"', body)
     assert matches, "no asset URLs found — page may be broken"
     for v in matches:
-        assert re.fullmatch(r"[A-Za-z0-9._+-]+", v), \
-            f"unsafe chars in asset ?v= value: {v!r}"
+        assert re.fullmatch(r"[A-Za-z0-9._+-]+", v), f"unsafe chars in asset ?v= value: {v!r}"

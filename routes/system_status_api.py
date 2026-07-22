@@ -454,9 +454,7 @@ def _database_is_healthy() -> bool:
     try:
         uri = Path(str(db_path)).resolve().as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=0.25) as conn:
-            row = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zones'"
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zones'").fetchone()
         return row is not None
     except (OSError, sqlite3.Error, ValueError):
         return False

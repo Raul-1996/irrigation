@@ -11,12 +11,9 @@ These PRAGMAs were previously scattered / partially applied at raw
 sqlite3.connect() call sites, leading to inconsistent behaviour
 (e.g. FK enforcement silently disabled on some write paths).
 
-The FK-integrity test for zones.group_id is marked xfail/skip
-because the current `zones` schema declares `group_id INTEGER
-DEFAULT 1` with no `REFERENCES groups(id)` clause — see
-db/migrations.py. Adding the FK requires the `add_foreign_keys_v2`
-migration described in irrigation-audit/architecture/target-state.md
-(zones_new rebuild). Logged as future work.
+The production schema uses reconciled triggers for zones.group_id because
+group_id=0 remains a supported sentinel; the integrity test below exercises
+that effective constraint on a fully migrated database.
 """
 
 from __future__ import annotations
@@ -106,25 +103,13 @@ def test_journal_mode_wal(tmp_db_path, repo_cls):
 
 
 # ---------------------------------------------------------------------------
-# FK enforcement (bonus, skipped due to schema)
+# Group-reference enforcement
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason=(
-        "zones.group_id has no FK declaration in current schema "
-        "(db/migrations.py: `group_id INTEGER DEFAULT 1`, no REFERENCES). "
-        "Adding the FK requires the add_foreign_keys_v2 migration — "
-        "see irrigation-audit/architecture/target-state.md. Future work."
-    )
-)
-def test_zones_group_id_fk_integrity_future(tmp_db_path):
-    """Insert zone with nonexistent group_id → expect IntegrityError.
-
-    Will start failing (correctly) once the add_foreign_keys_v2
-    migration is applied; that's the signal to unskip this test.
-    """
-    repo = ZoneRepository(tmp_db_path)
+def test_zones_group_reference_integrity(test_db):
+    """The forward integrity triggers reject nonexistent non-sentinel groups."""
+    repo = ZoneRepository(test_db.db_path)
     with repo._connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO zones (id, name, group_id) VALUES (?, ?, ?)",

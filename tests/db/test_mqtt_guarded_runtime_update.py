@@ -3,9 +3,7 @@
 
 def test_guarded_runtime_update_allows_only_rain_settings_reference(test_db):
     server = test_db.create_mqtt_server({"name": "Guarded", "host": "old", "port": 1883})
-    assert test_db.set_rain_config(
-        {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
-    )
+    assert test_db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]})
 
     allowed = test_db.update_mqtt_server_reference_guarded(
         server["id"],
@@ -47,9 +45,7 @@ def test_guarded_runtime_update_allows_only_rain_settings_reference(test_db):
 
 def test_guarded_rollback_detects_reference_added_after_precheck(test_db):
     server = test_db.create_mqtt_server({"name": "Rollback guard", "host": "old", "port": 1883})
-    assert test_db.set_rain_config(
-        {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
-    )
+    assert test_db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]})
     before = test_db.get_mqtt_server_storage_snapshot(server["id"])
     updated = test_db.update_mqtt_server_reference_guarded(
         server["id"],
@@ -81,9 +77,7 @@ def test_guarded_rollback_detects_reference_added_after_precheck(test_db):
 
 def test_guarded_rollback_detects_concurrent_server_row_update(test_db):
     server = test_db.create_mqtt_server({"name": "CAS", "host": "old", "port": 1883})
-    assert test_db.set_rain_config(
-        {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
-    )
+    assert test_db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]})
     before = test_db.get_mqtt_server_storage_snapshot(server["id"])
     updated = test_db.update_mqtt_server_reference_guarded(
         server["id"],

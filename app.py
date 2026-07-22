@@ -445,9 +445,7 @@ def _configure_session_cookie_secure(flask_app: Flask) -> _HttpTransportConfig:
     raw = os.environ.get("SESSION_COOKIE_SECURE")
     explicit_secure = _parse_strict_bool(raw, name="SESSION_COOKIE_SECURE") if raw is not None else None
     if profile.tls_enabled and explicit_secure is False:
-        raise _HttpTransportConfigurationError(
-            "SESSION_COOKIE_SECURE cannot be disabled for WB HTTP TLS"
-        )
+        raise _HttpTransportConfigurationError("SESSION_COOKIE_SECURE cannot be disabled for WB HTTP TLS")
     flask_app.config["HTTP_BIND_HOST"] = profile.bind_host
     flask_app.config["HTTP_TLS_ENABLED"] = profile.tls_enabled
     flask_app.config["HTTP_INSECURE_EXTERNAL_ACKNOWLEDGED"] = profile.insecure_external_acknowledged
@@ -586,9 +584,7 @@ def _auth_before_request():
                 return redirect(url_for("auth_bp.login_page", guest="1"))
             if pth.startswith("/api/") and request.method in {"GET", "HEAD"}:
                 if not logged_in and pth not in _ALLOWED_PUBLIC_GETS:
-                    return jsonify(
-                        {"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}
-                    ), 401
+                    return jsonify({"success": False, "message": "auth required", "error_code": "UNAUTHENTICATED"}), 401
                 return None
             try:
                 db.ensure_password_change_required()
@@ -598,9 +594,7 @@ def _auth_before_request():
                 postpone_cancel = _is_postpone_cancel_request(pth)
                 is_admin = logged_in and role == "admin"
                 is_viewer = logged_in and role == "viewer"
-                is_authenticated_read = (
-                    request.method == "POST" and pth in _ALLOWED_AUTHENTICATED_READ_POSTS
-                )
+                is_authenticated_read = request.method == "POST" and pth in _ALLOWED_AUTHENTICATED_READ_POSTS
                 if is_authenticated_read:
                     if logged_in and role in {"viewer", "user", "admin"}:
                         return None
@@ -1017,9 +1011,7 @@ if __name__ == "__main__":
     # Direct `python app.py` is dev-only. Production uses run.py via hypercorn.
     # debug flag follows FLASK_DEBUG env var (default off).
     _dev_profile = _resolve_http_transport()
-    _dev_ssl_context = (
-        (_dev_profile.tls_certfile, _dev_profile.tls_keyfile) if _dev_profile.tls_enabled else None
-    )
+    _dev_ssl_context = (_dev_profile.tls_certfile, _dev_profile.tls_keyfile) if _dev_profile.tls_enabled else None
     app.run(
         debug=os.environ.get("FLASK_DEBUG") == "1",
         host=_dev_profile.bind_host,

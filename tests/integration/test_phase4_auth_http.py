@@ -394,7 +394,7 @@ def test_rain_postpone_apply_rolls_back_complete_group_on_write_failure(app):
             f"""
             CREATE TRIGGER reject_second_rain_postpone
             BEFORE UPDATE OF postpone_until ON zones
-            WHEN OLD.id = {int(second['id'])} AND NEW.postpone_reason = 'rain'
+            WHEN OLD.id = {int(second["id"])} AND NEW.postpone_reason = 'rain'
             BEGIN
                 SELECT RAISE(ABORT, 'forced rain apply failure');
             END
@@ -446,7 +446,7 @@ def test_clear_group_rain_postpone_rolls_back_on_write_failure(app):
             f"""
             CREATE TRIGGER reject_second_rain_clear
             BEFORE UPDATE OF postpone_until ON zones
-            WHEN OLD.id = {int(second['id'])} AND OLD.postpone_reason = 'rain'
+            WHEN OLD.id = {int(second["id"])} AND OLD.postpone_reason = 'rain'
                  AND NEW.postpone_until IS NULL
             BEGIN
                 SELECT RAISE(ABORT, 'forced rain clear failure');
@@ -1473,9 +1473,7 @@ def test_mqtt_stop_does_not_retry_raw_publish_after_central_failure(admin_client
 
 @pytest.mark.parametrize("observed_state", ["on", "unknown"])
 @pytest.mark.parametrize("endpoint", ["legacy", "mqtt"])
-def test_public_stop_forces_off_retry_when_observed_state_is_not_off(
-    guest_client, app, endpoint, observed_state
-):
+def test_public_stop_forces_off_retry_when_observed_state_is_not_off(guest_client, app, endpoint, observed_state):
     import routes.zones_watering_api as route
 
     server = app.db.create_mqtt_server({"name": "observed mismatch", "host": "127.0.0.1", "port": 1883})
@@ -1670,9 +1668,7 @@ def test_sse_saturation_preserves_workers_for_ready_and_control(app, monkeypatch
             await asyncio.wait_for(first_started.wait(), timeout=1.0)
             assert _response_status(first_events) == 200
 
-            overflow_task, overflow_events, _overflow_started = _start_asgi_request(
-                asgi_app, "/api/mqtt/zones-sse"
-            )
+            overflow_task, overflow_events, _overflow_started = _start_asgi_request(asgi_app, "/api/mqtt/zones-sse")
             done, _pending = await asyncio.wait({overflow_task}, timeout=1.0)
             assert overflow_task in done, "overflow SSE consumed the reserved control worker"
             assert _response_status(overflow_events) == 503

@@ -193,9 +193,7 @@ class ZoneRepository(BaseRepository):
             try:
                 zones_list = json.loads(zones_json)
             except (json.JSONDecodeError, TypeError) as error:
-                raise sqlite3.IntegrityError(
-                    f"program {program_id} has malformed zones JSON"
-                ) from error
+                raise sqlite3.IntegrityError(f"program {program_id} has malformed zones JSON") from error
             if not isinstance(zones_list, list):
                 raise sqlite3.IntegrityError(f"program {program_id} zones is not a list")
 
@@ -206,9 +204,7 @@ class ZoneRepository(BaseRepository):
                 try:
                     parsed = int(item)
                 except (TypeError, ValueError) as error:
-                    raise sqlite3.IntegrityError(
-                        f"program {program_id} has an invalid zone identifier"
-                    ) from error
+                    raise sqlite3.IntegrityError(f"program {program_id} has an invalid zone identifier") from error
                 if parsed <= 0:
                     raise sqlite3.IntegrityError(f"program {program_id} has an invalid zone identifier")
                 normalised.append(parsed)
@@ -662,9 +658,7 @@ class ZoneRepository(BaseRepository):
                                     f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
                                     params,
                                 )
-                                affected_program_ids.update(
-                                    self._unlink_zone_from_programs_for_group_999(conn, zid, z)
-                                )
+                                affected_program_ids.update(self._unlink_zone_from_programs_for_group_999(conn, zid, z))
                                 updated += 1
                         else:
                             conn.execute(
@@ -682,9 +676,7 @@ class ZoneRepository(BaseRepository):
                                     z.get("mqtt_server_id"),
                                 ),
                             )
-                            affected_program_ids.update(
-                                self._unlink_zone_from_programs_for_group_999(conn, zid, z)
-                            )
+                            affected_program_ids.update(self._unlink_zone_from_programs_for_group_999(conn, zid, z))
                             created += 1
                     else:
                         cursor = conn.execute(

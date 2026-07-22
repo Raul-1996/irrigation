@@ -293,8 +293,8 @@ def test_finding_36_firing_close_finishes_before_concurrent_master_open(test_db)
 
     master_values: list[str] = []
     verifier = MagicMock()
-    verifier.verify_master_command.side_effect = (
-        lambda _sid, _topic, _expected, publish_command, **_kwargs: publish_command()
+    verifier.verify_master_command.side_effect = lambda _sid, _topic, _expected, publish_command, **_kwargs: (
+        publish_command()
     )
     scheduler = MagicMock()
     scheduler.schedule_zone_hard_stop.return_value = True

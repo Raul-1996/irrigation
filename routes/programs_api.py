@@ -994,8 +994,7 @@ def api_run_program(prog_id):
         runnable_zones = [
             zone_id
             for zone_id in zone_ids
-            if (zone := db.get_zone(zone_id)) is not None
-            and str(zone.get("state") or "").lower() != "fault"
+            if (zone := db.get_zone(zone_id)) is not None and str(zone.get("state") or "").lower() != "fault"
         ]
     except (OSError, TypeError, ValueError) as e:
         logger.error("Ошибка проверки зон программы %s: %s", prog_id, e)

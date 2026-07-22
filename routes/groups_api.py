@@ -120,9 +120,7 @@ def _strict_zones() -> list[dict]:
 
 def _strict_group_zone_ids(group_id: int) -> list[int]:
     return sorted(
-        int(zone["id"])
-        for zone in (_strict_zones() or [])
-        if int(zone.get("group_id") or 0) == int(group_id)
+        int(zone["id"]) for zone in (_strict_zones() or []) if int(zone.get("group_id") or 0) == int(group_id)
     )
 
 
@@ -322,9 +320,7 @@ def _groups_sharing_master(group: dict) -> list[dict]:
 def _master_has_unsafe_zone(group: dict) -> bool:
     all_zones = _strict_zones() or []
     for shared_group in _groups_sharing_master(group):
-        zones = [
-            zone for zone in all_zones if int(zone.get("group_id") or 0) == int(shared_group["id"])
-        ]
+        zones = [zone for zone in all_zones if int(zone.get("group_id") or 0) == int(shared_group["id"])]
         if any(not _zone_is_physically_safe(zone) for zone in zones):
             return True
     return False
@@ -469,8 +465,7 @@ def api_update_group(group_id):
         if not name:
             return jsonify({"success": False, "message": "Название группы не должно быть пустым"}), 400
         if any(
-            int(group.get("id") or 0) != int(group_id) and str(group.get("name") or "") == name
-            for group in all_groups
+            int(group.get("id") or 0) != int(group_id) and str(group.get("name") or "") == name for group in all_groups
         ):
             return jsonify({"success": False, "message": "Группа с таким названием уже существует"}), 400
         updates["name"] = name
@@ -538,9 +533,7 @@ def api_update_group(group_id):
     )
     if master_topology_changed:
         try:
-            group_zones = [
-                zone for zone in (_strict_zones() or []) if int(zone.get("group_id") or 0) == int(group_id)
-            ]
+            group_zones = [zone for zone in (_strict_zones() or []) if int(zone.get("group_id") or 0) == int(group_id)]
         except (ConnectionError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
             logger.exception("group zone safety scan unavailable for group %s", group_id)
             return jsonify({"success": False, "message": "Проверка топологии недоступна"}), 503
@@ -554,9 +547,7 @@ def api_update_group(group_id):
             logger.exception("old master confirmation unavailable for group %s", group_id)
             return jsonify({"success": False, "message": "Проверка мастер-клапана недоступна"}), 503
         if not closed:
-            return jsonify(
-                {"success": False, "message": close_error, "error_code": "MASTER_CONFIRMATION_TIMEOUT"}
-            ), 503
+            return jsonify({"success": False, "message": close_error, "error_code": "MASTER_CONFIRMATION_TIMEOUT"}), 503
         final_group = {**current, **updates}
         try:
             confirmed, confirmation_error = _confirm_master_closed(final_group)
@@ -678,9 +669,7 @@ def api_delete_group(group_id):
     try:
         group = _get_group_strict(group_id)
         before_snapshot = db.get_group_storage_snapshot(int(group_id))
-        group_zones = [
-            zone for zone in (_strict_zones() or []) if int(zone.get("group_id") or 0) == int(group_id)
-        ]
+        group_zones = [zone for zone in (_strict_zones() or []) if int(zone.get("group_id") or 0) == int(group_id)]
     except (ConnectionError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
         logger.exception("group delete topology preflight unavailable for group %s", group_id)
         return jsonify({"success": False, "message": "Проверка топологии недоступна"}), 503
@@ -705,9 +694,7 @@ def api_delete_group(group_id):
         logger.exception("master delete confirmation unavailable for group %s", group_id)
         return jsonify({"success": False, "message": "Проверка мастер-клапана недоступна"}), 503
     if not closed:
-        return jsonify(
-            {"success": False, "message": close_error, "error_code": "MASTER_CONFIRMATION_TIMEOUT"}
-        ), 503
+        return jsonify({"success": False, "message": close_error, "error_code": "MASTER_CONFIRMATION_TIMEOUT"}), 503
     if db.delete_group_if_unchanged(before_snapshot, allow_observed_drift=True):
         if int(group.get("use_water_meter") or 0) == 1 and not _reconfigure_water_monitor():
             rollback_snapshot = dict(before_snapshot)
@@ -1045,9 +1032,7 @@ def api_start_zone_exclusive(group_id, zone_id):
             return jsonify({"success": False, "message": "Зона не найдена"}), 404
         if int(zone.get("group_id") or 0) != int(group_id):
             return jsonify({"success": False, "message": f"Зона {zone_id} не принадлежит группе {group_id}"}), 409
-        debounce_enabled = not current_app.config.get("TESTING") or current_app.config.get(
-            "GROUP_DEBOUNCE_IN_TESTS"
-        )
+        debounce_enabled = not current_app.config.get("TESTING") or current_app.config.get("GROUP_DEBOUNCE_IN_TESTS")
         with group_lock(int(group_id)):
             # The unlocked preflight is only a fast rejection. Topology edits
             # serialize on this group lock, so re-read membership while it is

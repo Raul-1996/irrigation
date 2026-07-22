@@ -272,8 +272,8 @@ class BaseRepository:
                         placeholders = ", ".join("?" for _ in columns)
                         conn.execute(
                             f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})',
-                        before_values,
-                    )
+                            before_values,
+                        )
                 else:
                     if expected_current is None or not self._snapshot_matches(
                         current,

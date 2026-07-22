@@ -94,9 +94,7 @@ class TestSubscriptions:
         user = test_db.get_bot_user_by_chat(701)
         assert user is not None
         test_db.set_setting_value("telegram_admin_chat_id", "701")
-        test_db.create_or_update_subscription(
-            int(user["id"]), "daily", "brief", now.strftime("%H:%M"), None, True
-        )
+        test_db.create_or_update_subscription(int(user["id"]), "daily", "brief", now.strftime("%H:%M"), None, True)
 
         # Merely matching the configured chat is insufficient until the bot
         # message path has marked that row as authorized.

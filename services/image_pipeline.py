@@ -57,9 +57,7 @@ def load_safe_image(file_data: bytes) -> Image.Image:
     w0, h0 = img.size
     if w0 * h0 > MAX_INPUT_PIXELS:
         img.close()
-        raise ImageTooLargeError(
-            f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {MAX_INPUT_PIXELS}"
-        )
+        raise ImageTooLargeError(f"image too large: {w0}x{h0} ({w0 * h0} px) exceeds {MAX_INPUT_PIXELS}")
     try:
         img.load()  # force decode so malformed inputs fail inside this helper
     except Image.DecompressionBombError as e:

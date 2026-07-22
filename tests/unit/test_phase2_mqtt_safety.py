@@ -46,17 +46,13 @@ def test_finding_39_dead_broker_connect_does_not_hold_global_client_lock():
     results: dict[str, object] = {}
 
     def connect_dead_server():
-        results["dead"] = mqtt_pub.get_or_create_mqtt_client(
-            {"id": 901, "host": "dead.invalid", "port": 1883}
-        )
+        results["dead"] = mqtt_pub.get_or_create_mqtt_client({"id": 901, "host": "dead.invalid", "port": 1883})
 
     def get_healthy_server():
         results["healthy"] = mqtt_pub.get_or_create_mqtt_client({"id": 902})
         healthy_done.set()
 
-    with patch.object(mqtt_pub, "mqtt", fake_mqtt), patch.object(
-        mqtt_pub, "_MQTT_CLIENTS", {902: healthy}
-    ):
+    with patch.object(mqtt_pub, "mqtt", fake_mqtt), patch.object(mqtt_pub, "_MQTT_CLIENTS", {902: healthy}):
         dead_thread = threading.Thread(target=connect_dead_server)
         healthy_thread = threading.Thread(target=get_healthy_server)
         dead_thread.start()

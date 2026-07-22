@@ -23,6 +23,10 @@ os.environ["TESTING"] = "1"
 _FMT = "%Y-%m-%d %H:%M:%S"
 
 
+def _water_monitor_patch():
+    return patch("services.zone_control.water_monitor", **{"summarize_run.return_value": (None, None)})
+
+
 def _parse(ts):
     """Parse a 'YYYY-MM-DD HH:MM:SS' timestamp written by zone_control."""
     assert ts is not None, "expected non-NULL timestamp"
@@ -72,7 +76,7 @@ class TestStopZoneEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -134,7 +138,7 @@ class TestStopZoneEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -177,7 +181,7 @@ class TestStopZoneEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -236,7 +240,7 @@ class TestPeerOffEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import exclusive_start_zone
@@ -310,7 +314,7 @@ class TestSchedulerAutoStopEndTime:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             before = datetime.now().replace(microsecond=0)

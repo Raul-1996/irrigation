@@ -567,9 +567,7 @@ def test_server_invalidation_epoch_isolates_aba_inflight_and_debounce():
         patch.object(mqtt_pub, "_publish_one", side_effect=publish_one),
     ):
         old = threading.Thread(
-            target=lambda: old_result.append(
-                mqtt_pub.publish_mqtt_value(server_a, "/relay", "0", min_interval_sec=60)
-            )
+            target=lambda: old_result.append(mqtt_pub.publish_mqtt_value(server_a, "/relay", "0", min_interval_sec=60))
         )
         old.start()
         assert old_entered.wait(timeout=1)
@@ -1036,9 +1034,7 @@ def test_sse_fresh_off_snapshot_apply_aba_is_noop_for_new_activation(test_db):
         patch.object(sse_hub, "broadcast"),
     ):
         worker = threading.Thread(
-            target=lambda: sse_hub._process_mqtt_message(
-                server["id"], None, zone["topic"], "0", retained=False
-            )
+            target=lambda: sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "0", retained=False)
         )
         worker.start()
         assert initial_read.wait(timeout=1)
@@ -1227,9 +1223,7 @@ def test_off_received_after_fault_invalidation_keeps_fault_and_closes_run_failed
         patch.object(sse_hub, "_SSE_HUB_MQTT", {}),
         patch.object(sse_hub, "broadcast"),
     ):
-        sse_hub._process_mqtt_message(
-            server["id"], None, zone["topic"], "0", retained=False, received_at=130.0
-        )
+        sse_hub._process_mqtt_message(server["id"], None, zone["topic"], "0", retained=False, received_at=130.0)
 
     after = test_db.get_zone(zone["id"])
     assert after["state"] == "fault"
@@ -1518,12 +1512,15 @@ def test_off_confirmation_keeps_jobs_and_token_when_history_close_rejects(test_d
         patch.object(test_db, "finish_zone_run", return_value=False),
         patch("services.events.publish") as publish_event,
     ):
-        assert verifier.apply_live_confirmation(
-            zone["id"],
-            "off",
-            db_instance=test_db,
-            scheduler_getter=lambda: scheduler,
-        ) is False
+        assert (
+            verifier.apply_live_confirmation(
+                zone["id"],
+                "off",
+                db_instance=test_db,
+                scheduler_getter=lambda: scheduler,
+            )
+            is False
+        )
 
     after = test_db.get_zone(zone["id"])
     assert after["observed_state"] == "off"
@@ -2278,11 +2275,14 @@ def test_stop_all_reports_unresolved_failed_off(test_db):
     failed = _mqtt_zone(test_db, server, "failed-off", state="on")
     stopped = _mqtt_zone(test_db, server, "stopped-off", state="on")
 
-    with patch.object(zone_control, "db", test_db), patch.object(
-        zone_control,
-        "stop_zone",
-        side_effect=lambda zone_id, **_kwargs: int(zone_id) == int(stopped["id"]),
-    ) as stop:
+    with (
+        patch.object(zone_control, "db", test_db),
+        patch.object(
+            zone_control,
+            "stop_zone",
+            side_effect=lambda zone_id, **_kwargs: int(zone_id) == int(stopped["id"]),
+        ) as stop,
+    ):
         result = zone_control.stop_all_in_group(1, force=True, require_observed_confirmation=True)
 
     assert result == {
@@ -3119,8 +3119,9 @@ def test_prepared_verifier_catches_immediate_nonretained_echo_after_subscription
     verifier._db = test_db
     generation = verifier.register_command(zone["id"], "off")
 
-    with patch.object(observed_state, "mqtt", fake_mqtt), patch(
-        "irrigation_scheduler.get_scheduler", return_value=MagicMock()
+    with (
+        patch.object(observed_state, "mqtt", fake_mqtt),
+        patch("irrigation_scheduler.get_scheduler", return_value=MagicMock()),
     ):
         prepared = verifier.prepare_verification(zone["id"], "off", generation=generation, timeout=0.1)
         assert prepared is not None
@@ -3132,14 +3133,17 @@ def test_prepared_verifier_catches_immediate_nonretained_echo_after_subscription
             None,
             SimpleNamespace(payload=b"0", retain=False),
         )
-        assert verifier.verify(
-            zone["id"],
-            "off",
-            timeout=0.001,
-            retries=1,
-            generation=generation,
-            prepared=prepared,
-        ) is True
+        assert (
+            verifier.verify(
+                zone["id"],
+                "off",
+                timeout=0.001,
+                retries=1,
+                generation=generation,
+                prepared=prepared,
+            )
+            is True
+        )
 
     assert events == ["subscribed", "published"]
     assert fake_mqtt.Client.call_count == 1
@@ -3195,14 +3199,17 @@ def test_prepared_verifier_keeps_one_subscription_across_retry(test_db):
     ):
         prepared = verifier.prepare_verification(zone["id"], "off", generation=generation, timeout=0.1)
         assert prepared is not None
-        assert verifier.verify(
-            zone["id"],
-            "off",
-            timeout=0.001,
-            retries=2,
-            generation=generation,
-            prepared=prepared,
-        ) is True
+        assert (
+            verifier.verify(
+                zone["id"],
+                "off",
+                timeout=0.001,
+                retries=2,
+                generation=generation,
+                prepared=prepared,
+            )
+            is True
+        )
 
     assert subscriptions == 1
     assert fake_mqtt.Client.call_count == 1
@@ -3258,11 +3265,7 @@ def test_master_command_verifier_subscribes_before_publish_and_rejects_retained(
         )
 
     assert result is expected
-    expected_events = (
-        ["subscribed", "published"]
-        if expected
-        else ["subscribed", "published", "published", "published"]
-    )
+    expected_events = ["subscribed", "published"] if expected else ["subscribed", "published", "published", "published"]
     assert events == expected_events
     assert fake_mqtt.Client.call_count == 1
 

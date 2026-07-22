@@ -510,9 +510,7 @@ def notify_http_listener_ready(*, health_probe_url: str | None = None) -> bool:
         # WatchdogSec is armed, claiming readiness without a live sender would
         # guarantee a restart loop one period later.
         try:
-            heartbeat_started = _start_health_bound_heartbeat(
-                health_probe_url=health_probe_url
-            )
+            heartbeat_started = _start_health_bound_heartbeat(health_probe_url=health_probe_url)
         except Exception:
             logger.exception("health-bound systemd watchdog start failed")
             heartbeat_started = False
@@ -618,9 +616,7 @@ def _start_health_bound_heartbeat(*, health_probe_url: str | None = None) -> boo
         logger.info("systemd watchdog disabled via WB_WATCHDOG_ENABLED=0")
         return False
     if watchdog_disabled:
-        logger.critical(
-            "WB_WATCHDOG_ENABLED=0 ignored because systemd WATCHDOG_USEC is armed"
-        )
+        logger.critical("WB_WATCHDOG_ENABLED=0 ignored because systemd WATCHDOG_USEC is armed")
     if _HEALTH_HEARTBEAT_THREAD is not None and _HEALTH_HEARTBEAT_THREAD.is_alive():
         return True
     _HEALTH_HEARTBEAT_STOP = threading.Event()

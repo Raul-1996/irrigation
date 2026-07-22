@@ -327,18 +327,13 @@ def _do_group_stop(group_id: int) -> str:
         if scheduler is None:
             zones = _read_group_zones_strict(gid)
             _strict_group_zone_ids(gid, zones)
-            statuses = {
-                int(zone["id"]): _zone_off_status(zone, stop_results.get(int(zone["id"])))
-                for zone in zones
-            }
+            statuses = {int(zone["id"]): _zone_off_status(zone, stop_results.get(int(zone["id"]))) for zone in zones}
             failed = [zone_id for zone_id, status in statuses.items() if status == "failed"]
             pending = [zone_id for zone_id, status in statuses.items() if status == "pending"]
         else:
             zone_by_id = {int(zone["id"]): zone for zone in zones}
             pending = sorted(
-                zone_id
-                for zone_id in scheduler_unresolved
-                if _zone_off_status(zone_by_id[zone_id], None) == "pending"
+                zone_id for zone_id in scheduler_unresolved if _zone_off_status(zone_by_id[zone_id], None) == "pending"
             )
             failed = sorted(scheduler_unresolved - set(pending))
 

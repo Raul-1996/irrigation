@@ -106,8 +106,8 @@ def test_cancelled_run_stays_cancelled_when_postpone_expires_before_zone_slot(mo
     first = _zone(1, duration=30)
     program = _program(time="11:49", zones=[1, 2])
     fake_db = Mock()
-    fake_db.is_program_run_cancelled_for_group.side_effect = (
-        lambda program_id, run_date, group_id: run_date == "2026-07-20"
+    fake_db.is_program_run_cancelled_for_group.side_effect = lambda program_id, run_date, group_id: (
+        run_date == "2026-07-20"
     )
     monkeypatch.setattr(nw, "db", fake_db)
 

@@ -10,6 +10,13 @@ Tests verify:
 
 import json
 
+
+def _zone_version(client, zone_id):
+    data = client.get(f"/api/zones/{zone_id}").get_json()
+    zone = data.get("zone") if isinstance(data, dict) and isinstance(data.get("zone"), dict) else data
+    return zone["version"]
+
+
 # ============================================================
 # Template rendering tests — check that status.html has the
 # new Hunter-style zone UI elements
@@ -157,7 +164,9 @@ class TestZonesAPIForUI:
 
         # Update duration (simulates +/- button)
         resp2 = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"duration": 15}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"duration": 15, "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp2.status_code == 200
         data2 = json.loads(resp2.data)
@@ -185,7 +194,13 @@ class TestZonesAPIForUI:
         # Update name + group
         resp2 = admin_client.put(
             f"/api/zones/{zone_id}",
-            data=json.dumps({"name": "After Edit", "group_id": target_group["id"]}),
+            data=json.dumps(
+                {
+                    "name": "After Edit",
+                    "group_id": target_group["id"],
+                    "expected_version": _zone_version(admin_client, zone_id),
+                }
+            ),
             content_type="application/json",
         )
         assert resp2.status_code == 200
@@ -243,7 +258,9 @@ class TestZoneCardInteractions:
         """Simulate +1 minute button press."""
         zone_id = self._create_zone(admin_client, dur=10)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"duration": 11}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"duration": 11, "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -254,7 +271,9 @@ class TestZoneCardInteractions:
         """Duration should not go below 1. API may reject 0."""
         zone_id = self._create_zone(admin_client, dur=2)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"duration": 1}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"duration": 1, "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -267,7 +286,12 @@ class TestZoneCardInteractions:
         zone_id = self._create_zone(admin_client, group=1)
         resp = admin_client.put(
             f"/api/zones/{zone_id}",
-            data=json.dumps({"group_id": target_group["id"]}),
+            data=json.dumps(
+                {
+                    "group_id": target_group["id"],
+                    "expected_version": _zone_version(admin_client, zone_id),
+                }
+            ),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -279,7 +303,9 @@ class TestZoneCardInteractions:
         """Simulate changing zone type/icon."""
         zone_id = self._create_zone(admin_client)
         resp = admin_client.put(
-            f"/api/zones/{zone_id}", data=json.dumps({"icon": "💧"}), content_type="application/json"
+            f"/api/zones/{zone_id}",
+            data=json.dumps({"icon": "💧", "expected_version": _zone_version(admin_client, zone_id)}),
+            content_type="application/json",
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)

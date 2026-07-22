@@ -32,9 +32,7 @@ def _load_or_generate_secret(env_var: str = "SECRET_KEY", file_path: str = ".sec
         try:
             key = raw_key.decode("utf-8").strip()
         except UnicodeDecodeError as error:
-            raise SecretKeyConfigurationError(
-                "Flask secret key file is invalid; restore the original key"
-            ) from error
+            raise SecretKeyConfigurationError("Flask secret key file is invalid; restore the original key") from error
         if not key:
             raise SecretKeyConfigurationError("Flask secret key file is empty; restore the original key")
         return key
@@ -50,9 +48,7 @@ def _load_or_generate_secret(env_var: str = "SECRET_KEY", file_path: str = ".sec
         try:
             persisted = read_private_file(file_path).decode("utf-8").strip()
         except UnicodeDecodeError as error:
-            raise SecretKeyConfigurationError(
-                "Flask secret key file is invalid; restore the original key"
-            ) from error
+            raise SecretKeyConfigurationError("Flask secret key file is invalid; restore the original key") from error
         if not persisted:
             raise SecretKeyConfigurationError("Flask secret key file is empty; restore the original key") from None
         return persisted

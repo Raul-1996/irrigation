@@ -111,9 +111,7 @@ def test_raw_external_zone_update_is_guarded_by_forward_version_trigger(test_db)
 
 def test_version_trigger_is_reconciled_even_when_marker_already_exists(test_db):
     with sqlite3.connect(test_db.db_path) as conn:
-        assert conn.execute(
-            "SELECT 1 FROM migrations WHERE name = 'zones_version_invalidation_v1'"
-        ).fetchone() == (1,)
+        assert conn.execute("SELECT 1 FROM migrations WHERE name = 'zones_version_invalidation_v1'").fetchone() == (1,)
         conn.execute("DROP TRIGGER trg_zones_version_invalidate")
 
     MigrationRunner(test_db.db_path).init_database()
@@ -187,11 +185,7 @@ def test_detailed_cas_conflict_returns_locked_current_snapshot(test_db):
         "success": False,
         "reason": "version_conflict",
         "previous": None,
-        "current": {
-            key: value
-            for key, value in updated.items()
-            if key != "affected_program_ids"
-        },
+        "current": {key: value for key, value in updated.items() if key != "affected_program_ids"},
         "affected_program_ids": [],
     }
     assert test_db.get_zone(zone["id"])["name"] == "Newer"
@@ -320,8 +314,7 @@ def test_source_correction_clears_only_pre_marker_unverifiable_labels(test_db_pa
     with sqlite3.connect(test_db_path) as conn:
         conn.execute("DELETE FROM migrations WHERE name = 'zone_runs_clear_unverifiable_source_v1'")
         conn.execute(
-            "UPDATE migrations SET applied_at = '2026-01-02 00:00:00' "
-            "WHERE name = 'zone_runs_backfill_source'"
+            "UPDATE migrations SET applied_at = '2026-01-02 00:00:00' WHERE name = 'zone_runs_backfill_source'"
         )
         rows = [
             (1, "program", "2026-01-01 00:00:00"),

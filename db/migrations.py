@@ -1220,8 +1220,7 @@ class MigrationRunner:
                 ).fetchone()
                 if table is not None:
                     applied = (
-                        conn.execute("SELECT 1 FROM migrations WHERE name = ? LIMIT 1", (name,)).fetchone()
-                        is not None
+                        conn.execute("SELECT 1 FROM migrations WHERE name = ? LIMIT 1", (name,)).fetchone() is not None
                     )
         except sqlite3.Error:
             logger.exception("Migration downgrade preview failed migration=%s", name)
@@ -2875,16 +2874,12 @@ class MigrationRunner:
 
     @staticmethod
     def _zone_runs_source_backfill_preview(conn: sqlite3.Connection) -> dict[str, object]:
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zone_runs'"
-        ).fetchone()
+        table = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zone_runs'").fetchone()
         unresolved_rows = 0
         if table is not None:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(zone_runs)").fetchall()}
             if "source" in columns:
-                unresolved_rows = int(
-                    conn.execute("SELECT COUNT(*) FROM zone_runs WHERE source IS NULL").fetchone()[0]
-                )
+                unresolved_rows = int(conn.execute("SELECT COUNT(*) FROM zone_runs WHERE source IS NULL").fetchone()[0])
         return {
             "supported": False,
             "would_mutate": False,
@@ -2908,9 +2903,7 @@ class MigrationRunner:
         Rows written after the marker retain their caller-supplied source.
         """
 
-        marker = conn.execute(
-            "SELECT applied_at FROM migrations WHERE name = 'zone_runs_backfill_source'"
-        ).fetchone()
+        marker = conn.execute("SELECT applied_at FROM migrations WHERE name = 'zone_runs_backfill_source'").fetchone()
         if marker is None:
             raise sqlite3.IntegrityError("zone_runs_backfill_source marker is missing")
 
@@ -2919,9 +2912,7 @@ class MigrationRunner:
         if applied_at is not None:
             marker_julian_day = conn.execute("SELECT julianday(?)", (applied_at,)).fetchone()[0]
         if marker_julian_day is None:
-            cursor = conn.execute(
-                "UPDATE zone_runs SET source = NULL WHERE source IN ('program', 'manual')"
-            )
+            cursor = conn.execute("UPDATE zone_runs SET source = NULL WHERE source IN ('program', 'manual')")
         else:
             cursor = conn.execute(
                 """
@@ -2949,8 +2940,7 @@ class MigrationRunner:
         program_ids = [
             int(row[0])
             for row in conn.execute(
-                "SELECT id FROM programs "
-                "WHERE lower(trim(COALESCE(type, ''))) = 'smart' AND enabled = 1 ORDER BY id"
+                "SELECT id FROM programs WHERE lower(trim(COALESCE(type, ''))) = 'smart' AND enabled = 1 ORDER BY id"
             ).fetchall()
         ]
         if not program_ids:

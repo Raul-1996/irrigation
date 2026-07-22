@@ -79,9 +79,7 @@ def test_load_programs_disables_legacy_smart_row_without_blocking_valid_program(
 
         assert test_db.get_program(smart["id"])["enabled"] is False
         assert _program_jobs(scheduler, smart["id"]) == []
-        assert [job.id for job in _program_jobs(scheduler, valid["id"])] == [
-            f"program:{valid['id']}:main:d0"
-        ]
+        assert [job.id for job in _program_jobs(scheduler, valid["id"])] == [f"program:{valid['id']}:main:d0"]
         audit = test_db.get_audit_logs(
             action_type="unsupported_program_disabled",
             target=f"program:{smart['id']}",
@@ -236,8 +234,14 @@ def test_stale_interval_fire_self_heals_changed_time_and_slot_set(test_db):
                 f"program:{program['id']}:main",
                 f"program:{program['id']}:extra:0",
             }
-            assert (jobs[f"program:{program['id']}:main"].trigger.start_date.hour, jobs[f"program:{program['id']}:main"].trigger.start_date.minute) == (7, 15)
-            assert (jobs[f"program:{program['id']}:extra:0"].trigger.start_date.hour, jobs[f"program:{program['id']}:extra:0"].trigger.start_date.minute) == (18, 45)
+            assert (
+                jobs[f"program:{program['id']}:main"].trigger.start_date.hour,
+                jobs[f"program:{program['id']}:main"].trigger.start_date.minute,
+            ) == (7, 15)
+            assert (
+                jobs[f"program:{program['id']}:extra:0"].trigger.start_date.hour,
+                jobs[f"program:{program['id']}:extra:0"].trigger.start_date.minute,
+            ) == (18, 45)
             assert all(
                 list(job.args)[-1] == scheduler.program_schedule_fingerprint(program["id"], with_extra)
                 for job in jobs.values()
@@ -265,11 +269,14 @@ def test_weather_rejection_has_no_orphan_program_lifecycle(test_db):
         "_check_weather_skip",
         return_value={"skip": True, "reason": "forecast rain"},
     ):
-        assert scheduler._run_program_threaded(
-            program["id"],
-            [first["id"], second["id"]],
-            program["name"],
-        ) is True
+        assert (
+            scheduler._run_program_threaded(
+                program["id"],
+                [first["id"], second["id"]],
+                program["name"],
+            )
+            is True
+        )
 
     assert test_db.get_logs(event_type="program_start") == []
     assert test_db.get_logs(event_type="program_finish") == []

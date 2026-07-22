@@ -350,14 +350,14 @@ def _finish_observed_run(zone_id: int, *, status: str = "ok") -> bool:
         if not run:
             return True
         finished = _db.finish_zone_run(
-                int(run["id"]),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                time.monotonic(),
-                None,
-                None,
-                None,
-                status=str(status),
-            )
+            int(run["id"]),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            time.monotonic(),
+            None,
+            None,
+            None,
+            status=str(status),
+        )
         if finished is not True:
             logger.error("sse_hub: finish_zone_run rejected zid=%s run=%s", zone_id, run.get("id"))
             return False
@@ -606,11 +606,7 @@ def _process_mqtt_message(
             )
             continue
 
-        if (
-            relay_high
-            and not counter_required
-            and str(zone.get("commanded_state") or "").lower() == "on"
-        ):
+        if relay_high and not counter_required and str(zone.get("commanded_state") or "").lower() == "on":
             applied = state_verifier.apply_live_confirmation(
                 zid,
                 "on",
@@ -932,11 +928,7 @@ def _apply_rebuild(target_generation: int) -> bool:
             stale: list[tuple[int, object]] = []
         else:
             superseded = False
-            stale = [
-                (sid, client)
-                for sid, client in old_clients.items()
-                if candidates.get(sid) is not client
-            ]
+            stale = [(sid, client) for sid, client in old_clients.items() if candidates.get(sid) is not client]
             _SSE_HUB_ZONE_TOPICS.clear()
             _SSE_HUB_ZONE_TOPICS.update(zone_topics)
             _SSE_HUB_MV_TOPICS.clear()

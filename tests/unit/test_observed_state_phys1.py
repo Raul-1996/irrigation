@@ -197,13 +197,28 @@ class TestPhys1Reconciliation:
 
         zone, _server = self._make_zone_with_mqtt(test_db)
         zone_id = zone["id"]
-        run_id = test_db.create_zone_run(zone_id, 1, "2026-01-01 10:00:00", time.monotonic(), None, 1)
+        start_time = "2026-01-01 10:00:00"
+        run_id = test_db.create_zone_run(zone_id, 1, start_time, time.monotonic(), None, 1)
+        # verify('off') normally follows the command transition.  Preserve
+        # that ownership evidence so confirmation may finalize the exact run
+        # while still leaving confirmed=0 (only ON proves watering occurred).
+        test_db.update_zone(
+            zone_id,
+            {
+                "state": "stopping",
+                "commanded_state": "off",
+                "observed_state": "unconfirmed",
+                "watering_start_time": start_time,
+                "command_id": "test-off-generation",
+            },
+        )
 
         sv = StateVerifier()
         sv._db = test_db
         sv._notifier = MagicMock()
         with patch.object(StateVerifier, "_subscribe_and_wait", return_value=True):
-            assert sv.verify(zone_id, "off", timeout=0.01, retries=3) is True
+            result = sv.verify(zone_id, "off", timeout=0.01, retries=3)
+        assert result is True, test_db.get_zone(zone_id)
 
         with sqlite3.connect(test_db.db_path) as conn:
             confirmed = conn.execute("SELECT confirmed FROM zone_runs WHERE id = ?", (run_id,)).fetchone()[0]

@@ -1173,9 +1173,7 @@ class IrrigationScheduler:
                     return False
                 initial_zone = current
                 token = requested_token
-                physical = bool(
-                    initial_zone.get("mqtt_server_id") and str(initial_zone.get("topic") or "").strip()
-                )
+                physical = bool(initial_zone.get("mqtt_server_id") and str(initial_zone.get("topic") or "").strip())
 
             try:
                 from services.zone_control import stop_zone as _stop_zone_central
@@ -1627,8 +1625,7 @@ class IrrigationScheduler:
                             return bool(
                                 cancel_event is not None
                                 and (
-                                    cancel_event.is_set()
-                                    or self.group_cancel_events.get(group_id) is not cancel_event
+                                    cancel_event.is_set() or self.group_cancel_events.get(group_id) is not cancel_event
                                 )
                             )
 
@@ -2811,8 +2808,7 @@ class IrrigationScheduler:
                 matching = [
                     job
                     for job in self.scheduler.get_jobs(jobstore="default")
-                    if str(job.id).startswith("master_cap_close:")
-                    and list(getattr(job, "args", ()) or ()) == args
+                    if str(job.id).startswith("master_cap_close:") and list(getattr(job, "args", ()) or ()) == args
                 ]
                 if any(not self._master_cap_job_matches(job, str(job.id), args) for job in matching):
                     return False
@@ -2824,8 +2820,7 @@ class IrrigationScheduler:
                 remaining = [
                     job
                     for job in self.scheduler.get_jobs(jobstore="default")
-                    if str(job.id).startswith("master_cap_close:")
-                    and list(getattr(job, "args", ()) or ()) == args
+                    if str(job.id).startswith("master_cap_close:") and list(getattr(job, "args", ()) or ()) == args
                 ]
                 if remaining:
                     return False
@@ -3711,9 +3706,7 @@ class IrrigationScheduler:
                 owned_event.set()
         try:
             pending_ids = [
-                str(job.id)
-                for job in self.scheduler.get_jobs()
-                if str(job.id).startswith(f"group_seq:{gid}:")
+                str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(f"group_seq:{gid}:")
             ]
         except (AttributeError, RuntimeError, ValueError, TypeError, KeyError):
             logger.exception("Could not enumerate pending group jobs for %s", gid)
@@ -3859,9 +3852,7 @@ class IrrigationScheduler:
         gid = int(group_id)
         prefix = f"group_seq:{gid}:"
         try:
-            pending_ids = sorted(
-                {str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(prefix)}
-            )
+            pending_ids = sorted({str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(prefix)})
         except (AttributeError, RuntimeError, ValueError, TypeError, KeyError):
             logger.exception("Could not enumerate pending sequence jobs for group %s", gid)
             return False, False
@@ -3877,9 +3868,7 @@ class IrrigationScheduler:
                 logger.exception("Could not remove pending group job %s", job_id)
 
         try:
-            remaining = sorted(
-                str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(prefix)
-            )
+            remaining = sorted(str(job.id) for job in self.scheduler.get_jobs() if str(job.id).startswith(prefix))
         except (AttributeError, RuntimeError, ValueError, TypeError, KeyError):
             logger.exception("Could not verify pending sequence removal for group %s", gid)
             return False, bool(pending_ids)
@@ -4217,10 +4206,7 @@ class IrrigationScheduler:
             try:
                 program_id = int(program["id"])
                 seen_ids.add(program_id)
-                if (
-                    program.get("enabled", True)
-                    and str(program.get("type") or "time-based").strip().lower() == "smart"
-                ):
+                if program.get("enabled", True) and str(program.get("type") or "time-based").strip().lower() == "smart":
                     if not self._disable_enabled_legacy_smart_program(program_id):
                         self.cancel_program(program_id)
                         all_ok = False
@@ -4661,9 +4647,7 @@ class IrrigationScheduler:
             return False
         intent_id = str(intent if isinstance(intent, str) else intent["id"])
         job_id = (
-            self._boot_recovery_retry_job_id(intent_id)
-            if retry_generation
-            else self._boot_recovery_job_id(intent_id)
+            self._boot_recovery_retry_job_id(intent_id) if retry_generation else self._boot_recovery_job_id(intent_id)
         )
         run_at = run_at or self._controller_now()
         if run_at.tzinfo is None:
@@ -4858,9 +4842,7 @@ class IrrigationScheduler:
                     if not zones:
                         continue
                     program_evidence = self._boot_interrupted_program_zones.get(int(p["id"]), set())
-                    interrupted_indices = [
-                        idx for idx, zone_id in enumerate(zones) if zone_id in program_evidence
-                    ]
+                    interrupted_indices = [idx for idx, zone_id in enumerate(zones) if zone_id in program_evidence]
                     if require_interrupted_evidence and not interrupted_indices:
                         continue
                     # Если какая-то зона уже включена — программа идёт

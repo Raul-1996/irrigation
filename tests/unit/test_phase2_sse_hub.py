@@ -199,6 +199,8 @@ def test_active_retained_on_does_not_reset_override_or_hard_stop():
         "planned_end_time": "2026-07-19 10:05:00",
     }
     db = _Db(zones=[zone])
+    db.get_open_zone_run = MagicMock(return_value={"confirmed": 0})
+    db.mark_zone_run_confirmed = MagicMock(return_value=True)
     scheduler = MagicMock()
     _configure(db, _MqttModule(), scheduler=scheduler)
     client = _start_and_get_client()
@@ -209,6 +211,7 @@ def test_active_retained_on_does_not_reset_override_or_hard_stop():
     scheduler.cancel_zone_jobs.assert_not_called()
     scheduler.schedule_zone_stop.assert_not_called()
     scheduler.schedule_zone_hard_stop.assert_not_called()
+    db.mark_zone_run_confirmed.assert_called_once_with(7)
 
 
 def test_live_base_topic_on_does_not_self_confirm_physical_watering():
@@ -229,8 +232,9 @@ def test_live_base_topic_on_does_not_self_confirm_physical_watering():
     # The long-lived hub sees the app's own base-topic publish as live
     # (retain=False), so freshness alone is not physical relay evidence.
     client.on_message(client, None, _Message("/zone/22", "1", retain=False))
-    _wait_for(lambda: bool(db.zone_updates))
+    time.sleep(0.05)
 
+    assert not db.zone_updates
     db.mark_zone_run_confirmed.assert_not_called()
 
 
@@ -343,9 +347,7 @@ def test_new_client_is_published_as_current_before_network_loop_starts():
             assert sse_hub._SSE_HUB_MQTT.get(1) is self
             super().loop_start()
 
-    db = _Db(
-        zones=[{"id": 17, "mqtt_server_id": 1, "topic": "/zone/17", "duration": 10, "state": "off"}]
-    )
+    db = _Db(zones=[{"id": 17, "mqtt_server_id": 1, "topic": "/zone/17", "duration": 10, "state": "off"}])
     client = InspectingClient()
     _configure(db, _MqttModule(client_factory=lambda: client))
 
@@ -364,9 +366,7 @@ def test_startup_prefers_nonblocking_paho_connect_async():
         def connect(self, host, port, keepalive):
             raise AssertionError("blocking connect should not be used when connect_async exists")
 
-    db = _Db(
-        zones=[{"id": 18, "mqtt_server_id": 1, "topic": "/zone/18", "duration": 10, "state": "off"}]
-    )
+    db = _Db(zones=[{"id": 18, "mqtt_server_id": 1, "topic": "/zone/18", "duration": 10, "state": "off"}])
     client = AsyncClient()
     _configure(db, _MqttModule(client_factory=lambda: client))
 
@@ -451,9 +451,7 @@ def test_connect_does_not_hold_hub_lock():
     release = threading.Event()
     client = _Client(connect_gate=release)
     mqtt_module = _MqttModule(client_factory=lambda: client)
-    db = _Db(
-        zones=[{"id": 11, "mqtt_server_id": 1, "topic": "/zone/11", "duration": 10, "state": "off"}]
-    )
+    db = _Db(zones=[{"id": 11, "mqtt_server_id": 1, "topic": "/zone/11", "duration": 10, "state": "off"}])
     _configure(db, mqtt_module)
 
     starter = threading.Thread(target=sse_hub.ensure_hub_started, daemon=True)

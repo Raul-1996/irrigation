@@ -112,11 +112,14 @@ def test_listener_probe_requires_token_from_current_process():
 
     urlopen = MagicMock(return_value=Response())
 
-    assert run._probe_http_listener(
-        "http://127.0.0.1:8080/healthz",
-        "current-process",
-        urlopen_fn=urlopen,
-    ) is False
+    assert (
+        run._probe_http_listener(
+            "http://127.0.0.1:8080/healthz",
+            "current-process",
+            urlopen_fn=urlopen,
+        )
+        is False
+    )
     request = urlopen.call_args.args[0]
     assert request.headers["X-wb-startup-probe"] == "current-process"
 
@@ -152,9 +155,7 @@ def test_ready_notification_runs_only_after_listener_probe_accepts(monkeypatch):
         threading.Event(),
     )
 
-    notify_ready.assert_called_once_with(
-        health_probe_url="http://controller.example.test:8080/healthz"
-    )
+    notify_ready.assert_called_once_with(health_probe_url="http://controller.example.test:8080/healthz")
 
 
 def test_listener_probe_retries_transient_systemd_notification_failure(monkeypatch):

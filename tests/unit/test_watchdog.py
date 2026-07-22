@@ -14,9 +14,7 @@ class TestZoneWatchdog:
         from services.watchdog import ZoneWatchdog
 
         # Create a zone that's been ON for 300 minutes
-        server = test_db.create_mqtt_server(
-            {"name": "broker", "host": "127.0.0.1", "port": 1883}
-        )
+        server = test_db.create_mqtt_server({"name": "broker", "host": "127.0.0.1", "port": 1883})
         zone = test_db.create_zone(
             {
                 "name": "Test Zone",
@@ -81,9 +79,7 @@ class TestZoneWatchdog:
         """Even an exact True cannot override a physical row that is not observed OFF."""
         from services.watchdog import ZoneWatchdog
 
-        server = test_db.create_mqtt_server(
-            {"name": "broker", "host": "127.0.0.1", "port": 1883}
-        )
+        server = test_db.create_mqtt_server({"name": "broker", "host": "127.0.0.1", "port": 1883})
         zone = test_db.create_zone(
             {
                 "name": "Physical Zone",
@@ -116,9 +112,7 @@ class TestZoneWatchdog:
 
         assert "Принудительно остановлена" not in mock_alert.call_args.args[0]
         assert test_db.get_logs(event_type="watchdog_cap_stop") == []
-        details = json.loads(
-            test_db.get_logs(event_type="watchdog_cap_stop_unresolved")[0]["details"]
-        )
+        details = json.loads(test_db.get_logs(event_type="watchdog_cap_stop_unresolved")[0]["details"])
         assert details["state"] == "off"
         assert details["commanded_state"] == "off"
         assert details["observed_state"] == "unconfirmed"

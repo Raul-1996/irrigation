@@ -568,3 +568,32 @@ permissions changes этим решением не разрешены. Узки�
 - Пользовательский untracked `AGENTS.md` сохранён и не индексировался.
 - `git push` не выполнялся и запрещён без отдельного подтверждения: inventory и
   raw reports содержат подробные данные внутреннего аудита.
+
+## Финальная release-readiness интеграция — 2026-07-23
+
+- Inventory закрыт полностью: **217 `fixed`, 0 `deferred`, 0 `pending`,
+  9 `not_applicable`**. Исторические решения синхронизированы через
+  `PHASE2-PACKAGES.json`; renderer/check зелёный.
+- Runtime: readiness привязан к открытому listener, watchdog стартует до READY,
+  probe host и trusted-proxy boundary валидируются fail-closed, deployed SHA
+  задаёт точную asset/version identity.
+- Data/state: caller-owned CAS проходит через все writers, physical ON/OFF и
+  scheduler ownership fenced поколениями, run history завершается только после
+  подтверждённого состояния, legacy Smart отключается и не предлагается UI.
+- Native WB deploy: непривилегированный service user, root-owned env/control,
+  verified SQLite/state rollback, единый inode-checked flock, pinned uv/Python,
+  native OpenSSH с pinned host fingerprints, exact main SHA/ancestry и
+  production environment gate.
+- Полный sandbox gate после интеграции: **3516 passed, 2 historical skips,
+  18 deselected**, coverage **76.48%**. Оба historical skip затем исправлены и
+  прошли; единственный sandbox-excluded AF_UNIX notify test прошёл отдельно вне
+  sandbox. Эквивалентный итог: **3519 passed, 0 skipped, 17 deselected**
+  (только hardware-backed opt-in).
+- Ruff 0.15.22 check/format, Bandit 1.9.4, tracked-secret scan (524 files),
+  `uv pip check`, Bash/Node syntax и `git diff --check` зелёные.
+- Внешний vulnerability lookup lock-файлов не выполнялся: sandbox policy требует
+  отдельного согласия на передачу списка зависимостей внешнему audit service.
+- Пользовательский untracked `AGENTS.md` сохранён и не индексировался.
+- Явно исключённый пользователем скомпрометированный пароль и содержащая его
+  опубликованная Git-история остаются блокером фактического production deploy;
+  on-device WB canary не запускался без доступа к контроллеру и без ротации.

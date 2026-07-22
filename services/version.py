@@ -66,9 +66,7 @@ V2_BASE_TAG: str = "v2-base"
 # alphabet deliberately narrower than generic URI syntax and cap operator
 # input so a malformed EnvironmentFile cannot create unbounded URLs/log data.
 _MAX_VERSION_LENGTH: int = 128
-_SAFE_VERSION_RE = re.compile(
-    rf"[A-Za-z0-9][A-Za-z0-9._+-]{{0,{_MAX_VERSION_LENGTH - 1}}}\Z"
-)
+_SAFE_VERSION_RE = re.compile(rf"[A-Za-z0-9][A-Za-z0-9._+-]{{0,{_MAX_VERSION_LENGTH - 1}}}\Z")
 
 
 def _validate_version(value: str, *, source: str) -> str | None:

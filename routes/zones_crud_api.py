@@ -336,11 +336,7 @@ def api_zone(zone_id):
                 }
             ), 428
         expected_version = raw_data.get("expected_version")
-        if (
-            isinstance(expected_version, bool)
-            or not isinstance(expected_version, int)
-            or expected_version < 0
-        ):
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
             return jsonify(
                 {
                     "success": False,
@@ -625,9 +621,7 @@ def api_import_zones_bulk():
                         {"success": False, "message": f"zones[{index}].id должен быть положительным целым"}
                     ), 400
                 if raw_zone_id in seen_zone_ids:
-                    return jsonify(
-                        {"success": False, "message": f"zones[{index}].id дублируется в одном импорте"}
-                    ), 400
+                    return jsonify({"success": False, "message": f"zones[{index}].id дублируется в одном импорте"}), 400
                 seen_zone_ids.add(raw_zone_id)
             zone_id = stripped.get("id")
             current = existing_zones.get(int(zone_id)) if zone_id is not None else None

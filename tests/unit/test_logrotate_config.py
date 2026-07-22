@@ -66,8 +66,6 @@ def test_app_log_NOT_in_config(config_text):
 
 def test_managed_file_contains_no_active_directives(config_text):
     active_lines = [
-        line.strip()
-        for line in config_text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
+        line.strip() for line in config_text.splitlines() if line.strip() and not line.lstrip().startswith("#")
     ]
     assert active_lines == []

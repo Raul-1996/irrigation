@@ -151,7 +151,7 @@ def test_native_installers_require_the_hash_locked_production_dependencies():
 def test_native_mutators_share_a_nonblocking_process_lock():
     for script in (INSTALL, UPDATE, UNINSTALL):
         assert "/run/lock/wb-irrigation/deploy.lock" in script
-        assert "chmod 0700 \"$DEPLOY_LOCK_DIR\"" in script
+        assert 'chmod 0700 "$DEPLOY_LOCK_DIR"' in script
         assert "descriptor_identity" in script
         assert "acquire_deploy_lock" in script
         assert "flock -n" in script

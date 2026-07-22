@@ -143,10 +143,13 @@ def test_physical_stop_endpoints_report_pending_until_observed_off(admin_client,
     app.db.update_zone(zone["id"], {"state": "on", "commanded_state": "on", "observed_state": "on"})
 
     def accept_pending_stop(*_args, **_kwargs):
-        return app.db.update_zone(
-            zone["id"],
-            {"state": "stopping", "commanded_state": "off", "observed_state": "unconfirmed"},
-        ) is not None
+        return (
+            app.db.update_zone(
+                zone["id"],
+                {"state": "stopping", "commanded_state": "off", "observed_state": "unconfirmed"},
+            )
+            is not None
+        )
 
     for endpoint in ("stop", "mqtt/stop"):
         app.db.update_zone(zone["id"], {"state": "on", "commanded_state": "on", "observed_state": "on"})

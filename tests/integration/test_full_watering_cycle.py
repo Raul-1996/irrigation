@@ -98,7 +98,7 @@ class TestFullWateringCycle:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.water_monitor", **{"summarize_run.return_value": (None, None)}),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import exclusive_start_zone

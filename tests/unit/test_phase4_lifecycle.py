@@ -171,9 +171,7 @@ def test_boot_sync_bounds_blocked_confirmed_state_transaction(test_db):
 def test_boot_sync_includes_master_valve_off_in_readiness_decision(test_db):
     from services import app_init
 
-    server = test_db.create_mqtt_server(
-        {"name": "Master broker", "host": "127.0.0.1", "port": 1883, "enabled": 1}
-    )
+    server = test_db.create_mqtt_server({"name": "Master broker", "host": "127.0.0.1", "port": 1883, "enabled": 1})
     group = test_db.create_group("Master group")
     test_db.update_group_fields(
         int(group["id"]),
@@ -215,9 +213,7 @@ def test_boot_sync_keeps_active_evidence_durable_when_master_off_fails(test_db):
     ok_info.is_published.return_value = True
     failed_info = MagicMock(rc=4)
     mqtt_client = MagicMock()
-    mqtt_client.publish.side_effect = lambda topic, **_kwargs: (
-        failed_info if topic.endswith("/MV/on") else ok_info
-    )
+    mqtt_client.publish.side_effect = lambda topic, **_kwargs: failed_info if topic.endswith("/MV/on") else ok_info
 
     with patch("services.mqtt_pub.get_or_create_mqtt_client", return_value=mqtt_client):
         assert app_init._boot_sync(MagicMock(), test_db, timeout_sec=0.2) is False

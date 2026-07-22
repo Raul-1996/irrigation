@@ -122,9 +122,9 @@ def test_live_migration_downgrade_is_preview_only(test_db_path):
 
     with sqlite3.connect(test_db_path) as conn:
         assert conn.execute("SELECT 1 FROM migrations WHERE name = 'weather_create_log'").fetchone() == (1,)
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'weather_log'"
-        ).fetchone() == (1,)
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'weather_log'").fetchone() == (
+            1,
+        )
 
 
 def test_historical_zone_run_source_migration_is_non_mutating_preview(test_db_path):
@@ -149,6 +149,4 @@ def test_historical_zone_run_source_migration_is_non_mutating_preview(test_db_pa
     }
     with sqlite3.connect(test_db_path) as conn:
         assert conn.execute("SELECT source FROM zone_runs").fetchone() == (None,)
-        assert conn.execute(
-            "SELECT 1 FROM migrations WHERE name = 'zone_runs_backfill_source'"
-        ).fetchone() == (1,)
+        assert conn.execute("SELECT 1 FROM migrations WHERE name = 'zone_runs_backfill_source'").fetchone() == (1,)

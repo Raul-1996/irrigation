@@ -47,9 +47,7 @@ class TestZonesCRUD:
         zid = zones[0]["id"]
         resp = admin_client.put(
             f"/api/zones/{zid}",
-            data=json.dumps(
-                {"name": "Z1 Updated", "duration": 20, "expected_version": zones[0]["version"]}
-            ),
+            data=json.dumps({"name": "Z1 Updated", "duration": 20, "expected_version": zones[0]["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -128,10 +126,11 @@ class TestSseHubReloadOnWiringChange:
             {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
         app.db.update_zone(z["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
+        current = app.db.get_zone(z["id"])
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
-                data=json.dumps({"topic": "/devices/test/K2", "expected_version": z["version"]}),
+                data=json.dumps({"topic": "/devices/test/K2", "expected_version": current["version"]}),
                 content_type="application/json",
             )
         assert resp.status_code == 200
@@ -143,10 +142,11 @@ class TestSseHubReloadOnWiringChange:
             {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server_id}
         )
         app.db.update_zone(z["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
+        current = app.db.get_zone(z["id"])
         with patch("services.sse_hub.reload_hub") as mock_reload:
             resp = admin_client.put(
                 f"/api/zones/{z['id']}",
-                data=json.dumps({"name": "Renamed", "duration": 20, "expected_version": z["version"]}),
+                data=json.dumps({"name": "Renamed", "duration": 20, "expected_version": current["version"]}),
                 content_type="application/json",
             )
         assert resp.status_code == 200

@@ -14,9 +14,7 @@ def complete_group_stop_scheduler(db) -> MagicMock:
     def cancel_group_jobs(group_id: int, **_kwargs) -> dict[str, object]:
         normalized_group_id = int(group_id)
         stopped = sorted(
-            int(zone["id"])
-            for zone in (db.get_zones() or [])
-            if int(zone.get("group_id") or 0) == normalized_group_id
+            int(zone["id"]) for zone in (db.get_zones() or []) if int(zone.get("group_id") or 0) == normalized_group_id
         )
         return {
             "success": True,

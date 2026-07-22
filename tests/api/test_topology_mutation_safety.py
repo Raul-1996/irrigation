@@ -96,7 +96,8 @@ class TestZoneTopologyMutationSafety:
         before = app.db.get_zone(zone["id"])
 
         response = admin_client.put(
-            f"/api/zones/{zone['id']}", json={**change, "expected_version": zone["version"]}
+            f"/api/zones/{zone['id']}",
+            json={**change, "expected_version": before["version"]},
         )
 
         assert response.status_code == 409
@@ -129,10 +130,11 @@ class TestZoneTopologyMutationSafety:
         server = _server(app)
         zone = _zone(app, group["id"], server["id"])
         app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
+        current = app.db.get_zone(zone["id"])
 
         response = admin_client.put(
             f"/api/zones/{zone['id']}",
-            json={"topic": "/zone/new", "expected_version": zone["version"]},
+            json={"topic": "/zone/new", "expected_version": current["version"]},
         )
 
         assert response.status_code == 200
@@ -191,6 +193,7 @@ class TestZoneTopologyMutationSafety:
         server = _server(app)
         zone = _zone(app, source["id"], server["id"])
         app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
+        expected_version = app.db.get_zone(zone["id"])["version"]
         acquired_group_ids = []
         moved = False
 
@@ -206,13 +209,18 @@ class TestZoneTopologyMutationSafety:
             if method == "update":
                 response = admin_client.put(
                     f"/api/zones/{zone['id']}",
-                    json={"group_id": target["id"], "expected_version": zone["version"]},
+                    json={"group_id": target["id"], "expected_version": expected_version},
                 )
             else:
                 response = admin_client.delete(f"/api/zones/{zone['id']}")
 
-        assert response.status_code == (200 if method == "update" else 204)
+        # A concurrent topology writer owns the newer revision.  Update must
+        # reject the stale caller instead of silently overwriting it; DELETE
+        # has no caller CAS token and may proceed after acquiring the new lock.
+        assert response.status_code == (409 if method == "update" else 204)
         assert int(raced["id"]) in acquired_group_ids
+        if method == "update":
+            assert app.db.get_zone(zone["id"])["group_id"] == raced["id"]
 
 
 class TestZoneBulkImportSafety:
@@ -1312,9 +1320,7 @@ class TestMqttServerTopologySafety:
         detail_response = admin_client.get(f"/api/mqtt/servers/{server['id']}")
 
         assert (listed_response.status_code, detail_response.status_code) == (200, 200)
-        listed = next(
-            item for item in listed_response.get_json()["servers"] if int(item["id"]) == int(server["id"])
-        )
+        listed = next(item for item in listed_response.get_json()["servers"] if int(item["id"]) == int(server["id"]))
         detail = detail_response.get_json()["server"]
         for item in (listed, detail):
             assert item["is_referenced"] is True
@@ -1328,9 +1334,7 @@ class TestMqttServerTopologySafety:
         listed_response = admin_client.get("/api/mqtt/servers")
         detail_response = admin_client.get(f"/api/mqtt/servers/{server['id']}")
 
-        listed = next(
-            item for item in listed_response.get_json()["servers"] if int(item["id"]) == int(server["id"])
-        )
+        listed = next(item for item in listed_response.get_json()["servers"] if int(item["id"]) == int(server["id"]))
         detail = detail_response.get_json()["server"]
         for item in (listed, detail):
             assert item["is_referenced"] is False
@@ -1495,9 +1499,7 @@ class TestMqttServerTopologySafety:
 
     def test_enabled_rain_only_reference_stages_runtime_before_accepting_update(self, admin_client, app):
         server = _server(app)
-        assert app.db.set_rain_config(
-            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
-        )
+        assert app.db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]})
 
         with (
             patch("routes.mqtt_api._reconfigure_rain_monitor", return_value=True) as reconfigure,
@@ -1514,9 +1516,7 @@ class TestMqttServerTopologySafety:
 
     def test_failed_rain_stage_cas_rolls_back_server_update(self, admin_client, app):
         server = _server(app)
-        assert app.db.set_rain_config(
-            {"enabled": True, "topic": "/rain", "type": "NC", "server_id": server["id"]}
-        )
+        assert app.db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NC", "server_id": server["id"]})
         before = app.db.get_mqtt_server_storage_snapshot(server["id"])
 
         with (
@@ -1535,9 +1535,7 @@ class TestMqttServerTopologySafety:
 
     def test_rain_rollback_never_clobbers_concurrent_server_update(self, admin_client, app):
         server = _server(app)
-        assert app.db.set_rain_config(
-            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
-        )
+        assert app.db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]})
 
         def concurrent_update_then_reject(_config):
             assert app.db.update_mqtt_server(server["id"], {"name": "Concurrent broker rename"})
@@ -1564,9 +1562,7 @@ class TestMqttServerTopologySafety:
 
     def test_rain_referenced_cosmetic_rename_never_reconnects(self, admin_client, app):
         server = _server(app)
-        assert app.db.set_rain_config(
-            {"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]}
-        )
+        assert app.db.set_rain_config({"enabled": True, "topic": "/rain", "type": "NO", "server_id": server["id"]})
 
         with (
             patch("routes.mqtt_api._reconfigure_rain_monitor") as reconfigure,

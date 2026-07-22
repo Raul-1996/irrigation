@@ -106,7 +106,16 @@ class TestSkipSequencerLoop:
             assert safety_duration_minutes is None
             assert callable(cancel_guard)
             assert cancel_guard() is False
-            test_db.update_zone(zid, {"state": "on"})
+            test_db.update_zone(
+                zid,
+                {
+                    "state": "on",
+                    "commanded_state": "on",
+                    "observed_state": "on",
+                    "watering_start_time": "2026-07-23 00:00:00",
+                    "command_id": f"test-program-{zid}",
+                },
+            )
             started_zones.append(zid)
             return True
 
@@ -152,7 +161,7 @@ class TestSkipSequencerLoop:
             # zone_control.stop_zone: minimal DB update
             patch("services.zone_control.stop_zone", side_effect=_fake_stop),
             # Avoid scheduling a real hard-stop APScheduler job
-            patch.object(sch, "schedule_zone_hard_stop", return_value=None),
+            patch.object(sch, "schedule_zone_hard_stop", return_value=True),
             # Avoid MQTT
             patch("services.mqtt_pub.publish_mqtt_value", return_value=True),
             # Avoid db.reschedule_group_to_next_program touching real schedules

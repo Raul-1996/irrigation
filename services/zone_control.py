@@ -1386,9 +1386,7 @@ def exclusive_start_zone(
                     )
                     if not published:
                         state_verifier.cancel_verification(prepared_verification)
-                        if mark_zone_command_fault(
-                            zone_id, "on", reason="zone_on", activation_token=activation_token
-                        ):
+                        if mark_zone_command_fault(zone_id, "on", reason="zone_on", activation_token=activation_token):
                             _finish_open_zone_run_failed(zone_id)
                         if use_master:
                             _schedule_master_close(g, immediate=True)
@@ -1435,9 +1433,7 @@ def exclusive_start_zone(
                         return False
             except (ConnectionError, TimeoutError, OSError):
                 logger.exception("exclusive_start_zone: mqtt on failed")
-                if mark_zone_command_fault(
-                    zone_id, "on", reason="exception", activation_token=activation_token
-                ):
+                if mark_zone_command_fault(zone_id, "on", reason="exception", activation_token=activation_token):
                     _finish_open_zone_run_failed(zone_id)
                 return False
         try:
@@ -1964,8 +1960,7 @@ def _stop_zone_locked(
             return True
         physical_channel = bool(z.get("mqtt_server_id") and str(z.get("topic") or "").strip())
         fresh_physical_off = (
-            str(z.get("observed_state") or "").lower() == "off"
-            and str(z.get("commanded_state") or "").lower() == "off"
+            str(z.get("observed_state") or "").lower() == "off" and str(z.get("commanded_state") or "").lower() == "off"
         )
         if initial_state == "off" and not force and (not physical_channel or fresh_physical_off):
             logger.info(
@@ -2075,9 +2070,7 @@ def _stop_zone_locked(
                 if not published:
                     if prepared_verification is not None:
                         state_verifier.cancel_verification(prepared_verification)
-                    mark_zone_command_fault(
-                        zone_id, "off", reason="zone_off", activation_token=stop_activation
-                    )
+                    mark_zone_command_fault(zone_id, "off", reason="zone_off", activation_token=stop_activation)
                     return False
                 if require_observed_confirmation:
                     try:
@@ -2134,9 +2127,7 @@ def _stop_zone_locked(
                 return False
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error):
             logger.exception("stop_zone: mqtt off failed")
-            mark_zone_command_fault(
-                zone_id, "off", reason="zone_off_exception", activation_token=stop_activation
-            )
+            mark_zone_command_fault(zone_id, "off", reason="zone_off_exception", activation_token=stop_activation)
             return False
         # Delayed master valve close is a group concern and must run even for
         # DB-only/misconfigured zone channels after a completed stop path.
@@ -2669,8 +2660,6 @@ def emergency_stop_all(reason: str = "emergency_stop") -> dict:
             logger.exception("emergency_stop_all: publish failed group=%s topic=%s", gid, t_norm)
 
     stats["zones_failed"] = sorted(set(stats["zones_failed"]))
-    stats["success"] = (
-        not stats["errors"] and not stats["zones_failed"] and stats["masters_failed_publish"] == 0
-    )
+    stats["success"] = not stats["errors"] and not stats["zones_failed"] and stats["masters_failed_publish"] == 0
     logger.info("emergency_stop_all: done — %s", stats)
     return stats

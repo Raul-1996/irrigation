@@ -48,9 +48,7 @@ class TestEmptyDaysMeansNever:
 
     def test_single_and_bulk_agree_for_daily_program(self, admin_client, app):
         z = app.db.create_zone({"name": "ED3", "duration": 10, "group_id": 1})
-        app.db.create_program(
-            {"name": "Daily", "time": "04:30", "days": [0, 1, 2, 3, 4, 5, 6], "zones": [z["id"]]}
-        )
+        app.db.create_program({"name": "Daily", "time": "04:30", "days": [0, 1, 2, 3, 4, 5, 6], "zones": [z["id"]]})
 
         item = _bulk_item(admin_client, z["id"])
         assert item["next_datetime"] is not None

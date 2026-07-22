@@ -188,9 +188,7 @@ def test_update_zone_versioned_retries_failed_begin_immediate(test_db, monkeypat
         blocker.execute("BEGIN IMMEDIATE")
         blocker.execute("UPDATE zones SET name = 'held' WHERE id = ?", (zone["id"],))
         with pytest.raises(sqlite3.OperationalError, match="locked"):
-            repository.update_zone_versioned(
-                zone["id"], {"state": "on"}, expected_version=zone["version"]
-            )
+            repository.update_zone_versioned(zone["id"], {"state": "on"}, expected_version=zone["version"])
 
     assert attempts == 4
 

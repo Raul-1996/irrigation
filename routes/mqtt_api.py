@@ -176,9 +176,7 @@ class _BoundedSseBuffer:
                 self._condition.notify()
                 return False
             if control:
-                while self._frames and (
-                    len(self._frames) >= self._max_frames or self._bytes + size > self._max_bytes
-                ):
+                while self._frames and (len(self._frames) >= self._max_frames or self._bytes + size > self._max_bytes):
                     _old_frame, old_size = self._frames.popleft()
                     self._bytes -= old_size
                     self._dropped += 1

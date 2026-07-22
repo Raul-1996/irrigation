@@ -338,9 +338,7 @@ def _normalize_postpone_stop_result(
 
     if source == "scheduler" and result.get("aggregate_valid") is False:
         return invalid
-    if source == "scheduler" and (
-        result.get("aggregate_valid") is not True or result.get("unverified_zone_ids") != []
-    ):
+    if source == "scheduler" and (result.get("aggregate_valid") is not True or result.get("unverified_zone_ids") != []):
         return invalid
 
     stopped = _strict_zone_id_list(result.get("stopped"))

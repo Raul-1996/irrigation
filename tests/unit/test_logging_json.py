@@ -235,7 +235,7 @@ def test_pii_filters_scrub_secret_values():
         )
 
     masking = PIIMaskingFilter()
-    rec = _mk('login password=hunter2 and "token":"abc123" and \'secret\':\'qwe456\'')
+    rec = _mk("login password=hunter2 and \"token\":\"abc123\" and 'secret':'qwe456'")
     masking.filter(rec)
     assert "hunter2" not in rec.msg
     assert "abc123" not in rec.msg

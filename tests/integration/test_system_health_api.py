@@ -44,21 +44,20 @@ class TestSystemHealth:
 
     def test_status_reports_confirmed_closed_master_while_zone_is_watering(self, client, app):
         group = app.db.create_group("Master mismatch")
-        server = app.db.create_mqtt_server(
-            {"name": "Master broker", "host": "127.0.0.1", "port": 1883, "enabled": 1}
+        server = app.db.create_mqtt_server({"name": "Master broker", "host": "127.0.0.1", "port": 1883, "enabled": 1})
+        assert (
+            app.db.update_group_fields(
+                group["id"],
+                {
+                    "use_master_valve": 1,
+                    "master_mqtt_server_id": server["id"],
+                    "master_mqtt_topic": "/master/relay",
+                    "master_valve_observed": "closed",
+                },
+            )
+            is True
         )
-        assert app.db.update_group_fields(
-            group["id"],
-            {
-                "use_master_valve": 1,
-                "master_mqtt_server_id": server["id"],
-                "master_mqtt_topic": "/master/relay",
-                "master_valve_observed": "closed",
-            },
-        ) is True
-        zone = app.db.create_zone(
-            {"name": "Dry active zone", "duration": 10, "group_id": group["id"]}
-        )
+        zone = app.db.create_zone({"name": "Dry active zone", "duration": 10, "group_id": group["id"]})
         app.db.update_zone(zone["id"], {"state": "on"})
 
         health = client.get("/api/status").get_json()["system_health"]

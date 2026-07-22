@@ -158,9 +158,13 @@
         },
         {
           "id": 140,
-          "disposition": "deferred",
-          "reason": "Текущие zone_runs не хранят program_id/run identity, а program_start/program_finish logs не связывают overlapping/restarted executions и не содержат требуемых water/duration metrics. Сначала нужно определить semantics, добавить program_runs либо эквивалентный execution identity и scheduler writers; shape-only заглушки не заменяются вымышленными значениями.",
-          "tests": []
+          "disposition": "fixed",
+          "commit": "4db893e057ac8e140fe3606b948f9694a75ad955",
+          "reason": "API больше не выдаёт пустые массивы и нули как реальные результаты: до появления authoritative program-run identity log/stats явно отвечают UNSUPPORTED, а scheduler lifecycle audit не заявляет успешный terminal при отменённом или потерянном ownership.",
+          "tests": [
+            "tests/api/test_release_data_api_contracts.py::test_program_log_and_stats_report_unsupported_instead_of_fake_data",
+            "tests/unit/test_release_scheduler_reconcile.py::test_partially_cancelled_program_is_not_logged_as_success"
+          ]
         },
         {
           "id": 143,
@@ -696,9 +700,14 @@
         },
         {
           "id": 141,
-          "disposition": "deferred",
-          "reason": "В продукте не определено, чем runtime smart должен отличаться от time-based: нет smart decision inputs, scheduling policy или UI promise. Реализация без отдельной спецификации выдумала бы поведение; H2 включать запрещено.",
-          "tests": []
+          "disposition": "fixed",
+          "commit": "ae7f553a2a2a03814cc395aa5d1202dc88da24a1",
+          "reason": "Неопределённый Smart режим закрыт fail-closed: API не создаёт и не включает его, scheduler не создаёт jobs, forward migration отключает legacy Smart с audit, UI не предлагает создание и показывает legacy records read-only. Time-based semantics больше не маскируются под Smart.",
+          "tests": [
+            "tests/api/test_release_data_api_contracts.py::test_program_create_rejects_smart_as_unsupported",
+            "tests/db/test_release_data_followup_integrity.py::test_forward_migration_disables_enabled_smart_programs_with_audit",
+            "tests/unit/test_phase4_frontend_safety.py::test_program_wizard_does_not_offer_or_submit_unsupported_smart_type"
+          ]
         },
         {
           "id": 145,
@@ -842,9 +851,14 @@
         },
         {
           "id": 37,
-          "disposition": "deferred",
-          "reason": "Настоящий caller-owned optimistic CAS требует передавать expected_version через database facade, zones_state, zone_control и scheduler и запрещать raw fallback после CAS failure. В рамках единственного владельца db/zones.py P04 устранил проглатывание BEGIN IMMEDIATE/BUSY, но локальная транзакция не может отличить устаревшее намерение вызывающего без cross-layer version contract; такой протокол требует отдельного сериализованного safety-пакета.",
-          "tests": []
+          "disposition": "fixed",
+          "commit": "ae7f553a2a2a03814cc395aa5d1202dc88da24a1",
+          "reason": "Caller-owned expected_version проходит через публичный CRUD, database facade, zones_state, zone_control и scheduler; все repository writers увеличивают version, forward trigger страхует внешние writers, а CAS conflict больше не дожимается raw fallback. Физические ON/OFF и terminal writes дополнительно ограждены activation token/generation.",
+          "tests": [
+            "tests/db/test_release_data_followup_integrity.py",
+            "tests/unit/test_release_data_followup_state.py",
+            "tests/unit/test_release_scheduler_reconcile.py"
+          ]
         },
         {
           "id": 42,
@@ -1123,9 +1137,13 @@
       "resolutions": [
         {
           "id": 56,
-          "disposition": "deferred",
-          "reason": "На поддерживаемом production target Hypercorn слушается напрямую под native WB systemd, внешняя reverse-proxy topology не поддерживается. Исправление требует явной trusted-proxy allowlist/config boundary; без неё доверие X-Forwarded-For позволит клиенту подменить IP и ослабит rate/security controls.",
-          "tests": []
+          "disposition": "fixed",
+          "commit": "f9177c0686c59cbd7c27bfcbea281da6dceca032",
+          "reason": "Proxy headers по умолчанию игнорируются. Явный trusted-proxy contract разрешён только при согласованном secure transport, нормализованный client identity передаётся существующим rate limiters и audit, а небезопасные hop/bind комбинации отклоняются fail-closed.",
+          "tests": [
+            "tests/unit/test_runtime_security.py::test_proxy_headers_are_ignored_by_default_and_trusted_only_when_opted_in",
+            "tests/unit/test_runtime_security.py::test_proxy_client_identity_reaches_existing_api_rate_limiter"
+          ]
         },
         {
           "id": 57,
@@ -1477,27 +1495,33 @@
     },
     {
       "slug": "phase2-frozen-migration-decisions",
-      "decision_only": true,
-      "fix_commit": null,
-      "merge_commit": null,
-      "summary": "Две находки в замороженном db/migrations.py получили отдельные deferred-решения без production-изменений и без фиктивных commit-ссылок.",
+      "decision_only": false,
+      "fix_commit": "4db893e057ac8e140fe3606b948f9694a75ad955",
+      "merge_commit": "4db893e057ac8e140fe3606b948f9694a75ad955",
+      "summary": "Опасный live downgrade заменён non-mutating preview, а историческая source-коррекция снимает только заведомо непроверяемые labels, не выдумывая provenance.",
       "resolutions": [
         {
           "id": 73,
-          "disposition": "deferred",
-          "reason": "rollback_migration вызывается только тестами; поддерживаемый WB update path делает pre-deploy backup, а безопасный production rollback восстанавливает согласованную DB-копию. Исправление потребует разморозить миграции и выбрать контракт: constraint-preserving in-place downgrade либо удаление неподдерживаемого live-downgrade API в пользу backup restore.",
-          "tests": []
+          "disposition": "fixed",
+          "reason": "Опасный live schema downgrade удалён из исполняемого контракта: rollback_migration теперь даёт только non-mutating preview, а production rollback восстанавливает предварительно проверенную целостную SQLite-копию.",
+          "tests": [
+            "tests/unit/test_migration_downgrade.py::test_live_downgrade_is_preview_only",
+            "tests/db/test_release_data_contracts.py::test_live_migration_downgrade_is_preview_only"
+          ]
         },
         {
           "id": 99,
-          "disposition": "deferred",
-          "reason": "Одноразовый backfill уже применён, а старые zone_runs не содержат program identity/provenance: после edits/deletes легитимные manual и program runs неразличимы. Любая повторная переклассификация необратимо выдумала бы данные; нужен размороженный previewable forward-repair с явно выбранной ambiguity policy либо решение оставить исторические значения как есть.",
-          "tests": []
+          "disposition": "fixed",
+          "commit": "ae7f553a2a2a03814cc395aa5d1202dc88da24a1",
+          "reason": "Forward correction больше не выдумывает program provenance: до correction marker снимаются только заведомо непроверяемые ложные labels, после marker новые записи получают provenance из authoritative writer. Исторически неоднозначные строки остаются честно неизвестными.",
+          "tests": [
+            "tests/db/test_release_data_followup_integrity.py::test_source_correction_clears_only_pre_marker_unverifiable_labels"
+          ]
         }
       ],
       "verification": {
-        "targeted": "read-only caller, migration-history and deployment-backup evidence review",
-        "full_pytest": "2072 passed, 2 skipped, 17 deselected (unchanged from preceding code package)",
+        "targeted": "migration downgrade preview and forward source-correction regressions",
+        "full_pytest": "covered by final release-readiness gate",
         "ruff": "All checks passed!",
         "diff_check": "clean"
       }

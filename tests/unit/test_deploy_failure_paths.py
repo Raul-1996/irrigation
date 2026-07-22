@@ -27,9 +27,7 @@ def _bash(script: str, *, env: dict[str, str] | None = None) -> subprocess.Compl
         text=True,
     )
     if result.returncode != 0:
-        raise AssertionError(
-            f"bash failure ({result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        raise AssertionError(f"bash failure ({result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
     return result
 
 
@@ -623,9 +621,7 @@ def test_mqtt_tls_failure_cleanup_removes_only_new_material(tmp_path):
             "CREATE TABLE mqtt_servers (id INTEGER PRIMARY KEY, enabled INTEGER, tls_enabled INTEGER, "
             "tls_ca_path TEXT, tls_cert_path TEXT, tls_key_path TEXT)"
         )
-        connection.execute(
-            "INSERT INTO mqtt_servers VALUES (1, 1, 1, 'ca.pem', 'missing.pem', NULL)"
-        )
+        connection.execute("INSERT INTO mqtt_servers VALUES (1, 1, 1, 'ca.pem', 'missing.pem', NULL)")
 
     _bash(
         f"""
@@ -647,9 +643,7 @@ def test_mqtt_tls_failure_cleanup_removes_only_new_material(tmp_path):
         """
     )
     with sqlite3.connect(database) as connection:
-        row = connection.execute(
-            "SELECT tls_ca_path, tls_cert_path FROM mqtt_servers WHERE id=1"
-        ).fetchone()
+        row = connection.execute("SELECT tls_ca_path, tls_cert_path FROM mqtt_servers WHERE id=1").fetchone()
     assert row == ("ca.pem", "missing.pem")
 
 

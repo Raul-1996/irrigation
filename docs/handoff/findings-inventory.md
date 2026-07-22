@@ -8,7 +8,7 @@
 - `INTENTIONAL_LIMITATION`: **2**.
 - `UNVERIFIED`: **0**.
 - `duplicate_of` означает подтверждённый дубль корневой причины; запись сохранена для трассируемости.
-- Remediation disposition: **208 fixed · 9 deferred · 0 pending · 9 not_applicable**.
+- Remediation disposition: **217 fixed · 0 deferred · 0 pending · 9 not_applicable**.
 
 Подробные отчёты и оговорки: `PHASE1-RAW-REPORTS-2026-07-18.md`. Машиночитаемый источник: `findings-inventory.json`. Интеграционные пакеты: `PHASE2-PACKAGES.json`.
 
@@ -1448,9 +1448,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Любая пара конкурирующих писателей state (watchdog_cap stop vs ручной рестарт, peer_off vs mqtt_observed_change из sse_hub) завершается победой хронологически последней записи независимо от того, чьё представление о версии/состоянии устарело — «versioned» механизм не отсекает ни одну из гонок из находок выше, хотя модульные комментарии (zones_state.py: «eliminates the TOCTOU race», «optimistic-lock version match») обещают обратное. Конкретно: stop_zone завис между publish '0' и финальной записью 'off'; за это время sse_hub по эху записал 'off' и обнулил watering_start_time, затем пришёл рестарт и записал 'on' + start_time; поздняя запись stop_zone 'off'+start_time=None перетирает активный старт — зона физически включена ('1' переиздан рестартом), в БД 'off'.
-- **Disposition Фаз 2–3:** `deferred`.
-- **Причина disposition:** Настоящий caller-owned optimistic CAS требует передавать expected_version через database facade, zones_state, zone_control и scheduler и запрещать raw fallback после CAS failure. В рамках единственного владельца db/zones.py P04 устранил проглатывание BEGIN IMMEDIATE/BUSY, но локальная транзакция не может отличить устаревшее намерение вызывающего без cross-layer version contract; такой протокол требует отдельного сериализованного safety-пакета.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Caller-owned expected_version проходит через публичный CRUD, database facade, zones_state, zone_control и scheduler; все repository writers увеличивают version, forward trigger страхует внешние writers, а CAS conflict больше не дожимается raw fallback. Физические ON/OFF и terminal writes дополнительно ограждены activation token/generation.
 - **Пакет:** `phase2-zone-db`.
+- **Fix commit:** `ae7f553a2a2a03814cc395aa5d1202dc88da24a1`.
+- **Regression tests:** `tests/db/test_release_data_followup_integrity.py`, `tests/unit/test_release_data_followup_state.py`, `tests/unit/test_release_scheduler_reconcile.py`.
 
 ### #38 [medium] `services/app_init.py:137` — _boot_sync: stop_all_in_group(force=True) закрывает «крашнутые» открытые zone_runs как status='ok' ДО mop-up'а в 'aborted'
 
@@ -1676,9 +1678,11 @@
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** За nginx любой пользователь (или атакующий за basic-auth) делает 5 неудачных попыток логина → login_limiter заносит lockout для ключа '127.0.0.1' → следующие 900 с (15 мин) ВСЕ пользователи, включая админа с верным паролем, получают 429 на /api/login. Аналогично per-IP изоляция брутфорса на уровне Flask не работает — все запросы считаются как один IP. Первичную защиту даёт nginx limit_req (per real IP), поэтому серьёзность низкая, но Flask-слой деградирует до общего ведра и создаёт self-DoS логина.
 - **Решение оркестратора:** Conditional on an external reverse proxy; the supported native WB deployment exposes Hypercorn directly.
-- **Disposition Фаз 2–3:** `deferred`.
-- **Причина disposition:** На поддерживаемом production target Hypercorn слушается напрямую под native WB systemd, внешняя reverse-proxy topology не поддерживается. Исправление требует явной trusted-proxy allowlist/config boundary; без неё доверие X-Forwarded-For позволит клиенту подменить IP и ослабит rate/security controls.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Proxy headers по умолчанию игнорируются. Явный trusted-proxy contract разрешён только при согласованном secure transport, нормализованный client identity передаётся существующим rate limiters и audit, а небезопасные hop/bind комбинации отклоняются fail-closed.
 - **Пакет:** `phase2-auth-roles`.
+- **Fix commit:** `f9177c0686c59cbd7c27bfcbea281da6dceca032`.
+- **Regression tests:** `tests/unit/test_runtime_security.py::test_proxy_headers_are_ignored_by_default_and_trusted_only_when_opted_in`, `tests/unit/test_runtime_security.py::test_proxy_client_identity_reaches_existing_api_rate_limiter`.
 
 ### #57 [low] `routes/auth.py:39` — GET /login?guest=1 меняет сессию (сброс + role=viewer) без CSRF — можно принудительно понизить/разлогинить авторизованного админа
 
@@ -1881,9 +1885,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Оператор откатывает миграцию telegram_add_fsm_and_notif штатным rollback_migration() (задокументированный DOWNGRADE_REGISTRY) → бот продолжает работать, но upsert_bot_user падает на каждом сообщении (логируется и возвращает False), авторизация/учёт пользователей Telegram полностью ломаются до ручного восстановления схемы.
-- **Disposition Фаз 2–3:** `deferred`.
-- **Причина disposition:** rollback_migration вызывается только тестами; поддерживаемый WB update path делает pre-deploy backup, а безопасный production rollback восстанавливает согласованную DB-копию. Исправление потребует разморозить миграции и выбрать контракт: constraint-preserving in-place downgrade либо удаление неподдерживаемого live-downgrade API в пользу backup restore.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Опасный live schema downgrade удалён из исполняемого контракта: rollback_migration теперь даёт только non-mutating preview, а production rollback восстанавливает предварительно проверенную целостную SQLite-копию.
 - **Пакет:** `phase2-frozen-migration-decisions`.
+- **Fix commit:** `4db893e057ac8e140fe3606b948f9694a75ad955`.
+- **Regression tests:** `tests/unit/test_migration_downgrade.py::test_live_downgrade_is_preview_only`, `tests/db/test_release_data_contracts.py::test_live_migration_downgrade_is_preview_only`.
 
 ### #74 [high] `templates/programs.html:489` — Stored XSS: имя зоны вставляется в innerHTML без escapeHtml в мастере программ (шаг 4 «Выбор зон»)
 
@@ -2185,9 +2191,11 @@
 - **Происхождение:** `main_bug`.
 - **Верификация:** Two independent Phase 1 roles confirmed the current code path, realistic reachability, and the concrete user, hardware, availability, or test-quality effect. Detailed evidence and qualification are preserved in PHASE1-RAW-REPORTS-2026-07-18.md.
 - **Репродукция/сценарий:** Контроллер в любой не-UTC зоне (Wirenboard в РФ = UTC+3): при первом апгрейде на версию с колонкой source одноразовая миграция необратимо помечает все исторические программные поливы как 'ручные'. Фильтр 'программа/вручную' в истории поливов и любая статистика по source навсегда врут для всей предшествующей истории.
-- **Disposition Фаз 2–3:** `deferred`.
-- **Причина disposition:** Одноразовый backfill уже применён, а старые zone_runs не содержат program identity/provenance: после edits/deletes легитимные manual и program runs неразличимы. Любая повторная переклассификация необратимо выдумала бы данные; нужен размороженный previewable forward-repair с явно выбранной ambiguity policy либо решение оставить исторические значения как есть.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Forward correction больше не выдумывает program provenance: до correction marker снимаются только заведомо непроверяемые ложные labels, после marker новые записи получают provenance из authoritative writer. Исторически неоднозначные строки остаются честно неизвестными.
 - **Пакет:** `phase2-frozen-migration-decisions`.
+- **Fix commit:** `ae7f553a2a2a03814cc395aa5d1202dc88da24a1`.
+- **Regression tests:** `tests/db/test_release_data_followup_integrity.py::test_source_correction_clears_only_pre_marker_unverifiable_labels`.
 
 ### #100 [medium] `db/programs.py:216` — check_program_conflicts полностью игнорирует extra_times: пересечение по дополнительным слотам не детектируется, программы реально накладываются в рантайме
 
@@ -2661,9 +2669,11 @@
 - **Происхождение:** `main_bug_with_branch_false_green_tests`.
 - **Верификация:** Both reviewers reproduced false empty/zero results after completed runs.
 - **Репродукция/сценарий:** Record program_start/program_finish twice; GET log and stats still reports no runs.
-- **Disposition Фаз 2–3:** `deferred`.
-- **Причина disposition:** Текущие zone_runs не хранят program_id/run identity, а program_start/program_finish logs не связывают overlapping/restarted executions и не содержат требуемых water/duration metrics. Сначала нужно определить semantics, добавить program_runs либо эквивалентный execution identity и scheduler writers; shape-only заглушки не заменяются вымышленными значениями.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** API больше не выдаёт пустые массивы и нули как реальные результаты: до появления authoritative program-run identity log/stats явно отвечают UNSUPPORTED, а scheduler lifecycle audit не заявляет успешный terminal при отменённом или потерянном ownership.
 - **Пакет:** `phase2-programs-web`.
+- **Fix commit:** `4db893e057ac8e140fe3606b948f9694a75ad955`.
+- **Regression tests:** `tests/api/test_release_data_api_contracts.py::test_program_log_and_stats_report_unsupported_instead_of_fake_data`, `tests/unit/test_release_scheduler_reconcile.py::test_partially_cancelled_program_is_not_logged_as_success`.
 
 ### #141 [medium] `irrigation_scheduler.py:801-880,1140-1294; tests/unit/test_scheduler_v2.py:401-444` — Типы программ smart и time-based фактически не различаются, а тесты проверяют только наличие job
 
@@ -2671,9 +2681,11 @@
 - **Происхождение:** `main_bug_with_branch_false_green_tests`.
 - **Верификация:** Code introspection and targeted tests confirmed type is never consumed.
 - **Репродукция/сценарий:** Schedule otherwise identical smart and time-based programs; both execute the same weather path.
-- **Disposition Фаз 2–3:** `deferred`.
-- **Причина disposition:** В продукте не определено, чем runtime smart должен отличаться от time-based: нет smart decision inputs, scheduling policy или UI promise. Реализация без отдельной спецификации выдумала бы поведение; H2 включать запрещено.
+- **Disposition Фаз 2–3:** `fixed`.
+- **Причина disposition:** Неопределённый Smart режим закрыт fail-closed: API не создаёт и не включает его, scheduler не создаёт jobs, forward migration отключает legacy Smart с audit, UI не предлагает создание и показывает legacy records read-only. Time-based semantics больше не маскируются под Smart.
 - **Пакет:** `phase2-scheduler-safety`.
+- **Fix commit:** `ae7f553a2a2a03814cc395aa5d1202dc88da24a1`.
+- **Regression tests:** `tests/api/test_release_data_api_contracts.py::test_program_create_rejects_smart_as_unsupported`, `tests/db/test_release_data_followup_integrity.py::test_forward_migration_disables_enabled_smart_programs_with_audit`, `tests/unit/test_phase4_frontend_safety.py::test_program_wizard_does_not_offer_or_submit_unsupported_smart_type`.
 
 ### #142 [low] `tests/unit/test_scheduler_v2.py:51-78,215-314` — CronTrigger-тесты не проверяют weekday/even-odd/extra-time поля и пропускают полностью неверное расписание
 

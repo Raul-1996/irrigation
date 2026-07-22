@@ -12,9 +12,7 @@ def _scheduler_stop_barrier(app, group_id):
 
     def complete_stop(requested_group_id):
         zone_ids = [
-            int(zone["id"])
-            for zone in app.db.get_zones()
-            if int(zone.get("group_id") or 0) == int(requested_group_id)
+            int(zone["id"]) for zone in app.db.get_zones() if int(zone.get("group_id") or 0) == int(requested_group_id)
         ]
         return {
             "success": True,

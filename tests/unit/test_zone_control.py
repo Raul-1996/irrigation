@@ -6,13 +6,17 @@ from unittest.mock import patch
 os.environ["TESTING"] = "1"
 
 
+def _water_monitor_patch():
+    return patch("services.zone_control.water_monitor", **{"summarize_run.return_value": (None, None)})
+
+
 class TestExclusiveStartZone:
     def test_start_nonexistent_zone_returns_false(self, test_db):
         """Starting a zone that doesn't exist should return False."""
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
         ):
             from services.zone_control import exclusive_start_zone
 
@@ -36,7 +40,7 @@ class TestExclusiveStartZone:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import exclusive_start_zone
@@ -71,7 +75,7 @@ class TestExclusiveStartZone:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import exclusive_start_zone
@@ -92,7 +96,7 @@ class TestStopZone:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
         ):
             from services.zone_control import stop_zone
 
@@ -111,7 +115,7 @@ class TestStopZone:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
         ):
             from services.zone_control import stop_zone
 
@@ -133,7 +137,7 @@ class TestStopZone:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_zone
@@ -157,7 +161,7 @@ class TestStopAllInGroup:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            _water_monitor_patch(),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import stop_all_in_group

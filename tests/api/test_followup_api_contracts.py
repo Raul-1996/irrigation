@@ -517,9 +517,7 @@ class TestMapRetention:
         assert ignored.read_text(encoding="utf-8") == "keep"
         items = listed.get_json()["items"]
         assert len(items) == system_api.MAX_MAP_FILES
-        assert [item["mtime"] for item in items] == sorted(
-            (item["mtime"] for item in items), reverse=True
-        )
+        assert [item["mtime"] for item in items] == sorted((item["mtime"] for item in items), reverse=True)
 
     def test_failed_atomic_upload_does_not_prune_existing_maps(self, admin_client, tmp_path):
         import routes.system_config_api as system_api

@@ -517,9 +517,7 @@ def test_legacy_health_does_not_claim_empty_mqtt_configuration(admin_client):
     assert response.get_json()["mqtt_configured"] is False
 
 
-def test_legacy_health_checks_database_instead_of_treating_empty_query_as_success(
-    admin_client, monkeypatch
-):
+def test_legacy_health_checks_database_instead_of_treating_empty_query_as_success(admin_client, monkeypatch):
     from routes import system_status_api
 
     monkeypatch.setattr(system_status_api, "_database_is_healthy", lambda: False, raising=False)
@@ -584,15 +582,12 @@ def test_finding_102_log_dates_use_controller_local_calendar(admin_client, app, 
                 ],
             )
 
-        response = admin_client.get(
-            "/api/logs?type=phase2-local-date&from=2026-07-18&to=2026-07-18"
-        )
+        response = admin_client.get("/api/logs?type=phase2-local-date&from=2026-07-18&to=2026-07-18")
 
         assert response.status_code == 200
-        assert [
-            (entry["details"], entry["timestamp"])
-            for entry in response.get_json()
-        ] == [("local July 18", "2026-07-18 02:00:00")]
+        assert [(entry["details"], entry["timestamp"]) for entry in response.get_json()] == [
+            ("local July 18", "2026-07-18 02:00:00")
+        ]
     finally:
         if previous_tz is None:
             monkeypatch.delenv("TZ", raising=False)
@@ -680,8 +675,7 @@ def test_finding_148_health_cancel_does_not_create_ownerless_group_session(admin
 def test_health_cancel_group_fails_closed_on_unresolved_relays(admin_client, app, monkeypatch):
     group = app.db.create_group("cancel-unresolved")
     zones = [
-        app.db.create_zone({"name": f"cancel-{index}", "duration": 10, "group_id": group["id"]})
-        for index in range(3)
+        app.db.create_zone({"name": f"cancel-{index}", "duration": 10, "group_id": group["id"]}) for index in range(3)
     ]
     zone_ids = [zone["id"] for zone in zones]
     scheduler = SimpleNamespace(
@@ -773,8 +767,7 @@ def test_health_cancel_group_requires_exact_seven_field_partition(
 ):
     group = app.db.create_group(f"strict-cancel-{malformation}")
     zones = [
-        app.db.create_zone({"name": f"strict-{index}", "duration": 10, "group_id": group["id"]})
-        for index in range(2)
+        app.db.create_zone({"name": f"strict-{index}", "duration": 10, "group_id": group["id"]}) for index in range(2)
     ]
     zone_ids = [zone["id"] for zone in zones]
     outcome = _exact_group_cancel_result(group["id"], zone_ids)
@@ -835,13 +828,10 @@ def test_health_cancel_group_requires_exact_seven_field_partition(
 def test_health_cancel_group_accepts_only_exact_full_success(admin_client, app, monkeypatch):
     group = app.db.create_group("strict-cancel-valid")
     zones = [
-        app.db.create_zone({"name": f"valid-{index}", "duration": 10, "group_id": group["id"]})
-        for index in range(2)
+        app.db.create_zone({"name": f"valid-{index}", "duration": 10, "group_id": group["id"]}) for index in range(2)
     ]
     zone_ids = [zone["id"] for zone in zones]
-    scheduler = SimpleNamespace(
-        cancel_group_jobs=Mock(return_value=_exact_group_cancel_result(group["id"], zone_ids))
-    )
+    scheduler = SimpleNamespace(cancel_group_jobs=Mock(return_value=_exact_group_cancel_result(group["id"], zone_ids)))
     monkeypatch.setattr("routes.system_status_api.get_scheduler", lambda: scheduler)
 
     response = admin_client.post(f"/api/health/group/{group['id']}/cancel")
@@ -964,7 +954,9 @@ def test_status_rain_sensor_disabled_has_no_false_health_fault(admin_client, app
     assert payload["rain_sensor_online"] is False
     assert payload["rain_sensor_state"] == "disabled"
     assert payload["rain_sensor_health"] == {"status": "disabled", "error_code": None}
-    assert not any(str(fault.get("type", "")).startswith("rain_sensor_") for fault in payload["system_health"]["faults"])
+    assert not any(
+        str(fault.get("type", "")).startswith("rain_sensor_") for fault in payload["system_health"]["faults"]
+    )
 
 
 def test_status_rain_sensor_offline_is_degraded_not_dry(admin_client, app, monkeypatch):

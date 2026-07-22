@@ -132,13 +132,11 @@ def abort_crash_open_runs(
         active_interrupted = {
             int(row[0])
             for row in conn.execute(
-                "SELECT id FROM zones "
-                "WHERE LOWER(COALESCE(state, '')) IN ('starting', 'on', 'stopping', 'paused')"
+                "SELECT id FROM zones WHERE LOWER(COALESCE(state, '')) IN ('starting', 'on', 'stopping', 'paused')"
             ).fetchall()
         }
         conn.execute(
-            "UPDATE zone_runs SET end_utc = ?, status = 'aborted', updated_at = ? "
-            "WHERE end_utc IS NULL",
+            "UPDATE zone_runs SET end_utc = ?, status = 'aborted', updated_at = ? WHERE end_utc IS NULL",
             (str(end_local), str(end_local)),
         )
         _require_before_deadline(deadline)
