@@ -12,23 +12,42 @@ REPO_DIR=${REPO_DIR:-/opt/wb-irrigation/irrigation}
 BRANCH=${BRANCH:-main}
 TARGET_COMMIT=${TARGET_COMMIT:-}
 SERVICE=${SERVICE:-wb-irrigation}
-PY_VERSION=${PY_VERSION:-3.11}
-UV_BIN=${UV_BIN:-/root/.local/bin/uv}
+PY_VERSION=${PY_VERSION:-3.11.15}
+UV_BIN=${UV_BIN:-/mnt/data/wb-irrigation-tools/uv}
 BACKUP_BASE=${BACKUP_BASE:-}
 BACKUP_KEEP=${BACKUP_KEEP:-10}
 ENV_FILE=${ENV_FILE:-/opt/wb-irrigation/.env}
+STATE_DIR=${STATE_DIR:-/mnt/data/wb-irrigation-state}
+PYTHON_INSTALL_DIR=${PYTHON_INSTALL_DIR:-/mnt/data/wb-irrigation-python}
+SERVICE_USER=${SERVICE_USER:-wb-irrigation}
+SERVICE_GROUP=${SERVICE_GROUP:-wb-irrigation}
 NONINTERACTIVE=${NONINTERACTIVE:-0}
+HANDOFF_SERVICE_WAS_ACTIVE=${WB_IRRIGATION_HANDOFF_SERVICE_WAS_ACTIVE:-0}
+DEFER_ROLLBACK_RESTART=${WB_IRRIGATION_DEFER_ROLLBACK_RESTART:-0}
+DEPLOY_LOCK_FILE=${DEPLOY_LOCK_FILE:-/run/lock/wb-irrigation-deploy.lock}
+readonly FIXED_REPO_DIR=/opt/wb-irrigation/irrigation
+readonly FIXED_REPO_DIR_REAL=/mnt/data/wb-irrigation
+readonly FIXED_SERVICE=wb-irrigation
+readonly FIXED_ENV_FILE=/opt/wb-irrigation/.env
+readonly FIXED_STATE_DIR=/mnt/data/wb-irrigation-state
+readonly FIXED_PYTHON_INSTALL_DIR=/mnt/data/wb-irrigation-python
+readonly FIXED_PY_VERSION=3.11.15
+readonly FIXED_UV_BIN=/mnt/data/wb-irrigation-tools/uv
+readonly FIXED_DEPLOY_LOCK_FILE=/run/lock/wb-irrigation-deploy.lock
+readonly UV_VERSION=0.11.31
+readonly UV_ARCHIVE_URL=https://releases.astral.sh/github/uv/releases/download/0.11.31/uv-aarch64-unknown-linux-gnu.tar.gz
+readonly UV_ARCHIVE_SHA256=d74f23949fd07be4970f293d06ca99d87cd2a78a341c3d7b7fc0df7bc2d8a145
 # Versioned security contract for the currently integrated Telegram runtime.
 # Any legitimate edit to that runtime must deliberately update this allowlist.
 readonly TELEGRAM_LOG_RETIREMENT_BLOB=e4fc7b282236aac7675c879b892cbf1192dc66f0
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--repo-dir DIR] [--branch BRANCH] [--service NAME] [--backup-dir DIR] [--yes]
-Env vars: REPO_DIR, BRANCH, TARGET_COMMIT, SERVICE, BACKUP_BASE, BACKUP_KEEP, PY_VERSION, UV_BIN, ENV_FILE
+Usage: $(basename "$0") --commit SHA [--branch BRANCH] [--backup-dir DIR] [--yes]
+Env vars: TARGET_COMMIT, BACKUP_BASE, BACKUP_KEEP
+Pinned production toolchain: uv $UV_VERSION, Python $PY_VERSION (not overridable)
 Examples:
-  sudo bash $0 --yes
-  BRANCH=main REPO_DIR=/opt/wb-irrigation/irrigation bash $0 -y
+  sudo bash $0 --yes --commit 0123456789abcdef0123456789abcdef01234567
 EOF
 }
 
@@ -44,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --branch)
       BRANCH="$2"
+      shift 2
+      ;;
+    --commit)
+      TARGET_COMMIT="$2"
       shift 2
       ;;
     --service)
@@ -71,6 +94,557 @@ info() { echo -e "\033[1;34m[$(ts)]\033[0m $*"; }
 ok() { echo -e "\033[1;32m[$(ts)] OK\033[0m $*"; }
 warn() { echo -e "\033[1;33m[$(ts)] WARN\033[0m $*"; }
 err() { echo -e "\033[1;31m[$(ts)] ERROR\033[0m $*" >&2; }
+
+require_full_commit_sha() {
+  local target_commit=${1:-}
+
+  if [[ ! "$target_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    err "TARGET_COMMIT must be an explicit full lowercase 40-character Git commit SHA"
+    return 1
+  fi
+}
+
+validate_branch_name() {
+  if [[ "$BRANCH" != "main" ]]; then
+    err "Production updates authorize commits only from branch main"
+    return 1
+  fi
+}
+
+fetch_authorization_branch() {
+  local repository=$1
+
+  info "Fetching authorization branch origin/$BRANCH"
+  git -C "$repository" fetch --quiet origin \
+    "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+}
+
+resolve_authorized_target_commit() {
+  local repository=$1
+  local target_commit=$2
+  local resolved_target
+
+  require_full_commit_sha "$target_commit" || return 1
+  if ! resolved_target=$(git -C "$repository" rev-parse --verify "${target_commit}^{commit}"); then
+    err "Requested commit is not available after fetching origin/$BRANCH: $target_commit"
+    return 1
+  fi
+  if [[ "$resolved_target" != "$target_commit" ]]; then
+    err "Requested revision did not resolve to the exact immutable commit: $target_commit"
+    return 1
+  fi
+  if ! git -C "$repository" merge-base --is-ancestor "$target_commit" "refs/remotes/origin/$BRANCH"; then
+    err "Requested commit is not authorized by origin/$BRANCH: $target_commit"
+    return 1
+  fi
+  printf '%s\n' "$resolved_target"
+}
+
+validate_fixed_deployment_contract() {
+  if [[ "$BRANCH" != "main" ]]; then
+    err "BRANCH override is unsupported for production deployment: $BRANCH"
+    return 1
+  fi
+  if [[ "$REPO_DIR" != "$FIXED_REPO_DIR" ]]; then
+    err "REPO_DIR override is unsupported by the fixed systemd unit: $REPO_DIR"
+    return 1
+  fi
+  if [[ "$SERVICE" != "$FIXED_SERVICE" ]]; then
+    err "SERVICE override is unsupported by the fixed systemd unit: $SERVICE"
+    return 1
+  fi
+  if [[ "$ENV_FILE" != "$FIXED_ENV_FILE" ]]; then
+    err "ENV_FILE override is unsupported by the fixed systemd unit: $ENV_FILE"
+    return 1
+  fi
+  if [[ "$STATE_DIR" != "$FIXED_STATE_DIR" ]]; then
+    err "STATE_DIR override is unsupported by the fixed systemd unit: $STATE_DIR"
+    return 1
+  fi
+  if [[ "$PYTHON_INSTALL_DIR" != "$FIXED_PYTHON_INSTALL_DIR" ]]; then
+    err "PYTHON_INSTALL_DIR override is unsupported by the fixed systemd unit"
+    return 1
+  fi
+  if [[ "$PY_VERSION" != "$FIXED_PY_VERSION" ]]; then
+    err "PY_VERSION override is unsupported by the pinned production runtime"
+    return 1
+  fi
+  if [[ "$UV_BIN" != "$FIXED_UV_BIN" ]]; then
+    err "UV_BIN override is unsupported by the pinned production toolchain"
+    return 1
+  fi
+  if [[ "$SERVICE_USER" != "wb-irrigation" || "$SERVICE_GROUP" != "wb-irrigation" ]]; then
+    err "SERVICE_USER/SERVICE_GROUP overrides are unsupported"
+    return 1
+  fi
+  if [[ "$DEPLOY_LOCK_FILE" != "$FIXED_DEPLOY_LOCK_FILE" ]]; then
+    err "DEPLOY_LOCK_FILE override is unsupported for production deployment"
+    return 1
+  fi
+  if [[ "$HANDOFF_SERVICE_WAS_ACTIVE" != "0" && "$HANDOFF_SERVICE_WAS_ACTIVE" != "1" ]]; then
+    err "Invalid WB_IRRIGATION_HANDOFF_SERVICE_WAS_ACTIVE value"
+    return 1
+  fi
+  if [[ "$DEFER_ROLLBACK_RESTART" != "0" && "$DEFER_ROLLBACK_RESTART" != "1" ]]; then
+    err "Invalid WB_IRRIGATION_DEFER_ROLLBACK_RESTART value"
+    return 1
+  fi
+  if [[ "$DEFER_ROLLBACK_RESTART" == "1" && "$HANDOFF_SERVICE_WAS_ACTIVE" != "1" ]]; then
+    err "Deferred rollback restart requires an active-service install handoff"
+    return 1
+  fi
+}
+
+acquire_deploy_lock() {
+  local inherited_fd=${WB_IRRIGATION_DEPLOY_LOCK_FD:-}
+  local inherited_path=""
+
+  if ! command -v flock >/dev/null 2>&1; then
+    err "flock is required to serialize install, update and uninstall operations"
+    return 1
+  fi
+  if [[ -n "$inherited_fd" ]]; then
+    if [[ "$inherited_fd" != "9" ]] || ! : >&9 2>/dev/null; then
+      err "Invalid inherited deployment lock descriptor"
+      return 1
+    fi
+    if [[ -e "/proc/$$/fd/9" ]]; then
+      inherited_path=$(readlink -f "/proc/$$/fd/9")
+      if [[ "$inherited_path" != "$DEPLOY_LOCK_FILE" ]]; then
+        err "Inherited descriptor does not reference $DEPLOY_LOCK_FILE"
+        return 1
+      fi
+    fi
+    if ! flock -n 9; then
+      err "Inherited deployment lock is invalid"
+      return 1
+    fi
+    return 0
+  fi
+
+  exec 9>"$DEPLOY_LOCK_FILE"
+  chmod 0600 "$DEPLOY_LOCK_FILE"
+  if ! flock -n 9; then
+    err "Another install, update or uninstall operation holds $DEPLOY_LOCK_FILE"
+    return 1
+  fi
+  export WB_IRRIGATION_DEPLOY_LOCK_FD=9
+}
+
+install_pinned_uv() {
+  local architecture
+  local tools_dir
+  local staging_dir
+  local archive
+  local extracted_uv
+  local staged_uv
+  local metadata
+
+  architecture=$(uname -m)
+  if [[ "$architecture" != "aarch64" ]]; then
+    err "Production uv bootstrap supports only aarch64, got $architecture"
+    return 1
+  fi
+  if [[ -L "$UV_BIN" || ( -e "$UV_BIN" && ! -f "$UV_BIN" ) ]]; then
+    err "Pinned uv destination is unsafe: $UV_BIN"
+    return 1
+  fi
+
+  tools_dir=$(dirname "$UV_BIN")
+  if [[ -L "$tools_dir" || ( -e "$tools_dir" && ! -d "$tools_dir" ) ]]; then
+    err "Pinned uv tools path is unsafe: $tools_dir"
+    return 1
+  fi
+  mkdir -p "$tools_dir"
+  chown root:root "$tools_dir"
+  chmod 0755 "$tools_dir"
+  if ! staging_dir=$(mktemp -d /mnt/data/.wb-irrigation-uv.XXXXXX); then
+    err "Could not create pinned uv staging directory"
+    return 1
+  fi
+  archive="$staging_dir/uv.tar.gz"
+  if ! curl --proto '=https' --tlsv1.2 -fsSLo "$archive" "$UV_ARCHIVE_URL"; then
+    rm -rf -- "$staging_dir"
+    err "Could not download pinned uv archive"
+    return 1
+  fi
+  if ! printf '%s  %s\n' "$UV_ARCHIVE_SHA256" "$archive" | sha256sum -c - >/dev/null; then
+    rm -rf -- "$staging_dir"
+    err "Pinned uv archive SHA-256 verification failed"
+    return 1
+  fi
+  if ! tar -xzf "$archive" -C "$staging_dir"; then
+    rm -rf -- "$staging_dir"
+    err "Could not extract pinned uv archive"
+    return 1
+  fi
+  extracted_uv="$staging_dir/uv-aarch64-unknown-linux-gnu/uv"
+  if [[ ! -f "$extracted_uv" || -L "$extracted_uv" ]]; then
+    rm -rf -- "$staging_dir"
+    err "Pinned uv archive has an unexpected layout"
+    return 1
+  fi
+  staged_uv="${UV_BIN}.new-$$"
+  if [[ -e "$staged_uv" || -L "$staged_uv" ]]; then
+    rm -rf -- "$staging_dir"
+    err "Pinned uv staging destination already exists: $staged_uv"
+    return 1
+  fi
+  if ! install -o root -g root -m 0755 "$extracted_uv" "$staged_uv"; then
+    rm -rf -- "$staging_dir"
+    return 1
+  fi
+  if [[ "$($staged_uv --version)" != "uv $UV_VERSION" ]]; then
+    rm -f -- "$staged_uv"
+    rm -rf -- "$staging_dir"
+    err "Pinned uv binary reports an unexpected version"
+    return 1
+  fi
+  if ! mv "$staged_uv" "$UV_BIN"; then
+    rm -f -- "$staged_uv"
+    rm -rf -- "$staging_dir"
+    return 1
+  fi
+  metadata=$(stat -c '%u:%g:%a' "$UV_BIN")
+  if [[ "$metadata" != "0:0:755" || "$($UV_BIN --version)" != "uv $UV_VERSION" ]]; then
+    rm -rf -- "$staging_dir"
+    err "Installed uv does not match the pinned root-owned uv $UV_VERSION"
+    return 1
+  fi
+  rm -rf -- "$staging_dir"
+}
+
+ensure_service_account() {
+  local passwd_entry
+  local group_entry
+  local group_gid
+  local group_members
+  local conflicting_primary
+  local account_name password uid gid gecos account_home account_shell
+
+  if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+    groupadd --system "$SERVICE_GROUP"
+  fi
+  group_entry=$(getent group "$SERVICE_GROUP")
+  group_gid=$(printf '%s' "$group_entry" | cut -d: -f3)
+  group_members=$(printf '%s' "$group_entry" | cut -d: -f4)
+  if [[ "$group_gid" == "0" ]]; then
+    err "$SERVICE_GROUP must not use privileged GID 0"
+    return 1
+  fi
+  if [[ -n "$group_members" && "$group_members" != "$SERVICE_USER" ]]; then
+    err "$SERVICE_GROUP has unexpected supplementary members"
+    return 1
+  fi
+  conflicting_primary=$(getent passwd | awk -F: -v gid="$group_gid" -v user="$SERVICE_USER" \
+    '$4 == gid && $1 != user {print $1; exit}')
+  if [[ -n "$conflicting_primary" ]]; then
+    err "$SERVICE_GROUP is the primary group of unexpected user $conflicting_primary"
+    return 1
+  fi
+  if id "$SERVICE_USER" >/dev/null 2>&1; then
+    if [[ "$(id -gn "$SERVICE_USER")" != "$SERVICE_GROUP" ]]; then
+      err "$SERVICE_USER exists with an unexpected primary group"
+      return 1
+    fi
+    passwd_entry=$(getent passwd "$SERVICE_USER")
+    IFS=: read -r account_name password uid gid gecos account_home account_shell <<<"$passwd_entry"
+    if [[ "$uid" == "0" || "$gid" == "0" ]]; then
+      err "$SERVICE_USER must not use a privileged UID or GID"
+      return 1
+    fi
+    if [[ "$account_home" != "$STATE_DIR" || "$account_shell" != "/usr/sbin/nologin" ]]; then
+      err "$SERVICE_USER exists with an unexpected home or shell"
+      return 1
+    fi
+  else
+    useradd --system --gid "$SERVICE_GROUP" --home-dir "$STATE_DIR" \
+      --shell /usr/sbin/nologin --no-create-home "$SERVICE_USER"
+  fi
+}
+
+assert_safe_state_source() {
+  local source_path=$1
+  local source_kind=$2
+  local symlink_path=""
+
+  if [[ -L "$source_path" ]]; then
+    err "Refusing symlinked mutable state path: $source_path"
+    return 1
+  fi
+  if [[ "$source_kind" == "file" ]]; then
+    [[ ! -e "$source_path" || -f "$source_path" ]] || {
+      err "Mutable state path is not a regular file: $source_path"
+      return 1
+    }
+    return 0
+  fi
+  [[ ! -e "$source_path" || -d "$source_path" ]] || {
+    err "Mutable state path is not a directory: $source_path"
+    return 1
+  }
+  if [[ -d "$source_path" ]]; then
+    symlink_path=$(find -P "$source_path" -type l -print -quit)
+    if [[ -n "$symlink_path" ]]; then
+      err "Refusing mutable state tree containing a symlink: $symlink_path"
+      return 1
+    fi
+  fi
+}
+
+copy_state_database() {
+  local source_path=$1
+  local target_path=$2
+  local owner=$3
+  local group=$4
+  local staged_path="${target_path}.state-stage-$$"
+  local check_result
+
+  assert_safe_state_source "$source_path" file || return 1
+  [[ -f "$source_path" ]] || return 0
+  rm -f -- "$staged_path"
+  if ! sqlite3 "$source_path" ".backup '$staged_path'"; then
+    rm -f -- "$staged_path"
+    err "Could not copy SQLite state: $source_path"
+    return 1
+  fi
+  check_result=$(sqlite3 "$staged_path" "PRAGMA quick_check;")
+  if [[ "$check_result" != "ok" ]]; then
+    rm -f -- "$staged_path"
+    err "Copied SQLite state failed quick_check: $source_path"
+    return 1
+  fi
+  chmod 0600 "$staged_path"
+  chown "$owner:$group" "$staged_path"
+  mv -f -- "$staged_path" "$target_path"
+}
+
+copy_state_file() {
+  local source_path=$1
+  local target_path=$2
+  local owner=$3
+  local group=$4
+  local mode=$5
+  local staged_path="${target_path}.state-stage-$$"
+
+  assert_safe_state_source "$source_path" file || return 1
+  [[ -f "$source_path" ]] || return 0
+  install -m "$mode" "$source_path" "$staged_path"
+  chown "$owner:$group" "$staged_path"
+  mv -f -- "$staged_path" "$target_path"
+}
+
+copy_state_directory() {
+  local source_path=$1
+  local target_path=$2
+  local owner=$3
+  local group=$4
+  local staged_path="${target_path}.state-stage-$$"
+  local previous_path="${target_path}.state-previous-$$"
+
+  assert_safe_state_source "$source_path" directory || return 1
+  [[ -d "$source_path" ]] || return 0
+  if [[ -e "$staged_path" || -L "$staged_path" || -e "$previous_path" || -L "$previous_path" ]]; then
+    err "State copy staging path already exists for $target_path"
+    return 1
+  fi
+  mkdir -p "$(dirname "$target_path")"
+  mkdir -m 0700 "$staged_path"
+  if ! cp -a "$source_path/." "$staged_path/"; then
+    rm -rf -- "$staged_path"
+    err "Could not copy mutable state directory: $source_path"
+    return 1
+  fi
+  chown -R "$owner:$group" "$staged_path"
+  chmod -R go-rwx "$staged_path"
+  if [[ -e "$target_path" || -L "$target_path" ]]; then
+    mv "$target_path" "$previous_path"
+  fi
+  if ! mv "$staged_path" "$target_path"; then
+    [[ -e "$previous_path" ]] && mv "$previous_path" "$target_path"
+    rm -rf -- "$staged_path"
+    return 1
+  fi
+  rm -rf -- "$previous_path"
+}
+
+sync_mutable_state_tree() {
+  local source_root=$1
+  local target_root=$2
+  local owner=$3
+  local group=$4
+  local state_dir
+
+  if [[ -L "$source_root" || ! -d "$source_root" || -L "$target_root" ]]; then
+    err "Mutable state roots must be real directories"
+    return 1
+  fi
+  mkdir -p "$target_root"
+  chmod 0750 "$target_root"
+  chown "$owner:$group" "$target_root"
+
+  copy_state_database "$source_root/irrigation.db" "$target_root/irrigation.db" "$owner" "$group" || return 1
+  copy_state_database "$source_root/jobs.db" "$target_root/jobs.db" "$owner" "$group" || return 1
+  copy_state_file "$source_root/.secret_key" "$target_root/.secret_key" "$owner" "$group" 0600 || return 1
+  copy_state_file "$source_root/.irrig_secret_key" "$target_root/.irrig_secret_key" "$owner" "$group" 0600 || return 1
+  # A repository .env is dotenv state. The external systemd EnvironmentFile
+  # remains at /opt/wb-irrigation/.env and is handled separately.
+  copy_state_file "$source_root/.env" "$target_root/.env" root root 0600 || return 1
+
+  for state_dir in backups static/media/maps static/media/zones; do
+    if [[ -d "$source_root/$state_dir" || -L "$source_root/$state_dir" ]]; then
+      copy_state_directory "$source_root/$state_dir" "$target_root/$state_dir" "$owner" "$group" || return 1
+    else
+      mkdir -p "$target_root/$state_dir"
+      chmod 0700 "$target_root/$state_dir"
+      chown "$owner:$group" "$target_root/$state_dir"
+    fi
+  done
+  touch "$target_root/static/media/maps/.gitkeep" "$target_root/static/media/zones/.gitkeep"
+  chown "$owner:$group" \
+    "$target_root/static/media/maps/.gitkeep" "$target_root/static/media/zones/.gitkeep"
+  chmod 0600 "$target_root/static/media/maps/.gitkeep" "$target_root/static/media/zones/.gitkeep"
+}
+
+preflight_state_copy_space() {
+  local source_root=$1
+  local state_parent=$2
+  local required_kib=0
+  local available_kib
+  local state_path
+  local size
+
+  for state_path in irrigation.db jobs.db .secret_key .irrig_secret_key .env backups static/media/maps static/media/zones; do
+    if [[ -e "$source_root/$state_path" && ! -L "$source_root/$state_path" ]]; then
+      size=$(du -sk "$source_root/$state_path" | awk '{print $1}')
+      required_kib=$((required_kib + size))
+    fi
+  done
+  available_kib=$(df -Pk "$state_parent" | awk 'NR == 2 {print $4}')
+  if [[ ! "$available_kib" =~ ^[0-9]+$ ]] || ((available_kib <= required_kib + 10240)); then
+    err "Insufficient free space for transactional state migration"
+    return 1
+  fi
+}
+
+prepare_state_layout() {
+  local legacy_root=$1
+  local import_legacy=$2
+  local state_parent
+  local state_stage
+
+  state_parent=$(dirname "$STATE_DIR")
+  if [[ -L "$STATE_DIR" ]]; then
+    err "STATE_DIR must not be a symlink: $STATE_DIR"
+    return 1
+  fi
+  if [[ "$import_legacy" == "0" ]]; then
+    if [[ ! -d "$STATE_DIR" || ! -f "$STATE_DIR/.layout-v1" ]]; then
+      err "Active non-root unit requires a complete marked state layout"
+      return 1
+    fi
+    return 0
+  fi
+  if [[ -e "$STATE_DIR" ]]; then
+    err "Legacy unit and existing STATE_DIR conflict; refusing an ambiguous migration"
+    return 1
+  fi
+
+  preflight_state_copy_space "$legacy_root" "$state_parent"
+  state_stage="$state_parent/.wb-irrigation-state.stage.$$"
+  if [[ -e "$state_stage" || -L "$state_stage" ]]; then
+    err "State migration staging path already exists: $state_stage"
+    return 1
+  fi
+  mkdir -m 0700 "$state_stage"
+  if ! sync_mutable_state_tree "$legacy_root" "$state_stage" "$SERVICE_USER" "$SERVICE_GROUP"; then
+    rm -rf -- "$state_stage"
+    return 1
+  fi
+  if ! mv "$state_stage" "$STATE_DIR"; then
+    rm -rf -- "$state_stage"
+    return 1
+  fi
+  STATE_ACTIVATED=1
+}
+
+secure_python_runtime() {
+  chown -R root:root "$PYTHON_INSTALL_DIR"
+  chmod -R go-w "$PYTHON_INSTALL_DIR"
+  chmod -R a+rX "$PYTHON_INSTALL_DIR"
+}
+
+secure_code_tree() {
+  local repository=$1
+  local tracked_file
+  local tracked_mode
+
+  chown -R root:root "$repository"
+  find -P "$repository" -type d -exec chmod 0755 {} +
+  find -P "$repository" -type f -exec chmod go-rwx {} +
+  while IFS= read -r -d '' tracked_file; do
+    tracked_mode=$(git -C "$repository" ls-files -s -- "$tracked_file" | awk 'NR == 1 {print $1}')
+    if [[ "$tracked_mode" == "100755" ]]; then
+      chmod 0755 "$repository/$tracked_file"
+    elif [[ ! -L "$repository/$tracked_file" ]]; then
+      chmod 0644 "$repository/$tracked_file"
+    fi
+  done < <(git -C "$repository" ls-files -z)
+  chmod -R go-rwx "$repository/.git"
+  if [[ -d "$repository/venv" ]]; then
+    chmod -R go-w "$repository/venv"
+    chmod -R a+rX "$repository/venv"
+  fi
+  for private_path in \
+    "$repository/.env" "$repository/.secret_key" "$repository/.irrig_secret_key" \
+    "$repository/irrigation.db" "$repository/jobs.db" "$repository/backups"; do
+    if [[ -e "$private_path" && ! -L "$private_path" ]]; then
+      chmod -R go-rwx "$private_path"
+    fi
+  done
+}
+
+normalize_state_permissions() {
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR"
+  chmod 0700 "$STATE_DIR"
+  find -P "$STATE_DIR" -type d -exec chmod 0700 {} +
+  find -P "$STATE_DIR" -type f -exec chmod 0600 {} +
+  if [[ -f "$STATE_DIR/.env" ]]; then
+    chown root:root "$STATE_DIR/.env"
+    chmod 0600 "$STATE_DIR/.env"
+  fi
+  if [[ -d "$STATE_DIR/deploy-backups" ]]; then
+    chown -R root:root "$STATE_DIR/deploy-backups"
+    chmod -R go-rwx "$STATE_DIR/deploy-backups"
+  fi
+  if [[ -f "$STATE_DIR/.layout-v1" ]]; then
+    chown root:root "$STATE_DIR/.layout-v1"
+    chmod 0600 "$STATE_DIR/.layout-v1"
+  fi
+}
+
+verify_service_runtime_access() {
+  local tls_path
+
+  runuser -u "$SERVICE_USER" -- "$VENV_DIR/bin/python" -V >/dev/null
+  runuser -u "$SERVICE_USER" -- test -r "$REPO_DIR_REAL/run.py"
+  runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR"
+  runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR/static/media/maps"
+  runuser -u "$SERVICE_USER" -- test -w "$STATE_DIR/static/media/zones"
+  if runuser -u "$SERVICE_USER" -- test -w "$REPO_DIR_REAL" \
+    || runuser -u "$SERVICE_USER" -- test -w "$VENV_DIR" \
+    || runuser -u "$SERVICE_USER" -- test -w "$PYTHON_INSTALL_DIR"; then
+    err "$SERVICE_USER must not be able to write code, venv or shared Python"
+    return 1
+  fi
+  for tls_path in \
+    "$(configured_env_value WB_HTTP_TLS_CERTFILE "$ENV_FILE" "$STATE_DIR/.env" || true)" \
+    "$(configured_env_value WB_HTTP_TLS_KEYFILE "$ENV_FILE" "$STATE_DIR/.env" || true)"; do
+    if [[ -n "$tls_path" ]]; then
+      runuser -u "$SERVICE_USER" -- test -r "$tls_path"
+    fi
+  done
+}
 
 read_env_port() {
   local env_file=$1
@@ -106,6 +680,177 @@ configured_port() {
   printf '%s\n' "$port"
 }
 
+read_env_setting() {
+  local key=$1
+  local env_file=$2
+  local value
+
+  [[ -f "$env_file" ]] || return 1
+  grep -q "^[[:space:]]*${key}[[:space:]]*=" "$env_file" || return 1
+  value=$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$env_file" | tail -n 1)
+  value=${value%$'\r'}
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ ${#value} -ge 2 ]] \
+    && { [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]] \
+      || [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; }; then
+    value=${value:1:${#value}-2}
+  fi
+  printf '%s' "$value"
+}
+
+configured_env_value() {
+  local key=$1
+  shift
+  local env_file
+  local value
+
+  if [[ ${!key+x} ]]; then
+    printf '%s' "${!key}"
+    return 0
+  fi
+  for env_file in "$@"; do
+    if [[ -n "$env_file" ]] && value=$(read_env_setting "$key" "$env_file"); then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+configured_http_scheme() {
+  local environment_file=$1
+  local repository_file=${2:-}
+  local cert_file=""
+  local key_file=""
+
+  cert_file=$(configured_env_value WB_HTTP_TLS_CERTFILE "$environment_file" "$repository_file" || true)
+  key_file=$(configured_env_value WB_HTTP_TLS_KEYFILE "$environment_file" "$repository_file" || true)
+  if [[ -n "$cert_file" && -n "$key_file" ]]; then
+    printf 'https\n'
+  elif [[ -z "$cert_file" && -z "$key_file" ]]; then
+    printf 'http\n'
+  else
+    err "WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE must be configured together"
+    return 1
+  fi
+}
+
+validate_http_host_value() {
+  local host_value=$1
+
+  if [[ -z "$host_value" || "$host_value" =~ [^A-Za-z0-9.:-] || "$host_value" == -* ]]; then
+    err "Invalid HTTP host value: ${host_value:-<empty>}"
+    return 1
+  fi
+}
+
+configured_http_bind_host() {
+  local environment_file=$1
+  local repository_file=${2:-}
+  local bind_host
+
+  bind_host=$(configured_env_value WB_HTTP_BIND_HOST "$environment_file" "$repository_file" || printf '127.0.0.1')
+  validate_http_host_value "$bind_host" || return 1
+  printf '%s\n' "$bind_host"
+}
+
+configured_http_probe_host() {
+  local environment_file=$1
+  local repository_file=${2:-}
+  local bind_host=$3
+  local probe_host
+
+  probe_host=$(configured_env_value WB_HTTP_PROBE_HOST "$environment_file" "$repository_file" || true)
+  if [[ -n "$probe_host" ]]; then
+    validate_http_host_value "$probe_host" || return 1
+    if [[ "$probe_host" == "0.0.0.0" || "$probe_host" == "::" ]]; then
+      err "WB_HTTP_PROBE_HOST must not be a wildcard address"
+      return 1
+    fi
+    printf '%s\n' "$probe_host"
+    return 0
+  fi
+  case "$bind_host" in
+    0.0.0.0) printf '127.0.0.1\n' ;;
+    ::) printf '::1\n' ;;
+    *) printf '%s\n' "$bind_host" ;;
+  esac
+}
+
+configure_ready_probe() {
+  local environment_file=$1
+  local repository_file=${2:-}
+  local ca_file
+  local insecure_probe
+  local url_host
+
+  APP_BIND_HOST=$(configured_http_bind_host "$environment_file" "$repository_file") || return 1
+  APP_PROBE_HOST=$(configured_http_probe_host "$environment_file" "$repository_file" "$APP_BIND_HOST") \
+    || return 1
+  APP_SCHEME=$(configured_http_scheme "$environment_file" "$repository_file") || return 1
+  url_host=$APP_PROBE_HOST
+  [[ "$url_host" == *:* ]] && url_host="[$url_host]"
+  APP_READY_URL="${APP_SCHEME}://${url_host}:${APP_PORT}/readyz"
+  READY_CURL_ARGS=(-fsS --max-time 3)
+  if [[ "$APP_SCHEME" == "https" ]]; then
+    ca_file=$(configured_env_value WB_HTTP_PROBE_CA_FILE "$environment_file" "$repository_file" || true)
+    insecure_probe=$(configured_env_value WB_HTTP_PROBE_INSECURE_TLS "$environment_file" "$repository_file" || true)
+    if [[ -n "$ca_file" ]]; then
+      READY_CURL_ARGS+=(--cacert "$ca_file")
+    elif [[ "$insecure_probe" == "1" ]]; then
+      warn "WB_HTTP_PROBE_INSECURE_TLS=1 disables TLS verification for this local readiness probe"
+      READY_CURL_ARGS+=(--insecure)
+    fi
+  fi
+}
+
+validate_http_transport_contract() {
+  local environment_file=$1
+  local repository_file=${2:-}
+  local bind_host
+  local allow_insecure
+  local ca_file
+  local insecure_probe
+  local scheme
+
+  bind_host=$(configured_http_bind_host "$environment_file" "$repository_file") || return 1
+  configured_http_probe_host "$environment_file" "$repository_file" "$bind_host" >/dev/null || return 1
+  allow_insecure=$(
+    configured_env_value WB_HTTP_ALLOW_INSECURE_EXTERNAL "$environment_file" "$repository_file" || true
+  )
+  if ! scheme=$(configured_http_scheme "$environment_file" "$repository_file"); then
+    return 1
+  fi
+  ca_file=$(configured_env_value WB_HTTP_PROBE_CA_FILE "$environment_file" "$repository_file" || true)
+  insecure_probe=$(configured_env_value WB_HTTP_PROBE_INSECURE_TLS "$environment_file" "$repository_file" || true)
+  if [[ -n "$insecure_probe" && "$insecure_probe" != "0" && "$insecure_probe" != "1" ]]; then
+    err "WB_HTTP_PROBE_INSECURE_TLS must be 0 or 1"
+    return 1
+  fi
+  if [[ -n "$ca_file" && "$insecure_probe" == "1" ]]; then
+    err "WB_HTTP_PROBE_CA_FILE and WB_HTTP_PROBE_INSECURE_TLS=1 are mutually exclusive"
+    return 1
+  fi
+  if [[ -n "$ca_file" && ( -L "$ca_file" || ! -f "$ca_file" || ! -r "$ca_file" ) ]]; then
+    err "WB_HTTP_PROBE_CA_FILE must be a readable regular non-symlink file: $ca_file"
+    return 1
+  fi
+  if [[ "$scheme" == "http" && ( -n "$ca_file" || "$insecure_probe" == "1" ) ]]; then
+    err "TLS probe options require WB_HTTP_TLS_CERTFILE and WB_HTTP_TLS_KEYFILE"
+    return 1
+  fi
+  case "$bind_host" in
+    127.0.0.1 | localhost | ::1) ;;
+    *)
+      if [[ "$scheme" != "https" && "$allow_insecure" != "1" ]]; then
+        err "External WB_HTTP_BIND_HOST=$bind_host requires native TLS or WB_HTTP_ALLOW_INSECURE_EXTERNAL=1"
+        return 1
+      fi
+      ;;
+  esac
+}
+
 upsert_env_value() {
   local key=$1
   local value=$2
@@ -123,12 +868,41 @@ upsert_env_value() {
   chmod 600 "$env_file"
 }
 
+ensure_env_default() {
+  local key=$1
+  local value=$2
+  local env_file=$3
+
+  if [[ ! -f "$env_file" ]] || ! grep -q "^${key}=" "$env_file"; then
+    upsert_env_value "$key" "$value" "$env_file"
+  fi
+}
+
+persist_http_environment() {
+  local env_file=$1
+  local key
+
+  for key in \
+    WB_HTTP_BIND_HOST \
+    WB_HTTP_TLS_CERTFILE \
+    WB_HTTP_TLS_KEYFILE \
+    WB_HTTP_PROBE_CA_FILE \
+    WB_HTTP_PROBE_HOST \
+    WB_HTTP_PROBE_INSECURE_TLS \
+    WB_HTTP_ALLOW_INSECURE_EXTERNAL; do
+    if [[ ${!key+x} ]]; then
+      upsert_env_value "$key" "${!key}" "$env_file"
+    fi
+  done
+  ensure_env_default WB_HTTP_BIND_HOST 127.0.0.1 "$env_file"
+}
+
 canonicalize_backup_base() {
   local backup_parent
   local backup_name
 
-  if [[ -z "${REPO_DIR_REAL:-}" || "$REPO_DIR_REAL" != /* ]]; then
-    err "Repository path must be canonical before validating backups"
+  if [[ -z "${STATE_DIR:-}" || "$STATE_DIR" != /* ]]; then
+    err "State path must be absolute before validating backups"
     return 1
   fi
   if [[ -z "${BACKUP_BASE:-}" || "$BACKUP_BASE" != /* ]]; then
@@ -142,8 +916,8 @@ canonicalize_backup_base() {
 
   backup_parent=$(dirname -- "$BACKUP_BASE")
   backup_name=$(basename -- "$BACKUP_BASE")
-  if [[ "$backup_name" != "backups" || "$backup_parent" != "$REPO_DIR_REAL" ]]; then
-    err "BACKUP_BASE must be the dedicated child $REPO_DIR_REAL/backups"
+  if [[ "$backup_name" != "deploy-backups" || "$backup_parent" != "$STATE_DIR" ]]; then
+    err "BACKUP_BASE must be the dedicated child $STATE_DIR/deploy-backups"
     return 1
   fi
   if [[ -e "$BACKUP_BASE" && ! -d "$BACKUP_BASE" ]]; then
@@ -151,7 +925,7 @@ canonicalize_backup_base() {
     return 1
   fi
 
-  BACKUP_BASE="$REPO_DIR_REAL/backups"
+  BACKUP_BASE="$STATE_DIR/deploy-backups"
 }
 
 ensure_logrotate_ready() {
@@ -377,6 +1151,107 @@ restore_sqlite_database() {
   chmod 600 "$database_path"
 }
 
+restore_state_snapshot() {
+  if [[ "${STATE_SNAPSHOT_CREATED:-0}" != "1" ]]; then
+    return 0
+  fi
+  if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" || ! -f "$STATE_ARCHIVE" ]]; then
+    err "State rollback snapshot or destination is unavailable"
+    return 1
+  fi
+  rm -rf -- \
+    "$STATE_DIR/.secret_key" "$STATE_DIR/.irrig_secret_key" "$STATE_DIR/.env" \
+    "$STATE_DIR/backups" "$STATE_DIR/static/media/maps" "$STATE_DIR/static/media/zones"
+  mkdir -p "$STATE_DIR"
+  tar -xzf "$STATE_ARCHIVE" -C "$STATE_DIR"
+  normalize_state_permissions
+}
+
+quarantine_legacy_runtime_state() {
+  local repository=$1
+  local relative_path
+  local source_path
+  local target_path
+
+  LEGACY_QUARANTINE="$BACKUP_DIR/legacy-runtime"
+  LEGACY_MANIFEST="$BACKUP_DIR/legacy-runtime.manifest"
+  if [[ -e "$LEGACY_QUARANTINE" || -L "$LEGACY_QUARANTINE" || -e "$LEGACY_MANIFEST" ]]; then
+    err "Legacy runtime quarantine already exists"
+    return 1
+  fi
+  mkdir -m 0700 "$LEGACY_QUARANTINE"
+  if ! git -C "$repository" ls-files -z --others -- \
+    'irrigation.db*' 'jobs.db*' .secret_key .irrig_secret_key .env backups \
+    static/media/maps static/media/zones >"$LEGACY_MANIFEST"; then
+    rm -rf -- "$LEGACY_QUARANTINE" "$LEGACY_MANIFEST"
+    err "Could not enumerate legacy mutable state"
+    return 1
+  fi
+  chmod 0600 "$LEGACY_MANIFEST"
+  LEGACY_CLEANUP_STARTED=1
+  while IFS= read -r -d '' relative_path; do
+    if [[ "$relative_path" == /* || "$relative_path" == ".." || "$relative_path" == ../* \
+      || "$relative_path" == */../* ]]; then
+      err "Unsafe legacy runtime path: $relative_path"
+      return 1
+    fi
+    source_path="$repository/$relative_path"
+    target_path="$LEGACY_QUARANTINE/$relative_path"
+    if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+      err "Refusing unexpected legacy runtime entry: $source_path"
+      return 1
+    fi
+    mkdir -p "$(dirname "$target_path")"
+    mv "$source_path" "$target_path"
+  done <"$LEGACY_MANIFEST"
+}
+
+restore_legacy_runtime_state() {
+  local repository=$1
+  local relative_path
+  local source_path
+  local target_path
+
+  [[ "${LEGACY_CLEANUP_STARTED:-0}" == "1" ]] || return 0
+  if [[ ! -f "${LEGACY_MANIFEST:-}" || ! -d "${LEGACY_QUARANTINE:-}" ]]; then
+    err "Legacy runtime rollback manifest is unavailable"
+    return 1
+  fi
+  while IFS= read -r -d '' relative_path; do
+    source_path="$LEGACY_QUARANTINE/$relative_path"
+    target_path="$repository/$relative_path"
+    [[ -e "$source_path" ]] || continue
+    if [[ -e "$target_path" || -L "$target_path" ]]; then
+      err "Legacy runtime rollback target already exists: $target_path"
+      return 1
+    fi
+    mkdir -p "$(dirname "$target_path")"
+    mv "$source_path" "$target_path"
+  done <"$LEGACY_MANIFEST"
+}
+
+activate_state_layout_marker() {
+  install -m 0600 /dev/null "$STATE_DIR/.layout-v1"
+  chown root:root "$STATE_DIR/.layout-v1"
+}
+
+quarantine_failed_state_layout() {
+  local failed_state
+
+  [[ "${STATE_ACTIVATED:-0}" == "1" ]] || return 0
+  if [[ -L "$STATE_DIR" || ! -d "$STATE_DIR" ]]; then
+    err "Cannot quarantine failed state layout"
+    return 1
+  fi
+  failed_state="${STATE_DIR}.failed-${STAMP:-rollback}-$$"
+  if [[ -e "$failed_state" || -L "$failed_state" ]]; then
+    err "Failed-state quarantine already exists: $failed_state"
+    return 1
+  fi
+  mv "$STATE_DIR" "$failed_state"
+  RECOVERY_STATE_DIR=$failed_state
+}
+
 rollback_update() {
   local rollback_failed=0
 
@@ -410,10 +1285,22 @@ rollback_update() {
       err "Rollback could not restore Git revision $ORIGINAL_COMMIT"
       rollback_failed=1
     fi
+  fi
+  if ! restore_state_snapshot; then
+    rollback_failed=1
+  fi
+  if [[ -n "${DB_PATH:-}" && -n "${DB_BACKUP:-}" ]]; then
     if ! restore_sqlite_database "$DB_PATH" "$DB_BACKUP" "${HAD_DB:-0}" "irrigation.db"; then
       rollback_failed=1
     fi
+  fi
+  if [[ -n "${JOBS_DB_PATH:-}" && -n "${JOBS_DB_BACKUP:-}" ]]; then
     if ! restore_sqlite_database "$JOBS_DB_PATH" "$JOBS_DB_BACKUP" "${HAD_JOBS_DB:-0}" "jobs.db"; then
+      rollback_failed=1
+    fi
+  fi
+  if [[ -d "${STATE_DIR:-}" ]]; then
+    if ! normalize_state_permissions; then
       rollback_failed=1
     fi
   fi
@@ -435,13 +1322,35 @@ rollback_update() {
   fi
   if [[ "${ENV_CHANGED:-0}" == "1" ]]; then
     if [[ "${HAD_ENV_FILE:-0}" == "1" ]]; then
-      install -m 0600 "$ENV_FILE_BACKUP" "$ENV_FILE" || rollback_failed=1
+      install -m 0640 "$ENV_FILE_BACKUP" "$ENV_FILE" || rollback_failed=1
+      chown root:"${SERVICE_GROUP:-wb-irrigation}" "$ENV_FILE" || rollback_failed=1
     else
       rm -f -- "$ENV_FILE" || rollback_failed=1
     fi
   fi
 
-  if [[ "${SERVICE_WAS_ACTIVE:-0}" == "1" ]]; then
+  if ! restore_legacy_runtime_state "$REPO_DIR_REAL"; then
+    rollback_failed=1
+  fi
+  if ! quarantine_failed_state_layout; then
+    rollback_failed=1
+  fi
+
+  if [[ "$rollback_failed" == "0" && "${ORIGINAL_USES_STATE:-0}" == "1" ]]; then
+    if ! secure_code_tree "$REPO_DIR_REAL"; then
+      err "Rollback could not restore non-root-readable code permissions"
+      rollback_failed=1
+    fi
+    chown root:root /opt/wb-irrigation || rollback_failed=1
+    chmod 0755 /opt/wb-irrigation || rollback_failed=1
+    if [[ "$rollback_failed" == "0" ]] && ! verify_service_runtime_access; then
+      err "Rollback runtime is not accessible under the dedicated service account"
+      rollback_failed=1
+    fi
+  fi
+
+  if [[ "$rollback_failed" == "0" && "${SERVICE_WAS_ACTIVE:-0}" == "1" \
+    && "${DEFER_ROLLBACK_RESTART:-0}" != "1" ]]; then
     if ! systemctl start "${SERVICE:-wb-irrigation}"; then
       err "Rollback could not restart ${SERVICE:-wb-irrigation}"
       rollback_failed=1
@@ -473,6 +1382,10 @@ if [[ "$(id -u)" -ne 0 ]]; then
   err "Run as root (sudo bash $0)"
   exit 1
 fi
+validate_fixed_deployment_contract
+require_full_commit_sha "$TARGET_COMMIT"
+validate_branch_name
+acquire_deploy_lock
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   err "Git repository not found: $REPO_DIR"
   exit 1
@@ -483,30 +1396,30 @@ if [[ ! "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || ((BACKUP_KEEP < 1)); then
 fi
 
 REPO_DIR_REAL=$(cd "$REPO_DIR" && pwd -P)
-BACKUP_BASE=${BACKUP_BASE:-"${REPO_DIR_REAL}/backups"}
-canonicalize_backup_base
+if [[ "$REPO_DIR_REAL" != "$FIXED_REPO_DIR_REAL" ]]; then
+  err "Legacy code layout must be migrated to $FIXED_REPO_DIR_REAL before this updater can run"
+  exit 1
+fi
 cd "$REPO_DIR_REAL"
-info "Target repo: $REPO_DIR_REAL (branch: $BRANCH)"
+info "Target repo: $REPO_DIR_REAL (authorization branch: $BRANCH, commit: $TARGET_COMMIT)"
 
 if [[ -n $(git status --porcelain --untracked-files=normal) ]]; then
   err "Deployment checkout has local changes; refusing an update that cannot be rolled back exactly"
   exit 1
 fi
 ORIGINAL_COMMIT=$(git rev-parse --verify HEAD)
-info "Fetching target branch origin/$BRANCH"
-git fetch --quiet origin "$BRANCH"
-UPDATE_REF=${TARGET_COMMIT:-origin/$BRANCH}
-RESOLVED_TARGET=$(git rev-parse --verify "${UPDATE_REF}^{commit}")
-if [[ -n "$TARGET_COMMIT" && "$RESOLVED_TARGET" != "$TARGET_COMMIT" ]]; then
-  err "Fetched target does not match requested TARGET_COMMIT=$TARGET_COMMIT"
-  exit 1
-fi
+fetch_authorization_branch "$REPO_DIR_REAL"
+RESOLVED_TARGET=$(resolve_authorized_target_commit "$REPO_DIR_REAL" "$TARGET_COMMIT")
 # Integration ordering contract: the Telegram runtime must stop creating the
 # legacy file before this deploy migration is allowed to purge it.
 require_retired_telegram_runtime_commit "$REPO_DIR_REAL" "$RESOLVED_TARGET"
 
 UPDATE_SUCCEEDED=0
-SERVICE_WAS_ACTIVE=0
+SERVICE_WAS_ACTIVE=$HANDOFF_SERVICE_WAS_ACTIVE
+ORIGINAL_USES_STATE=0
+STATE_ACTIVATED=0
+STATE_SNAPSHOT_CREATED=0
+LEGACY_CLEANUP_STARTED=0
 CODE_UPDATED=0
 VENV_SWAPPED=0
 HAD_OLD_VENV=0
@@ -521,7 +1434,24 @@ HAD_JOBS_DB=0
 STAGED_VENV=""
 OLD_VENV_BACKUP=""
 BACKUP_DIR=""
+STATE_ARCHIVE=""
+LEGACY_QUARANTINE=""
+LEGACY_MANIFEST=""
+SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+LOGROTATE_TARGET="/etc/logrotate.d/wb-irrigation"
+if [[ -f "$SERVICE_FILE" ]]; then
+  if grep -Fxq "User=$SERVICE_USER" "$SERVICE_FILE" \
+    && grep -Fxq "WorkingDirectory=$STATE_DIR" "$SERVICE_FILE"; then
+    ORIGINAL_USES_STATE=1
+  elif grep -Fq "User=$SERVICE_USER" "$SERVICE_FILE" \
+    || grep -Fq "WorkingDirectory=$STATE_DIR" "$SERVICE_FILE"; then
+    err "Installed unit contains a partial non-root state contract; refusing migration"
+    exit 1
+  fi
+fi
 trap finish_update EXIT
+
+ensure_service_account
 
 if systemctl is-active "$SERVICE" >/dev/null 2>&1; then
   SERVICE_WAS_ACTIVE=1
@@ -535,6 +1465,15 @@ fi
 
 retire_telegram_file_logs "$REPO_DIR_REAL"
 
+if [[ "$ORIGINAL_USES_STATE" == "1" ]]; then
+  prepare_state_layout "$REPO_DIR_REAL" 0
+else
+  prepare_state_layout "$REPO_DIR_REAL" 1
+fi
+normalize_state_permissions
+
+BACKUP_BASE=${BACKUP_BASE:-"${STATE_DIR}/deploy-backups"}
+canonicalize_backup_base
 mkdir -p -m 700 "$BACKUP_BASE"
 chmod 700 "$BACKUP_BASE"
 STAMP=$(date +"%Y%m%d_%H%M%S")
@@ -542,9 +1481,9 @@ BACKUP_DIR="$BACKUP_BASE/$STAMP"
 mkdir -m 700 "$BACKUP_DIR"
 info "Creating verified backup at $BACKUP_DIR"
 
-DB_PATH="$REPO_DIR_REAL/irrigation.db"
+DB_PATH="$STATE_DIR/irrigation.db"
 DB_BACKUP="$BACKUP_DIR/irrigation.db"
-JOBS_DB_PATH="$REPO_DIR_REAL/jobs.db"
+JOBS_DB_PATH="$STATE_DIR/jobs.db"
 JOBS_DB_BACKUP="$BACKUP_DIR/jobs.db"
 if [[ -f "$DB_PATH" ]]; then
   backup_sqlite_database "$DB_PATH" "$DB_BACKUP" "irrigation.db"
@@ -557,7 +1496,7 @@ if [[ -f "$JOBS_DB_PATH" ]]; then
   HAD_JOBS_DB=1
 fi
 
-for secret_file in "$REPO_DIR_REAL/.secret_key" "$REPO_DIR_REAL/.irrig_secret_key" "$REPO_DIR_REAL/.env"; do
+for secret_file in "$STATE_DIR/.secret_key" "$STATE_DIR/.irrig_secret_key" "$STATE_DIR/.env"; do
   if [[ -f "$secret_file" ]]; then
     chmod 600 "$secret_file"
   fi
@@ -571,8 +1510,14 @@ tar --exclude="./venv" --exclude="./.git" --exclude="./__pycache__" \
   -czf "$ARCHIVE" .
 chmod 600 "$ARCHIVE"
 
-SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
-LOGROTATE_TARGET="/etc/logrotate.d/wb-irrigation"
+STATE_ARCHIVE="$BACKUP_DIR/state_snapshot.tar.gz"
+tar --exclude="./deploy-backups" \
+  --exclude="./irrigation.db" --exclude="./irrigation.db-wal" --exclude="./irrigation.db-shm" \
+  --exclude="./jobs.db" --exclude="./jobs.db-wal" --exclude="./jobs.db-shm" \
+  -czf "$STATE_ARCHIVE" -C "$STATE_DIR" .
+chmod 600 "$STATE_ARCHIVE"
+STATE_SNAPSHOT_CREATED=1
+
 SERVICE_FILE_BACKUP="$BACKUP_DIR/systemd-unit.service"
 LOGROTATE_FILE_BACKUP="$BACKUP_DIR/logrotate.conf"
 ENV_FILE_BACKUP="$BACKUP_DIR/environment.env"
@@ -598,27 +1543,27 @@ ok "Code updated to $(git rev-parse --short HEAD)"
 
 find . -path ./venv -prune -o -path ./.git -prune -o -type d -name __pycache__ -print -exec rm -rf -- {} +
 
-if [[ ! -x "$UV_BIN" ]]; then
-  if command -v uv >/dev/null 2>&1; then
-    UV_BIN=$(command -v uv)
-  else
-    info "Installing uv"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-  fi
-fi
-if [[ ! -x "$UV_BIN" ]]; then
-  err "uv not found at $UV_BIN"
+install_pinned_uv
+export PATH="$(dirname "$UV_BIN"):$PATH"
+export UV_PYTHON_INSTALL_DIR="$PYTHON_INSTALL_DIR"
+"$UV_BIN" python install "$PY_VERSION"
+PY_BIN=$("$UV_BIN" python find "$PY_VERSION")
+if [[ ! -x "$PY_BIN" || "$PY_BIN" != "$PYTHON_INSTALL_DIR"/* ]]; then
+  err "uv Python is not installed in the shared runtime directory: $PY_BIN"
   exit 1
 fi
-export PATH="$(dirname "$UV_BIN"):$PATH"
-uv python install "$PY_VERSION"
+secure_python_runtime
 
 VENV_DIR="$REPO_DIR_REAL/venv"
 STAGED_VENV="$REPO_DIR_REAL/.venv-staged-$STAMP-$$"
 OLD_VENV_BACKUP="$REPO_DIR_REAL/.venv-rollback-$STAMP-$$"
-uv venv --python "$PY_VERSION" "$STAGED_VENV"
-uv pip install --python "$STAGED_VENV/bin/python" -r requirements.txt
-STAGED_VERSION=$("$STAGED_VENV/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+if [[ ! -f "$REPO_DIR_REAL/requirements.lock" ]]; then
+  err "Production dependency lock is missing: $REPO_DIR_REAL/requirements.lock"
+  exit 1
+fi
+"$UV_BIN" venv --python "$PY_BIN" "$STAGED_VENV"
+"$UV_BIN" pip install --python "$STAGED_VENV/bin/python" --require-hashes -r requirements.lock
+STAGED_VERSION=$("$STAGED_VENV/bin/python" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
 if [[ "$STAGED_VERSION" != "$PY_VERSION" ]]; then
   err "Staged venv uses Python $STAGED_VERSION instead of $PY_VERSION"
   exit 1
@@ -630,6 +1575,10 @@ if [[ -e "$VENV_DIR" ]]; then
 fi
 VENV_SWAPPED=1
 mv "$STAGED_VENV" "$VENV_DIR"
+mkdir -p "$REPO_DIR_REAL/static/media/maps" "$REPO_DIR_REAL/static/media/zones"
+secure_code_tree "$REPO_DIR_REAL"
+chown root:root /opt/wb-irrigation
+chmod 0755 /opt/wb-irrigation
 ok "Staged runtime activated with $($VENV_DIR/bin/python -V)"
 
 REPO_UNIT="$REPO_DIR_REAL/wb-irrigation.service"
@@ -658,9 +1607,14 @@ CURRENT_COMMIT=$(git rev-parse HEAD)
 ENV_CHANGED=1
 upsert_env_value GIT_COMMIT "$CURRENT_COMMIT" "$ENV_FILE"
 if [[ ${PORT+x} ]]; then
-  VALIDATED_PORT=$(configured_port "$ENV_FILE" "$REPO_DIR_REAL/.env")
+  VALIDATED_PORT=$(configured_port "$ENV_FILE" "$STATE_DIR/.env")
   upsert_env_value PORT "$VALIDATED_PORT" "$ENV_FILE"
 fi
+persist_http_environment "$ENV_FILE"
+chown root:"$SERVICE_GROUP" "$ENV_FILE"
+chmod 0640 "$ENV_FILE"
+validate_http_transport_contract "$ENV_FILE" "$STATE_DIR/.env"
+verify_service_runtime_access
 info "GIT_COMMIT updated in $ENV_FILE -> ${CURRENT_COMMIT:0:12}"
 
 if ! systemctl is-enabled "$SERVICE" >/dev/null 2>&1; then
@@ -673,32 +1627,33 @@ if ! systemctl is-active "$SERVICE" >/dev/null 2>&1; then
   exit 1
 fi
 
-APP_PORT=$(configured_port "$ENV_FILE" "$REPO_DIR_REAL/.env")
-info "Waiting up to 30s for /readyz on 127.0.0.1:${APP_PORT}"
-READYZ_BODY=""
+APP_PORT=$(configured_port "$ENV_FILE" "$STATE_DIR/.env")
+configure_ready_probe "$ENV_FILE" "$STATE_DIR/.env"
+info "Waiting up to 30s for $APP_READY_URL"
 for attempt in $(seq 1 15); do
-  if READYZ_BODY=$(curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/readyz" 2>/dev/null); then
-    SCHED_STATUS=$(
-      printf '%s' "$READYZ_BODY" | "$VENV_DIR/bin/python" -c \
-        "import json,sys; print(json.load(sys.stdin).get('checks', {}).get('scheduler', {}).get('status', 'missing'))"
-    )
-    if [[ "$SCHED_STATUS" == "ok" ]]; then
-      ok "/readyz scheduler check: ok (attempt $attempt)"
-      break
-    fi
+  if curl "${READY_CURL_ARGS[@]}" "$APP_READY_URL" >/dev/null 2>&1; then
+    ok "/readyz returned a successful HTTP status (attempt $attempt)"
+    break
   fi
   if [[ "$attempt" -eq 15 ]]; then
     err "/readyz failed on configured PORT=$APP_PORT"
-    err "Body: ${READYZ_BODY:-<no response>}"
     exit 1
   fi
   sleep 2
 done
 
+if [[ "$ORIGINAL_USES_STATE" == "0" ]]; then
+  quarantine_legacy_runtime_state "$REPO_DIR_REAL"
+fi
+activate_state_layout_marker
+normalize_state_permissions
 prune_old_backups
 UPDATE_SUCCEEDED=1
 VENV_SWAPPED=0
 if [[ "$HAD_OLD_VENV" == "1" ]] && ! rm -rf -- "$OLD_VENV_BACKUP"; then
   warn "Update succeeded, but old venv cleanup failed: $OLD_VENV_BACKUP"
+fi
+if [[ -n "$LEGACY_QUARANTINE" ]] && ! rm -rf -- "$LEGACY_QUARANTINE" "$LEGACY_MANIFEST"; then
+  warn "Update succeeded, but legacy quarantine cleanup failed: $LEGACY_QUARANTINE"
 fi
 ok "Update completed successfully. Backup stored at: $BACKUP_DIR"
