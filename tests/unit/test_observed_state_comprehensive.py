@@ -92,22 +92,20 @@ class TestStateVerifier:
             result = sv.verify(z["id"], "on")
             assert result is True  # nothing to verify
 
-    def test_verify_no_server(self, test_db):
+    def test_verify_no_server(self):
         from services.observed_state import StateVerifier
 
         sv = StateVerifier()
-        sv._db = test_db
-        z = test_db.create_zone(
-            {
-                "name": "Z1",
-                "duration": 10,
-                "group_id": 1,
-                "topic": "/test/z1",
-                "mqtt_server_id": 999,
-            }
-        )
+        sv._db = MagicMock()
+        sv._db.get_zone.return_value = {
+            "id": 1,
+            "name": "Z1",
+            "topic": "/test/z1",
+            "mqtt_server_id": 999,
+        }
+        sv._db.get_mqtt_server.return_value = None
         with patch("services.observed_state.mqtt", MagicMock()):
-            result = sv.verify(z["id"], "on")
+            result = sv.verify(1, "on")
             assert result is False
 
     def test_record_fault(self, test_db):

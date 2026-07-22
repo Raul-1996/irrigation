@@ -3,8 +3,9 @@
 import json
 import os
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
-import pytest
+from tests.safety_contracts import confirmed_group_stop
 
 os.environ["TESTING"] = "1"
 
@@ -19,28 +20,32 @@ class TestGroupsAPIDeep:
     def test_update_group_all_fields(self, admin_client, app):
         g = app.db.create_group("AllFields")
         srv = app.db.create_mqtt_server({"name": "T", "host": "127.0.0.1", "port": 1883})
-        resp = admin_client.put(
-            f"/api/groups/{g['id']}",
-            data=json.dumps(
-                {
-                    "name": "Updated All",
-                    "icon": "💧",
-                    "use_master_valve": 1,
-                    "master_mqtt_topic": "/mv",
-                    "master_mqtt_server_id": srv["id"],
-                    "master_mode": "NO",
-                    "use_water_meter": 1,
-                    "water_mqtt_topic": "/water",
-                    "water_mqtt_server_id": srv["id"],
-                    "water_pulse_size": "10l",
-                    "water_base_value_m3": 100.5,
-                    "water_base_pulses": 1000,
-                    "use_rain": True,
-                }
-            ),
-            content_type="application/json",
-        )
-        assert resp.status_code in (200, 400, 500)
+        with (
+            patch("routes.groups_api._confirm_master_closed", return_value=(True, None)),
+            patch("routes.groups_api._reconfigure_water_monitor", return_value=True),
+        ):
+            resp = admin_client.put(
+                f"/api/groups/{g['id']}",
+                data=json.dumps(
+                    {
+                        "name": "Updated All",
+                        "icon": "💧",
+                        "use_master_valve": 1,
+                        "master_mqtt_topic": "/mv",
+                        "master_mqtt_server_id": srv["id"],
+                        "master_mode": "NO",
+                        "use_water_meter": 1,
+                        "water_mqtt_topic": "/water",
+                        "water_mqtt_server_id": srv["id"],
+                        "water_pulse_size": "10l",
+                        "water_base_value_m3": 100.5,
+                        "water_base_pulses": 1000,
+                        "use_rain": True,
+                    }
+                ),
+                content_type="application/json",
+            )
+        assert resp.status_code == 200
 
     def test_delete_group_with_zones(self, admin_client, app):
         g = app.db.create_group("WithZones")
@@ -52,7 +57,8 @@ class TestGroupsAPIDeep:
         g = app.db.create_group("StopWater")
         z = app.db.create_zone({"name": "Z", "duration": 10, "group_id": g["id"], "topic": "/t/z"})
         app.db.update_zone(z["id"], {"state": "on", "watering_start_time": "2026-01-01 10:00:00"})
-        resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
         assert resp.status_code in (200, 400, 500)
 
 
@@ -180,9 +186,30 @@ class TestHealthDetailsDeep:
 
 
 class TestPostponeDeep:
-    def test_postpone_valid(self, admin_client, app):
+    def test_postpone_valid(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
         g = app.db.create_group("PPG")
-        app.db.create_zone({"name": "PP", "duration": 10, "group_id": g["id"]})
+        zone = app.db.create_zone({"name": "PP", "duration": 10, "group_id": g["id"]})
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "aggregate_valid": True,
+                        "stopped": [zone["id"]],
+                        "unresolved": [],
+                        "unverified_zone_ids": [],
+                        "retry_scheduled": False,
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         resp = admin_client.post(
             "/api/postpone",
             data=json.dumps(
@@ -220,13 +247,22 @@ class TestPostponeDeep:
 
 
 class TestWaterUsageDeep:
-    @pytest.mark.xfail(reason="known bug: get_water_usage returns list but API expects dict")
     def test_water_with_usage_data(self, admin_client, app):
-        g = app.db.create_group("WUG")
-        z = app.db.create_zone({"name": "WU", "duration": 10, "group_id": g["id"]})
+        # Seeded group 1: freshly created groups get id 1000+ and /api/water
+        # skips ids >= 999 (999 = служебная группа "БЕЗ ПОЛИВА").
+        z = app.db.create_zone({"name": "WU", "duration": 10, "group_id": 1})
         app.db.add_water_usage(z["id"], 50)
         resp = admin_client.get("/api/water?days=30")
         assert resp.status_code == 200
+        data = resp.get_json()
+        group_data = data["1"]["data"]
+        assert group_data["total_liters"] == 50
+        zone_entry = group_data["zone_usage"][str(z["id"])]
+        assert zone_entry["name"] == "WU"
+        assert zone_entry["liters"] == 50
+        assert zone_entry["last_used"] is not None
+        assert len(group_data["daily_usage"]) == 30
+        assert sum(d["liters"] for d in group_data["daily_usage"]) == 50
 
     def test_water_no_data(self, admin_client, app):
         resp = admin_client.get("/api/water")

@@ -2,6 +2,7 @@
 
 import json
 import os
+from unittest.mock import patch
 
 os.environ["TESTING"] = "1"
 
@@ -103,7 +104,7 @@ class TestZoneCSVImport:
         z = app.db.create_zone({"name": "CSV", "duration": 10, "group_id": 1})
         resp = admin_client.put(
             f"/api/zones/{z['id']}?source=csv",
-            data=json.dumps({"name": "CSV Updated"}),
+            data=json.dumps({"name": "CSV Updated", "expected_version": z["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200
@@ -146,8 +147,9 @@ class TestMasterValveToggle:
                 "master_mqtt_server_id": srv["id"],
             },
         )
-        resp = admin_client.post(f"/api/groups/{g['id']}/master-valve/open", content_type="application/json")
-        assert resp.status_code in (200, 400, 500)
+        with patch("routes.groups_api._activate_manual_master_open", return_value=True):
+            resp = admin_client.post(f"/api/groups/{g['id']}/master-valve/open", content_type="application/json")
+        assert resp.status_code == 200
 
     def test_master_valve_close(self, admin_client, app):
         g = app.db.create_group("MVC")
@@ -160,8 +162,9 @@ class TestMasterValveToggle:
                 "master_mqtt_server_id": srv["id"],
             },
         )
-        resp = admin_client.post(f"/api/groups/{g['id']}/master-valve/close", content_type="application/json")
-        assert resp.status_code in (200, 400, 500)
+        with patch("routes.groups_api._master_command_locked", return_value=(True, False)):
+            resp = admin_client.post(f"/api/groups/{g['id']}/master-valve/close", content_type="application/json")
+        assert resp.status_code == 200
 
 
 class TestSystemAPIExtended:
@@ -226,17 +229,18 @@ class TestGroupUpdate:
     def test_update_group_water_meter(self, admin_client, app):
         g = app.db.create_group("WM")
         srv = app.db.create_mqtt_server({"name": "T", "host": "127.0.0.1", "port": 1883})
-        resp = admin_client.put(
-            f"/api/groups/{g['id']}",
-            data=json.dumps(
-                {
-                    "name": "WM",
-                    "use_water_meter": 1,
-                    "water_mqtt_topic": "/water/meter",
-                    "water_mqtt_server_id": srv["id"],
-                    "water_pulse_size": "1l",
-                }
-            ),
-            content_type="application/json",
-        )
-        assert resp.status_code in (200, 400)
+        with patch("routes.groups_api._reconfigure_water_monitor", return_value=True):
+            resp = admin_client.put(
+                f"/api/groups/{g['id']}",
+                data=json.dumps(
+                    {
+                        "name": "WM",
+                        "use_water_meter": 1,
+                        "water_mqtt_topic": "/water/meter",
+                        "water_mqtt_server_id": srv["id"],
+                        "water_pulse_size": "1l",
+                    }
+                ),
+                content_type="application/json",
+            )
+        assert resp.status_code == 200

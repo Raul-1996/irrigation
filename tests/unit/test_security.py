@@ -11,11 +11,11 @@ os.environ["TESTING"] = "1"
 class TestAuthService:
     def test_verify_password_correct(self, test_db):
         """Correct password should return (True, 'admin')."""
-        # Default password is '1234'
+        test_db.set_password("fixture-admin-password")
         with patch("services.auth_service.db", test_db):
             from services.auth_service import verify_password
 
-            success, role = verify_password("1234")
+            success, role = verify_password("fixture-admin-password")
             assert success is True
             assert role == "admin"
 

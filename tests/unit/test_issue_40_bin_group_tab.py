@@ -20,7 +20,6 @@ import re
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STATUS_JS = os.path.join(PROJECT_ROOT, "static", "js", "status.js")
-PROGRAMS_JS = os.path.join(PROJECT_ROOT, "static", "js", "programs.js")
 
 
 def _read(path):
@@ -97,19 +96,6 @@ class TestStatusJsBinGroupTab:
         )
 
 
-class TestProgramsJsBinGroupExcluded:
-    """programs.js — wizard must keep excluding bin group (Raul: existing behavior preserved)."""
-
-    def test_load_zone_selector_still_filters_999(self):
-        """programs.js:271 filter `gid !== 999` must remain untouched."""
-        js = _read(PROGRAMS_JS)
-        # Either of the equivalent forms is acceptable, but the literal filter must exist.
-        assert "gid !== 999" in js or "g.id !== 999" in js, (
-            "programs.js no longer excludes group 999 from the wizard — "
-            "watering programs would start including bin zones (regression)."
-        )
-
-
 # ─── API contract: backend must still return group 999 ───
 
 
@@ -125,9 +111,7 @@ class TestGroupsApiReturnsBinGroup:
         ids = [g.get("id") for g in data]
         assert 999 in ids, f"Group 999 missing from /api/groups response — got ids {ids}"
         bin_group = next(g for g in data if g.get("id") == 999)
-        assert bin_group.get("name") == "БЕЗ ПОЛИВА", (
-            f"Group 999 has unexpected name {bin_group.get('name')!r}"
-        )
+        assert bin_group.get("name") == "БЕЗ ПОЛИВА", f"Group 999 has unexpected name {bin_group.get('name')!r}"
 
 
 # ─── End-to-end zone-filter logic (mirrors the JS in Python) ───
@@ -153,7 +137,7 @@ class TestBinZoneFilteringLogic:
 
     @staticmethod
     def _wizard(zones):
-        """JS programs.js: zones offered to the program wizard."""
+        """Program wizard: zones offered for selection (bin group excluded)."""
         return [z for z in zones if z["group_id"] != 999]
 
     def test_three_views_with_seeded_zones(self, admin_client):
@@ -193,9 +177,7 @@ class TestBinZoneFilteringLogic:
         wizard = self._wizard(zones)
 
         # «Все» tab — bin zones hidden
-        assert {z["name"] for z in vse} == {"Normal-A"}, (
-            f"«Все» tab leaked bin zones: {[z['name'] for z in vse]}"
-        )
+        assert {z["name"] for z in vse} == {"Normal-A"}, f"«Все» tab leaked bin zones: {[z['name'] for z in vse]}"
 
         # «БЕЗ ПОЛИВА» tab — exactly the two bin zones
         assert {z["name"] for z in bin_view} == {"Bin-A", "Bin-B"}, (

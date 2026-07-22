@@ -6,8 +6,8 @@ from utils import decrypt_secret, encrypt_secret, normalize_topic
 class TestNormalizeTopic:
     """Tests for MQTT topic normalization."""
 
-    def test_strips_on_suffix(self):
-        assert normalize_topic("/devices/wb-mr6cv3_85/controls/K1/on") == "/devices/wb-mr6cv3_85/controls/K1"
+    def test_rejects_on_command_suffix(self):
+        assert normalize_topic("/devices/wb-mr6cv3_85/controls/K1/on") == ""
 
     def test_preserves_normal_topic(self):
         assert normalize_topic("/devices/wb-mr6cv3_85/controls/K1") == "/devices/wb-mr6cv3_85/controls/K1"

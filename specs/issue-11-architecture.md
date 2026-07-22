@@ -358,7 +358,7 @@ Schema migration is forward-only (column add). No downgrade.
 - HEIC decoding (deferred — add `pillow-heif` if user evidence shows iPhone users upload `.heic` directly).
 - Multiple photos per zone (issue says one photo).
 - Photo crop UI / aspect-picker (auto center-crop is fine per AC).
-- Focus trap / a11y improvements in lightbox (audit findings flagged this in `irrigation-audit/findings/a11y.md` but it's a separate ticket).
+- Focus trap / a11y improvements in lightbox remain a separate ticket.
 - Rate limiting on upload endpoint (already covered by Flask-Limiter? — verify; not in this issue).
 
 ---

@@ -116,23 +116,40 @@
 <script>
     let logsData = [];
     let filteredLogs = [];
+    let eventRequestGeneration = 0;
+    let auditRequestGeneration = 0;
+
+    function clearEventLogsError() {
+        logsData = [];
+        filteredLogs = [];
+        updateEventTypeOptions();
+        document.getElementById('log-body').innerHTML = `
+            <tr>
+                <td colspan="3" class="no-data">Ошибка загрузки данных</td>
+            </tr>
+        `;
+    }
     
     // Загрузка логов
     async function loadLogs() {
+        const requestGeneration = ++eventRequestGeneration;
         try {
-            logsData = await api.get('/api/logs');
+            const response = await fetch('/api/logs', {cache: 'no-store'});
+            const data = await response.json().catch(() => null);
+            if (requestGeneration !== eventRequestGeneration) return;
+            if (!response.ok || !Array.isArray(data)) {
+                throw new Error((data && (data.message || data.error)) || `HTTP ${response.status}`);
+            }
+            logsData = data;
             filteredLogs = [...logsData];
             updateEventTypeOptions();
             applyDebugVisibility();
             renderLogs();
         } catch (error) {
+            if (requestGeneration !== eventRequestGeneration) return;
             console.error('Ошибка загрузки логов:', error);
             showNotification('Ошибка загрузки логов', 'error');
-            document.getElementById('log-body').innerHTML = `
-                <tr>
-                    <td colspan="3" class="no-data">Ошибка загрузки данных</td>
-                </tr>
-            `;
+            clearEventLogsError();
         }
     }
     
@@ -222,6 +239,7 @@
     
     // Применение фильтров
     async function applyFilter() {
+        const requestGeneration = ++eventRequestGeneration;
         const fromDate = document.getElementById('fromDate').value;
         const toDate = document.getElementById('toDate').value;
         const eventType = document.getElementById('eventType').value;
@@ -238,7 +256,10 @@
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
             
-            filteredLogs = await response.json();
+            const data = await response.json();
+            if (requestGeneration !== eventRequestGeneration) return;
+            if (!Array.isArray(data)) throw new Error('Некорректный ответ логов');
+            filteredLogs = data;
             applyDebugVisibility();
             renderLogs();
             
@@ -246,8 +267,10 @@
                 showNotification('По заданным критериям ничего не найдено', 'info');
             }
         } catch (error) {
+            if (requestGeneration !== eventRequestGeneration) return;
             console.error('Ошибка фильтрации логов:', error);
             showNotification('Ошибка фильтрации логов', 'error');
+            clearEventLogsError();
         }
     }
     
@@ -293,6 +316,7 @@
     
     // Сброс фильтров
     function resetFilters() {
+        eventRequestGeneration += 1;
         document.getElementById('fromDate').value = '';
         document.getElementById('toDate').value = '';
         document.getElementById('eventType').value = '';
@@ -367,6 +391,12 @@
     // ===== Audit-tab helpers =====
     let auditRows = [];
 
+    function clearAuditError() {
+        auditRows = [];
+        document.getElementById('auditStats').textContent = 'Данные недоступны';
+        document.getElementById('audit-body').innerHTML = '<tr><td colspan="8" class="no-data">Ошибка загрузки аудита</td></tr>';
+    }
+
     function switchLogsTab(name) {
         document.querySelectorAll('.logs-tab').forEach(b => {
             const active = b.dataset.tab === name;
@@ -396,6 +426,7 @@
     }
 
     async function loadAudit() {
+        const requestGeneration = ++auditRequestGeneration;
         const tbody = document.getElementById('audit-body');
         tbody.innerHTML = '<tr><td colspan="8" class="loading">Загрузка...</td></tr>';
         const params = new URLSearchParams();
@@ -412,12 +443,17 @@
         params.append('limit', '500');
         try {
             const r = await fetch('/api/audit?' + params.toString());
-            const j = await r.json();
+            const j = await r.json().catch(() => null);
+            if (requestGeneration !== auditRequestGeneration) return;
+            if (!r.ok || !j || j.success === false || !Array.isArray(j.rows)) {
+                throw new Error((j && (j.message || j.error)) || `HTTP ${r.status}`);
+            }
             auditRows = j.rows || [];
             document.getElementById('auditStats').textContent = `Записей: ${auditRows.length} из ${j.total || 0}`;
             renderAudit();
         } catch (e) {
-            tbody.innerHTML = '<tr><td colspan="8" class="no-data">Ошибка загрузки аудита</td></tr>';
+            if (requestGeneration !== auditRequestGeneration) return;
+            clearAuditError();
         }
     }
 

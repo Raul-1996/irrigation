@@ -13,7 +13,9 @@ Endpoints:
 
 import json
 import logging
+import math
 import sqlite3
+from typing import Any
 
 from flask import Blueprint, jsonify, request
 
@@ -26,6 +28,38 @@ logger = logging.getLogger(__name__)
 weather_api_bp = Blueprint("weather_api_bp", __name__)
 
 
+def _setting_updates_atomically(updates: list[tuple[str, str | None]]) -> None:
+    """Persist a configuration batch in one SQLite transaction."""
+    with db.settings._connect() as conn:
+        for key, value in updates:
+            if value is None:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+        conn.commit()
+
+
+def _finite_number(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a number")
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be a finite number") from error
+    if not math.isfinite(number):
+        raise ValueError(f"{field} must be finite")
+    return number
+
+
+def _boolean(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be boolean")
+    return value
+
+
 @weather_api_bp.route("/api/weather", methods=["GET"])
 def api_get_weather():
     """Get current weather summary for dashboard.
@@ -36,12 +70,13 @@ def api_get_weather():
     """
     try:
         from services.weather import get_weather_service
+        from services.weather_merged import merge_weather_response
 
         svc = get_weather_service(db.db_path)
         # Use extended format that includes both old flat fields and new structured data
         try:
             extended = svc.get_weather_extended()
-            return jsonify(extended)
+            return jsonify(merge_weather_response(extended))
         except (AttributeError, TypeError):
             # Fallback to legacy summary for backward compat
             summary = svc.get_weather_summary()
@@ -195,76 +230,90 @@ def api_get_weather_settings():
 def api_put_weather_settings():
     """Update weather adjustment settings (extended in v2)."""
     try:
-        data = request.get_json() or {}
-        ok = True
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError("request body must be an object")
+        updates: list[tuple[str, str | None]] = []
 
         if "enabled" in data:
-            ok = ok and db.set_setting_value("weather.enabled", "1" if data["enabled"] else "0")
+            enabled = _boolean(data["enabled"], "enabled")
+            updates.append(("weather.enabled", "1" if enabled else "0"))
         if "source_mode" in data:
             mode = str(data["source_mode"]).strip().lower()
-            if mode in ("direct", "relay"):
-                ok = ok and db.set_setting_value("weather.source_mode", mode)
+            if mode not in ("direct", "relay"):
+                raise ValueError("source_mode must be direct or relay")
+            updates.append(("weather.source_mode", mode))
         if "rain_threshold_mm" in data:
-            val = float(data["rain_threshold_mm"])
-            ok = ok and db.set_setting_value("weather.rain_threshold_mm", str(max(0, min(100, val))))
+            val = _finite_number(data["rain_threshold_mm"], "rain_threshold_mm")
+            updates.append(("weather.rain_threshold_mm", str(max(0, min(100, val)))))
         if "freeze_threshold_c" in data:
-            val = float(data["freeze_threshold_c"])
-            ok = ok and db.set_setting_value("weather.freeze_threshold_c", str(max(-10, min(10, val))))
+            val = _finite_number(data["freeze_threshold_c"], "freeze_threshold_c")
+            updates.append(("weather.freeze_threshold_c", str(max(-10, min(10, val)))))
 
         # Legacy wind field
         if "wind_threshold_kmh" in data:
-            val = float(data["wind_threshold_kmh"])
-            ok = ok and db.set_setting_value("weather.wind_threshold_kmh", str(max(5, min(100, val))))
+            val = _finite_number(data["wind_threshold_kmh"], "wind_threshold_kmh")
+            updates.append(("weather.wind_threshold_kmh", str(max(5, min(100, val)))))
 
         # NEW: wind in m/s
         if "wind_threshold_ms" in data:
-            val = float(data["wind_threshold_ms"])
-            ok = ok and db.set_setting_value("weather.wind_threshold_ms", str(max(1.0, min(30.0, val))))
+            val = _finite_number(data["wind_threshold_ms"], "wind_threshold_ms")
+            updates.append(("weather.wind_threshold_ms", str(max(1.0, min(30.0, val)))))
 
         # NEW: humidity threshold
         if "humidity_threshold_pct" in data:
-            val = float(data["humidity_threshold_pct"])
-            ok = ok and db.set_setting_value("weather.humidity_threshold_pct", str(max(50, min(100, val))))
+            val = _finite_number(data["humidity_threshold_pct"], "humidity_threshold_pct")
+            updates.append(("weather.humidity_threshold_pct", str(max(50, min(100, val)))))
 
         # NEW: humidity reduction percentage
         if "humidity_reduction_pct" in data:
-            val = int(float(data["humidity_reduction_pct"]))
-            ok = ok and db.set_setting_value("weather.humidity_reduction_pct", str(max(10, min(50, val))))
+            val = int(_finite_number(data["humidity_reduction_pct"], "humidity_reduction_pct"))
+            updates.append(("weather.humidity_reduction_pct", str(max(10, min(50, val)))))
 
         # NEW: per-factor toggles
         factors = data.get("factors")
-        if factors and isinstance(factors, dict):
+        if factors is not None:
+            if not isinstance(factors, dict):
+                raise ValueError("factors must be an object")
             for factor_name in ("rain", "freeze", "wind", "humidity", "heat"):
                 if factor_name in factors:
                     key = f"weather.factor.{factor_name}"
-                    ok = ok and db.set_setting_value(key, "1" if factors[factor_name] else "0")
+                    enabled = _boolean(factors[factor_name], f"factors.{factor_name}")
+                    updates.append((key, "1" if enabled else "0"))
 
         # H2 virtual water balance settings (mode switch + tuning, clamped)
         balance = data.get("balance")
-        if balance and isinstance(balance, dict):
+        if balance is not None:
+            if not isinstance(balance, dict):
+                raise ValueError("balance must be an object")
             if "enabled" in balance:
-                ok = ok and db.set_setting_value("weather.balance.enabled", "1" if balance["enabled"] else "0")
+                enabled = _boolean(balance["enabled"], "balance.enabled")
+                updates.append(("weather.balance.enabled", "1" if enabled else "0"))
             if "window_days" in balance:
-                val = int(float(balance["window_days"]))
-                ok = ok and db.set_setting_value("weather.balance.window_days", str(max(1, min(14, val))))
+                val = int(_finite_number(balance["window_days"], "balance.window_days"))
+                updates.append(("weather.balance.window_days", str(max(1, min(14, val)))))
             if "norm_window_days" in balance:
-                val = int(float(balance["norm_window_days"]))
-                ok = ok and db.set_setting_value("weather.balance.norm_window_days", str(max(7, min(90, val))))
+                val = int(_finite_number(balance["norm_window_days"], "balance.norm_window_days"))
+                updates.append(("weather.balance.norm_window_days", str(max(7, min(90, val)))))
             if "coef_min" in balance:
-                val = int(float(balance["coef_min"]))
-                ok = ok and db.set_setting_value("weather.balance.coef_min", str(max(0, min(100, val))))
+                val = int(_finite_number(balance["coef_min"], "balance.coef_min"))
+                updates.append(("weather.balance.coef_min", str(max(0, min(100, val)))))
             if "coef_max" in balance:
-                val = int(float(balance["coef_max"]))
-                ok = ok and db.set_setting_value("weather.balance.coef_max", str(max(100, min(300, val))))
+                val = int(_finite_number(balance["coef_max"], "balance.coef_max"))
+                updates.append(("weather.balance.coef_max", str(max(100, min(300, val)))))
             if "intercept_mm" in balance:
-                val = float(balance["intercept_mm"])
-                ok = ok and db.set_setting_value("weather.balance.intercept_mm", str(max(0.0, min(20.0, val))))
+                val = _finite_number(balance["intercept_mm"], "balance.intercept_mm")
+                updates.append(("weather.balance.intercept_mm", str(max(0.0, min(20.0, val)))))
             if "stale_fallback_days" in balance:
-                val = int(float(balance["stale_fallback_days"]))
-                ok = ok and db.set_setting_value("weather.balance.stale_fallback_days", str(max(1, min(14, val))))
+                val = int(_finite_number(balance["stale_fallback_days"], "balance.stale_fallback_days"))
+                updates.append(("weather.balance.stale_fallback_days", str(max(1, min(14, val)))))
 
-        return jsonify({"success": bool(ok)})
-    except (sqlite3.Error, ValueError, TypeError) as e:
+        _setting_updates_atomically(updates)
+        return jsonify({"success": True})
+    except (ValueError, TypeError) as e:
+        logger.debug("Weather settings validation error: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 400
+    except sqlite3.Error as e:
         logger.debug("Weather settings write error: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -293,16 +342,28 @@ def api_get_location():
 def api_put_location():
     """Set location (lat/lon)."""
     try:
-        data = request.get_json() or {}
-        lat = data.get("latitude")
-        lon = data.get("longitude")
-        ok = True
-        if lat is not None:
-            ok = ok and db.set_setting_value("weather.latitude", str(float(lat)))
-        if lon is not None:
-            ok = ok and db.set_setting_value("weather.longitude", str(float(lon)))
-        return jsonify({"success": bool(ok)})
-    except (sqlite3.Error, ValueError, TypeError) as e:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError("request body must be an object")
+        if "latitude" not in data or "longitude" not in data:
+            raise ValueError("latitude and longitude are required")
+        lat = _finite_number(data["latitude"], "latitude")
+        lon = _finite_number(data["longitude"], "longitude")
+        if not -90.0 <= lat <= 90.0:
+            raise ValueError("latitude must be within -90..90")
+        if not -180.0 <= lon <= 180.0:
+            raise ValueError("longitude must be within -180..180")
+        _setting_updates_atomically(
+            [
+                ("weather.latitude", str(lat)),
+                ("weather.longitude", str(lon)),
+            ]
+        )
+        return jsonify({"success": True})
+    except (ValueError, TypeError) as e:
+        logger.debug("Location validation error: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 400
+    except sqlite3.Error as e:
         logger.debug("Location write error: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 

@@ -12,7 +12,13 @@ from services.monitors import env_monitor as _env_mod
 from services.monitors import rain_monitor as _rain_mod
 from services.monitors import water_monitor as _water_mod
 from services.monitors.env_monitor import EnvMonitor, env_monitor, probe_env_values, start_env_monitor
-from services.monitors.rain_monitor import RainMonitor, rain_monitor, start_rain_monitor
+from services.monitors.rain_monitor import (
+    RainMonitor,
+    enforce_group,
+    rain_config_transaction_lock,
+    rain_monitor,
+    start_rain_monitor,
+)
 from services.monitors.water_monitor import WaterMonitor, start_water_monitor, water_monitor
 
 __all__ = [
@@ -20,9 +26,11 @@ __all__ = [
     "RainMonitor",
     "WaterMonitor",
     "db",
+    "enforce_group",
     "env_monitor",
     "mqtt",
     "probe_env_values",
+    "rain_config_transaction_lock",
     "rain_monitor",
     "start_env_monitor",
     "start_rain_monitor",

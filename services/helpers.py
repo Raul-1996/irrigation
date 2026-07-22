@@ -29,7 +29,7 @@ class UnsafePathError(ValueError):
 # only widening — anything else (e.g. ZONE_5_thumbb.webp, ZONE_5_thumb_evil.webp)
 # still fails the anchored match.
 _ZONE_PHOTO_FILENAME_RE = re.compile(
-    r"^ZONE_\d+(_thumb)?\.(png|jpg|jpeg|gif|webp)$",
+    r"^ZONE_(?P<zone_id>\d+)(?:_thumb)?\.(?:png|jpg|jpeg|gif|webp)$",
     re.IGNORECASE,
 )
 
@@ -68,20 +68,35 @@ def safe_media_subpath(base_dir: str, relative_path: str) -> str:
     return joined
 
 
-def safe_zone_photo_path(photo_path: str) -> str:
+def safe_zone_photo_path(photo_path: str, *, expected_zone_id: int | None = None) -> str:
     """Validate *photo_path* (DB column) and return absolute filesystem path.
 
     Expected structure: `media/zones/ZONE_<id>.<ext>`. The path must live
     under `static/` and the filename must match _ZONE_PHOTO_FILENAME_RE.
     Raises UnsafePathError on anything else.
     """
-    if not photo_path:
+    if not photo_path or not isinstance(photo_path, str):
         raise UnsafePathError("empty photo_path")
-    # First layer: the DB value must live under static/ — reject if it
-    # already has a leading slash or tries to escape media/zones/.
+    # The basename allowlist alone is insufficient: a value such as
+    # ``media/maps/ZONE_1.webp`` or ``media/zones/../ZONE_1.webp`` still has a
+    # legal basename but targets a sibling directory. Require the exact DB
+    # representation written by the upload endpoint before resolving it.
     filename = os.path.basename(photo_path)
-    if not _ZONE_PHOTO_FILENAME_RE.match(filename):
+    match = _ZONE_PHOTO_FILENAME_RE.match(filename)
+    if not match:
         raise UnsafePathError(f"invalid zone photo filename: {filename!r}")
+    if expected_zone_id is not None:
+        if isinstance(expected_zone_id, bool):
+            raise UnsafePathError("invalid expected zone id")
+        try:
+            canonical_zone_id = str(int(expected_zone_id))
+        except (TypeError, ValueError) as exc:
+            raise UnsafePathError("invalid expected zone id") from exc
+        if match.group("zone_id") != canonical_zone_id:
+            raise UnsafePathError("zone photo belongs to another zone")
+    canonical = f"media/zones/{filename}"
+    if photo_path != canonical:
+        raise UnsafePathError(f"zone photo must use canonical path {canonical!r}")
     # Second layer: normalise and check containment inside static/.
     return safe_media_subpath("static", photo_path)
 

@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import sqlite3
+import threading
+from functools import wraps
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
@@ -30,6 +32,21 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 zones_photo_api_bp = Blueprint("zones_photo_api", __name__)
+_PHOTO_LOCKS: dict[int, threading.RLock] = {}
+_PHOTO_LOCKS_GUARD = threading.Lock()
+
+
+def _serialize_photo_mutation(fn):
+    """Prevent concurrent upload/delete/rotate from interleaving file pairs."""
+
+    @wraps(fn)
+    def wrapped(zone_id, *args, **kwargs):
+        with _PHOTO_LOCKS_GUARD:
+            lock = _PHOTO_LOCKS.setdefault(int(zone_id), threading.RLock())
+        with lock:
+            return fn(zone_id, *args, **kwargs)
+
+    return wrapped
 
 
 # ---- Image helpers ----
@@ -81,9 +98,18 @@ def render_two_variants(image_bytes):
 def _atomic_write(path, data):
     """Write bytes to ``path`` atomically via .tmp + os.replace."""
     tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            logger.warning("could not remove temporary photo file %s", tmp)
 
 
 def normalize_image(image_data, max_long_side=1024, fmt="WEBP", quality=90, lossless=False, target_size=None):
@@ -136,9 +162,9 @@ def _archive_old_zone_file(zone_id, old_rel, label):
     Best-effort, swallows OS errors. ``label`` only used for log context.
     """
     if not old_rel:
-        return
+        return None
     try:
-        old_abs = safe_zone_photo_path(old_rel)
+        old_abs = safe_zone_photo_path(old_rel, expected_zone_id=zone_id)
     except UnsafePathError as e:
         logger.warning(
             "archive_old: refused unsafe %s path for zone %s: %r — %s",
@@ -147,21 +173,45 @@ def _archive_old_zone_file(zone_id, old_rel, label):
             old_rel,
             e,
         )
-        return
+        return None
     try:
         if os.path.exists(old_abs):
             old_dir = os.path.join(UPLOAD_FOLDER, "OLD")
             os.makedirs(old_dir, exist_ok=True)
-            os.replace(old_abs, os.path.join(old_dir, os.path.basename(old_abs)))
+            archived_abs = os.path.join(old_dir, os.path.basename(old_abs))
+            os.replace(old_abs, archived_abs)
+            return old_abs, archived_abs
     except OSError as e:
         logger.debug("archive_old: %s move failed for zone %s: %s", label, zone_id, e)
+        raise
+    return None
+
+
+def _rollback_photo_upload(new_paths, archived_paths):
+    """Remove newly written variants and restore the previous files."""
+    for path in new_paths:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            logger.exception("photo upload rollback could not remove %s", path)
+    for original, archived in reversed(archived_paths):
+        try:
+            if os.path.isfile(archived):
+                os.replace(archived, original)
+        except OSError:
+            logger.exception("photo upload rollback could not restore %s", original)
 
 
 @zones_photo_api_bp.route("/api/zones/<int:zone_id>/photo", methods=["POST"])
 @audit_log("photo_upload", target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
+@_serialize_photo_mutation
 def upload_zone_photo(zone_id):
     """Upload photo for a zone (issue #11: writes main + thumb)."""
     try:
+        current = db.get_zone(zone_id)
+        if not current:
+            return jsonify({"success": False, "message": "Зона не найдена"}), 404
         if "photo" not in request.files:
             return jsonify({"success": False, "message": "Файл не найден"}), 400
         file = request.files["photo"]
@@ -231,26 +281,36 @@ def upload_zone_photo(zone_id):
                 ), 400
             ext = ".webp"
 
-        # Archive old files (main + thumb) before overwrite — both flow.
-        try:
-            current = db.get_zone(zone_id) or {}
-            _archive_old_zone_file(zone_id, current.get("photo_path"), "main")
-            _archive_old_zone_file(zone_id, current.get("photo_thumb"), "thumb")
-        except (sqlite3.Error, OSError) as e:
-            logger.debug("upload_zone_photo: archive step warning: %s", e)
-
         main_name = f"ZONE_{zone_id}{ext}"
         thumb_name = f"ZONE_{zone_id}_thumb{ext}"
         main_path = os.path.join(UPLOAD_FOLDER, main_name)
         thumb_path = os.path.join(UPLOAD_FOLDER, thumb_name)
-        # Atomic writes: tmp file -> os.replace, prevents readers seeing a
-        # partial main while thumb is still being written.
-        _atomic_write(main_path, main_bytes)
-        _atomic_write(thumb_path, thumb_bytes)
-
         db_main = f"media/{ZONE_MEDIA_SUBDIR}/{main_name}"
         db_thumb = f"media/{ZONE_MEDIA_SUBDIR}/{thumb_name}"
-        db.update_zone_photo(zone_id, db_main, photo_thumb=db_thumb, update_thumb=True)
+        archived_paths = []
+        written_paths = []
+        try:
+            for old_rel, label in (
+                (current.get("photo_path"), "main"),
+                (current.get("photo_thumb"), "thumb"),
+            ):
+                archived = _archive_old_zone_file(zone_id, old_rel, label)
+                if archived:
+                    archived_paths.append(archived)
+
+            # Atomic writes: tmp file -> os.replace, prevents readers seeing a
+            # partial variant.  The rollback below restores the old pair if
+            # either write or the DB commit fails.
+            _atomic_write(main_path, main_bytes)
+            written_paths.append(main_path)
+            _atomic_write(thumb_path, thumb_bytes)
+            written_paths.append(thumb_path)
+            if not db.update_zone_photo(zone_id, db_main, photo_thumb=db_thumb, update_thumb=True):
+                raise RuntimeError("zone photo metadata update failed")
+        except (OSError, RuntimeError, sqlite3.Error):
+            logger.exception("photo upload commit failed for zone %s", zone_id)
+            _rollback_photo_upload(written_paths, archived_paths)
+            return jsonify({"success": False, "message": "Ошибка сохранения фотографии"}), 500
         db.add_log("photo_upload", json.dumps({"zone": zone_id, "filename": main_name}))
         return jsonify(
             {
@@ -267,6 +327,7 @@ def upload_zone_photo(zone_id):
 
 @zones_photo_api_bp.route("/api/zones/<int:zone_id>/photo", methods=["DELETE"])
 @audit_log("photo_delete", target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
+@_serialize_photo_mutation
 def delete_zone_photo(zone_id):
     """Delete zone photo (issue #11: removes main + thumb)."""
     try:
@@ -278,13 +339,15 @@ def delete_zone_photo(zone_id):
         if not photo_path and not photo_thumb:
             return jsonify({"success": False, "message": "Фотография не найдена"}), 404
 
-        bad_path = False
-        # SEC-009: validate each stored path before filesystem delete.
+        targets = []
+        # SEC-009: validate the complete stored pair before either durable
+        # metadata or a filesystem entry is changed. A poisoned thumb must
+        # never cause the independently valid main image to be deleted.
         for label, rel in (("main", photo_path), ("thumb", photo_thumb)):
             if not rel:
                 continue
             try:
-                filepath = safe_zone_photo_path(rel)
+                filepath = safe_zone_photo_path(rel, expected_zone_id=zone_id)
             except UnsafePathError as e:
                 logger.error(
                     "delete_zone_photo: refused unsafe %s path for zone %s: %s",
@@ -292,12 +355,44 @@ def delete_zone_photo(zone_id):
                     zone_id,
                     e,
                 )
-                bad_path = True
-                continue
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Некорректный путь к фото",
+                        "error_code": "INVALID_PHOTO_PATH",
+                    }
+                ), 400
+            targets.append((label, filepath))
+
+        # Clear authoritative references before best-effort cleanup. If this
+        # write fails, every original file remains in place and the request is
+        # safely retryable; deleting first can leave durable dangling paths.
+        try:
+            metadata_cleared = db.update_zone_photo(
+                zone_id,
+                None,
+                photo_thumb=None,
+                update_thumb=True,
+            )
+        except (OSError, sqlite3.Error):
+            logger.exception("delete_zone_photo: metadata clear failed for zone %s", zone_id)
+            metadata_cleared = False
+        if metadata_cleared is not True:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Не удалось удалить фотографию",
+                    "error_code": "PHOTO_METADATA_UPDATE_FAILED",
+                }
+            ), 500
+
+        cleanup_pending = False
+        for label, filepath in targets:
             try:
                 if os.path.exists(filepath):
                     os.remove(filepath)
             except OSError as e:
+                cleanup_pending = True
                 logger.warning(
                     "delete_zone_photo: %s remove failed for zone %s: %s",
                     label,
@@ -305,20 +400,14 @@ def delete_zone_photo(zone_id):
                     e,
                 )
 
-        # Always clear both DB columns so admin UI stops pointing at them.
-        db.update_zone_photo(zone_id, None, photo_thumb=None, update_thumb=True)
-
-        if bad_path:
-            return jsonify(
-                {
-                    "success": False,
-                    "message": "Некорректный путь к фото",
-                    "error_code": "INVALID_PHOTO_PATH",
-                }
-            ), 400
-
         db.add_log("photo_delete", json.dumps({"zone": zone_id}))
-        return jsonify({"success": True, "message": "Фотография удалена"})
+        return jsonify(
+            {
+                "success": True,
+                "message": "Фотография удалена",
+                "cleanup_pending": cleanup_pending,
+            }
+        )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка удаления фото: {e}")
         return jsonify({"success": False, "message": "Ошибка удаления"}), 500
@@ -326,35 +415,27 @@ def delete_zone_photo(zone_id):
 
 @zones_photo_api_bp.route("/api/zones/<int:zone_id>/photo/rotate", methods=["POST"])
 @audit_log("photo_rotate", target_extractor=lambda *a, **kw: f"zone:{kw.get('zone_id', a[0] if a else '?')}")
+@_serialize_photo_mutation
 def rotate_zone_photo(zone_id):
     """Rotate zone photo by a multiple of 90 degrees."""
     try:
         zone = db.get_zone(zone_id)
         if not zone:
             return jsonify({"success": False, "message": "Зона не найдена"}), 404
-        angle = 90
-        try:
-            data = request.get_json(silent=True) or {}
-            angle_raw = int(data.get("angle", 90))
-            # SEC-014: clamp to the only legitimate rotation steps. An
-            # attacker-controlled `angle=999999999` otherwise causes
-            # Pillow to allocate enormous canvases (DoS / OOM).
-            allowed_angles = {-270, -180, -90, 0, 90, 180, 270}
-            if angle_raw not in allowed_angles:
-                # Normalise to nearest 90deg multiple within one rotation.
-                angle_raw = angle_raw % 360
-                if angle_raw not in {0, 90, 180, 270}:
-                    return jsonify(
-                        {
-                            "success": False,
-                            "message": "Допустимы только углы, кратные 90",
-                            "error_code": "INVALID_ANGLE",
-                        }
-                    ), 400
-            angle = angle_raw
-        except (ValueError, TypeError, KeyError) as e:
-            logger.debug("Exception in rotate_zone_photo: %s", e)
-            angle = 90
+        data = request.get_json(silent=True)
+        if data is None:
+            data = {}
+        angle_raw = data.get("angle", 90) if isinstance(data, dict) else None
+        allowed_angles = {-270, -180, -90, 0, 90, 180, 270}
+        if isinstance(angle_raw, bool) or not isinstance(angle_raw, int) or angle_raw not in allowed_angles:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "Допустимы только углы -270, -180, -90, 0, 90, 180 или 270",
+                    "error_code": "INVALID_ANGLE",
+                }
+            ), 400
+        angle = angle_raw
         photo_path = zone.get("photo_path")
         photo_thumb = zone.get("photo_thumb")
         if not photo_path:
@@ -365,9 +446,10 @@ def rotate_zone_photo(zone_id):
         if photo_thumb:
             targets.append(("thumb", photo_thumb))
 
+        prepared = []
         for label, rel in targets:
             try:
-                filepath = safe_zone_photo_path(rel)
+                filepath = safe_zone_photo_path(rel, expected_zone_id=zone_id)
             except UnsafePathError as e:
                 logger.error(
                     "rotate_zone_photo: refused unsafe %s path for zone %s: %s",
@@ -388,13 +470,45 @@ def rotate_zone_photo(zone_id):
                     return jsonify({"success": False, "message": "Файл не найден"}), 404
                 continue
             try:
-                with Image.open(filepath) as img:
-                    img = img.rotate(-angle, expand=True)
+                with open(filepath, "rb") as source:
+                    original_bytes = source.read()
+                with Image.open(io.BytesIO(original_bytes)) as img:
+                    # Capture the format BEFORE rotate(): derived images always
+                    # have .format == None, which silently re-encoded WebP as JPEG.
                     fmt = img.format or "JPEG"
-                    img.save(filepath, format=fmt)
+                    rotated = img.rotate(-angle, expand=True)
+                    try:
+                        encoded = io.BytesIO()
+                        if fmt == "WEBP":
+                            # Same quality as the upload pipeline (main q=92 / thumb q=90).
+                            rotated.save(
+                                encoded,
+                                format="WEBP",
+                                quality=92 if label == "main" else 90,
+                                method=6,
+                            )
+                        else:
+                            rotated.save(encoded, format=fmt)
+                    finally:
+                        rotated.close()
+                prepared.append((filepath, original_bytes, encoded.getvalue()))
             except (OSError, PermissionError) as e:
                 logger.error(f"rotate failed ({label}): {e}")
                 return jsonify({"success": False, "message": "Ошибка обработки изображения"}), 500
+
+        written = []
+        try:
+            for filepath, original_bytes, rotated_bytes in prepared:
+                _atomic_write(filepath, rotated_bytes)
+                written.append((filepath, original_bytes))
+        except (OSError, PermissionError):
+            logger.exception("atomic rotate commit failed for zone %s", zone_id)
+            for filepath, original_bytes in reversed(written):
+                try:
+                    _atomic_write(filepath, original_bytes)
+                except (OSError, PermissionError):
+                    logger.critical("rotate rollback could not restore %s", filepath, exc_info=True)
+            return jsonify({"success": False, "message": "Ошибка обработки изображения"}), 500
 
         try:
             db.add_log("photo_rotate", json.dumps({"zone": zone_id, "angle": angle}))
@@ -431,7 +545,7 @@ def get_zone_photo(zone_id):
             # a corrupted `photo_path` like `../../etc/passwd` would be
             # returned to the client).
             try:
-                filepath = safe_zone_photo_path(photo_path)
+                filepath = safe_zone_photo_path(photo_path, expected_zone_id=zone_id)
             except UnsafePathError as e:
                 logger.error(
                     "get_zone_photo: refused unsafe photo_path for zone %s: %s",

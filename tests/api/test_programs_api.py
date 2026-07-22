@@ -5,6 +5,8 @@ import os
 
 os.environ["TESTING"] = "1"
 
+from routes import programs_api
+
 
 class TestProgramsAPI:
     def test_get_programs(self, admin_client):
@@ -39,6 +41,7 @@ class TestProgramsAPI:
         assert resp.status_code == 400
 
     def test_get_single_program(self, admin_client, app):
+        app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program(
             {
                 "name": "P",
@@ -55,6 +58,7 @@ class TestProgramsAPI:
         assert resp.status_code == 404
 
     def test_update_program(self, admin_client, app):
+        app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program(
             {
                 "name": "Old",
@@ -78,6 +82,7 @@ class TestProgramsAPI:
         assert resp.status_code == 200
 
     def test_delete_program(self, admin_client, app):
+        app.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
         prog = app.db.create_program(
             {
                 "name": "Del",
@@ -91,8 +96,7 @@ class TestProgramsAPI:
 
     def test_delete_program_not_found(self, admin_client):
         resp = admin_client.delete("/api/programs/99999")
-        # delete_program returns True for nonexistent IDs
-        assert resp.status_code in (204, 404)
+        assert resp.status_code == 404
 
 
 class TestCheckConflicts:
@@ -123,7 +127,7 @@ class TestCheckConflicts:
 class TestRunProgram:
     """Issue #10: manual run button must hit a real backend endpoint."""
 
-    def test_run_program_success(self, admin_client, app):
+    def test_run_program_success(self, admin_client, app, monkeypatch):
         app.db.create_zone({"name": "Z1", "duration": 1, "group_id": 1})
         prog = app.db.create_program(
             {
@@ -133,10 +137,26 @@ class TestRunProgram:
                 "zones": [1],
             }
         )
+        dispatched = []
+
+        class DeferredThread:
+            def __init__(self, *args, **kwargs):
+                dispatched.append((args, kwargs))
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(programs_api, "get_scheduler", lambda: object())
+        monkeypatch.setattr(programs_api.threading, "Thread", DeferredThread)
+
         resp = admin_client.post(f"/api/programs/{prog['id']}/run")
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.get_json()
         assert data["success"] is True
+        assert data["accepted"] is True
+        assert data["started"] is False
+        assert data["status"] == "accepted"
+        assert len(dispatched) == 1
 
     def test_run_program_not_found(self, admin_client):
         resp = admin_client.post("/api/programs/99999/run")

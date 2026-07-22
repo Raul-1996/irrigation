@@ -1,25 +1,15 @@
 [project]
 name = "wb-irrigation"
+# Runtime version is derived from Git by services/version.py; this repository
+# is deployed in-place and is not built as a distributable Python package.
+dynamic = ["version"]
 # Минимум Python 3.11. Причины:
 # - используется PEP 604 union-синтаксис (`X | None`) везде в коде;
 # - используется `datetime.UTC` (появился в 3.11).
 # Не подменять на 3.10 — `datetime.UTC` отсутствует. См. CLAUDE.md → Python version.
 requires-python = ">=3.11"
 
-[tool.pytest.ini_options]
-timeout = 30
-timeout_method = "signal"
-testpaths = ["tests"]
-python_files = "test_*.py"
-python_functions = "test_*"
-python_classes = "Test*"
-addopts = "--tb=short --durations=20 -ra"
-markers = [
-    "mqtt_real: requires real MQTT broker on 10.2.5.244",
-    "e2e: end-to-end tests against live controller",
-    "slow: tests that take >5 seconds",
-    "serial: must run serially (not parallel-safe under pytest-xdist)",
-]
+# Конфигурация pytest живёт в pytest.ini (единственный источник истины).
 
 [tool.coverage.run]
 source = ["app", "database", "irrigation_scheduler", "services", "routes", "db", "utils", "config"]

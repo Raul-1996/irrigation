@@ -1,5 +1,7 @@
 """Coverage boost: unit tests for services and core modules."""
 
+from unittest.mock import patch
+
 
 class TestDatabaseFacade:
     """Tests for database.py facade methods."""
@@ -180,7 +182,8 @@ class TestSchedulerModule:
         sched = IrrigationScheduler(test_db)
         sched.start()
         try:
-            result = sched.start_group_sequence(1)
+            with patch("services.zone_control.db", test_db):
+                result = sched.start_group_sequence(1)
             assert result is True
         finally:
             sched.stop()

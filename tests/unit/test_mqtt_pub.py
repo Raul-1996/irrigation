@@ -1,4 +1,4 @@
-"""Tests for MQTT publish service: publish, retry, debounce, dual-topic, QoS."""
+"""Tests for MQTT publish service: command publish, retry, debounce, QoS."""
 
 import os
 import time
@@ -83,8 +83,8 @@ class TestPublishMqttValue:
             result = publish_mqtt_value({"id": 1}, "/test/topic", "1", min_interval_sec=0)
             assert result is False
 
-    def test_publish_dual_topic(self):
-        """Should publish to both base topic and /on topic."""
+    def test_publish_command_topic_only(self):
+        """Desired state must never overwrite the relay-owned report topic."""
         mock_client = MagicMock()
         mock_result = MagicMock()
         mock_result.rc = 0
@@ -99,10 +99,8 @@ class TestPublishMqttValue:
 
             result = publish_mqtt_value({"id": 1}, "/test/topic", "1", min_interval_sec=0)
             assert result is True
-            # Should have published to both /test/topic and /test/topic/on
             topics_published = [call[0][0] for call in mock_client.publish.call_args_list]
-            assert "/test/topic" in topics_published
-            assert "/test/topic/on" in topics_published
+            assert topics_published == ["/test/topic/on"]
 
     def test_publish_qos_2(self):
         """QoS 2 publish should wait for acknowledgement."""
@@ -137,7 +135,7 @@ class TestMqttClientRecovery:
                 "services.mqtt_pub.get_or_create_mqtt_client",
                 side_effect=[stuck, fresh, fresh, fresh, fresh],
             ),
-            # base topic: first attempt fails (wedged), retry after recreate succeeds; /on succeeds
+            # command topic: first attempt fails (wedged), retry after recreate succeeds
             patch("services.mqtt_pub._publish_with_retries", side_effect=[False, True, True, True]),
             patch("services.mqtt_pub._invalidate_client", side_effect=lambda sid: invalidated.append(sid)),
             patch("services.mqtt_pub._TOPIC_LAST_SEND", {}),

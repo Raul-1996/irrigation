@@ -22,10 +22,10 @@ class TestNormalizeTopic:
 
         assert normalize_topic("///devices/wb") == "/devices/wb"
 
-    def test_strip_on_suffix(self):
+    def test_reject_on_command_suffix(self):
         from utils import normalize_topic
 
-        assert normalize_topic("/devices/wb/controls/K1/on") == "/devices/wb/controls/K1"
+        assert normalize_topic("/devices/wb/controls/K1/on") == ""
 
     def test_empty_string(self):
         from utils import normalize_topic

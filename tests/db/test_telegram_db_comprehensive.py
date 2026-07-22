@@ -87,3 +87,24 @@ class TestSubscriptions:
         now = datetime.now()
         result = test_db.get_due_bot_subscriptions(now)
         assert isinstance(result, list)
+
+    def test_due_subscription_requires_authorized_current_admin(self, test_db):
+        now = datetime.now().replace(second=0, microsecond=0)
+        test_db.upsert_bot_user(701, "admin", "Current")
+        user = test_db.get_bot_user_by_chat(701)
+        assert user is not None
+        test_db.set_setting_value("telegram_admin_chat_id", "701")
+        test_db.create_or_update_subscription(int(user["id"]), "daily", "brief", now.strftime("%H:%M"), None, True)
+
+        # Merely matching the configured chat is insufficient until the bot
+        # message path has marked that row as authorized.
+        assert test_db.get_due_bot_subscriptions(now) == []
+
+        test_db.set_bot_user_authorized(701, "admin")
+        due = test_db.get_due_bot_subscriptions(now)
+        assert [row["chat_id"] for row in due] == [701]
+
+        # Changing the configured admin immediately revokes the old recipient,
+        # even if its legacy subscription row remains enabled.
+        test_db.set_setting_value("telegram_admin_chat_id", "702")
+        assert test_db.get_due_bot_subscriptions(now) == []

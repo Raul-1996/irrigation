@@ -4,6 +4,8 @@ import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from db.migrations import MigrationRunner
+
 os.environ["TESTING"] = "1"
 
 
@@ -32,7 +34,7 @@ def _make_db(test_db_path):
 
 
 class TestZoneRunsSourceMigration:
-    """Migration adds `source` column, composite index, and backfills history."""
+    """Migration adds source metadata without inventing historical identity."""
 
     def test_source_column_present(self, test_db_path):
         _make_db(test_db_path)
@@ -75,9 +77,8 @@ class TestZoneRunsSourceMigration:
         IrrigationDB(db_path=test_db_path)  # no exception
         _ = db.get_zones()  # still functional
 
-    def test_backfill_marks_matching_run_as_program(self, test_db_path, monkeypatch):
-        """A pre-migration NULL row that lines up with a program's schedule
-        becomes ``source='program'`` after backfill.
+    def test_backfill_leaves_schedule_match_unresolved(self, test_db_path, monkeypatch):
+        """A matching timestamp cannot prove which execution owned the run.
 
         We simulate "pre-existing" data by inserting directly into the DB,
         then triggering re-init via a fresh ``IrrigationDB`` — but the
@@ -137,10 +138,12 @@ class TestZoneRunsSourceMigration:
         row = conn.execute("SELECT source FROM zone_runs WHERE start_utc = ?", (start_utc,)).fetchone()
         conn.close()
         assert row is not None
-        assert row[0] == "program", f"expected 'program', got {row[0]!r}"
+        assert row[0] is None
+        preview = MigrationRunner(test_db_path).preview_zone_runs_source_backfill()
+        assert preview["unresolved_rows"] == 1
 
-    def test_backfill_marks_unrelated_run_as_manual(self, test_db_path):
-        """A row whose start_utc does NOT match any schedule becomes 'manual'."""
+    def test_backfill_leaves_unrelated_run_unresolved(self, test_db_path):
+        """A non-matching timestamp still cannot prove a manual owner."""
         db = _make_db(test_db_path)
         zone = db.create_zone(
             {
@@ -188,10 +191,10 @@ class TestZoneRunsSourceMigration:
         row = conn.execute("SELECT source FROM zone_runs WHERE start_utc = ?", (start_utc,)).fetchone()
         conn.close()
         assert row is not None
-        assert row[0] == "manual"
+        assert row[0] is None
 
-    def test_backfill_handles_null_start_utc(self, test_db_path):
-        """Rows with NULL start_utc fall back to 'manual' (no crash)."""
+    def test_backfill_leaves_null_start_utc_unresolved(self, test_db_path):
+        """Rows with NULL start_utc remain explicitly unresolved."""
         db = _make_db(test_db_path)
         zone = db.create_zone(
             {
@@ -218,7 +221,7 @@ class TestZoneRunsSourceMigration:
         row = conn.execute("SELECT source FROM zone_runs WHERE start_utc IS NULL").fetchone()
         conn.close()
         assert row is not None
-        assert row[0] == "manual"
+        assert row[0] is None
 
     def test_idempotent_rerun(self, test_db_path):
         """Running init twice does not change already-set source values."""

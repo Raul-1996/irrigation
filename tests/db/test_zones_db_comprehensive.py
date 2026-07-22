@@ -43,12 +43,12 @@ class TestZoneCRUDComprehensive:
     def test_update_zone_versioned_success(self, test_db):
         z = test_db.create_zone({"name": "V", "duration": 5, "group_id": 1})
         # Returns (ok: bool, prev_zone: dict | None) since AUDIT-LOGGING-EXPANSION.
-        ok, prev = test_db.update_zone_versioned(z["id"], {"state": "on"})
+        ok, prev = test_db.update_zone_versioned(z["id"], {"state": "on"}, expected_version=z["version"])
         assert isinstance(ok, bool)
         assert isinstance(prev, dict)
 
     def test_update_zone_versioned_not_found(self, test_db):
-        ok, prev = test_db.update_zone_versioned(99999, {"state": "on"})
+        ok, prev = test_db.update_zone_versioned(99999, {"state": "on"}, expected_version=0)
         assert ok is False
         assert prev is None
 

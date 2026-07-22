@@ -46,6 +46,22 @@ def app(test_db_path):
     from database import IrrigationDB
 
     test_db = IrrigationDB(db_path=test_db_path)
+    # Production intentionally has no public default credential.  Legacy API
+    # tests still log in with ``1234``, which the production password policy
+    # correctly rejects, so seed its hash directly in this isolated fixture.
+    from werkzeug.security import generate_password_hash
+
+    with test_db.settings._connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+            ("password_hash", generate_password_hash("1234", method="pbkdf2:sha256")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+            ("password_must_change", "0"),
+        )
+        conn.commit()
+    test_db.settings._remove_bootstrap_password_file()
 
     # Monkey-patch the module-level db
     db_mod.db = test_db

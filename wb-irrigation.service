@@ -3,22 +3,42 @@ Description=WB-Irrigation Flask app
 After=network-online.target mosquitto.service
 Wants=network-online.target
 Requires=mosquitto.service
+RequiresMountsFor=/mnt/data
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=notify
 NotifyAccess=main
-WorkingDirectory=/opt/wb-irrigation/irrigation
+User=wb-irrigation
+Group=wb-irrigation
+WorkingDirectory=/mnt/data/wb-irrigation-state
+EnvironmentFile=-/opt/wb-irrigation/.env
+EnvironmentFile=/opt/wb-irrigation/release.env
 Environment=TESTING=0
 Environment=UI_THEME=auto
 Environment=WB_WATCHDOG_ENABLED=1
-ExecStart=/opt/wb-irrigation/irrigation/venv/bin/python run.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/wb-irrigation/irrigation/venv/bin/python /opt/wb-irrigation/irrigation/run.py
 TimeoutStartSec=60
 TimeoutStopSec=45
 WatchdogSec=60
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/data/wb-irrigation-state
+BindPaths=/mnt/data/wb-irrigation-state/static/media/maps:/mnt/data/wb-irrigation/static/media/maps
+BindPaths=/mnt/data/wb-irrigation-state/static/media/zones:/mnt/data/wb-irrigation/static/media/zones
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
 
 [Install]
 WantedBy=multi-user.target

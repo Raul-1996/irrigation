@@ -3,6 +3,9 @@
 import json
 import os
 from datetime import datetime, timedelta
+from unittest.mock import patch
+
+from tests.safety_contracts import confirmed_group_stop
 
 os.environ["TESTING"] = "1"
 
@@ -122,10 +125,31 @@ class TestZoneNextWateringPostpone:
         item2 = self._bulk(admin_client, z2["id"])
         assert item2["next_datetime"] is not None
 
-    def test_bulk_group_postpone_via_api(self, admin_client, app):
+    def test_bulk_group_postpone_via_api(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
         # POST /api/postpone for the group, then verify bulk respects it.
         g = app.db.create_group("PPGroup")
         z = app.db.create_zone({"name": "PP3", "duration": 10, "group_id": g["id"]})
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "aggregate_valid": True,
+                        "stopped": [z["id"]],
+                        "unresolved": [],
+                        "unverified_zone_ids": [],
+                        "retry_scheduled": False,
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         app.db.create_program(
             {
                 "name": "DailyDawn",
@@ -379,12 +403,15 @@ class TestRainEnvAPI:
         resp = admin_client.get("/api/rain")
         assert resp.status_code == 200
 
-    def test_post_rain(self, admin_client):
-        resp = admin_client.post(
-            "/api/rain",
-            data=json.dumps({"enabled": True, "topic": "/rain", "server_id": 1, "type": "NO"}),
-            content_type="application/json",
-        )
+    def test_post_rain(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "rain", "host": "127.0.0.1", "port": 1883, "enabled": True})
+        with patch("routes.system_config_api.rain_monitor") as monitor:
+            monitor.reconfigure.return_value = True
+            resp = admin_client.post(
+                "/api/rain",
+                data=json.dumps({"enabled": True, "topic": "/rain", "server_id": server["id"], "type": "NO"}),
+                content_type="application/json",
+            )
         assert resp.status_code == 200
 
     def test_get_env(self, admin_client):
@@ -480,7 +507,8 @@ class TestGroupsAdvanced:
     def test_stop_group(self, admin_client, app):
         g = app.db.create_group("SG")
         z = app.db.create_zone({"name": "Z", "duration": 10, "group_id": g["id"]})
-        resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post(f"/api/groups/{g['id']}/stop", content_type="application/json")
         assert resp.status_code in (200, 400, 500)
 
     def test_start_zone_exclusive(self, admin_client, app):

@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import os
 import random
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -124,6 +125,25 @@ class TestMapUploadInvalid:
         assert body.get("success") is False
         assert body.get("error_code") == "IMAGE_PROCESSING_FAILED"
         # And critically: nothing got persisted to disk.
+        assert set(_list_map_files()) == before
+
+    def test_decompression_bomb_returns_image_too_large_400(self, admin_client):
+        before = set(_list_map_files())
+        bomb = Image.DecompressionBombError("unsafe dimensions")
+
+        with patch("services.image_pipeline.Image.open", side_effect=bomb):
+            resp = admin_client.post(
+                "/api/map",
+                data={"file": (io.BytesIO(b"bomb header"), "bomb.png")},
+                content_type="multipart/form-data",
+            )
+
+        assert resp.status_code == 400
+        assert resp.get_json() == {
+            "success": False,
+            "message": "Изображение слишком большое",
+            "error_code": "IMAGE_TOO_LARGE",
+        }
         assert set(_list_map_files()) == before
 
 

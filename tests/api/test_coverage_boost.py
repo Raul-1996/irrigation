@@ -7,6 +7,8 @@ Each test hits as many code paths as possible.
 import json
 from unittest.mock import patch
 
+from tests.safety_contracts import confirmed_group_stop
+
 
 class TestAllGetEndpoints:
     """Hit every GET endpoint to maximize route coverage."""
@@ -146,7 +148,14 @@ class TestZoneCRUDWorkflow:
             # Update
             resp = admin_client.put(
                 f"/api/zones/{zone_id}",
-                data=json.dumps({"name": "Updated Z", "duration": 20, "icon": "🌊"}),
+                data=json.dumps(
+                    {
+                        "name": "Updated Z",
+                        "duration": 20,
+                        "icon": "🌊",
+                        "expected_version": resp.get_json()["version"],
+                    }
+                ),
                 content_type="application/json",
             )
             assert resp.status_code == 200
@@ -247,14 +256,24 @@ class TestMQTTOperations:
         assert resp.status_code in (200, 201)
 
     def test_zone_mqtt_start_stop(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         app.db.create_zone(
-            {"name": "MQTTZ", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {
+                "name": "MQTTZ",
+                "duration": 10,
+                "group_id": 1,
+                "topic": "/devices/test/K1",
+                "mqtt_server_id": server["id"],
+            }
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
 
-        with patch("services.mqtt_pub.publish_mqtt_value", return_value=True):
+        with (
+            confirmed_group_stop(app.db),
+            patch("services.zone_control.publish_mqtt_value", return_value=True),
+            patch("services.zone_control.state_verifier"),
+        ):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/start")
             assert resp.status_code == 200
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/stop")
@@ -343,7 +362,9 @@ class TestEmergencyOperations:
     def test_emergency_stop_resume(self, admin_client):
         with patch("services.zone_control.stop_all_in_group"):
             resp = admin_client.post("/api/emergency-stop")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        assert resp.get_json()["success"] is False
+        assert resp.get_json()["sessions_quiesced"] is False
 
         resp = admin_client.post("/api/emergency-resume")
         assert resp.status_code == 200
@@ -373,11 +394,20 @@ class TestViewerRole:
         assert viewer_client.get("/api/groups").status_code == 200
         assert viewer_client.get("/api/status").status_code == 200
 
-    def test_viewer_cannot_mutate(self, viewer_client):
-        resp = viewer_client.post(
-            "/api/zones", data=json.dumps({"name": "X", "duration": 1}), content_type="application/json"
-        )
-        assert resp.status_code in (200, 201, 401, 403)  # TESTING mode may allow
+    def test_viewer_cannot_mutate(self, viewer_client, app):
+        zone_ids_before = {zone["id"] for zone in app.db.get_zones()}
+        testing_before = app.config["TESTING"]
+        app.config["TESTING"] = False
+        try:
+            resp = viewer_client.post(
+                "/api/zones", data=json.dumps({"name": "X", "duration": 1}), content_type="application/json"
+            )
+        finally:
+            app.config["TESTING"] = testing_before
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error_code"] == "FORBIDDEN"
+        assert {zone["id"] for zone in app.db.get_zones()} == zone_ids_before
 
 
 class TestGuestRole:
@@ -398,14 +428,14 @@ class TestZoneStartStopWorkflow:
     """Zone start/stop through API."""
 
     def test_zone_start_stop_via_api(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         app.db.create_zone(
-            {"name": "SSZ", "duration": 5, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "SSZ", "duration": 5, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server["id"]}
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
 
-        with patch("services.zone_control.exclusive_start_zone"):
+        with confirmed_group_stop(app.db), patch("services.zone_control.exclusive_start_zone"):
             resp = admin_client.post(f"/api/zones/{zid}/start")
             assert resp.status_code == 200
 

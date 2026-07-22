@@ -273,30 +273,40 @@ function escapeHtml(str) {
                 if (t.dataset && t.dataset.job){ cancelJob(t.dataset.job); }
                 if (t.dataset && t.dataset.group){ cancelGroup(t.dataset.group); }
             };
-            // Convert bracketed actions to clickable spans
-            root.innerHTML = root.innerHTML
-                .replace(/\[ cancel \]/g, '<span data-job-action style="color:#ff8080;cursor:pointer;">[ cancel ]</span>')
-                .replace(/\[ cancel group \]/g, '<span data-group-action style="color:#ff8080;cursor:pointer;">[ cancel group ]</span>');
-            // Map actions to ids
+            // Build action spans as DOM nodes. Health text includes broker-controlled
+            // MQTT topic/payload values, so decoded text must never re-enter innerHTML.
             const lines = root.textContent.split('\n');
-            let html = '';
+            const fragment = document.createDocumentFragment();
             const jobs = d.jobs||[];
             const zones = d.zones||[];
             let ji = 0, zi = 0;
             for (const line of lines){
+                const div = document.createElement('div');
                 if (line.includes('[ cancel ]')){
                     const id = (jobs[ji]||{}).id || '';
-                    html += `<div>${line.replace('[ cancel ]', `<span data-job="${(id||'').replace(/"/g,'&quot;') }" style='color:#ff8080;cursor:pointer;'>[ cancel ]</span>`)}</div>`;
+                    const action = document.createElement('span');
+                    action.dataset.job = String(id);
+                    action.style.color = '#ff8080';
+                    action.style.cursor = 'pointer';
+                    action.textContent = '[ cancel ]';
+                    div.append(document.createTextNode(line.replace('[ cancel ]', '')), action);
                     ji++;
                 } else if (line.includes('[ cancel group ]')){
                     const gid = (zones[zi]||{}).group_id || '';
-                    html += `<div>${line.replace('[ cancel group ]', `<span data-group="${gid}" style='color:#ff8080;cursor:pointer;'>[ cancel group ]</span>`)}</div>`;
+                    const action = document.createElement('span');
+                    action.dataset.group = String(gid);
+                    action.style.color = '#ff8080';
+                    action.style.cursor = 'pointer';
+                    action.textContent = '[ cancel group ]';
+                    div.append(document.createTextNode(line.replace('[ cancel group ]', '')), action);
                     zi++;
                 } else {
-                    html += `<div>${line}</div>`;
+                    div.textContent = line;
                 }
+                fragment.appendChild(div);
             }
-            root.innerHTML = html;
+            root.textContent = '';
+            root.appendChild(fragment);
         }
         async function refresh(force){
             if (!panel) return;
@@ -321,6 +331,7 @@ function escapeHtml(str) {
             if (visible){ refresh(true); timer = setInterval(refresh, 2500); }
         }
         document.addEventListener('keydown', (ev)=>{
+            if (!(ev.target instanceof Element) || ev.target.closest('input, textarea, select, [contenteditable]')) return;
             if (ev.key === 'h' || ev.key === 'H') setVisible(!visible);
         });
     })();
@@ -349,7 +360,10 @@ function escapeHtml(str) {
         function start(label){ t0 = performance.now(); marks = [{label: label||'click', t: t0}]; if (swVisible) render(); }
         function mark(label){ if (!t0) return; marks.push({label: label||'mark', t: performance.now()}); if (swVisible) render(); }
         window.__sw = { start, mark, show: setVisible };
-        document.addEventListener('keydown', (ev)=>{ if (ev.key === 's' || ev.key === 'S') setVisible(!swVisible); });
+        document.addEventListener('keydown', (ev)=>{
+            if (!(ev.target instanceof Element) || ev.target.closest('input, textarea, select, [contenteditable]')) return;
+            if (ev.key === 's' || ev.key === 'S') setVisible(!swVisible);
+        });
     })();
     // Real user timing for Chrome (from navigation start to content complete state on Status page)
     (function(){

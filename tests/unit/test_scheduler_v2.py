@@ -1,16 +1,29 @@
-"""Tests for Scheduler v2: new schedule types (interval, even-odd), extra_times, enabled field.
-
-TDD approach: tests written BEFORE implementation.
-All tests use @pytest.mark.xfail for not-yet-implemented features.
-"""
+"""Tests for Scheduler v2: new schedule types (interval, even-odd), extra_times, enabled field."""
 
 import os
-from datetime import datetime
-from unittest.mock import MagicMock
+from datetime import datetime, timedelta
 
 import pytest
 
 os.environ["TESTING"] = "1"
+
+
+def _cron_fields(trigger):
+    """Return CronTrigger fields in a stable, semantic form."""
+    return {field.name: str(field) for field in trigger.fields}
+
+
+def _frozen_datetime(now: datetime):
+    """Return a datetime subclass whose ``now()`` is deterministic."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return now
+            return now.astimezone(tz)
+
+    return FrozenDateTime
 
 
 @pytest.fixture
@@ -18,10 +31,7 @@ def test_scheduler(test_db):
     """Create a test scheduler instance with test DB."""
     from irrigation_scheduler import IrrigationScheduler
 
-    # Mock MQTT client
-    mock_mqtt = MagicMock()
-
-    scheduler = IrrigationScheduler(test_db, mock_mqtt)
+    scheduler = IrrigationScheduler(test_db)
     scheduler.start()
 
     yield scheduler
@@ -33,7 +43,6 @@ def test_scheduler(test_db):
 class TestScheduleWeekdaysProgram:
     """Tests for standard weekdays schedule (existing functionality)."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: weekdays with new fields")
     def test_schedule_weekdays_program(self, test_scheduler):
         """Программа с schedule_type='weekdays' планируется корректно."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -55,9 +64,8 @@ class TestScheduleWeekdaysProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         job_ids = [j.id for j in jobs]
 
-        assert any("program_" in job_id and str(prog["id"]) in job_id for job_id in job_ids)
+        assert any(f"program:{prog['id']}:" in job_id for job_id in job_ids)
 
-    @pytest.mark.xfail(reason="Not yet implemented: weekdays schedule details")
     def test_weekdays_program_has_correct_trigger(self, test_scheduler):
         """Weekdays программа имеет CronTrigger с правильными днями."""
         from apscheduler.triggers.cron import CronTrigger
@@ -78,20 +86,25 @@ class TestScheduleWeekdaysProgram:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        jobs_by_id = {job.id: job for job in prog_jobs}
+        expected_days = {f"program:{prog['id']}:main:d{day}": day for day in (0, 2, 4)}
+        assert jobs_by_id.keys() == expected_days.keys()
 
-        job = prog_jobs[0]
-        assert isinstance(job.trigger, CronTrigger)
-        # Проверяем что день недели соответствует 0,2,4 (mon,wed,fri)
-        # CronTrigger использует: mon=0, tue=1, wed=2, thu=3, fri=4, sat=5, sun=6
+        for job_id, day in expected_days.items():
+            trigger = jobs_by_id[job_id].trigger
+            assert isinstance(trigger, CronTrigger)
+            fields = _cron_fields(trigger)
+            assert fields["day_of_week"] == str(day)
+            assert fields["hour"] == "6"
+            assert fields["minute"] == "0"
+            assert fields["second"] == "0"
 
 
 class TestScheduleIntervalProgram:
     """Tests for schedule_type='interval' (every N days)."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: interval schedule")
     def test_schedule_interval_program(self, test_scheduler):
         """Программа с schedule_type='interval' планируется с IntervalTrigger."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -113,9 +126,8 @@ class TestScheduleIntervalProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         job_ids = [j.id for j in jobs]
 
-        assert any(f"program_{prog['id']}" in job_id for job_id in job_ids)
+        assert any(f"program:{prog['id']}:" in job_id for job_id in job_ids)
 
-    @pytest.mark.xfail(reason="Not yet implemented: interval trigger type")
     def test_interval_program_uses_interval_trigger(self, test_scheduler):
         """Interval программа использует IntervalTrigger."""
         from apscheduler.triggers.interval import IntervalTrigger
@@ -137,16 +149,33 @@ class TestScheduleIntervalProgram:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         assert len(prog_jobs) > 0
 
         job = prog_jobs[0]
         assert isinstance(job.trigger, IntervalTrigger)
 
-    @pytest.mark.xfail(reason="Not yet implemented: interval first run today")
-    def test_interval_program_first_run_today(self, test_scheduler):
-        """Interval программа: первый запуск СЕГОДНЯ в указанное время."""
+    @pytest.mark.parametrize(
+        ("now", "expected_start"),
+        [
+            pytest.param(
+                datetime(2030, 1, 15, 10, 0),
+                datetime(2030, 1, 15, 14, 30),
+                id="time-still-ahead",
+            ),
+            pytest.param(
+                datetime(2030, 1, 15, 16, 0),
+                datetime(2030, 1, 16, 14, 30),
+                id="time-already-passed",
+            ),
+        ],
+    )
+    def test_interval_program_first_run_today(self, test_scheduler, monkeypatch, now, expected_start):
+        """Interval starts at the nearest requested wall-clock time."""
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        monkeypatch.setattr("irrigation_scheduler.datetime", _frozen_datetime(now))
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
@@ -164,22 +193,19 @@ class TestScheduleIntervalProgram:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        assert len(prog_jobs) == 1
 
         job = prog_jobs[0]
-        next_run = job.next_run_time
-
-        # Следующий запуск должен быть сегодня в 14:30 (если ещё не прошло) или через interval_days
-        today = datetime.now().date()
-        assert next_run.date() >= today
+        assert isinstance(job.trigger, IntervalTrigger)
+        assert job.trigger.interval == timedelta(days=5)
+        assert job.trigger.start_date.replace(tzinfo=None) == expected_start
 
 
 class TestScheduleEvenOddProgram:
     """Tests for schedule_type='even-odd' (even/odd days of month)."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: even-odd schedule")
     def test_schedule_even_odd_program_even(self, test_scheduler):
         """Программа с even_odd='even' планируется на чётные дни."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -201,9 +227,8 @@ class TestScheduleEvenOddProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         job_ids = [j.id for j in jobs]
 
-        assert any(f"program_{prog['id']}" in job_id for job_id in job_ids)
+        assert any(f"program:{prog['id']}:" in job_id for job_id in job_ids)
 
-    @pytest.mark.xfail(reason="Not yet implemented: even-odd schedule odd")
     def test_schedule_even_odd_program_odd(self, test_scheduler):
         """Программа с even_odd='odd' планируется на нечётные дни."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -225,21 +250,27 @@ class TestScheduleEvenOddProgram:
         jobs = test_scheduler.scheduler.get_jobs()
         job_ids = [j.id for j in jobs]
 
-        assert any(f"program_{prog['id']}" in job_id for job_id in job_ids)
+        assert any(f"program:{prog['id']}:" in job_id for job_id in job_ids)
 
-    @pytest.mark.xfail(reason="Not yet implemented: even-odd cron expression")
-    def test_even_odd_program_has_correct_cron_days(self, test_scheduler):
-        """Even-odd программа имеет CronTrigger с правильными днями месяца."""
+    @pytest.mark.parametrize(
+        ("parity", "expected_days"),
+        [
+            pytest.param("even", ",".join(str(day) for day in range(2, 31, 2)), id="even"),
+            pytest.param("odd", ",".join(str(day) for day in range(1, 32, 2)), id="odd"),
+        ],
+    )
+    def test_even_odd_program_has_correct_cron_days(self, test_scheduler, parity, expected_days):
+        """Even-odd CronTrigger preserves parity and requested start time."""
         from apscheduler.triggers.cron import CronTrigger
 
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
             {
-                "name": "Even Days",
-                "time": "06:00",
+                "name": f"{parity.title()} Days",
+                "time": "06:45",
                 "schedule_type": "even-odd",
-                "even_odd": "even",
+                "even_odd": parity,
                 "days": [],
                 "zones": [1],
                 "enabled": 1,
@@ -249,23 +280,27 @@ class TestScheduleEvenOddProgram:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        assert len(prog_jobs) == 1
 
         job = prog_jobs[0]
         assert isinstance(job.trigger, CronTrigger)
-
-        # Проверяем что day содержит чётные дни: 2,4,6,8,...
-        # trigger.fields[2] обычно day field в CronTrigger
+        fields = _cron_fields(job.trigger)
+        assert fields["day"] == expected_days
+        assert fields["day_of_week"] == "*"
+        assert fields["hour"] == "6"
+        assert fields["minute"] == "45"
+        assert fields["second"] == "0"
 
 
 class TestExtraTimes:
     """Tests for extra_times field (multiple start times per day)."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: extra_times scheduling")
     def test_schedule_extra_times(self, test_scheduler):
-        """Программа с extra_times создаёт несколько jobs."""
+        """Each weekday/extra-time pair gets the requested CronTrigger."""
+        from apscheduler.triggers.cron import CronTrigger
+
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
@@ -282,12 +317,24 @@ class TestExtraTimes:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        # Должно быть 3 job: main (06:00), extra0 (12:00), extra1 (18:00)
-        assert len(prog_jobs) == 3
+        expected = {}
+        for day in (0, 2, 4):
+            expected[f"program:{prog['id']}:main:d{day}"] = (day, 6, 0)
+            expected[f"program:{prog['id']}:extra:0:d{day}"] = (day, 12, 0)
+            expected[f"program:{prog['id']}:extra:1:d{day}"] = (day, 18, 0)
 
-    @pytest.mark.xfail(reason="Not yet implemented: extra_times job naming")
+        jobs_by_id = {job.id: job for job in prog_jobs}
+        assert jobs_by_id.keys() == expected.keys()
+        for job_id, (day, hour, minute) in expected.items():
+            trigger = jobs_by_id[job_id].trigger
+            assert isinstance(trigger, CronTrigger)
+            fields = _cron_fields(trigger)
+            assert fields["day_of_week"] == str(day)
+            assert fields["hour"] == str(hour)
+            assert fields["minute"] == str(minute)
+
     def test_extra_times_jobs_have_correct_ids(self, test_scheduler):
         """Jobs для extra_times имеют правильные ID (main, extra0, extra1, ...)."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -299,12 +346,11 @@ class TestExtraTimes:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_job_ids = [j.id for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_job_ids = [j.id for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert f"program_{prog['id']}_main" in prog_job_ids
-        assert f"program_{prog['id']}_extra0" in prog_job_ids
+        assert f"program:{prog['id']}:main:d0" in prog_job_ids
+        assert f"program:{prog['id']}:extra:0:d0" in prog_job_ids
 
-    @pytest.mark.xfail(reason="Not yet implemented: extra_times with interval")
     def test_extra_times_with_interval_schedule(self, test_scheduler):
         """extra_times работает с schedule_type='interval'."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -325,12 +371,11 @@ class TestExtraTimes:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         # Должно быть 2 job (main + extra0) для interval
         assert len(prog_jobs) == 2
 
-    @pytest.mark.xfail(reason="Not yet implemented: empty extra_times")
     def test_empty_extra_times_creates_single_job(self, test_scheduler):
         """Программа с extra_times=[] создаёт только один job (main)."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -342,7 +387,7 @@ class TestExtraTimes:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         # Только main job
         assert len(prog_jobs) == 1
@@ -351,7 +396,6 @@ class TestExtraTimes:
 class TestEnabledField:
     """Tests for enabled field (skip disabled programs)."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: skip disabled program")
     def test_skip_disabled_program(self, test_scheduler):
         """Программа с enabled=0 не планируется."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -363,12 +407,11 @@ class TestEnabledField:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         # Не должно быть jobs для выключенной программы
         assert len(prog_jobs) == 0
 
-    @pytest.mark.xfail(reason="Not yet implemented: enabled default")
     def test_enabled_default_true_schedules_program(self, test_scheduler):
         """Программа без явного enabled (дефолт=1) планируется."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -386,11 +429,10 @@ class TestEnabledField:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         assert len(prog_jobs) > 0
 
-    @pytest.mark.xfail(reason="Not yet implemented: cancel jobs on disable")
     def test_enable_disable_reschedules(self, test_scheduler):
         """При toggle enabled → пересчёт расписания (добавление/удаление jobs)."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -402,48 +444,42 @@ class TestEnabledField:
         # Планируем
         test_scheduler.schedule_program(prog["id"], prog)
 
-        jobs_before = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_before = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_before) > 0
 
         # Выключаем
         prog["enabled"] = 0
         test_scheduler.schedule_program(prog["id"], prog)
 
-        jobs_after_disable = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_after_disable = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_after_disable) == 0
 
         # Включаем обратно
         prog["enabled"] = 1
         test_scheduler.schedule_program(prog["id"], prog)
 
-        jobs_after_enable = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_after_enable = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_after_enable) > 0
 
 
 class TestSmartTypeWeatherAdjustment:
-    """Tests for type='smart' with enhanced weather correction."""
+    """Smart has no proven semantics and must not alias time-based."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: smart type weather")
     def test_smart_type_weather_adjustment(self, test_scheduler):
-        """Программа с type='smart' применяет расширенную погодокоррекцию."""
+        """Программа с type='smart' отклоняется без scheduler jobs."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
 
         prog = test_scheduler.db.create_program(
             {"name": "Smart Program", "time": "06:00", "type": "smart", "days": [0], "zones": [1], "enabled": 1}
         )
 
-        # Планируем (проверяем что не падает)
-        test_scheduler.schedule_program(prog["id"], prog)
+        assert test_scheduler.schedule_program(prog["id"], prog) is False
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
-        assert len(prog_jobs) > 0
+        assert prog_jobs == []
 
-        # TODO: проверить что при запуске используется smart weather adjustment
-        # Это требует мока weather_adjustment и проверки вызова adjust_duration
-
-    @pytest.mark.xfail(reason="Not yet implemented: time-based vs smart")
     def test_time_based_uses_standard_weather(self, test_scheduler):
         """Программа с type='time-based' использует стандартную погодокоррекцию."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -462,7 +498,7 @@ class TestSmartTypeWeatherAdjustment:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         assert len(prog_jobs) > 0
 
@@ -470,7 +506,6 @@ class TestSmartTypeWeatherAdjustment:
 class TestSchedulerIntegration:
     """Integration tests for scheduler with v2 features."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: full v2 program scheduling")
     def test_full_v2_program_scheduling(self, test_scheduler):
         """Полная программа v2 (все поля) планируется корректно."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -481,7 +516,7 @@ class TestSchedulerIntegration:
                 "name": "Full v2 Program",
                 "time": "06:00",
                 "extra_times": ["18:00"],
-                "type": "smart",
+                "type": "time-based",
                 "schedule_type": "interval",
                 "interval_days": 2,
                 "color": "#9c27b0",
@@ -494,7 +529,7 @@ class TestSchedulerIntegration:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         # Должно быть 2 job (main + extra0) для interval с extra_times
         assert len(prog_jobs) == 2
@@ -505,7 +540,6 @@ class TestSchedulerIntegration:
         for job in prog_jobs:
             assert isinstance(job.trigger, IntervalTrigger)
 
-    @pytest.mark.xfail(reason="Not yet implemented: reschedule on update")
     def test_reschedule_program_on_update(self, test_scheduler):
         """При обновлении программы jobs пересоздаются."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -517,7 +551,7 @@ class TestSchedulerIntegration:
         # Планируем
         test_scheduler.schedule_program(prog["id"], prog)
 
-        jobs_before = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_before = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_before) > 0
 
         # Обновляем время и schedule_type
@@ -528,7 +562,7 @@ class TestSchedulerIntegration:
         # Пере-планируем
         test_scheduler.schedule_program(prog["id"], updated_prog)
 
-        jobs_after = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_after = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_after) > 0
 
         # Проверяем что trigger изменился
@@ -537,7 +571,6 @@ class TestSchedulerIntegration:
         job = jobs_after[0]
         assert isinstance(job.trigger, IntervalTrigger)
 
-    @pytest.mark.xfail(reason="Not yet implemented: cancel all jobs on delete")
     def test_cancel_program_removes_all_jobs(self, test_scheduler):
         """При удалении программы все её jobs удаляются (включая extra_times)."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -556,20 +589,19 @@ class TestSchedulerIntegration:
         # Планируем
         test_scheduler.schedule_program(prog["id"], prog)
 
-        jobs_before = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_before = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_before) == 3  # main + 2 extra
 
         # Отменяем
         test_scheduler.cancel_program(prog["id"])
 
-        jobs_after = [j for j in test_scheduler.scheduler.get_jobs() if f"program_{prog['id']}" in j.id]
+        jobs_after = [j for j in test_scheduler.scheduler.get_jobs() if f"program:{prog['id']}:" in j.id]
         assert len(jobs_after) == 0
 
 
 class TestBackwardCompatibilityScheduler:
     """Tests ensuring old programs still schedule correctly."""
 
-    @pytest.mark.xfail(reason="Not yet implemented: backward compatible scheduling")
     def test_old_program_schedules_as_weekdays(self, test_scheduler):
         """Старая программа (без новых полей) планируется как weekdays."""
         test_scheduler.db.create_zone({"name": "Z1", "duration": 10, "group_id": 1})
@@ -588,7 +620,7 @@ class TestBackwardCompatibilityScheduler:
         test_scheduler.schedule_program(prog["id"], prog)
 
         jobs = test_scheduler.scheduler.get_jobs()
-        prog_jobs = [j for j in jobs if f"program_{prog['id']}" in j.id]
+        prog_jobs = [j for j in jobs if f"program:{prog['id']}:" in j.id]
 
         assert len(prog_jobs) > 0
 

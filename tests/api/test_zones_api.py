@@ -55,13 +55,14 @@ class TestZoneSingleAPI:
         zone = app.db.create_zone({"name": "Old", "duration": 10, "group_id": 1})
         resp = admin_client.put(
             f"/api/zones/{zone['id']}",
-            data=json.dumps({"name": "Updated", "duration": 20}),
+            data=json.dumps({"name": "Updated", "duration": 20, "expected_version": zone["version"]}),
             content_type="application/json",
         )
         assert resp.status_code == 200
 
     def test_delete_zone(self, admin_client, app):
         zone = app.db.create_zone({"name": "Del", "duration": 10, "group_id": 1})
+        app.db.update_zone(zone["id"], {"state": "off", "commanded_state": "off", "observed_state": "off"})
         resp = admin_client.delete(f"/api/zones/{zone['id']}")
         assert resp.status_code == 204
 
@@ -249,10 +250,9 @@ class TestZoneStopAbortsSession:
         assert "api_zone_stop" in pj
         assert "mqtt" not in pj.lower() or "api_zone_mqtt_stop" not in pj
 
-    # ─── #9: cancel_group_jobs failure -> fallback to solo stop ─────────
-    def test_zone_mqtt_stop_cancel_group_jobs_failure_falls_back(self, admin_client, app, monkeypatch):
-        """Spec §4.2 #9: even if cancel_group_jobs throws, the legacy solo
-        stop must still close the valve so the user-facing button works."""
+    # ─── #9: cancel_group_jobs failure is surfaced truthfully ────────────
+    def test_zone_mqtt_stop_cancel_group_jobs_failure_is_not_success(self, admin_client, app, monkeypatch):
+        """A cleanup failure cannot be reported as a completed session abort."""
         from irrigation_scheduler import init_scheduler
 
         sched = init_scheduler(app.db)
@@ -265,8 +265,6 @@ class TestZoneStopAbortsSession:
         monkeypatch.setattr(sched, "cancel_group_jobs", _boom)
 
         resp = admin_client.post(f"/api/zones/{zone['id']}/mqtt/stop", content_type="application/json")
-        # The fallback path can return 200 (solo stop succeeded) or 500
-        # (solo stop also failed); both prove we tried the fallback.
-        # In TESTING mode, central stop_zone returns success on a
-        # newly-created zone (state defaults to off), so 200 is expected.
-        assert resp.status_code in (200, 400, 500), resp.get_data(as_text=True)
+        assert resp.status_code == 503, resp.get_data(as_text=True)
+        assert resp.get_json()["success"] is False
+        assert resp.get_json()["error_code"] == "SESSION_CLEANUP_FAILED"

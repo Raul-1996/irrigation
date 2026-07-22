@@ -2,38 +2,9 @@
 
 import re
 
-import pytest
+from tests.fixtures.css import fetch_inline_and_external_css
 
 
-def _fetch_inline_and_external_css(client, page_path: str) -> str:
-    """Return concatenated CSS visible to the rendered page.
-
-    The HTML response only contains <link rel="stylesheet" href=...> tags after
-    CSS extraction (commit 791ff0e moved inline <style> blocks into
-    static/css/*.css).  Tests that previously grep'd HTML for class names or
-    media queries must now fetch every linked stylesheet via the test client
-    and concatenate them with the HTML body so existing assertions still match.
-    """
-    resp = client.get(page_path)
-    if resp.status_code != 200:
-        return resp.data.decode("utf-8", errors="replace")
-    html = resp.data.decode("utf-8", errors="replace")
-    pieces = [html]
-    for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
-        # Normalise to a path the test client can fetch
-        if href.startswith("http"):
-            continue
-        path = href if href.startswith("/") else "/" + href.lstrip("./")
-        try:
-            css_resp = client.get(path)
-            if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
-        except (OSError, ValueError):
-            continue
-    return "\n".join(pieces)
-
-
-@pytest.mark.xfail(reason="Implementation pending")
 def test_status_html_has_desktop_layout(client):
     """Verify status.html contains desktop-layout wrapper and sidebar elements."""
     response = client.get("/status")
@@ -49,7 +20,6 @@ def test_status_html_has_desktop_layout(client):
     assert 'id="sidebar-toggle"' in html
 
 
-@pytest.mark.xfail(reason="Implementation pending")
 def test_status_html_has_active_zone_indicator(client):
     """Verify status.html contains active zone indicator in sidebar."""
     response = client.get("/status")
@@ -64,7 +34,6 @@ def test_status_html_has_active_zone_indicator(client):
     assert 'id="active-zone-next"' in html
 
 
-@pytest.mark.xfail(reason="Implementation pending")
 def test_status_html_has_water_meter(client):
     """Verify status.html contains water meter widget in sidebar."""
     response = client.get("/status")
@@ -93,36 +62,27 @@ def test_weather_widget_in_sidebar(client):
     assert sidebar_start < weather_widget_pos < sidebar_end, "weather-widget not inside weather-sidebar"
 
 
-@pytest.mark.xfail(reason="Implementation pending")
 def test_24h_grid_exists(client):
-    """Verify CSS contains weather-24h-grid styles."""
-    response = client.get("/status")
-    assert response.status_code == 200
-    html = response.data.decode("utf-8")
+    """Verify CSS contains weather-24h-grid styles (lives in status.css)."""
+    combined = fetch_inline_and_external_css(client, "/status")
 
-    assert "weather-24h-grid" in html
+    assert "weather-24h-grid" in combined
     # Check CSS definition
-    assert "grid-template-columns: repeat(3, 1fr)" in html or "grid-template-columns:repeat(3,1fr)" in html
+    assert "grid-template-columns: repeat(3, 1fr)" in combined or "grid-template-columns:repeat(3,1fr)" in combined
 
 
-@pytest.mark.xfail(reason="Implementation pending")
 def test_sidebar_collapsed_css(client):
-    """Verify CSS contains sidebar-collapsed styles."""
-    response = client.get("/status")
-    assert response.status_code == 200
-    html = response.data.decode("utf-8")
+    """Verify CSS contains sidebar-collapsed styles (lives in status.css)."""
+    combined = fetch_inline_and_external_css(client, "/status")
 
-    assert "sidebar-collapsed" in html
+    assert "sidebar-collapsed" in combined
 
 
-@pytest.mark.xfail(reason="Implementation pending")
 def test_mobile_media_query(client):
-    """Verify mobile responsive media query exists."""
-    response = client.get("/status")
-    assert response.status_code == 200
-    html = response.data.decode("utf-8")
+    """Verify mobile responsive media query exists (lives in status.css)."""
+    combined = fetch_inline_and_external_css(client, "/status")
 
-    assert "@media (max-width: 1023px)" in html or "@media(max-width:1023px)" in html
+    assert "@media (max-width: 1023px)" in combined or "@media(max-width:1023px)" in combined
 
 
 def test_mobile_zones_cards_class(client):
@@ -144,7 +104,7 @@ def test_mobile_buttons_responsive(client):
     """
     response = client.get("/status")
     assert response.status_code == 200
-    combined = _fetch_inline_and_external_css(client, "/status")
+    combined = fetch_inline_and_external_css(client, "/status")
     # v2: breakpoint raised to 1023px
     assert (
         "@media (max-width: 1023px)" in combined
@@ -162,7 +122,7 @@ def test_bottom_sheet_hidden_by_default(client):
     overrides both, with a delayed visibility transition so slide-down animates
     out before the sheet becomes non-interactive.
     """
-    combined = _fetch_inline_and_external_css(client, "/status")
+    combined = fetch_inline_and_external_css(client, "/status")
     # Locate the base .bottom-sheet block (the one before the @media query).
     base_match = re.search(r"\.bottom-sheet\s*\{[^}]*\}", combined, re.DOTALL)
     assert base_match, ".bottom-sheet base rule not found in CSS"

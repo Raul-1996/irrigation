@@ -25,9 +25,17 @@ class TestFullWateringCycle:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.water_monitor") as wm,
             patch("services.zone_control.state_verifier"),
         ):
+            # A bare MagicMock breaks stop_zone: pulse readings must be
+            # int | None and summarize_run must unpack into (liters, lpm),
+            # otherwise the zone_run is never finalized and
+            # get_last_watering_time returns None.
+            wm.get_pulses_at_or_before.return_value = None
+            wm.get_pulses_at_or_after.return_value = None
+            wm.summarize_run.return_value = (None, None)
+
             from services.zone_control import exclusive_start_zone, stop_zone
 
             result = exclusive_start_zone(zone["id"])
@@ -37,6 +45,12 @@ class TestFullWateringCycle:
             assert z["state"] in ("on", "starting")
             assert z["watering_start_time"] is not None
             start_iso = z["watering_start_time"]
+
+            # Simulate the real relay-on echo so the finished run stays
+            # status='ok' (finish_zone_run downgrades unconfirmed runs to
+            # 'failed'); the echo normally arrives via observed_state/sse_hub,
+            # both out of the picture here.
+            test_db.mark_zone_run_confirmed(int(zone["id"]))
 
             # Issue #2: ensure end-time is strictly after start-time after
             # a real start→sleep→stop cycle.
@@ -84,7 +98,7 @@ class TestFullWateringCycle:
         with (
             patch("services.zone_control.db", test_db),
             patch("services.zone_control.publish_mqtt_value", return_value=True),
-            patch("services.zone_control.water_monitor"),
+            patch("services.zone_control.water_monitor", **{"summarize_run.return_value": (None, None)}),
             patch("services.zone_control.state_verifier"),
         ):
             from services.zone_control import exclusive_start_zone

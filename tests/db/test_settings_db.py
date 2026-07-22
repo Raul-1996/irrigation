@@ -25,10 +25,9 @@ class TestSettings:
 
 
 class TestPassword:
-    def test_default_password(self, test_db):
-        """Default password should be set."""
-        h = test_db.get_password_hash()
-        assert h is not None
+    def test_public_default_password_is_not_seeded(self, test_db):
+        """Credential bootstrap is delegated to the private recovery workflow."""
+        assert test_db.get_password_hash() is None
 
     def test_set_password(self, test_db):
         test_db.set_password("new_secure_password")

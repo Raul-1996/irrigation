@@ -2,6 +2,8 @@
 
 import json
 
+from tests.safety_contracts import confirmed_group_stop
+
 
 class TestGroupsAPIDeep:
     def test_list_groups(self, admin_client):
@@ -28,8 +30,9 @@ class TestGroupsAPIDeep:
             )
             assert resp.status_code == 200
 
-    def test_group_stop(self, admin_client):
-        resp = admin_client.post("/api/groups/1/stop")
+    def test_group_stop(self, admin_client, app):
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post("/api/groups/1/stop")
         assert resp.status_code == 200
 
     def test_group_start_with_zones(self, admin_client, app):

@@ -17,6 +17,8 @@ import json
 
 import pytest
 
+from tests.safety_contracts import confirmed_group_stop
+
 
 class TestZoneCRUD:
     """Zone create, read, update, delete."""
@@ -27,6 +29,16 @@ class TestZoneCRUD:
         resp = client.post("/api/zones", data=json.dumps(defaults), content_type="application/json")
         data = json.loads(resp.data)
         return data.get("id") or data.get("zone", {}).get("id")
+
+    def _update_zone(self, client, zone_id, changes):
+        current = client.get(f"/api/zones/{zone_id}")
+        assert current.status_code == 200
+        version = json.loads(current.data)["version"]
+        return client.put(
+            f"/api/zones/{zone_id}",
+            data=json.dumps({**changes, "expected_version": version}),
+            content_type="application/json",
+        )
 
     def test_create_zone(self, admin_client):
         resp = admin_client.post(
@@ -57,9 +69,7 @@ class TestZoneCRUD:
 
     def test_update_zone_name(self, admin_client):
         zid = self._create_zone(admin_client, name="Before")
-        resp = admin_client.put(
-            f"/api/zones/{zid}", data=json.dumps({"name": "After"}), content_type="application/json"
-        )
+        resp = self._update_zone(admin_client, zid, {"name": "After"})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
@@ -67,7 +77,7 @@ class TestZoneCRUD:
 
     def test_update_zone_duration(self, admin_client):
         zid = self._create_zone(admin_client, duration=10)
-        resp = admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 15}), content_type="application/json")
+        resp = self._update_zone(admin_client, zid, {"duration": 15})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
@@ -75,27 +85,34 @@ class TestZoneCRUD:
 
     def test_update_zone_icon(self, admin_client):
         zid = self._create_zone(admin_client, icon="🌿")
-        resp = admin_client.put(f"/api/zones/{zid}", data=json.dumps({"icon": "💧"}), content_type="application/json")
+        resp = self._update_zone(admin_client, zid, {"icon": "💧"})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
         assert zone["icon"] == "💧"
 
-    def test_update_zone_group(self, admin_client):
+    def test_update_zone_group(self, admin_client, app):
+        target_group = app.db.create_group("Functional target group")
         zid = self._create_zone(admin_client, group_id=1)
-        resp = admin_client.put(f"/api/zones/{zid}", data=json.dumps({"group_id": 2}), content_type="application/json")
+        resp = self._update_zone(admin_client, zid, {"group_id": target_group["id"]})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
-        assert zone["group_id"] == 2
+        assert zone["group_id"] == target_group["id"]
 
-    def test_update_multiple_fields(self, admin_client):
+    def test_update_multiple_fields(self, admin_client, app):
         """Bottom sheet saves name + duration + icon + group at once."""
+        target_group = app.db.create_group("Functional multi-field group")
         zid = self._create_zone(admin_client, name="Old", duration=10, icon="🌿", group_id=1)
-        resp = admin_client.put(
-            f"/api/zones/{zid}",
-            data=json.dumps({"name": "New", "duration": 20, "icon": "🌳", "group_id": 2}),
-            content_type="application/json",
+        resp = self._update_zone(
+            admin_client,
+            zid,
+            {
+                "name": "New",
+                "duration": 20,
+                "icon": "🌳",
+                "group_id": target_group["id"],
+            },
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -103,23 +120,23 @@ class TestZoneCRUD:
         assert zone["name"] == "New"
         assert zone["duration"] == 20
         assert zone["icon"] == "🌳"
-        assert zone["group_id"] == 2
+        assert zone["group_id"] == target_group["id"]
 
     def test_duration_increment_decrement(self, admin_client):
         """Simulate +/- buttons: 10 → 11 → 10 → 1 (min)."""
         zid = self._create_zone(admin_client, duration=10)
         # +1
-        admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 11}), content_type="application/json")
+        self._update_zone(admin_client, zid, {"duration": 11})
         resp = admin_client.get(f"/api/zones/{zid}")
         zone = json.loads(resp.data).get("zone") or json.loads(resp.data)
         assert zone["duration"] == 11
         # -1
-        admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 10}), content_type="application/json")
+        self._update_zone(admin_client, zid, {"duration": 10})
         resp = admin_client.get(f"/api/zones/{zid}")
         zone = json.loads(resp.data).get("zone") or json.loads(resp.data)
         assert zone["duration"] == 10
         # to 1
-        admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 1}), content_type="application/json")
+        self._update_zone(admin_client, zid, {"duration": 1})
         resp = admin_client.get(f"/api/zones/{zid}")
         zone = json.loads(resp.data).get("zone") or json.loads(resp.data)
         assert zone["duration"] == 1
@@ -186,21 +203,43 @@ class TestGroupOperations:
         resp = admin_client.post(f"/api/groups/{gid}/start-from-first")
         assert resp.status_code in (200, 400, 500)
 
-    def test_group_stop(self, admin_client):
+    def test_group_stop(self, admin_client, app):
         resp = admin_client.get("/api/groups")
         groups = json.loads(resp.data)
         if not groups:
             pytest.skip("No groups")
         gid = groups[0]["id"]
-        resp = admin_client.post(f"/api/groups/{gid}/stop")
+        with confirmed_group_stop(app.db, "routes.groups_api.get_scheduler"):
+            resp = admin_client.post(f"/api/groups/{gid}/stop")
         assert resp.status_code in (200, 400, 500)
 
-    def test_postpone_group(self, admin_client):
+    def test_postpone_group(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
         resp = admin_client.get("/api/groups")
         groups = json.loads(resp.data)
         if not groups:
             pytest.skip("No groups")
         gid = groups[0]["id"]
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "aggregate_valid": True,
+                        "stopped": [z["id"] for z in app.db.get_zones_by_group(group_id)],
+                        "unresolved": [],
+                        "unverified_zone_ids": [],
+                        "retry_scheduled": False,
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         resp = admin_client.post(
             "/api/postpone",
             data=json.dumps({"group_id": gid, "days": 1, "action": "postpone"}),
@@ -234,9 +273,10 @@ class TestEmergency:
 
     def test_emergency_stop(self, admin_client):
         resp = admin_client.post("/api/emergency-stop")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = json.loads(resp.data)
-        assert data.get("success") is True
+        assert data.get("success") is False
+        assert data.get("sessions_quiesced") is False
 
     def test_emergency_resume(self, admin_client):
         # Stop first
@@ -307,10 +347,29 @@ class TestWeatherAndNextWatering:
 class TestSSEEndpoint:
     """SSE zones endpoint exists."""
 
-    def test_sse_endpoint_responds(self, admin_client):
-        resp = admin_client.get("/api/mqtt/zones-sse")
-        # SSE returns 200 with text/event-stream
-        assert resp.status_code == 200
+    def test_sse_endpoint_responds(self, admin_client, monkeypatch):
+        import queue
+
+        import routes.zones_watering_api as route
+
+        msg_queue = queue.Queue()
+        unregistered = []
+        monkeypatch.setattr(route, "_SSE_HTTP_ACTIVE", 0)
+        monkeypatch.setattr(route._sse_hub, "ensure_hub_started", lambda: None)
+        monkeypatch.setattr(route._sse_hub, "register_client", lambda: msg_queue)
+        monkeypatch.setattr(route._sse_hub, "unregister_client", unregistered.append)
+
+        resp = admin_client.get("/api/mqtt/zones-sse", buffered=False)
+        try:
+            # Consume the handshake before explicitly closing the infinite stream.
+            assert resp.status_code == 200
+            assert next(resp.response) == b": connected\n\n"
+        finally:
+            resp.close()
+            resp.close()
+
+        assert unregistered == [msg_queue]
+        assert route._SSE_HTTP_ACTIVE == 0
 
 
 class TestPageRender:
@@ -344,20 +403,11 @@ class TestPageRender:
         /static/css/status.css.  Fetch linked stylesheets and grep the
         combined content rather than only the HTML body.
         """
-        import re
+        from tests.fixtures.css import fetch_inline_and_external_css
 
         resp = client.get("/")
         assert resp.status_code == 200
-        html = resp.data.decode()
-        pieces = [html]
-        for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html):
-            if href.startswith("http"):
-                continue
-            path = href if href.startswith("/") else "/" + href.lstrip("./")
-            css_resp = client.get(path)
-            if css_resp.status_code == 200:
-                pieces.append(css_resp.data.decode("utf-8", errors="replace"))
-        combined = "\n".join(pieces)
+        combined = fetch_inline_and_external_css(client, "/")
         classes = [
             "zone-card",
             "zc-icon",

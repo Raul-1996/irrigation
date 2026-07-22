@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from unittest.mock import Mock, patch
 
 import pytest
 from PIL import Image
@@ -121,15 +122,21 @@ class TestOptimizeUploadedImage:
             assert r.size == (200, 100)
 
     def test_pixel_cap_rejects_over_50mp(self):
-        """Decompression-bomb guard: 50 MP cap (matches zones_photo behaviour)."""
-        # 8000x7000 = 56 MP — over the cap.
-        huge = _png_bytes((8000, 7000), color="white")
-        with pytest.raises(ImageTooLargeError):
-            optimize_uploaded_image(huge)
+        """Decompression-bomb guard rejects from headers before pixel decode."""
+        header_only = Mock(spec=Image.Image)
+        header_only.size = (8_000, 7_000)  # 56 MP — over the cap.
+        header_only.load.side_effect = AssertionError("oversize image was decoded")
 
-    def test_pixel_cap_accepts_at_or_under_50mp(self):
-        # 7000x7000 = 49 MP — under cap.
-        ok = _png_bytes((7000, 7000), color="white")
+        with patch("services.image_pipeline.Image.open", return_value=header_only):
+            with pytest.raises(ImageTooLargeError):
+                optimize_uploaded_image(b"header-only image")
+
+        header_only.load.assert_not_called()
+
+    def test_pixel_cap_accepts_at_limit(self, monkeypatch):
+        # Use a tiny image and lower the cap to avoid allocating a 50 MP bitmap.
+        monkeypatch.setattr("services.image_pipeline.MAX_INPUT_PIXELS", 4)
+        ok = _png_bytes((2, 2), color="white")
         out, _ = optimize_uploaded_image(ok)
         assert len(out) > 0
 
@@ -140,9 +147,13 @@ class TestLoadSafeImage:
         assert img.mode == "RGB"
         assert img.size == (200, 200)
 
-    def test_raises_on_oversize(self):
-        with pytest.raises(ImageTooLargeError):
-            load_safe_image(_png_bytes((8000, 7000)))
+    def test_raises_on_pillow_decompression_bomb(self):
+        error = Image.DecompressionBombError("unsafe dimensions")
+        with patch("services.image_pipeline.Image.open", side_effect=error):
+            with pytest.raises(ImageTooLargeError) as exc_info:
+                load_safe_image(b"bomb header")
+
+        assert exc_info.value.__cause__ is error
 
     def test_raises_on_garbage_input(self):
         # Pillow raises UnidentifiedImageError (subclass of OSError) — propagate.

@@ -81,13 +81,26 @@ let editingId = null;
 let wizardData = {};
 let programs = [];
 let zones = [];
+let executionPollTimer = null;
+let executionRequestGeneration = 0;
 
 const COLORS = ["#42a5f5", "#66bb6a", "#ffa726", "#ef5350", "#ab47bc", "#26c6da", "#78909c", "#8d6e63"];
+const DEFAULT_PROGRAM_COLOR = '#42a5f5';
 
-// CSRF token from base.html meta tag
-function getCsrfToken() {
-  const meta = document.querySelector('meta[name="csrf-token"]');
-  return meta ? meta.getAttribute('content') : '';
+function safeProgramColor(value) {
+  const color = String(value == null ? '' : value).trim();
+  return /^#[0-9A-Fa-f]{6}$/.test(color) ? color.toLowerCase() : DEFAULT_PROGRAM_COLOR;
+}
+
+function isUnsupportedSmartProgram(program) {
+  return Boolean(program && program.type === 'smart');
+}
+
+function rejectUnsupportedProgramAction(id) {
+  const program = programs.find(item => item.id === id);
+  if (!isUnsupportedSmartProgram(program)) return false;
+  showToast('Smart Weather больше не поддерживается. Программу можно только просмотреть или удалить.');
+  return true;
 }
 
 function apiHeaders(json = true) {
@@ -98,11 +111,21 @@ function apiHeaders(json = true) {
   return h;
 }
 
+async function readResponseJson(resp) {
+  try {
+    return await resp.json();
+  } catch (_) {
+    return {};
+  }
+}
+
 // Load data
 async function loadPrograms() {
   try {
     const resp = await fetch('/api/programs');
-    programs = await resp.json();
+    const data = await readResponseJson(resp);
+    if (!resp.ok || !Array.isArray(data)) throw new Error(data.message || 'Некорректный ответ программ');
+    programs = data;
     renderList();
   } catch (err) {
     console.error('Load programs error:', err);
@@ -113,27 +136,87 @@ async function loadPrograms() {
 async function loadZones() {
   try {
     const resp = await fetch('/api/zones');
-    zones = await resp.json();
+    const data = await readResponseJson(resp);
+    if (!resp.ok || !Array.isArray(data)) throw new Error(data.message || 'Некорректный ответ зон');
+    zones = data;
   } catch (err) {
     console.error('Load zones error:', err);
   }
 }
 
+function stopExecutionPolling() {
+  executionRequestGeneration += 1;
+  if (executionPollTimer !== null) {
+    clearTimeout(executionPollTimer);
+    executionPollTimer = null;
+  }
+}
+
+function renderExecutionState(activeGroups, emergencyStop) {
+  const container = document.getElementById('execution-content');
+  if (!container) return;
+  if (emergencyStop) {
+    container.innerHTML = '<div class="empty-state"><h3>⛔ Аварийная остановка активна</h3><p>Новые запуски заблокированы.</p></div>';
+    return;
+  }
+  if (!activeGroups.length) {
+    container.innerHTML = '<div class="empty-state"><h3>Нет активного полива</h3><p>Состояние подтверждено сервером.</p></div>';
+    return;
+  }
+  container.innerHTML = activeGroups.map(group => {
+    const zone = zones.find(item => Number(item.id) === Number(group.current_zone));
+    const zoneName = zone ? `#${zone.id} ${zone.name || ''}` : `#${group.current_zone}`;
+    const source = group.current_zone_source === 'schedule' ? 'Программа' : 'Ручной запуск';
+    const queued = Number(group.queue_remaining || 0);
+    return `<div class="program-card" style="border-left-color:#42a5f5">
+      <div class="program-header">
+        <div class="program-title"><div class="program-name"><span>${escapeHtml(group.name || `Группа ${group.id}`)}</span><span class="badge time-based">Выполняется</span></div></div>
+        <div class="program-time">💧 ${escapeHtml(zoneName)}</div>
+        <div class="program-stats">${escapeHtml(source)}${queued ? ` · в очереди ${queued}` : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadExecutionState() {
+  const requestGeneration = ++executionRequestGeneration;
+  const container = document.getElementById('execution-content');
+  try {
+    const resp = await fetch('/api/status?ts=' + Date.now(), {cache: 'no-store'});
+    const data = await readResponseJson(resp);
+    if (requestGeneration !== executionRequestGeneration || currentTab !== 'execution') return;
+    if (!resp.ok || !data || data.success === false || !Array.isArray(data.groups)) {
+      throw new Error(data.message || data.error || `HTTP ${resp.status}`);
+    }
+    const activeGroups = data.groups.filter(group => group.status === 'watering' && group.current_zone);
+    renderExecutionState(activeGroups, !!data.emergency_stop);
+  } catch (err) {
+    if (requestGeneration !== executionRequestGeneration || currentTab !== 'execution') return;
+    if (container) container.innerHTML = `<div class="empty-state"><h3>Не удалось получить состояние</h3><p>${escapeHtml(err.message || 'Ошибка сети')}</p></div>`;
+  } finally {
+    if (requestGeneration === executionRequestGeneration && currentTab === 'execution') {
+      executionPollTimer = setTimeout(loadExecutionState, 3000);
+    }
+  }
+}
+
 // Tabs
 function switchTab(tab) {
+  stopExecutionPolling();
   currentTab = tab;
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-pill').forEach(p => p.classList.remove('active'));
   document.getElementById(`tab-${tab}`).classList.add('active');
   document.querySelectorAll('.nav-pill')[['list','execution','log'].indexOf(tab)].classList.add('active');
-  
+
   if (tab === 'list') renderList();
+  if (tab === 'execution') loadExecutionState();
 }
 
 // List rendering
 function renderList() {
   const container = document.getElementById('list-content');
-  
+
   if (programs.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
@@ -163,31 +246,35 @@ function renderList() {
   sorted.forEach(p => {
     const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const days = p.days || [];
-    
+    const unsupportedSmart = p.type === 'smart';
+
     html += `
-      <div class="program-card" style="border-left-color: ${p.color || '#42a5f5'}">
+      <div class="program-card" style="border-left-color: ${safeProgramColor(p.color)}">
         <div class="program-header" onclick="toggleDetails(${p.id})">
           <div class="program-title">
             <div class="program-name">
               <span>${escapeHtml(p.name)}</span>
-              <span class="badge ${p.type || 'time-based'}">${p.type === 'smart' ? 'Smart' : 'Time-Based'}</span>
+              <span class="badge ${unsupportedSmart ? 'smart' : 'time-based'}">${unsupportedSmart ? 'Smart — не поддерживается' : 'Time-Based'}</span>
             </div>
-            <div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>
+            ${unsupportedSmart
+              ? '<div class="toggle-switch disabled" aria-disabled="true" title="Smart Weather больше не поддерживается"></div>'
+              : `<div class="toggle-switch ${p.enabled ? 'active' : ''}" onclick="event.stopPropagation(); toggleEnabled(${p.id})"></div>`}
           </div>
-          <div class="program-time">⏰ ${p.time}</div>
+          <div class="program-time">⏰ ${escapeHtml(p.time)}</div>
           <div class="program-days">
-            ${p.schedule_type === 'even_odd' ? 
+            ${p.schedule_type === 'even-odd' ?
               `<div class="day-pill active">${p.even_odd === 'even' ? 'Чётные дни' : 'Нечётные дни'}</div>` :
               p.schedule_type === 'interval' ?
               `<div class="day-pill active">Каждые ${p.interval_days || 3} дн.</div>` :
-              dayNames.map((name, i) => 
+              dayNames.map((name, i) =>
                 `<div class="day-pill ${days.includes(i) ? 'active' : ''}">${name}</div>`
               ).join('')
             }
           </div>
           <div class="program-stats">${(p.zones || []).length} зон</div>
+          ${unsupportedSmart ? '<div class="program-stats" role="status">⚠️ Smart Weather больше не поддерживается. Редактирование, включение, дублирование и запуск отключены.</div>' : ''}
         </div>
-        
+
         <div class="program-details" id="details-${p.id}">
           <div class="program-details-content">
             <div class="zone-list">
@@ -202,17 +289,19 @@ function renderList() {
                 `;
               }).join('')}
             </div>
-            
+
             <div class="program-actions">
-              <button class="icon-btn" onclick="editProgram(${p.id})"
-                      data-audit-action="program_edit_click"
-                      data-audit-target="program:${p.id}">✏️ Редактировать</button>
-              <button class="icon-btn" onclick="duplicateProgram(${p.id})"
-                      data-audit-action="program_duplicate_click"
-                      data-audit-target="program:${p.id}">📋 Дублировать</button>
-              <button class="icon-btn" onclick="runProgram(${p.id})"
-                      data-audit-action="program_run_click"
-                      data-audit-target="program:${p.id}">▶️ Запустить</button>
+              ${unsupportedSmart ? '' : `
+                <button class="icon-btn" onclick="editProgram(${p.id})"
+                        data-audit-action="program_edit_click"
+                        data-audit-target="program:${p.id}">✏️ Редактировать</button>
+                <button class="icon-btn" onclick="duplicateProgram(${p.id})"
+                        data-audit-action="program_duplicate_click"
+                        data-audit-target="program:${p.id}">📋 Дублировать</button>
+                <button class="icon-btn" onclick="runProgram(${p.id})"
+                        data-audit-action="program_run_click"
+                        data-audit-target="program:${p.id}">▶️ Запустить</button>
+              `}
               <button class="icon-btn danger" onclick="deleteProgram(${p.id})"
                       data-audit-action="program_delete_click"
                       data-audit-target="program:${p.id}">🗑 Удалить</button>
@@ -239,19 +328,23 @@ function toggleDetails(id) {
 async function toggleEnabled(id) {
   try {
     const prog = programs.find(p => p.id === id);
-    const newEnabled = prog.enabled ? 0 : 1;
-    
+    if (rejectUnsupportedProgramAction(id)) return;
+    const newEnabled = !Boolean(prog.enabled);
+
     const resp = await fetch(`/api/programs/${id}/enabled`, {
       method: 'PATCH',
       headers: apiHeaders(),
       body: JSON.stringify({enabled: newEnabled})
     });
-    
-    if (resp.ok) {
-      prog.enabled = newEnabled;
-      renderList();
-      showToast(newEnabled ? '✅ Программа включена' : '⏸ Программа выключена', 'success');
+
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка переключения программы');
+      return;
     }
+    prog.enabled = newEnabled;
+    renderList();
+    showToast(newEnabled ? '✅ Программа включена' : '⏸ Программа выключена', 'success');
   } catch (err) {
     console.error('Toggle enabled error:', err);
     showToast('Ошибка переключения программы');
@@ -259,12 +352,16 @@ async function toggleEnabled(id) {
 }
 
 async function duplicateProgram(id) {
+  if (rejectUnsupportedProgramAction(id)) return;
   try {
     const resp = await fetch(`/api/programs/${id}/duplicate`, {method: 'POST', headers: apiHeaders(false)});
-    if (resp.ok) {
-      await loadPrograms();
-      showToast('📋 Программа скопирована', 'success');
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка дублирования');
+      return;
     }
+    await loadPrograms();
+    showToast('📋 Программа скопирована', 'success');
   } catch (err) {
     console.error('Duplicate error:', err);
     showToast('Ошибка дублирования');
@@ -272,23 +369,19 @@ async function duplicateProgram(id) {
 }
 
 async function runProgram(id) {
+  if (rejectUnsupportedProgramAction(id)) return;
   try {
     const resp = await fetch(`/api/programs/${id}/run`, {
       method: 'POST',
       headers: apiHeaders(false)
     });
-
-    if (resp.ok) {
-      showToast('▶️ Полив запущен', 'success');
-      switchTab('execution');
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка запуска');
       return;
     }
-    let msg = 'Ошибка запуска';
-    try {
-      const data = await resp.json();
-      if (data && data.message) msg = data.message;
-    } catch (_) { /* ignore parse errors */ }
-    showToast(msg);
+    showToast(data.message || '⏳ Запрос на полив принят', 'success');
+    switchTab('execution');
   } catch (err) {
     console.error('Run program error:', err);
     showToast('Ошибка запуска');
@@ -297,14 +390,17 @@ async function runProgram(id) {
 
 async function deleteProgram(id) {
   if (!confirm('Удалить программу?')) return;
-  
+
   try {
     const resp = await fetch(`/api/programs/${id}`, {method: 'DELETE', headers: apiHeaders(false)});
-    if (resp.ok) {
-      programs = programs.filter(p => p.id !== id);
-      renderList();
-      showToast('🗑 Программа удалена', 'success');
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
+      showToast(data.message || 'Ошибка удаления');
+      return;
     }
+    programs = programs.filter(p => p.id !== id);
+    renderList();
+    showToast('🗑 Программа удалена', 'success');
   } catch (err) {
     console.error('Delete error:', err);
     showToast('Ошибка удаления');
@@ -314,19 +410,20 @@ async function deleteProgram(id) {
 function editProgram(id) {
   const p = programs.find(pr => pr.id === id);
   if (!p) return;
+  if (rejectUnsupportedProgramAction(id)) return;
   editingId = id;
   wizardStep = 1;
   wizardData = {
     name: p.name || '',
     type: p.type || 'time-based',
-    color: p.color || COLORS[0],
+    color: safeProgramColor(p.color),
     schedule_type: p.schedule_type || 'weekdays',
     days: Array.isArray(p.days) ? [...p.days] : [],
     interval_days: p.interval_days || 3,
     even_odd: p.even_odd || null,
     time: p.time || '06:00',
     zones: Array.isArray(p.zones) ? [...p.zones] : [],
-    enabled: p.enabled !== undefined ? p.enabled : 1,
+    enabled: Boolean(p.enabled),
     extra_times: Array.isArray(p.extra_times) ? [...p.extra_times] : []
   };
   renderWizard();
@@ -347,7 +444,7 @@ function openWizard() {
     even_odd: null,
     time: '06:00',
     zones: [],
-    enabled: 1
+    enabled: true
   };
   renderWizard();
   document.getElementById('wizardModal').classList.add('active');
@@ -385,28 +482,24 @@ function renderWizardStep() {
       <input type="text" id="wiz-name" class="form-input" placeholder="Например: Утренний полив"
         value="${escapeHtml(wizardData.name)}" oninput="wizardData.name = this.value; this.removeAttribute('aria-invalid')">
     </div>
-    
+
     <div class="form-group">
       <label class="form-label">Тип программы</label>
       <div class="radio-cards">
-        <div class="radio-card ${wizardData.type === 'time-based' ? 'selected' : ''}" 
+        <div class="radio-card ${wizardData.type === 'time-based' ? 'selected' : ''}"
           onclick="wizardData.type = 'time-based'; renderWizard()">
           <div class="radio-card-title">⏱ Time-Based</div>
           <div class="radio-card-desc">Фиксированное время для каждой зоны</div>
         </div>
-        <div class="radio-card ${wizardData.type === 'smart' ? 'selected' : ''}" 
-          onclick="wizardData.type = 'smart'; renderWizard()">
-          <div class="radio-card-title">🌤 Smart Weather</div>
-          <div class="radio-card-desc">Автокоррекция по погоде и ET₀</div>
-        </div>
       </div>
+      <div class="radio-card-desc">Smart Weather больше не поддерживается и недоступен для новых программ.</div>
     </div>
-    
+
     <div class="form-group">
       <label class="form-label">Цвет программы</label>
       <div class="color-picker">
         ${COLORS.map(c => `
-          <div class="color-option ${wizardData.color === c ? 'selected' : ''}" 
+          <div class="color-option ${wizardData.color === c ? 'selected' : ''}"
             style="background: ${c}" onclick="wizardData.color = '${c}'; renderWizard()">
             ${wizardData.color === c ? '✓' : ''}
           </div>
@@ -418,18 +511,18 @@ function renderWizardStep() {
   // Step 2: Schedule
   html += `<div class="wizard-step ${wizardStep === 2 ? 'active' : ''}">
     <div class="schedule-tabs">
-      <button class="schedule-tab ${wizardData.schedule_type === 'weekdays' ? 'active' : ''}" 
+      <button class="schedule-tab ${wizardData.schedule_type === 'weekdays' ? 'active' : ''}"
         onclick="wizardData.schedule_type = 'weekdays'; wizardData.even_odd = null; renderWizard()">Дни недели</button>
-      <button class="schedule-tab ${wizardData.schedule_type === 'interval' ? 'active' : ''}" 
+      <button class="schedule-tab ${wizardData.schedule_type === 'interval' ? 'active' : ''}"
         onclick="wizardData.schedule_type = 'interval'; wizardData.even_odd = null; renderWizard()">Интервал</button>
-      <button class="schedule-tab ${wizardData.schedule_type === 'even_odd' ? 'active' : ''}" 
-        onclick="wizardData.schedule_type = 'even_odd'; renderWizard()">Чёт/Нечет</button>
+      <button class="schedule-tab ${wizardData.schedule_type === 'even-odd' ? 'active' : ''}"
+        onclick="wizardData.schedule_type = 'even-odd'; renderWizard()">Чёт/Нечет</button>
     </div>
-    
+
     ${wizardData.schedule_type === 'weekdays' ? `
       <div class="weekdays">
         ${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map((d, i) => `
-          <button class="weekday-btn ${wizardData.days.includes(i) ? 'active' : ''}" 
+          <button class="weekday-btn ${wizardData.days.includes(i) ? 'active' : ''}"
             onclick="toggleDay(${i})">${d}</button>
         `).join('')}
       </div>
@@ -440,26 +533,26 @@ function renderWizardStep() {
         <button class="btn-quick" onclick="wizardData.days = []; renderWizard()">Снять все</button>
       </div>
     ` : ''}
-    
+
     ${wizardData.schedule_type === 'interval' ? `
       <div class="form-group">
         <label class="form-label">Интервал полива (дней)</label>
-        <input type="number" class="form-input" min="1" max="30" 
-          value="${wizardData.interval_days || 3}" 
+        <input type="number" class="form-input" min="1" max="30"
+          value="${wizardData.interval_days || 3}"
           onchange="wizardData.interval_days = parseInt(this.value)"
           placeholder="Дней">
       </div>
     ` : ''}
 
-    ${wizardData.schedule_type === 'even_odd' ? `
+    ${wizardData.schedule_type === 'even-odd' ? `
       <div class="even-odd-selector">
         <div class="radio-cards">
-          <div class="radio-card ${wizardData.even_odd === 'even' ? 'selected' : ''}" 
+          <div class="radio-card ${wizardData.even_odd === 'even' ? 'selected' : ''}"
             onclick="wizardData.even_odd = 'even'; renderWizard()">
             <div class="radio-card-title">📅 Чётные дни</div>
             <div class="radio-card-desc">2, 4, 6, 8... числа месяца</div>
           </div>
-          <div class="radio-card ${wizardData.even_odd === 'odd' ? 'selected' : ''}" 
+          <div class="radio-card ${wizardData.even_odd === 'odd' ? 'selected' : ''}"
             onclick="wizardData.even_odd = 'odd'; renderWizard()">
             <div class="radio-card-title">📅 Нечётные дни</div>
             <div class="radio-card-desc">1, 3, 5, 7... числа месяца</div>
@@ -473,7 +566,7 @@ function renderWizardStep() {
   html += `<div class="wizard-step ${wizardStep === 3 ? 'active' : ''}">
     <div class="form-group">
       <label class="form-label">Время запуска</label>
-      <input type="time" class="form-input" value="${wizardData.time}" 
+      <input type="time" class="form-input" value="${escapeHtml(wizardData.time)}"
         onchange="wizardData.time = this.value">
     </div>
   </div>`;
@@ -492,10 +585,10 @@ function renderWizardStep() {
         <div class="zone-row ${wizardData.zones.includes(z.id) ? 'enabled' : 'disabled'}">
           <span class="zone-icon">💧</span>
           <div class="zone-info">
-            <div>${z.name}</div>
+            <div>${escapeHtml(z.name)}</div>
             <div class="zone-number">Зона ${z.id}</div>
           </div>
-          <div class="toggle-switch ${wizardData.zones.includes(z.id) ? 'active' : ''}" 
+          <div class="toggle-switch ${wizardData.zones.includes(z.id) ? 'active' : ''}"
             onclick="toggleZone(${z.id})"></div>
         </div>
       `).join('')}
@@ -509,23 +602,23 @@ function renderWizardStep() {
         <div class="summary-label">Программа</div>
         <div class="summary-value">
           <strong>${escapeHtml(wizardData.name || 'Без названия')}</strong>
-          <span class="badge ${wizardData.type}">${wizardData.type === 'smart' ? 'Smart' : 'Time-Based'}</span>
+          <span class="badge time-based">Time-Based</span>
         </div>
       </div>
-      
+
       <div class="summary-section">
         <div class="summary-label">Расписание</div>
         <div class="summary-value">
-          ${wizardData.schedule_type === 'weekdays' ? 
+          ${wizardData.schedule_type === 'weekdays' ?
             ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].filter((d, i) => wizardData.days.includes(i)).join(', ') :
-            wizardData.schedule_type === 'even_odd' ?
+            wizardData.schedule_type === 'even-odd' ?
             (wizardData.even_odd === 'even' ? 'Чётные дни месяца' : 'Нечётные дни месяца') :
             `Каждые ${wizardData.interval_days || 3} дней`
           }
         </div>
-        <div class="summary-value">⏰ ${wizardData.time}</div>
+        <div class="summary-value">⏰ ${escapeHtml(wizardData.time)}</div>
       </div>
-      
+
       <div class="summary-section">
         <div class="summary-label">Зоны</div>
         <div class="summary-value">${wizardData.zones.length} зон выбрано</div>
@@ -565,7 +658,7 @@ function validateWizardStep(step) {
       showToast('Укажите интервал в днях (минимум 1)');
       return false;
     }
-    if (wizardData.schedule_type === 'even_odd' && wizardData.even_odd !== 'even' && wizardData.even_odd !== 'odd') {
+    if (wizardData.schedule_type === 'even-odd' && wizardData.even_odd !== 'even' && wizardData.even_odd !== 'odd') {
       showToast('Выберите чётные или нечётные дни');
       return false;
     }
@@ -614,16 +707,20 @@ function toggleZone(zoneId) {
 }
 
 async function saveWizard() {
+  if (wizardData.type !== 'time-based') {
+    showToast('Smart Weather больше не поддерживается. Создайте программу Time-Based.');
+    return;
+  }
   if (!wizardData.name) {
     showToast('Введите название программы');
     return;
   }
-  
+
   if (wizardData.zones.length === 0) {
     showToast('Выберите хотя бы одну зону');
     return;
   }
-  
+
   try {
     const url = editingId ? `/api/programs/${editingId}` : '/api/programs';
     const method = editingId ? 'PUT' : 'POST';
@@ -632,15 +729,15 @@ async function saveWizard() {
       headers: apiHeaders(),
       body: JSON.stringify(wizardData)
     });
-    
-    if (resp.ok) {
-      closeWizard();
-      await loadPrograms();
-      showToast(editingId ? '✅ Программа обновлена' : '✅ Программа создана', 'success');
-    } else {
-      const data = await resp.json();
+
+    const data = await readResponseJson(resp);
+    if (!resp.ok || data.success === false) {
       showToast(data.message || 'Ошибка сохранения программы');
+      return;
     }
+    closeWizard();
+    await loadPrograms();
+    showToast(editingId ? '✅ Программа обновлена' : '✅ Программа создана', 'success');
   } catch (err) {
     console.error('Save error:', err);
     showToast('Ошибка сохранения программы');

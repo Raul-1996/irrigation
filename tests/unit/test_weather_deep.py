@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from datetime import datetime
 
 import pytest
 
@@ -11,8 +12,9 @@ class TestWeatherData:
         from services.weather import WeatherData
 
         raw = {
+            "utc_offset_seconds": 0,
             "hourly": {
-                "time": ["2024-01-01T12:00"],
+                "time": [datetime.utcfromtimestamp(time.time()).strftime("%Y-%m-%dT%H:00")],
                 "temperature_2m": [22.5],
                 "relative_humidity_2m": [65],
                 "precipitation": [0.0],
@@ -93,14 +95,11 @@ class TestWeatherAdjustment:
         from services.weather_adjustment import WeatherAdjustment
 
         adj = WeatherAdjustment(test_db.db_path)
-        try:
-            adj.log_adjustment(zone_id=1, original_duration=10, adjusted_duration=8, coefficient=80, skipped=False)
-            with sqlite3.connect(test_db.db_path) as conn:
-                cur = conn.execute("SELECT COUNT(*) FROM weather_log")
-                count = cur.fetchone()[0]
-            assert count >= 1
-        except (sqlite3.Error, TypeError) as e:
-            pytest.skip(f"log_adjustment not supported: {e}")
+        adj.log_adjustment(zone_id=1, original_duration=10, adjusted_duration=8, coefficient=80, skip=False)
+        with sqlite3.connect(test_db.db_path) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM weather_log")
+            count = cur.fetchone()[0]
+        assert count >= 1
 
 
 class TestWeatherService:

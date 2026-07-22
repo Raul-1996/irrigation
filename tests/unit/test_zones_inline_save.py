@@ -46,9 +46,7 @@ class TestZonesInlineSave:
         # not start with `...zone` (the loop-local zone var); spreading
         # `...zonesData[i]` for in-memory state is fine.
         bad = re.search(r"\{\s*\.\.\.zone\b(?!sData)", body)
-        assert bad is None, (
-            "saveZone() spreads full zone object → state-machine fields leak into PUT payload → 400"
-        )
+        assert bad is None, "saveZone() spreads full zone object → state-machine fields leak into PUT payload → 400"
 
     def test_save_zone_sends_only_editable_fields(self):
         """Payload must contain only fields the user can edit on /zones."""

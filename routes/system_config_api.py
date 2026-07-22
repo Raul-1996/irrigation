@@ -1,14 +1,18 @@
 """System Config API — auth, password, rain, env, map, postpone, settings."""
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
+import secrets
 import sqlite3
+import stat
+import threading
 import time
 from datetime import datetime, timedelta
 
-from flask import Blueprint, current_app, jsonify, redirect, request, session, url_for
+from flask import Blueprint, abort, current_app, jsonify, redirect, request, send_file, session, url_for
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -19,7 +23,7 @@ from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
 from services.helpers import ALLOWED_MIME_TYPES, MAP_DIR
 from services.image_pipeline import ImageTooLargeError, optimize_uploaded_image
-from services.monitors import env_monitor, probe_env_values
+from services.monitors import env_monitor, probe_env_values, rain_config_transaction_lock, rain_monitor
 from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
 from utils import normalize_topic
 
@@ -34,7 +38,23 @@ system_config_api_bp = Blueprint("system_config_api", __name__)
 
 # Password blocklist (TASK-013)
 _PASSWORD_BLOCKLIST = {"1234", "12345678", "0000", "password", "admin", "qwerty"}
+_RAIN_SETTING_KEYS = ("rain.enabled", "rain.topic", "rain.type", "rain.server_id")
 
+# Maps are full-size images stored on the controller's limited flash.  Keep
+# both the API response and the on-disk collection bounded to the same newest
+# set so a long-running installation cannot grow this directory indefinitely.
+MAX_MAP_FILES = 20
+MAP_TEMP_STALE_SECONDS = 60 * 60
+_MAP_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_MAP_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+_TRUSTED_MAP_DIR = os.path.abspath(MAP_DIR)
+_MAP_STORAGE_LOCK = threading.RLock()
 
 # ===== Auth / Password =====
 
@@ -86,16 +106,23 @@ def api_change_password():
         if not session.get("logged_in") and not current_app.config.get("TESTING"):
             return jsonify({"success": False, "message": "Требуется аутентификация"}), 401
         data = request.get_json() or {}
-        old_password = data.get("old_password", "")
-        new_password = data.get("new_password", "")
+        old_password_raw = data.get("old_password", "")
+        new_password_raw = data.get("new_password", "")
+        if not isinstance(old_password_raw, str) or not isinstance(new_password_raw, str):
+            return jsonify({"success": False, "message": "Пароль должен быть строкой"}), 400
+        # Login normalises edge whitespace, and the repository persists the
+        # normalised value.  Apply the same contract before every policy and
+        # hash check so padding cannot bypass min-length/blocklist rules.
+        old_password = old_password_raw.strip()
+        new_password = new_password_raw.strip()
+        if not new_password:
+            return jsonify({"success": False, "message": "Новый пароль обязателен"}), 400
         if len(new_password) < MIN_PASSWORD_LENGTH:
             return jsonify(
                 {"success": False, "message": f"Пароль должен быть не менее {MIN_PASSWORD_LENGTH} символов"}
             ), 400
         if len(new_password) > 32:
             return jsonify({"success": False, "message": "Пароль не может быть длиннее 32 символов"}), 400
-        if not new_password:
-            return jsonify({"success": False, "message": "Новый пароль обязателен"}), 400
         if new_password.lower() in _PASSWORD_BLOCKLIST:
             return jsonify({"success": False, "message": "Этот пароль слишком простой. Выберите другой."}), 400
         stored_hash = db.get_password_hash()
@@ -112,23 +139,262 @@ def api_change_password():
 # ===== Map =====
 
 
+def _map_open_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    return flags
+
+
+@contextlib.contextmanager
+def _open_map_directory(*, create: bool) -> tuple[str, int]:
+    """Open the fixed map directory without following directory symlinks.
+
+    The in-process lock protects threads.  ``flock`` on the already verified
+    directory descriptor extends that serialization to multiple application
+    processes while every operation keeps using ``dir_fd`` relative syscalls.
+    """
+
+    with _MAP_STORAGE_LOCK:
+        map_directory = os.path.abspath(_TRUSTED_MAP_DIR)
+        if os.path.realpath(map_directory) != map_directory:
+            raise OSError("map directory or one of its parents is a symlink")
+        if create:
+            os.makedirs(map_directory, mode=0o755, exist_ok=True)
+        directory_info = os.lstat(map_directory)
+        if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
+            raise OSError("map storage path is not a trusted directory")
+        directory_fd = os.open(map_directory, _map_open_flags(directory=True))
+        try:
+            opened_info = os.fstat(directory_fd)
+            if not stat.S_ISDIR(opened_info.st_mode):
+                raise OSError("map storage descriptor is not a directory")
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            try:
+                yield map_directory, directory_fd
+            finally:
+                fcntl.flock(directory_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(directory_fd)
+
+
+def _is_safe_map_filename(filename: str) -> bool:
+    return (
+        bool(filename)
+        and secure_filename(filename) == filename
+        and os.path.splitext(filename)[1].lower() in _MAP_EXTENSIONS
+    )
+
+
+def _entry_stat(directory_fd: int, filename: str) -> os.stat_result:
+    return os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+
+
+def _remove_unsafe_entries_locked(directory_fd: int) -> None:
+    removed = False
+    try:
+        for filename in os.listdir(directory_fd):
+            try:
+                item_stat = _entry_stat(directory_fd, filename)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(item_stat.st_mode):
+                os.unlink(filename, dir_fd=directory_fd)
+                removed = True
+    finally:
+        if removed:
+            os.fsync(directory_fd)
+
+
+def _list_map_items_locked(directory_fd: int) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for filename in os.listdir(directory_fd):
+        if not _is_safe_map_filename(filename):
+            continue
+        try:
+            item_stat = _entry_stat(directory_fd, filename)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(item_stat.st_mode):
+            continue
+        items.append(
+            {
+                "name": filename,
+                "path": f"media/maps/{filename}",
+                "mtime": item_stat.st_mtime,
+            }
+        )
+    items.sort(key=lambda item: (float(item["mtime"]), str(item["name"])), reverse=True)
+    return items
+
+
+def _cleanup_stale_map_temps_locked(directory_fd: int) -> None:
+    cutoff = time.time() - MAP_TEMP_STALE_SECONDS
+    removed = False
+    try:
+        for filename in os.listdir(directory_fd):
+            if not (filename.startswith(".zones_map_") and filename.endswith(".tmp")):
+                continue
+            try:
+                item_stat = _entry_stat(directory_fd, filename)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(item_stat.st_mode) and item_stat.st_mtime < cutoff:
+                os.unlink(filename, dir_fd=directory_fd)
+                removed = True
+    finally:
+        if removed:
+            os.fsync(directory_fd)
+
+
+def _prune_map_items_locked(directory_fd: int, *, new_filename: str | None = None) -> None:
+    """Prune oldest maps, always protecting a just-published map."""
+
+    items = _list_map_items_locked(directory_fd)
+    if new_filename is None:
+        keep_names = {str(item["name"]) for item in items[:MAX_MAP_FILES]}
+    else:
+        keep_names = {new_filename}
+        prior_items = [item for item in items if item["name"] != new_filename]
+        keep_names.update(str(item["name"]) for item in prior_items[: MAX_MAP_FILES - 1])
+    # Oldest first makes a failed prune conservative and cannot remove the
+    # newest item, including the map that triggered this retention pass.
+    victims = [str(item["name"]) for item in reversed(items) if item["name"] not in keep_names]
+    removed = False
+    try:
+        for filename in victims:
+            os.unlink(filename, dir_fd=directory_fd)
+            removed = True
+    finally:
+        if removed:
+            os.fsync(directory_fd)
+
+
+def _atomic_publish_map_locked(directory_fd: int, out_bytes: bytes, out_ext: str) -> str:
+    extension = str(out_ext).lower()
+    if extension not in _MAP_EXTENSIONS:
+        raise ValueError("unsupported optimized map extension")
+    unique = f"{time.time_ns()}_{secrets.token_hex(6)}"
+    filename = f"zones_map_{unique}{extension}"
+    temporary_name = f".zones_map_{unique}.tmp"
+    temporary_fd: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        temporary_fd = os.open(temporary_name, flags, 0o644, dir_fd=directory_fd)
+        with os.fdopen(temporary_fd, "wb") as temporary:
+            temporary_fd = None
+            temporary.write(out_bytes)
+            temporary.flush()
+            os.fchmod(temporary.fileno(), 0o644)
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary_name = ""
+        # Persist the new directory entry before any retention deletion.
+        os.fsync(directory_fd)
+        return filename
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_name:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+
+
+def _store_map_bytes(out_bytes: bytes, out_ext: str) -> str:
+    with _open_map_directory(create=True) as (_, directory_fd):
+        _remove_unsafe_entries_locked(directory_fd)
+        _cleanup_stale_map_temps_locked(directory_fd)
+        filename = _atomic_publish_map_locked(directory_fd, out_bytes, out_ext)
+        _prune_map_items_locked(directory_fd, new_filename=filename)
+        return filename
+
+
+def _open_safe_map_file(filename: str) -> tuple[object, str]:
+    if not _is_safe_map_filename(filename):
+        raise FileNotFoundError(filename)
+    with _open_map_directory(create=False) as (_, directory_fd):
+        try:
+            item_stat = _entry_stat(directory_fd, filename)
+        except FileNotFoundError:
+            raise
+        if stat.S_ISLNK(item_stat.st_mode):
+            os.unlink(filename, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            raise FileNotFoundError(filename)
+        if not stat.S_ISREG(item_stat.st_mode):
+            raise FileNotFoundError(filename)
+        file_fd = os.open(filename, _map_open_flags(), dir_fd=directory_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise FileNotFoundError(filename)
+        except BaseException:
+            os.close(file_fd)
+            raise
+    extension = os.path.splitext(filename)[1].lower()
+    return os.fdopen(file_fd, "rb"), _MAP_MIME_TYPES[extension]
+
+
+def _serve_map_file(filename: str):
+    try:
+        file_handle, mimetype = _open_safe_map_file(filename)
+    except FileNotFoundError:
+        abort(404)
+    try:
+        response = send_file(
+            file_handle,
+            mimetype=mimetype,
+            download_name=filename,
+            conditional=False,
+            max_age=60 * 60 * 24 * 7,
+        )
+    except BaseException:
+        file_handle.close()
+        raise
+    response.call_on_close(file_handle.close)
+    return response
+
+
+@system_config_api_bp.before_app_request
+def _serve_legacy_map_static_path():
+    """Keep legacy map URLs without letting Flask follow map symlinks."""
+
+    prefix = "/static/media/maps/"
+    if not request.path.startswith(prefix):
+        return None
+    filename = request.path[len(prefix) :]
+    if "/" in filename:
+        abort(404)
+    try:
+        return _serve_map_file(filename)
+    except OSError as exc:
+        logger.error("map serving failed: %s", exc)
+        abort(500)
+
+
+@system_config_api_bp.route("/api/map/file/<string:filename>", methods=["GET"])
+def api_map_file(filename: str):
+    try:
+        return _serve_map_file(filename)
+    except OSError as exc:
+        logger.error("map serving failed: %s", exc)
+        return jsonify({"success": False, "message": "Ошибка работы с картой"}), 500
+
+
 @system_config_api_bp.route("/api/map", methods=["GET", "POST"])
 @audit_log("map_upload", target_extractor=lambda *a, **kw: "map")
 def api_map():
     try:
         if request.method == "GET":
-            allowed_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-            items = []
-            for f in os.listdir(MAP_DIR):
-                p = os.path.join(MAP_DIR, f)
-                try:
-                    ext = os.path.splitext(f)[1].lower()
-                    if os.path.isfile(p) and ext in allowed_ext:
-                        items.append({"name": f, "path": f"media/maps/{f}", "mtime": os.path.getmtime(p)})
-                except (OSError, PermissionError) as e:
-                    logger.debug("Exception in api_map: %s", e)
-                    continue
-            items.sort(key=lambda x: x["mtime"], reverse=True)
+            with _open_map_directory(create=True) as (_, directory_fd):
+                _remove_unsafe_entries_locked(directory_fd)
+                _cleanup_stale_map_temps_locked(directory_fd)
+                _prune_map_items_locked(directory_fd)
+                items = _list_map_items_locked(directory_fd)
             return jsonify({"success": True, "items": items})
         else:
             if not (current_app.config.get("TESTING") or session.get("role") == "admin"):
@@ -139,7 +405,7 @@ def api_map():
             if file.filename == "":
                 return jsonify({"success": False, "message": "Файл не выбран"}), 400
             ext = os.path.splitext(file.filename)[1].lower()
-            if ext not in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
+            if ext not in _MAP_EXTENSIONS:
                 return jsonify({"success": False, "message": "Неподдерживаемый формат"}), 400
             m = request.files.get("file")
             if not m or (getattr(m, "mimetype", None) not in ALLOWED_MIME_TYPES):
@@ -167,10 +433,7 @@ def api_map():
                         "error_code": "IMAGE_PROCESSING_FAILED",
                     }
                 ), 400
-            filename = f"zones_map_{int(time.time())}{out_ext}"
-            save_path = os.path.join(MAP_DIR, filename)
-            with open(save_path, "wb") as f:
-                f.write(out_bytes)
+            filename = _store_map_bytes(out_bytes, out_ext)
             return jsonify({"success": True, "message": "Карта загружена", "path": f"media/maps/{filename}"})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка работы с картой зон: {e}")
@@ -186,10 +449,21 @@ def api_map_delete(filename):
         safe = secure_filename(filename)
         if safe != filename:
             return jsonify({"success": False, "message": "Некорректное имя файла"}), 400
-        path = os.path.join(MAP_DIR, safe)
-        if not os.path.exists(path):
-            return jsonify({"success": False, "message": "Файл не найден"}), 404
-        os.remove(path)
+        if not _is_safe_map_filename(safe):
+            return jsonify({"success": False, "message": "Некорректное имя файла"}), 400
+        with _open_map_directory(create=False) as (_, directory_fd):
+            try:
+                item_stat = _entry_stat(directory_fd, safe)
+            except FileNotFoundError:
+                return jsonify({"success": False, "message": "Файл не найден"}), 404
+            if stat.S_ISLNK(item_stat.st_mode):
+                os.unlink(safe, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                return jsonify({"success": False, "message": "Файл не найден"}), 404
+            if not stat.S_ISREG(item_stat.st_mode):
+                return jsonify({"success": False, "message": "Файл не найден"}), 404
+            os.unlink(safe, dir_fd=directory_fd)
+            os.fsync(directory_fd)
         return jsonify({"success": True})
     except (OSError, PermissionError) as e:
         logger.error(f"Ошибка удаления карты: {e}")
@@ -199,33 +473,195 @@ def api_map_delete(filename):
 # ===== Rain config =====
 
 
+def _rain_setting_value(cfg: dict, key: str) -> str | None:
+    values = {
+        "rain.enabled": "1" if cfg["enabled"] else "0",
+        "rain.topic": cfg["topic"],
+        "rain.type": cfg["type"],
+        "rain.server_id": str(cfg["server_id"]) if cfg["server_id"] is not None else None,
+    }
+    return values[key]
+
+
+def _rain_config_write(conn: sqlite3.Connection, cfg: dict, *, group_revision: str) -> None:
+    for key in _RAIN_SETTING_KEYS:
+        value = _rain_setting_value(cfg, key)
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
+    if cfg["enabled"]:
+        conn.execute(
+            "UPDATE groups SET use_rain_sensor = 1, updated_at = ? WHERE id != 999",
+            (group_revision,),
+        )
+
+
+def _snapshot_rain_db(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, tuple[bool, str | None]], dict[int, tuple[int, str | None]]]:
+    settings: dict[str, tuple[bool, str | None]] = {}
+    for key in _RAIN_SETTING_KEYS:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        settings[key] = (row is not None, row[0] if row is not None else None)
+    groups = {
+        int(group_id): (int(use_rain or 0), updated_at)
+        for group_id, use_rain, updated_at in conn.execute(
+            "SELECT id, use_rain_sensor, updated_at FROM groups ORDER BY id"
+        ).fetchall()
+    }
+    return settings, groups
+
+
+def _rollback_rain_db_cas(
+    old_settings: dict[str, tuple[bool, str | None]],
+    old_groups: dict[int, tuple[int, str | None]],
+    attempted_cfg: dict,
+    group_revision: str,
+) -> bool:
+    """Restore only if no concurrent writer changed the attempted snapshot."""
+    with db.settings._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for key in _RAIN_SETTING_KEYS:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            current = (row is not None, row[0] if row is not None else None)
+            desired_value = _rain_setting_value(attempted_cfg, key)
+            desired = (desired_value is not None, desired_value)
+            if current != desired:
+                conn.rollback()
+                return False
+
+        expected_groups = {
+            group_id: (1, group_revision) if attempted_cfg["enabled"] and group_id != 999 else old_state
+            for group_id, old_state in old_groups.items()
+        }
+        current_groups = {
+            int(group_id): (int(use_rain or 0), updated_at)
+            for group_id, use_rain, updated_at in conn.execute(
+                "SELECT id, use_rain_sensor, updated_at FROM groups ORDER BY id"
+            ).fetchall()
+        }
+        if current_groups != expected_groups:
+            conn.rollback()
+            return False
+
+        for key, (existed, value) in old_settings.items():
+            if existed:
+                conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (key, value))
+            else:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        if attempted_cfg["enabled"]:
+            for group_id, (old_use_rain, old_updated_at) in old_groups.items():
+                conn.execute(
+                    "UPDATE groups SET use_rain_sensor = ?, updated_at = ? WHERE id = ?",
+                    (old_use_rain, old_updated_at, group_id),
+                )
+        conn.commit()
+    return True
+
+
 @system_config_api_bp.route("/api/rain", methods=["GET", "POST"])
 @audit_log("rain_config_save", target_extractor=lambda *a, **kw: "rain_config")
 def api_rain_config():
     try:
         if request.method == "GET":
             return jsonify({"success": True, "config": db.get_rain_config()})
-        data = request.get_json() or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError("request body must be an object")
+        if "enabled" in data and not isinstance(data["enabled"], bool):
+            raise ValueError("enabled must be boolean")
+        sensor_type = data.get("type", "NO")
+        if sensor_type not in ("NO", "NC"):
+            raise ValueError("type must be NO or NC")
+        topic_raw = data.get("topic", "")
+        if not isinstance(topic_raw, str):
+            raise ValueError("topic must be a string")
+        topic = topic_raw.strip()
+        if "\x00" in topic or "+" in topic or "#" in topic:
+            raise ValueError("topic must not contain MQTT wildcards or NUL")
+        try:
+            topic_size = len(topic.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValueError("topic must be valid UTF-8") from error
+        if topic_size > 65535:
+            raise ValueError("topic is too long")
+        server_id = data.get("server_id")
+        if isinstance(server_id, bool):
+            raise ValueError("server_id must be an integer")
+        if isinstance(server_id, float) and not server_id.is_integer():
+            raise ValueError("server_id must be an integer")
+        if server_id is not None:
+            server_id = int(server_id)
+            if server_id <= 0 or server_id > 9_223_372_036_854_775_807:
+                raise ValueError("server_id must be positive")
         cfg = {
             "enabled": bool(data.get("enabled")),
-            "topic": (data.get("topic") or "").strip(),
-            "type": data.get("type") if data.get("type") in ("NO", "NC") else "NO",
-            "server_id": data.get("server_id"),
+            "topic": topic,
+            "type": sensor_type,
+            "server_id": server_id,
         }
         if cfg["enabled"] and not cfg["topic"]:
             return jsonify({"success": False, "message": "Требуется MQTT-топик для датчика дождя"}), 400
-        ok = db.set_rain_config(cfg)
-        if ok and cfg.get("enabled"):
+        if cfg["enabled"] and cfg["server_id"] is None:
+            return jsonify({"success": False, "message": "Требуется MQTT-сервер для датчика дождя"}), 400
+
+        with rain_config_transaction_lock():
+            group_revision = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+            with db.settings._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if cfg["enabled"]:
+                    broker = conn.execute(
+                        "SELECT enabled FROM mqtt_servers WHERE id = ? LIMIT 1",
+                        (cfg["server_id"],),
+                    ).fetchone()
+                    if broker is None:
+                        conn.rollback()
+                        return jsonify({"success": False, "message": "MQTT-сервер не найден"}), 400
+                    if int(broker[0] or 0) != 1:
+                        conn.rollback()
+                        return jsonify({"success": False, "message": "MQTT-сервер отключён"}), 400
+                old_settings, old_groups = _snapshot_rain_db(conn)
+                _rain_config_write(conn, cfg, group_revision=group_revision)
+                conn.commit()
+
             try:
-                for g in db.get_groups() or []:
-                    gid = int(g.get("id"))
-                    if gid == 999:
-                        continue
-                    db.set_group_use_rain(gid, True)
-            except (sqlite3.Error, OSError) as e:
-                logger.debug("Handled exception in api_rain_config: %s", e)
-        return jsonify({"success": bool(ok)})
-    except (ConnectionError, TimeoutError, OSError) as e:
+                runtime_applied = rain_monitor.reconfigure(cfg) is True
+            except (ConnectionError, TimeoutError, OSError, RuntimeError, sqlite3.Error):
+                logger.exception("rain monitor runtime reconfiguration failed")
+                runtime_applied = False
+            if not runtime_applied:
+                try:
+                    rollback_ok = _rollback_rain_db_cas(old_settings, old_groups, cfg, group_revision)
+                except (sqlite3.Error, OSError):
+                    logger.exception("rain config DB rollback failed")
+                    rollback_ok = False
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "message": "Не удалось подключить датчик дождя; настройки не применены",
+                            "rollback_success": rollback_ok,
+                        }
+                    ),
+                    503,
+                )
+            # Return the authoritative post-commit group flags. Global enable
+            # updates every non-system group, so callers must refresh their
+            # local group model instead of echoing only the requested toggle.
+            with db.settings._connect() as conn:
+                group_flags = [
+                    {"id": int(group_id), "use_rain_sensor": bool(int(use_rain or 0))}
+                    for group_id, use_rain in conn.execute(
+                        "SELECT id, use_rain_sensor FROM groups WHERE id != 999 ORDER BY id"
+                    ).fetchall()
+                ]
+            effective_config = db.get_rain_config()
+        return jsonify({"success": True, "config": effective_config, "groups": group_flags})
+    except (ValueError, TypeError) as e:
+        logger.debug("rain config validation failed: %s", e)
+        return jsonify({"success": False, "message": str(e)}), 400
+    except (sqlite3.Error, ConnectionError, TimeoutError, OSError) as e:
         logger.error(f"rain config failed: {e}")
         return jsonify({"success": False}), 500
 
@@ -329,58 +765,53 @@ def api_postpone():
         return jsonify({"success": True, "message": "Отложенный полив отменен"})
 
     elif action == "postpone":
-        postpone_date = datetime.now() + timedelta(days=days)
-        postpone_until = postpone_date.strftime("%Y-%m-%d 23:59:59")
-        zones = db.get_zones()
-        group_zones = [z for z in zones if int(z.get("group_id") or 0) == int(group_id)]
-        for zone in group_zones:
-            db.update_zone_postpone(zone["id"], postpone_until, "manual")
-        try:
-            for zone in group_zones:
-                try:
-                    if (zone.get("state") == "on") or zone.get("watering_start_time"):
-                        # Postpone applies to a group — each zone going OFF
-                        # is an audited transition (operator action via
-                        # /api/postpone) that we want to see in audit_log.
-                        try:
-                            from services.zones_state import update_zone_state as _uzs
+        from services.postpone import InvalidPostponeDaysError, PostponeConflictError, postpone_group
 
-                            _uzs(
-                                zone["id"],
-                                {"state": "off", "watering_start_time": None},
-                                audit_reason="postpone_action",
-                            )
-                        except (sqlite3.Error, OSError, ImportError):
-                            logger.exception(
-                                "system_config.postpone: audited path failed zone=%s — falling back to raw update_zone",
-                                zone.get("id"),
-                            )
-                            db.update_zone(zone["id"], {"state": "off", "watering_start_time": None})
-                        sid = zone.get("mqtt_server_id")
-                        topic = (zone.get("topic") or "").strip()
-                        if mqtt and sid and topic:
-                            t = normalize_topic(topic)
-                            server = db.get_mqtt_server(int(sid))
-                            if server:
-                                _publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
-                except (ConnectionError, TimeoutError, OSError):
-                    logger.exception("Ошибка остановки зоны при установке отложенного полива")
-            try:
-                scheduler = get_scheduler()
-                if scheduler:
-                    scheduler.cancel_group_jobs(group_id)
-            except (ValueError, KeyError, RuntimeError):
-                logger.exception("Ошибка отмены заданий планировщика при отложенном поливе группы")
-        except (ConnectionError, TimeoutError, OSError):
-            logger.exception("Ошибка массовой остановки зон при отложенном поливе группы")
-        db.add_log("postpone_set", json.dumps({"group": group_id, "days": days, "until": postpone_until}))
-        return jsonify(
-            {
-                "success": True,
-                "message": f"Полив отложен на {days} дней",
-                "postpone_until": postpone_date.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        try:
+            res = postpone_group(group_id, days, source="api")
+        except InvalidPostponeDaysError as exc:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": str(exc),
+                        "error_code": exc.error_code,
+                    }
+                ),
+                400,
+            )
+        except PostponeConflictError as exc:
+            return (
+                jsonify({"success": False, "message": str(exc), "error_code": exc.error_code}),
+                409,
+            )
+        success = res.get("success") is True
+        error_code = res.get("error_code")
+        if success:
+            message = f"Полив отложен на {days} дней"
+        elif error_code == "POSTPONE_STOP_UNAVAILABLE":
+            message = "Отсрочка сохранена, результат физического подтверждения недоступен"
+        elif error_code == "POSTPONE_SESSION_NOT_QUIESCED":
+            message = "Отсрочка сохранена, сессия полива не остановлена гарантированно"
+        else:
+            message = "Отсрочка сохранена, физическое выключение ещё не подтверждено"
+        payload = {
+            "success": success,
+            "pending": not success,
+            "message": message,
+            "group_id": group_id,
+            "postpone_until": res["postpone_until"],
+            "stopped": res.get("stopped", []),
+            "unresolved": res.get("unresolved", []),
+            "unverified_zone_ids": res.get("unverified_zone_ids", []),
+            "aggregate_valid": res.get("aggregate_valid") is True,
+            "retry_scheduled": res.get("retry_scheduled") is True,
+            "session_quiesced": res.get("session_quiesced") is True,
+            "physical_stop_confirmed": res.get("physical_stop_confirmed") is True,
+        }
+        if not success:
+            payload["error_code"] = error_code or "POSTPONE_STOP_PENDING"
+        return jsonify(payload), 200 if success else 503
 
     return jsonify({"success": False, "message": "Неверное действие"}), 400
 

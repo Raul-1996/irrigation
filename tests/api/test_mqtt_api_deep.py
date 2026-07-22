@@ -52,23 +52,26 @@ class TestMQTTZoneControl:
     """Tests for MQTT zone start/stop."""
 
     def test_mqtt_start_zone(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server["id"]}
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
-        with patch("services.mqtt_pub.publish_mqtt_value", return_value=True):
+        with patch(
+            "services.zone_control.start_zone_orchestrated",
+            return_value=("started", {"warnings": [], "duration": 10}),
+        ):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/start")
         assert resp.status_code == 200
 
     def test_mqtt_stop_zone(self, admin_client, app):
+        server = app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         app.db.create_zone(
-            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": 1}
+            {"name": "Z1", "duration": 10, "group_id": 1, "topic": "/devices/test/K1", "mqtt_server_id": server["id"]}
         )
-        app.db.create_mqtt_server({"name": "S1", "host": "127.0.0.1", "port": 1883, "enabled": 1})
         zones = app.db.get_zones()
         zid = zones[0]["id"]
-        with patch("services.mqtt_pub.publish_mqtt_value", return_value=True):
+        with patch("services.zone_control.publish_mqtt_value", return_value=True):
             resp = admin_client.post(f"/api/zones/{zid}/mqtt/stop")
         assert resp.status_code == 200

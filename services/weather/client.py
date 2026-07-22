@@ -78,6 +78,10 @@ def fetch_api(lat: float, lon: float) -> dict[str, Any] | None:
                     "hourly": hourly_params,
                     "daily": daily_params,
                     "timezone": "auto",
+                    # A forecast-only response starts at local midnight today,
+                    # so before 23:00 it cannot contain a true rolling 24-hour
+                    # precipitation window.  Include yesterday's hourly values.
+                    "past_days": 1,
                     "forecast_days": 3,
                     "wind_speed_unit": "ms",
                 }
@@ -96,6 +100,7 @@ def fetch_api(lat: float, lon: float) -> dict[str, Any] | None:
         "hourly": hourly_params,
         "daily": daily_params,
         "timezone": "auto",
+        "past_days": 1,
         "forecast_days": 3,
         "wind_speed_unit": "ms",
     }
@@ -146,13 +151,11 @@ def fetch_api(lat: float, lon: float) -> dict[str, Any] | None:
 def fetch_history(lat: float, lon: float, past_days: int) -> dict[str, Any] | None:
     """Fetch *past* daily ET₀ / precipitation for the water-balance engine.
 
-    Deliberately isolated from ``fetch_api`` and the whole H1 cache/parse path
-    (review BLOCKER 1): the ``weather_cache`` is keyed only on (lat, lon), so if a
-    ``past_days`` response were ever cached or parsed via ``WeatherData._parse``,
-    the H1 forecast path — which reads ``daily[..., 0]`` as *today* — would
-    silently break. This function therefore never touches the cache and returns
-    the raw JSON for ``balance.py`` to read directly (a single daily request per
-    night needs no caching).
+    Deliberately isolated from ``fetch_api`` and the whole H1 cache/parse path.
+    H1 asks for one past day of hourly data for rolling rain and parses daily
+    values by date; H2 asks for a much longer daily-only history.  Keeping H2
+    out of the shared cache prevents a history-only payload from replacing the
+    live forecast required by H1.
 
     Only the ``daily`` block is requested (``et0_fao_evapotranspiration``,
     ``precipitation_sum``, ``time``). ``forecast_days=1`` keeps today present so
@@ -200,14 +203,18 @@ def fetch_history(lat: float, lon: float, past_days: int) -> dict[str, Any] | No
             resp.raise_for_status()
             return resp.json()
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            logger.warning("Weather history fetch attempt %d/%d failed (transient): %s", attempt, _RETRY_MAX_ATTEMPTS, e)
+            logger.warning(
+                "Weather history fetch attempt %d/%d failed (transient): %s", attempt, _RETRY_MAX_ATTEMPTS, e
+            )
             if attempt >= _RETRY_MAX_ATTEMPTS:
                 return None
             time.sleep(_RETRY_BACKOFF_SEC)
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status in _RETRYABLE_STATUS and attempt < _RETRY_MAX_ATTEMPTS:
-                logger.warning("Weather history fetch attempt %d/%d failed (HTTP %s)", attempt, _RETRY_MAX_ATTEMPTS, status)
+                logger.warning(
+                    "Weather history fetch attempt %d/%d failed (HTTP %s)", attempt, _RETRY_MAX_ATTEMPTS, status
+                )
                 time.sleep(_RETRY_BACKOFF_SEC)
             else:
                 logger.warning("Weather history fetch failed (HTTP %s): %s", status, e)
@@ -278,7 +285,9 @@ def fetch_relay(url: str, token: str = "") -> dict[str, Any] | None:
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status in _RETRYABLE_STATUS and attempt < _RETRY_MAX_ATTEMPTS:
-                logger.warning("Weather relay fetch attempt %d/%d failed (HTTP %s)", attempt, _RETRY_MAX_ATTEMPTS, status)
+                logger.warning(
+                    "Weather relay fetch attempt %d/%d failed (HTTP %s)", attempt, _RETRY_MAX_ATTEMPTS, status
+                )
                 time.sleep(_RETRY_BACKOFF_SEC)
             else:
                 logger.warning("Weather relay fetch failed (HTTP %s): %s", status, e)

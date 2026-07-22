@@ -3,6 +3,8 @@
 import json
 import os
 
+import pytest
+
 os.environ["TESTING"] = "1"
 
 
@@ -31,9 +33,10 @@ class TestHealthAPI:
 class TestEmergencyAPI:
     def test_emergency_stop(self, admin_client):
         resp = admin_client.post("/api/emergency-stop", content_type="application/json")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = resp.get_json()
-        assert data["success"] is True
+        assert data["success"] is False
+        assert data["sessions_quiesced"] is False
 
     def test_emergency_resume(self, admin_client):
         # First stop
@@ -83,8 +86,48 @@ class TestSchedulerAPI:
 
 
 class TestPostponeAPI:
-    def test_postpone(self, admin_client, app):
-        app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
+    @pytest.mark.parametrize("days", ["abc", 100_000_000_000_000])
+    def test_postpone_rejects_invalid_days_without_writes(self, guest_client, app, days):
+        zone = app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
+
+        resp = guest_client.post(
+            "/api/postpone",
+            data=json.dumps(
+                {
+                    "group_id": 1,
+                    "days": days,
+                    "action": "postpone",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 400
+        assert app.db.get_zone(zone["id"])["postpone_until"] is None
+
+    def test_postpone(self, admin_client, app, monkeypatch):
+        import irrigation_scheduler
+
+        zone = app.db.create_zone({"name": "P", "duration": 10, "group_id": 1})
+        monkeypatch.setattr(
+            irrigation_scheduler,
+            "get_scheduler",
+            lambda: type(
+                "SuccessfulPostponeScheduler",
+                (),
+                {
+                    "cancel_group_jobs": lambda self, group_id, **kwargs: {
+                        "success": True,
+                        "aggregate_valid": True,
+                        "stopped": [zone["id"]],
+                        "unresolved": [],
+                        "unverified_zone_ids": [],
+                        "retry_scheduled": False,
+                        "group_id": group_id,
+                    }
+                },
+            )(),
+        )
         resp = admin_client.post(
             "/api/postpone",
             data=json.dumps(
