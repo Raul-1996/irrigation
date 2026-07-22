@@ -597,3 +597,35 @@ permissions changes этим решением не разрешены. Узки�
 - Явно исключённый пользователем скомпрометированный пароль и содержащая его
   опубликованная Git-история остаются блокером фактического production deploy;
   on-device WB canary не запускался без доступа к контроллеру и без ротации.
+
+## Публичный GitHub release gate — 2026-07-23
+
+- Безопасная публичная ветка `codex/production-release` подготовлена от
+  `origin/main` и опубликована в draft PR
+  [#61](https://github.com/Raul-1996/irrigation/pull/61). Release commit:
+  `6e1c225f7e2e3745f60c02f7142666d351ab8926`; PR не merge'ился и deploy не
+  запускался.
+- В публичном tree отсутствуют `docs/archive/**`, `docs/handoff/**`,
+  `irrigation-audit/**` и отдельные внутренние security/handoff reports;
+  tracked-secret scan прошёл для 439 файлов.
+- Первые Linux CI-прогоны нашли два portability-дефекта release plumbing:
+  отсутствующий hash-locked `greenlet` для SQLAlchemy и переиспользование
+  заведомо некорректного временного env-файла между deploy-script test cases.
+  Исправления опубликованы commits
+  `bc17de9f5f43753035a31c6e43736cc97c73d9af` и
+  `94fad664384853ed9f79d574404b63ca555d248a`; в полной локальной ветке им
+  соответствуют `6ca5b66cba50f196bafd77f6e9c28cd2deee6aa4` и
+  `7ee92099c1a8f9bb9a7e6d87d7f42d3f3089935a`.
+- Финальный GitHub Actions CI
+  [#109](https://github.com/Raul-1996/irrigation/actions/runs/29965848148)
+  полностью зелёный на Ubuntu/Python 3.11: **3520 passed, 0 skipped,
+  17 deselected** за 18:44, coverage **76.52%**; hash-locked install,
+  `pip check`, Ruff check/format, Bandit и secret scan также прошли.
+- GitHub environment `production` создан и ограничен selected branch `main`;
+  deploy workflow требует manual dispatch, точный full SHA из `main` и явное
+  подтверждение. PR намеренно остаётся draft.
+- Внешний advisory lookup lock-файлов по-прежнему не выполнялся: для передачи
+  dependency metadata внешнему сервису нет отдельного согласия пользователя.
+- Разрешённые пользователем остаточные блокеры не изменились: ротация
+  скомпрометированного production-пароля, очистка опубликованной Git-истории и
+  реальный canary на Wirenboard. До их закрытия merge/production deploy запрещён.
