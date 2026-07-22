@@ -73,7 +73,7 @@ export GITHUB_TOKEN=$(python3 -c "import json; print(json.load(open('/config/sec
   ```bash
   ssh -i /config/secrets/ssh/botops_key botops@172.30.0.1
   # затем:
-  sshpass -p '123_grom' ssh root@10.2.5.244
+  SSHPASS="${WB_ROOT_PASSWORD:?load WB_ROOT_PASSWORD from approved secret storage}" sshpass -e ssh root@10.2.5.244
   ```
 - **⚠️ НЕ ТРОГАТЬ** контейнер `b24-migrator` и другие контейнеры на Docker-хосте!
 
@@ -81,7 +81,7 @@ export GITHUB_TOKEN=$(python3 -c "import json; print(json.load(open('/config/sec
 - **IP:** 10.2.5.244
 - **OS:** Wirenboard (Debian-based ARM64)
 - **Назначение:** Тех. помещения — управление поливом
-- **Root пароль:** 123_grom
+- **Root-доступ:** пароль хранится вне репозитория; загрузите его в `WB_ROOT_PASSWORD` из одобренного хранилища секретов.
 - **Текущая версия:** старый wb-irrigation в /opt/wb-irrigation/irrigation/
 - **Порт приложения:** 8080
 - **Реле (RS485-2):**
@@ -174,7 +174,7 @@ export GITHUB_TOKEN=$(python3 -c "import json; print(json.load(open('/config/sec
    # Копируем через jump host
    scp -i /config/secrets/ssh/botops_key /tmp/wb-irrigation-v2.tar.gz botops@172.30.0.1:/tmp/
    # Далее с Docker-хоста на контроллер
-   sshpass -p '123_grom' scp /tmp/wb-irrigation-v2.tar.gz root@10.2.5.244:/tmp/
+   SSHPASS="${WB_ROOT_PASSWORD:?load WB_ROOT_PASSWORD from approved secret storage}" sshpass -e scp /tmp/wb-irrigation-v2.tar.gz root@10.2.5.244:/tmp/
    # На контроллере:
    mkdir -p /opt/wb-irrigation/irrigation
    cd /opt/wb-irrigation/irrigation
