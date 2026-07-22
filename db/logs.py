@@ -245,6 +245,20 @@ def _required_integrity_trigger_sql() -> dict[str, str]:
             """,
         )
 
+    add(
+        "trg_zones_version_invalidate",
+        """
+            CREATE TRIGGER trg_zones_version_invalidate
+            AFTER UPDATE ON zones
+            WHEN NEW.version IS NULL OR NEW.version <= COALESCE(OLD.version, 0)
+            BEGIN
+                UPDATE zones
+                SET version = COALESCE(OLD.version, 0) + 1
+                WHERE id = OLD.id;
+            END
+        """,
+    )
+
     for operation in ("INSERT", "UPDATE"):
         suffix = operation.lower()
         add(
@@ -883,6 +897,9 @@ class LogRepository(BaseRepository):
             "restore_runtime_indexes_v1",
             "mqtt_reference_integrity_v1",
             "group_reference_integrity_v1",
+            "zone_runs_clear_unverifiable_source_v1",
+            "programs_disable_unsupported_smart_v1",
+            "zones_version_invalidation_v1",
         }
     )
     _REQUIRED_INTEGRITY_TRIGGERS = {
@@ -910,6 +927,7 @@ class LogRepository(BaseRepository):
         "trg_groups_restrict_reserved_delete": "groups",
         "trg_groups_reject_replacing_name": "groups",
         "trg_groups_reject_replacing_name_update": "groups",
+        "trg_zones_version_invalidate": "zones",
     }
     _REQUIRED_TRIGGER_SQL = _required_integrity_trigger_sql()
     _REQUIRED_INDEXES: dict[str, tuple[str, tuple[str, ...]]] = {

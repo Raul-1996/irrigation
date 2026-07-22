@@ -140,30 +140,94 @@ class ZoneRepository(BaseRepository):
         return fields, params
 
     @staticmethod
+    def _select_zone_enriched(conn: sqlite3.Connection, zone_id: int) -> dict[str, Any] | None:
+        """Read the canonical zone model through an existing transaction."""
+
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT z.*, g.name AS group_name,
+                   (
+                       SELECT zr.end_utc
+                       FROM zone_runs zr
+                       WHERE zr.zone_id = z.id
+                         AND zr.status = 'ok'
+                         AND zr.end_utc IS NOT NULL
+                       ORDER BY zr.end_utc DESC
+                       LIMIT 1
+                   ) AS last_watering_time
+            FROM zones z
+            LEFT JOIN groups g ON z.group_id = g.id
+            WHERE z.id = ?
+            """,
+            (int(zone_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        zone = dict(row)
+        zone["group"] = zone["group_id"]
+        return zone
+
+    @staticmethod
     def _unlink_zone_from_programs_for_group_999(
         conn: sqlite3.Connection,
         zone_id: int,
         zone_data: dict[str, Any],
-    ) -> None:
-        """Preserve the established group-999 exclusion in every update path."""
+    ) -> list[int]:
+        """Atomically unlink a group-999 zone and return affected programs.
+
+        Program membership is safety data.  Malformed/non-list JSON or an
+        invalid member therefore aborts the surrounding zone transaction
+        instead of silently leaving an excluded zone scheduled.  Numeric
+        string IDs from legacy databases are accepted and canonicalised.
+        """
 
         if "group_id" not in zone_data and "group" not in zone_data:
-            return
+            return []
         if int(zone_data.get("group_id", zone_data.get("group"))) != 999:
-            return
-        cursor = conn.execute("SELECT id, zones FROM programs")
-        for row in cursor.fetchall():
+            return []
+
+        pending: list[tuple[int, list[int], int]] = []
+        cursor = conn.execute("SELECT id, zones, enabled FROM programs ORDER BY id")
+        for program_id, zones_json, enabled in cursor.fetchall():
             try:
-                zones_list = json.loads(row[1])
+                zones_list = json.loads(zones_json)
             except (json.JSONDecodeError, TypeError) as error:
-                logger.debug("zones list parse in program %s: %s", row[0], error)
+                raise sqlite3.IntegrityError(
+                    f"program {program_id} has malformed zones JSON"
+                ) from error
+            if not isinstance(zones_list, list):
+                raise sqlite3.IntegrityError(f"program {program_id} zones is not a list")
+
+            normalised: list[int] = []
+            for item in zones_list:
+                if isinstance(item, bool):
+                    raise sqlite3.IntegrityError(f"program {program_id} has an invalid zone identifier")
+                try:
+                    parsed = int(item)
+                except (TypeError, ValueError) as error:
+                    raise sqlite3.IntegrityError(
+                        f"program {program_id} has an invalid zone identifier"
+                    ) from error
+                if parsed <= 0:
+                    raise sqlite3.IntegrityError(f"program {program_id} has an invalid zone identifier")
+                normalised.append(parsed)
+
+            if int(zone_id) not in normalised:
                 continue
-            if zone_id not in zones_list:
-                continue
+            filtered = [item for item in normalised if item != int(zone_id)]
+            pending.append((int(program_id), filtered, 0 if not filtered else int(bool(enabled))))
+
+        for program_id, filtered, enabled in pending:
             conn.execute(
-                "UPDATE programs SET zones = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (json.dumps([item for item in zones_list if item != zone_id]), row[0]),
+                """
+                UPDATE programs
+                SET zones = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (json.dumps(filtered, ensure_ascii=False), enabled, program_id),
             )
+        return [program_id for program_id, _filtered, _enabled in pending]
 
     def get_zones(self) -> list[dict[str, Any]]:
         """Получить все зоны.
@@ -248,6 +312,7 @@ class ZoneRepository(BaseRepository):
         """Создать новую зону."""
         try:
             with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
                 topic = (zone_data.get("topic") or "").strip()
                 mqtt_sid = zone_data.get("mqtt_server_id")
                 if mqtt_sid is None and "mqtt_server_id" not in zone_data:
@@ -286,10 +351,21 @@ class ZoneRepository(BaseRepository):
                                 mqtt_sid,
                             ),
                         )
-                        conn.commit()
-                        return self.get_zone(zid_explicit)
                     except sqlite3.Error:
                         logger.warning("Не удалось вставить зону с явным id=%s, пробуем без id", zid_explicit)
+                    else:
+                        affected_program_ids = self._unlink_zone_from_programs_for_group_999(
+                            conn,
+                            zid_explicit,
+                            zone_data,
+                        )
+                        created = self._select_zone_enriched(conn, zid_explicit)
+                        if created is None:
+                            raise sqlite3.IntegrityError("inserted zone is not readable")
+                        if affected_program_ids:
+                            created["affected_program_ids"] = affected_program_ids
+                        conn.commit()
+                        return created
 
                 cursor = conn.execute(
                     """
@@ -306,8 +382,16 @@ class ZoneRepository(BaseRepository):
                     ),
                 )
                 zone_id = cursor.lastrowid
+                if zone_id is None:
+                    raise sqlite3.IntegrityError("inserted zone has no identifier")
+                affected_program_ids = self._unlink_zone_from_programs_for_group_999(conn, zone_id, zone_data)
+                created = self._select_zone_enriched(conn, zone_id)
+                if created is None:
+                    raise sqlite3.IntegrityError("inserted zone is not readable")
+                if affected_program_ids:
+                    created["affected_program_ids"] = affected_program_ids
                 conn.commit()
-                return self.get_zone(zone_id)
+                return created
         except sqlite3.Error as e:
             logger.error("Ошибка создания зоны: %s", e)
             return None
@@ -317,10 +401,14 @@ class ZoneRepository(BaseRepository):
         """Обновить только явно переданные поля зоны."""
         try:
             with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN IMMEDIATE")
                 if conn.execute("SELECT 1 FROM zones WHERE id = ?", (zone_id,)).fetchone() is None:
+                    conn.rollback()
                     return None
 
                 sql_fields, params = self._build_zone_update_fields(zone_data, zone_data)
+                sql_fields.append("version = COALESCE(version, 0) + 1")
                 params.append(zone_id)
 
                 sql = f"""
@@ -330,10 +418,15 @@ class ZoneRepository(BaseRepository):
                 """
                 conn.execute(sql, params)
 
-                self._unlink_zone_from_programs_for_group_999(conn, zone_id, zone_data)
+                affected_program_ids = self._unlink_zone_from_programs_for_group_999(conn, zone_id, zone_data)
+                current = self._select_zone_enriched(conn, zone_id)
+                if current is None:
+                    raise sqlite3.IntegrityError("updated zone is not readable")
+                if affected_program_ids:
+                    current["affected_program_ids"] = affected_program_ids
 
                 conn.commit()
-                return self.get_zone(zone_id)
+                return current
         except (TypeError, ValueError) as e:
             logger.warning("Некорректные данные обновления зоны %s: %s", zone_id, e)
             return None
@@ -341,7 +434,6 @@ class ZoneRepository(BaseRepository):
             logger.error("Ошибка обновления зоны %s: %s", zone_id, e)
             return None
 
-    @retry_on_busy()
     def update_zone_versioned(
         self,
         zone_id: int,
@@ -356,6 +448,27 @@ class ZoneRepository(BaseRepository):
         no write.  On success it returns ``(True, previous_zone)``.  A missing
         row returns ``(False, None)``.
         """
+        result = self.update_zone_versioned_detailed(
+            zone_id,
+            updates,
+            expected_version=expected_version,
+        )
+        snapshot = result["previous"] if result["success"] else result["current"]
+        affected_program_ids = result["affected_program_ids"]
+        if result["success"] and affected_program_ids and isinstance(snapshot, dict):
+            snapshot = {**snapshot, "affected_program_ids": affected_program_ids}
+        return bool(result["success"]), snapshot
+
+    @retry_on_busy()
+    def update_zone_versioned_detailed(
+        self,
+        zone_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """CAS a zone and return both snapshots from the locked transaction."""
+
         if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
             raise ValueError("expected_version must be a non-negative integer")
         if not isinstance(updates, dict) or not updates:
@@ -367,45 +480,83 @@ class ZoneRepository(BaseRepository):
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN IMMEDIATE")
-                cur = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,))
-                row = cur.fetchone()
-                if not row:
+                previous = self._select_zone_enriched(conn, zone_id)
+                if previous is None:
                     conn.rollback()
-                    return (False, None)
-                prev_zone = dict(row)
-                current_version = int(prev_zone.get("version") or 0)
+                    return {
+                        "success": False,
+                        "reason": "not_found",
+                        "previous": None,
+                        "current": None,
+                        "affected_program_ids": [],
+                    }
+                current_version = int(previous.get("version") or 0)
                 if current_version != expected_version:
                     conn.rollback()
-                    return (False, prev_zone)
+                    return {
+                        "success": False,
+                        "reason": "version_conflict",
+                        "previous": None,
+                        "current": previous,
+                        "affected_program_ids": [],
+                    }
 
                 fields, params = self._build_zone_update_fields(updates, updates)
-                fields.append("version = version + 1")
+                fields.append("version = COALESCE(version, 0) + 1")
                 params.extend([zone_id, expected_version])
                 sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ? AND version = ?"
                 cur2 = conn.execute(sql, params)
                 if cur2.rowcount != 1:
                     conn.rollback()
-                    current = conn.execute("SELECT * FROM zones WHERE id = ?", (zone_id,)).fetchone()
-                    return (False, dict(current) if current is not None else None)
-                self._unlink_zone_from_programs_for_group_999(conn, zone_id, updates)
+                    return {
+                        "success": False,
+                        "reason": "database_error",
+                        "previous": None,
+                        "current": None,
+                        "affected_program_ids": [],
+                    }
+                affected_program_ids = self._unlink_zone_from_programs_for_group_999(conn, zone_id, updates)
+                current = self._select_zone_enriched(conn, zone_id)
+                if current is None:
+                    raise sqlite3.IntegrityError("updated zone is not readable")
                 conn.commit()
-                return (True, prev_zone)
+                return {
+                    "success": True,
+                    "reason": "updated",
+                    "previous": previous,
+                    "current": current,
+                    "affected_program_ids": affected_program_ids,
+                }
         except (TypeError, ValueError) as error:
             logger.warning("Некорректные данные versioned-обновления зоны %s: %s", zone_id, error)
-            return (False, None)
+            return {
+                "success": False,
+                "reason": "database_error",
+                "previous": None,
+                "current": None,
+                "affected_program_ids": [],
+            }
         except sqlite3.Error as e:
             logger.error("Ошибка versioned-обновления зоны %s: %s", zone_id, e)
-            return (False, None)
+            return {
+                "success": False,
+                "reason": "database_error",
+                "previous": None,
+                "current": None,
+                "affected_program_ids": [],
+            }
 
     @retry_on_busy()
     def bulk_update_zones(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         """Пакетное обновление зон в одной транзакции."""
         updated = 0
         failed: list[int] = []
+        affected_program_ids: set[int] = set()
         if not updates:
             return {"updated": 0, "failed": []}
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 for upd in updates:
                     try:
                         zone_id = int(upd.get("id"))
@@ -426,19 +577,38 @@ class ZoneRepository(BaseRepository):
                         logger.warning("Некорректные данные bulk-обновления зоны %s: %s", zone_id, e)
                         failed.append(zone_id)
                         continue
+                    fields.append("version = COALESCE(version, 0) + 1")
                     params.append(zone_id)
                     sql = f"UPDATE zones SET {', '.join(fields)} WHERE id = ?"
+                    conn.execute("SAVEPOINT bulk_zone_update")
                     try:
                         conn.execute(sql, params)
+                        program_ids = self._unlink_zone_from_programs_for_group_999(conn, zone_id, upd)
+                        conn.execute("RELEASE SAVEPOINT bulk_zone_update")
+                        affected_program_ids.update(program_ids)
                         updated += 1
-                    except sqlite3.Error as e:
+                    except (sqlite3.Error, TypeError, ValueError) as e:
+                        conn.execute("ROLLBACK TO SAVEPOINT bulk_zone_update")
+                        conn.execute("RELEASE SAVEPOINT bulk_zone_update")
                         logger.warning("Ошибка обновления зоны %s в bulk: %s", zone_id, e)
                         failed.append(zone_id)
                 conn.commit()
-            return {"updated": updated, "failed": failed}
+            result: dict[str, Any] = {
+                "updated": updated,
+                "failed": failed,
+            }
+            if affected_program_ids:
+                result["affected_program_ids"] = sorted(affected_program_ids)
+            return result
         except sqlite3.Error as e:
             logger.error("Ошибка bulk-обновления зон: %s", e)
-            return {"updated": updated, "failed": failed or []}
+            result = {
+                "updated": updated,
+                "failed": failed or [],
+            }
+            if affected_program_ids:
+                result["affected_program_ids"] = sorted(affected_program_ids)
+            return result
 
     @retry_on_busy()
     def bulk_upsert_zones(self, zones: list[dict[str, Any]]) -> dict[str, Any]:
@@ -451,8 +621,15 @@ class ZoneRepository(BaseRepository):
         """
         created = 0
         updated = 0
+        affected_program_ids: set[int] = set()
         if not zones:
-            return {"success": True, "created": 0, "updated": 0, "failed": 0, "errors": []}
+            return {
+                "success": True,
+                "created": 0,
+                "updated": 0,
+                "failed": 0,
+                "errors": [],
+            }
 
         failed_index: int | None = None
         failed_id: Any = None
@@ -478,11 +655,15 @@ class ZoneRepository(BaseRepository):
                             # _ALLOWED_UPDATE_COLUMNS (см. комментарий у
                             # константы) — state-machine-поля исключены.
                             assignments, params = self._build_zone_update_fields(z, z, allowed=_ALLOWED_UPDATE_COLUMNS)
+                            assignments.append("version = COALESCE(version, 0) + 1")
                             params.append(zid)
                             if assignments:
                                 conn.execute(
                                     f"UPDATE zones SET {', '.join(assignments)} WHERE id = ?",
                                     params,
+                                )
+                                affected_program_ids.update(
+                                    self._unlink_zone_from_programs_for_group_999(conn, zid, z)
                                 )
                                 updated += 1
                         else:
@@ -501,9 +682,12 @@ class ZoneRepository(BaseRepository):
                                     z.get("mqtt_server_id"),
                                 ),
                             )
+                            affected_program_ids.update(
+                                self._unlink_zone_from_programs_for_group_999(conn, zid, z)
+                            )
                             created += 1
                     else:
-                        conn.execute(
+                        cursor = conn.execute(
                             """
                             INSERT INTO zones (name, icon, duration, group_id, topic, mqtt_server_id)
                             VALUES (?, ?, ?, ?, ?, ?)
@@ -517,9 +701,23 @@ class ZoneRepository(BaseRepository):
                                 z.get("mqtt_server_id"),
                             ),
                         )
+                        if cursor.lastrowid is None:
+                            raise sqlite3.IntegrityError("imported zone has no identifier")
+                        affected_program_ids.update(
+                            self._unlink_zone_from_programs_for_group_999(conn, cursor.lastrowid, z)
+                        )
                         created += 1
                 conn.commit()
-            return {"success": True, "created": created, "updated": updated, "failed": 0, "errors": []}
+            result = {
+                "success": True,
+                "created": created,
+                "updated": updated,
+                "failed": 0,
+                "errors": [],
+            }
+            if affected_program_ids:
+                result["affected_program_ids"] = sorted(affected_program_ids)
+            return result
         except (sqlite3.Error, TypeError, ValueError, KeyError) as e:
             logger.error("Atomic zone import rolled back at row %s: %s", failed_index, e)
             if isinstance(e, sqlite3.IntegrityError):
@@ -646,7 +844,9 @@ class ZoneRepository(BaseRepository):
                 conn.execute(
                     """
                     UPDATE zones
-                    SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
+                    SET scheduled_start_time = NULL,
+                        updated_at = CURRENT_TIMESTAMP,
+                        version = COALESCE(version, 0) + 1
                     WHERE group_id = ?
                 """,
                     (group_id,),
@@ -664,7 +864,9 @@ class ZoneRepository(BaseRepository):
                     conn.execute(
                         """
                         UPDATE zones
-                        SET scheduled_start_time = ?, updated_at = CURRENT_TIMESTAMP
+                        SET scheduled_start_time = ?,
+                            updated_at = CURRENT_TIMESTAMP,
+                            version = COALESCE(version, 0) + 1
                         WHERE id = ? AND group_id = ?
                     """,
                         (ts, zone_id, group_id),
@@ -681,7 +883,9 @@ class ZoneRepository(BaseRepository):
                 conn.execute(
                     """
                     UPDATE zones
-                    SET scheduled_start_time = NULL, updated_at = CURRENT_TIMESTAMP
+                    SET scheduled_start_time = NULL,
+                        updated_at = CURRENT_TIMESTAMP,
+                        version = COALESCE(version, 0) + 1
                     WHERE group_id = ? AND id != ?
                 """,
                     (group_id, zone_id),
@@ -698,7 +902,9 @@ class ZoneRepository(BaseRepository):
                 conn.execute(
                     """
                     UPDATE zones
-                    SET postpone_until = ?, postpone_reason = ?, updated_at = CURRENT_TIMESTAMP
+                    SET postpone_until = ?, postpone_reason = ?,
+                        updated_at = CURRENT_TIMESTAMP,
+                        version = COALESCE(version, 0) + 1
                     WHERE id = ?
                 """,
                     (postpone_until, reason, zone_id),
@@ -741,7 +947,8 @@ class ZoneRepository(BaseRepository):
                         """
                         UPDATE zones
                         SET postpone_until = ?, postpone_reason = 'rain',
-                            updated_at = CURRENT_TIMESTAMP
+                            updated_at = CURRENT_TIMESTAMP,
+                            version = COALESCE(version, 0) + 1
                         WHERE group_id = ?
                           AND postpone_until IS NULL
                           AND postpone_reason IS NULL
@@ -784,7 +991,8 @@ class ZoneRepository(BaseRepository):
                         """
                         UPDATE zones
                         SET postpone_until = NULL, postpone_reason = NULL,
-                            updated_at = CURRENT_TIMESTAMP
+                            updated_at = CURRENT_TIMESTAMP,
+                            version = COALESCE(version, 0) + 1
                         WHERE group_id = ? AND postpone_reason = 'rain'
                         """,
                         (int(group_id),),
@@ -815,7 +1023,9 @@ class ZoneRepository(BaseRepository):
                     conn.execute(
                         """
                         UPDATE zones
-                        SET photo_path = ?, photo_thumb = ?, updated_at = CURRENT_TIMESTAMP
+                        SET photo_path = ?, photo_thumb = ?,
+                            updated_at = CURRENT_TIMESTAMP,
+                            version = COALESCE(version, 0) + 1
                         WHERE id = ?
                     """,
                         (photo_path, photo_thumb, zone_id),
@@ -824,7 +1034,8 @@ class ZoneRepository(BaseRepository):
                     conn.execute(
                         """
                         UPDATE zones
-                        SET photo_path = ?, updated_at = CURRENT_TIMESTAMP
+                        SET photo_path = ?, updated_at = CURRENT_TIMESTAMP,
+                            version = COALESCE(version, 0) + 1
                         WHERE id = ?
                     """,
                         (photo_path, zone_id),

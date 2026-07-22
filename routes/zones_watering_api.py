@@ -13,8 +13,6 @@ from irrigation_scheduler import get_scheduler
 from services import sse_hub as _sse_hub
 from services.api_rate_limiter import rate_limit
 from services.audit import audit_log
-from services.mqtt_pub import publish_mqtt_value as _publish_mqtt_value
-from utils import normalize_topic
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +175,12 @@ def _abort_group_session_after_off(scheduler, group_id: int) -> dict:
     unresolved: set[int] = set()
     for zone_id in expected_zone_ids:
         try:
-            physically_stopped = _stop_central(zone_id, reason="manual_session_abort", force=True)
+            physically_stopped = _stop_central(
+                zone_id,
+                reason="manual_session_abort",
+                force=True,
+                require_observed_confirmation=True,
+            )
         except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeError):
             logger.exception("session abort OFF failed zone=%s", zone_id)
             physically_stopped = False
@@ -214,6 +217,53 @@ def _abort_group_session_after_off(scheduler, group_id: int) -> dict:
         )
         return result
     return completed
+
+
+def _accepted_stop_response(zone_id: int):
+    """Serialize the persisted result of an accepted central OFF command."""
+    current = db.get_zone(int(zone_id))
+    state = str((current or {}).get("state") or "").strip().lower()
+    if state not in {"off", "stopping", "fault"}:
+        logger.error("central stop returned success without a persisted stop state zone=%s state=%s", zone_id, state)
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "Команда OFF не зафиксирована",
+                    "error_code": "ZONE_STOP_STATE_INVALID",
+                    "zone_id": int(zone_id),
+                    "state": state or None,
+                }
+            ),
+            409,
+        )
+
+    pending = state != "off"
+    try:
+        db.add_log(
+            "zone_stop_command",
+            json.dumps(
+                {
+                    "zone": int(zone_id),
+                    "group": int((current or {}).get("group_id") or 0),
+                    "source": "manual",
+                    "state": state,
+                    "pending_confirmation": pending,
+                }
+            ),
+        )
+    except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        logger.debug("zone stop command log failed zone=%s", zone_id, exc_info=True)
+
+    return jsonify(
+        {
+            "success": True,
+            "message": "Команда OFF отправлена" if pending else f"Зона {int(zone_id)} остановлена",
+            "zone_id": int(zone_id),
+            "state": state,
+            "pending_confirmation": pending,
+        }
+    )
 
 
 # ---- Zone start/stop ----
@@ -334,14 +384,7 @@ def stop_zone(zone_id):
         except (ValueError, TypeError, KeyError):
             logger.exception("stop_zone: central stop failed")
             return jsonify({"success": False, "message": "Не удалось остановить зону"}), 500
-        try:
-            db.add_log(
-                "zone_stop",
-                json.dumps({"zone": int(zone_id), "group": int(zone.get("group_id") or 0), "source": "manual"}),
-            )
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-            logger.debug("Handled exception in stop_zone: %s", e)
-        return jsonify({"success": True, "message": f"Зона {zone_id} остановлена", "zone_id": zone_id, "state": "off"})
+        return _accepted_stop_response(int(zone_id))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.error(f"Ошибка остановки зоны {zone_id}: {e}")
         return jsonify({"success": False, "message": "Ошибка остановки зоны"}), 500
@@ -713,38 +756,33 @@ def api_zone_mqtt_stop(zone_id: int):
     try:
         from services.zone_control import stop_zone as _stop_central
 
-        if _stop_central(int(zone_id), reason="manual", force=True):
-            return jsonify({"success": True, "message": "Зона остановлена"})
-    except (ValueError, TypeError, KeyError):
-        logger.exception("api_zone_mqtt_stop: central stop failed, fallback to direct publish")
-    sid = z.get("mqtt_server_id")
-    topic = (z.get("topic") or "").strip()
-    if not sid or not topic:
-        return jsonify({"success": False, "message": "No MQTT config for zone"}), 400
-    t = normalize_topic(topic)
-    try:
-        server = db.get_mqtt_server(int(sid))
-        if not server:
-            return jsonify({"success": False, "message": "MQTT server not found"}), 400
-        logger.info(f"HTTP publish OFF zone={zone_id} topic={t}")
-        published = _publish_mqtt_value(server, t, "0", min_interval_sec=0.0, qos=2, retain=True)
-        if not published:
-            logger.error("HTTP publish OFF was not acknowledged zone=%s topic=%s", zone_id, t)
-            return jsonify({"success": False, "message": "MQTT publish failed"}), 500
-        try:
-            # Manual MQTT stop — operator action, audited.
-            from services.zones_state import update_zone_state_internal as _uzs
+        stopped = _stop_central(int(zone_id), reason="manual", force=True)
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeError):
+        logger.exception("api_zone_mqtt_stop: central stop failed")
+        stopped = False
+    if stopped:
+        return _accepted_stop_response(int(zone_id))
 
-            _uzs(
-                zone_id,
-                {"state": "off", "watering_start_time": None},
-                snapshot=z,
-                audit_reason="mqtt_stop",
-                db=db,
-            )
-        except (sqlite3.Error, OSError, ImportError) as e:
-            logger.debug("Handled exception in api_zone_mqtt_stop: %s", e)
-        return jsonify({"success": True, "message": "Зона остановлена"})
-    except (ConnectionError, TimeoutError, OSError) as e:
-        logger.error(f"MQTT publish stop failed: {e}")
-        return jsonify({"success": False, "message": "MQTT publish failed"}), 500
+    # The central path owns the topology lock, command generation, broker
+    # publish and durable transition.  Retrying here from the pre-call snapshot
+    # can target a channel that moved while the central call was running, and
+    # can publish after its CAS already rejected.  Surface the unresolved stop
+    # and let the retained safety retry/current owner decide the next command.
+    current = db.get_zone(int(zone_id)) or {}
+    logger.error(
+        "api_zone_mqtt_stop: central stop unresolved zone=%s state=%s version=%s",
+        zone_id,
+        current.get("state"),
+        current.get("version"),
+    )
+    return (
+        jsonify(
+            {
+                "success": False,
+                "message": "Не удалось подтвердить команду остановки зоны",
+                "error_code": "ZONE_STOP_UNRESOLVED",
+                "state": current.get("state"),
+            }
+        ),
+        500,
+    )

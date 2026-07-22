@@ -172,6 +172,8 @@ class TestZoneCrudOwnership:
             zone["id"],
             {"state": "off", "commanded_state": "off", "observed_state": "off"},
         )
+        zone = app.db.get_zone(zone["id"])
+        assert zone is not None
         mutation = {"mqtt_server_id": server["id"], "topic": topic}
 
         if method == "create":

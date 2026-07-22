@@ -1397,10 +1397,16 @@ def test_boot_cleanup_reports_transient_job_removal_failure(sched):
 def test_program_runner_aborts_before_next_zone_when_off_is_unresolved(sched, test_db):
     group = test_db.create_group("program-off-failure")
     zones = [test_db.create_zone({"name": f"z{index}", "duration": 1, "group_id": group["id"]}) for index in range(2)]
+    activation_token = "program-owned-activation"
+
+    def start_first(zone_id, **_kwargs):
+        test_db.update_zone(zone_id, {"state": "on", "command_id": activation_token})
+        return True
 
     with (
-        patch("services.zone_control.exclusive_start_zone", return_value=True) as start,
+        patch("services.zone_control.exclusive_start_zone", side_effect=start_first) as start,
         patch.object(sched._shutdown_event, "wait", return_value=True),
+        patch.object(sched, "schedule_zone_hard_stop", return_value=True),
         patch.object(sched, "_stop_zone", return_value=False) as stop,
     ):
         sched._run_program_threaded(901, [zone["id"] for zone in zones], "off-failure", manual=True)
@@ -1409,7 +1415,7 @@ def test_program_runner_aborts_before_next_zone_when_off_is_unresolved(sched, te
     assert start.call_args.args == (zones[0]["id"],)
     assert start.call_args.kwargs["source"] == "manual"
     assert callable(start.call_args.kwargs["cancel_guard"])
-    stop.assert_called_once_with(zones[0]["id"], reason="auto")
+    stop.assert_called_once_with(zones[0]["id"], reason="auto", activation_token=activation_token)
 
 
 def test_group_runner_aborts_before_next_zone_when_off_is_unresolved(sched, test_db, monkeypatch):
@@ -1417,9 +1423,14 @@ def test_group_runner_aborts_before_next_zone_when_off_is_unresolved(sched, test
     group = test_db.create_group("group-off-failure")
     zones = [test_db.create_zone({"name": f"z{index}", "duration": 1, "group_id": group["id"]}) for index in range(2)]
     sched.group_cancel_events[group["id"]] = threading.Event()
+    activation_token = "group-owned-activation"
+
+    def start_first(zone_id, **_kwargs):
+        test_db.update_zone(zone_id, {"state": "on", "command_id": activation_token})
+        return True
 
     with (
-        patch("services.zone_control.exclusive_start_zone", return_value=True) as start,
+        patch("services.zone_control.exclusive_start_zone", side_effect=start_first) as start,
         patch.object(sched._shutdown_event, "wait", return_value=True),
         patch.object(sched, "_stop_zone", return_value=False) as stop,
     ):
@@ -1429,7 +1440,7 @@ def test_group_runner_aborts_before_next_zone_when_off_is_unresolved(sched, test
     assert start.call_args.args == (zones[0]["id"],)
     assert start.call_args.kwargs["source"] == "manual"
     assert callable(start.call_args.kwargs["cancel_guard"])
-    stop.assert_called_once_with(zones[0]["id"], reason="group_sequence")
+    stop.assert_called_once_with(zones[0]["id"], reason="group_sequence", activation_token=activation_token)
 
 
 def test_broker_ack_returns_unresolved_and_refreshes_short_retry(sched, test_db):

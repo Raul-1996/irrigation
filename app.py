@@ -677,7 +677,33 @@ app.register_blueprint(health_api_bp)
 
 
 # ── Group exclusivity watchdog ─────────────────────────────────────────────
+def _zone_may_be_energized(zone: dict) -> bool:
+    """Conservatively classify one row for exclusivity enforcement."""
+    state = str(zone.get("state") or "").lower()
+    commanded = str(zone.get("commanded_state") or "").lower()
+    physical = bool(zone.get("mqtt_server_id") and str(zone.get("topic") or "").strip())
+    if not physical:
+        return state in {"on", "starting"}
+    observed = str(zone.get("observed_state") or "").lower()
+    if observed == "on":
+        return True
+    if commanded == "on" and state in {"on", "starting"}:
+        return True
+    return observed != "off" and state in {"on", "starting", "stopping", "fault"}
+
+
 def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> None:
+    """Repair one group from a fresh snapshot under its serialization lock."""
+    try:
+        from services.locks import group_lock
+
+        with group_lock(int(group_id)):
+            _force_group_exclusive_locked(int(group_id), reason)
+    except (RuntimeError, TypeError, ValueError, sqlite3.Error, OSError, ImportError) as e:
+        logger.error("Group exclusivity lock failed for group %s: %s", group_id, e)
+
+
+def _force_group_exclusive_locked(group_id: int, reason: str) -> None:
     try:
         group_zones = db.get_zones_by_group(group_id)
         try:
@@ -694,7 +720,7 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                 logger.debug("_is_mv check: %s", e)
                 return False
 
-        on_zones = [z for z in group_zones if str(z.get("state")) == "on" and not _is_mv(z)]
+        on_zones = [z for z in group_zones if _zone_may_be_energized(z) and not _is_mv(z)]
         if len(on_zones) <= 1:
             return
 
@@ -706,42 +732,107 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                 return datetime.min
 
         on_zones.sort(key=started_key, reverse=True)
-        for z in on_zones[1:]:
+        turned_off: list[int] = []
+        physically_off: list[int] = []
+        faulted: list[int] = []
+        failed: list[int] = []
+        unresolved: list[int] = []
+        group_shutdown = False
+        zones_to_stop = list(on_zones[1:])
+        keeper_id = int(on_zones[0]["id"])
+
+        def _require_group_shutdown(zone_id: int) -> None:
+            nonlocal group_shutdown
+            if zone_id not in unresolved:
+                unresolved.append(zone_id)
+            if not group_shutdown:
+                group_shutdown = True
+                zones_to_stop.append(on_zones[0])
+
+        for z in zones_to_stop:
+            zone_id = int(z["id"])
+            shutting_down_keeper = group_shutdown and zone_id == keeper_id
+            stopped = False
             try:
-                sid = z.get("mqtt_server_id")
-                topic = (z.get("topic") or "").strip()
-                if mqtt and sid and topic:
-                    server = db.get_mqtt_server(int(sid))
-                    if server:
-                        _publish_mqtt_value(
-                            server, normalize_topic(topic), "0", min_interval_sec=0.0, qos=2, retain=True
-                        )
-            except (ConnectionError, TimeoutError, OSError) as e:
-                logger.warning("group exclusive mqtt off for zone %s: %s", z.get("id"), e)
-            try:
-                # Use central stop_zone to ensure master close scheduling runs
-                # alongside the DB transition (was: direct state='off' write).
                 from services.zone_control import stop_zone as _stop_central_gex
 
-                _stop_central_gex(int(z["id"]), reason="group_exclusive", force=True)
+                stopped = bool(
+                    _stop_central_gex(
+                        zone_id,
+                        reason="group_exclusive",
+                        force=True,
+                        master_close_immediately=shutting_down_keeper,
+                        skip_master_close=not shutting_down_keeper,
+                        require_observed_confirmation=True,
+                    )
+                )
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e:
                 logger.error("group exclusive stop_zone for %s: %s", z.get("id"), e)
-                # Fallback to direct DB update if central stop fails — but
-                # still go through the audited helper so 'group_exclusivity'
-                # transitions are visible to triage.  If even that path
-                # blows up, drop to raw update_zone last.
-                try:
-                    # last_watering_time is no longer a column — derived
-                    # from zone_runs at read time. Just transition state.
-                    from services.zones_state import update_zone_state as _uzs
 
-                    _uzs(int(z["id"]), {"state": "off", "watering_start_time": None}, audit_reason="group_exclusivity")
-                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e2:
-                    logger.error("group exclusive audited fallback for zone %s: %s", z.get("id"), e2)
-                    try:
-                        db.update_zone(int(z["id"]), {"state": "off", "watering_start_time": None})
-                    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError) as e3:
-                        logger.error("group exclusive db update fallback for zone %s: %s", z.get("id"), e3)
+            current = db.get_zone(zone_id)
+            if (
+                stopped
+                and current
+                and str(current.get("state") or "").lower() == "off"
+                and not _zone_may_be_energized(current)
+            ):
+                turned_off.append(zone_id)
+                continue
+            if stopped:
+                logger.error(
+                    "group exclusive stop reported success without OFF state zone=%s state=%s",
+                    zone_id,
+                    (current or {}).get("state"),
+                )
+            if current and not _zone_may_be_energized(current):
+                physically_off.append(zone_id)
+                continue
+
+            # A failed or internally inconsistent stop must never be rewritten
+            # as a successful OFF.  Pin the exact still-current generation to
+            # FAULT so it cannot be scheduled again, while retaining activation
+            # timestamps for incident recovery and truthful run history.
+            if (
+                current
+                and str(current.get("state") or "").lower() == "fault"
+                and str(current.get("commanded_state") or "").lower() == "off"
+            ):
+                faulted.append(zone_id)
+                _require_group_shutdown(zone_id)
+                continue
+            try:
+                from services.zones_state import update_zone_state as _uzs_strict
+
+                snapshot = current or db.get_zone(zone_id)
+                if not snapshot:
+                    failed.append(zone_id)
+                    _require_group_shutdown(zone_id)
+                    continue
+                fallback_fields = {
+                    "state": "fault",
+                    "commanded_state": "off",
+                    "fault_count": int(snapshot.get("fault_count") or 0) + 1,
+                    "last_fault": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                applied, _conflict = _uzs_strict(
+                    zone_id,
+                    fallback_fields,
+                    expected_version=snapshot["version"],
+                    audit_reason=f"group_exclusivity_{reason}",
+                    db=db,
+                )
+                if applied:
+                    faulted.append(zone_id)
+                else:
+                    failed.append(zone_id)
+                    logger.error("group exclusive fault fallback CAS conflicted zone=%s", zone_id)
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, ImportError) as e:
+                failed.append(zone_id)
+                logger.error("group exclusive audited fallback for zone %s: %s", z.get("id"), e)
+            # A FAULT transition records uncertainty; it is not physical OFF
+            # proof.  Once any loser reaches this path, remove the elected
+            # keeper as well so the group fails closed as a whole.
+            _require_group_shutdown(zone_id)
         try:
             db.add_log(
                 "warning",
@@ -749,14 +840,19 @@ def _force_group_exclusive(group_id: int, reason: str = "group_exclusive") -> No
                     {
                         "type": "group_exclusive_fix",
                         "group_id": group_id,
-                        "kept_zone": on_zones[0].get("id"),
-                        "turned_off": [z.get("id") for z in on_zones[1:]],
+                        "kept_zone": None if group_shutdown else on_zones[0].get("id"),
+                        "group_shutdown": group_shutdown,
+                        "turned_off": turned_off,
+                        "physically_off": physically_off,
+                        "faulted": faulted,
+                        "failed": failed,
+                        "unresolved": unresolved,
                     }
                 ),
             )
         except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError, TypeError, KeyError) as e:
             logger.debug("group exclusive log: %s", e)
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, sqlite3.Error, OSError, ImportError) as e:
         logger.error(f"Group exclusivity enforcement failed for group {group_id}: {e}")
 
 
@@ -784,9 +880,9 @@ def _enforce_group_exclusive_all_groups() -> None:
                     logger.debug("_is_mv check (enforce_all): %s", e)
                     return False
 
-            if sum(1 for z in arr if str(z.get("state")) == "on" and not _is_mv(z)) > 1:
+            if sum(1 for z in arr if _zone_may_be_energized(z) and not _is_mv(z)) > 1:
                 _force_group_exclusive(gid, "watchdog")
-    except (ConnectionError, TimeoutError, OSError) as e:
+    except (ConnectionError, TimeoutError, OSError, sqlite3.Error, ImportError, TypeError, ValueError) as e:
         logger.exception("enforce_group_exclusive_all: %s", e)
 
 

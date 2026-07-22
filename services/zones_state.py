@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _INTERNAL_GENERATION_FIELDS = (
     "state",
     "commanded_state",
+    # A fresh relay report is physical evidence, not incidental metadata.
+    # Retrying an older transition across it could overwrite a newly observed
+    # ON with stale OFF completion from the previous command generation.
+    "observed_state",
     "command_id",
     "sequence_id",
     "watering_start_time",
@@ -102,6 +106,49 @@ def compare_and_swap_zone(
     if applied and snapshot is not None:
         _record_state_audit(int(zone_id), updates, snapshot, audit_reason)
     return bool(applied), snapshot
+
+
+def compare_and_swap_zone_detailed(
+    zone_id: int,
+    updates: dict[str, Any],
+    *,
+    expected_version: int,
+    audit_reason: str = "",
+    db: Any | None = None,
+) -> dict[str, Any]:
+    """Apply one CAS and retain its canonical in-transaction read model.
+
+    Public CRUD needs the exact committed revision, including derived fields,
+    without a post-commit read that could accidentally return a later writer.
+    Internal transition callers keep using the compact tuple contract above.
+    """
+    failure: dict[str, Any] = {
+        "success": False,
+        "reason": "database_error",
+        "previous": None,
+        "current": None,
+        "affected_program_ids": [],
+    }
+    resolved_db = _resolve_db(db)
+    detailed_update = getattr(resolved_db, "update_zone_versioned_detailed", None)
+    if not callable(detailed_update):
+        logger.error("detailed zone CAS is unavailable zone=%s", zone_id)
+        return failure
+    try:
+        result = detailed_update(
+            int(zone_id),
+            updates,
+            expected_version=expected_version,
+        )
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        logger.exception("detailed zone CAS failed zone=%s expected_version=%s", zone_id, expected_version)
+        return failure
+    if not isinstance(result, dict):
+        logger.error("detailed zone CAS returned invalid result zone=%s result=%r", zone_id, result)
+        return failure
+    if result.get("success") is True and isinstance(result.get("previous"), dict):
+        _record_state_audit(int(zone_id), updates, result["previous"], audit_reason)
+    return result
 
 
 def update_zone_state(

@@ -66,6 +66,7 @@ class StateVerifier:
         self._generation_lock = threading.Lock()
         self._generations: dict[int, int] = {}
         self._generation_registered_at: dict[int, float] = {}
+        self._generation_invalidated_at: dict[int, float] = {}
 
     @property
     def db(self):
@@ -107,6 +108,7 @@ class StateVerifier:
             generation = self._generations.get(zid, 0) + 1
             self._generations[zid] = generation
             self._generation_registered_at[zid] = time.time()
+            self._generation_invalidated_at.pop(zid, None)
         return generation
 
     def command_registered_at(self, zone_id: int) -> float | None:
@@ -114,6 +116,12 @@ class StateVerifier:
         with self._generation_lock:
             registered_at = self._generation_registered_at.get(int(zone_id))
         return float(registered_at) if registered_at is not None else None
+
+    def command_invalidated_at(self, zone_id: int) -> float | None:
+        """Return when the latest real command generation was invalidated."""
+        with self._generation_lock:
+            invalidated_at = self._generation_invalidated_at.get(int(zone_id))
+        return float(invalidated_at) if invalidated_at is not None else None
 
     def invalidate_verifiers(self, zone_id: int) -> int:
         """Invalidate in-flight verifiers without inventing a new command.
@@ -128,6 +136,11 @@ class StateVerifier:
         with zone_lock(zid), self._generation_lock:
             generation = self._generations.get(zid, 0) + 1
             self._generations[zid] = generation
+            # Keep the real command's receipt fence intact: a report already
+            # received before this invalidation remains valid physical
+            # evidence.  The separate boundary lets queued consumers reject
+            # reports received only after that command lost ownership.
+            self._generation_invalidated_at[zid] = time.time()
         return generation
 
     @staticmethod
@@ -455,65 +468,225 @@ class StateVerifier:
         except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError):  # catch-all: intentional
             logger.exception("StateVerifier._safe_verify failed zone=%s expected=%s", zone_id, expected)
 
-    def _apply_confirmation(self, zone_id: int, expected: str) -> None:
-        """Persist fresh physical truth and disarm OFF safety jobs in order."""
-        db = self.db
+    def _apply_confirmation(
+        self,
+        zone_id: int,
+        expected: str,
+        *,
+        clear_fault: bool = False,
+        db_instance=None,
+        scheduler_getter=None,
+    ) -> bool:
+        """Persist fresh physical truth before any generation-bound side effect.
+
+        A broker report can race a newer command or topology edit.  The CAS is
+        therefore the commit point: run history, safety-job cleanup and events
+        are touched only after that exact relay generation was accepted.
+        """
+        db = self.db if db_instance is None else db_instance
         if db is None:
-            return
+            return False
         state = self._canonical_state(expected)
         if state is None:
-            return
+            return False
         snapshot = db.get_zone(int(zone_id))
         if not snapshot:
-            return
+            return False
+        snapshot_state = str(snapshot.get("state") or "").lower()
+        already_observed = str(snapshot.get("observed_state") or "").lower() == state
+        on_run = None
+        if state == "on" and (snapshot.get("command_id") or snapshot.get("watering_start_time")):
+            try:
+                on_run = db.get_open_zone_run(int(zone_id))
+            except (sqlite3.Error, OSError, AttributeError):
+                logger.exception("StateVerifier: open-run confirmation read failed zone=%s", zone_id)
+                return False
+            if not on_run:
+                logger.error("StateVerifier: active ON confirmation has no open run zone=%s", zone_id)
+                return False
+        if state == "on" and already_observed and snapshot_state in {"on", "fault"}:
+            if on_run and int(on_run.get("confirmed") or 0) == 1:
+                return True
+            if not on_run:
+                return True
+        if (
+            state == "off"
+            and already_observed
+            and snapshot_state in {"off", "fault"}
+            and not clear_fault
+            and not snapshot.get("command_id")
+            and not snapshot.get("watering_start_time")
+        ):
+            return True
         fields: dict[str, object] = {"observed_state": state}
-        cleanup_ok = True
         if state == "off":
             fields["planned_end_time"] = None
+            # Fault is sticky until an explicit repair action, but a confirmed
+            # physical OFF still completes ordinary STARTING/ON/STOPPING rows.
+            if snapshot_state != "fault" or clear_fault:
+                fields["state"] = "off"
+        elif snapshot_state != "fault":
+            fields["state"] = "on"
+        from services.zones_state import update_zone_state_internal
+
+        needs_persist = not already_observed or any(snapshot.get(key) != value for key, value in fields.items())
+        if needs_persist:
             try:
-                from irrigation_scheduler import get_scheduler
-
-                scheduler = get_scheduler()
-                if scheduler is not None:
-                    try:
-                        scheduler.cancel_zone_jobs(int(zone_id), include_cap=True)
-                    except TypeError:
-                        scheduler.cancel_zone_jobs(int(zone_id))
-                        scheduler.cancel_zone_cap(int(zone_id))
-            except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
-                cleanup_ok = False
-                logger.exception("StateVerifier: cancel confirmed OFF safety jobs failed zone=%s", zone_id)
-            if cleanup_ok:
-                fields["watering_start_time"] = None
-                fields["command_id"] = None
-        try:
-            from services.zones_state import update_zone_state_internal
-
-            applied, _current = update_zone_state_internal(
-                int(zone_id),
-                fields,
-                snapshot=snapshot,
-                audit_reason=f"mqtt_verified_{state}",
-                db=db,
-            )
-            if not applied:
-                logger.warning("StateVerifier: confirmation CAS conflicted zone=%s", zone_id)
-        except (sqlite3.Error, OSError, ImportError):
-            logger.exception("StateVerifier: audited confirmation persist failed zone=%s", zone_id)
+                applied, _current = update_zone_state_internal(
+                    int(zone_id),
+                    fields,
+                    snapshot=snapshot,
+                    audit_reason=f"mqtt_verified_{state}",
+                    db=db,
+                )
+                if not applied:
+                    logger.warning("StateVerifier: confirmation CAS conflicted zone=%s", zone_id)
+                    return False
+            except (sqlite3.Error, OSError, ImportError):
+                logger.exception("StateVerifier: audited confirmation persist failed zone=%s", zone_id)
+                return False
 
         if state == "on":
             try:
-                db.mark_zone_run_confirmed(zone_id)
+                confirmed = db.mark_zone_run_confirmed(zone_id)
             except (sqlite3.Error, OSError, AttributeError):
-                logger.debug("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
+                logger.exception("StateVerifier: mark_zone_run_confirmed failed zone=%s", zone_id)
+                return False
+            if confirmed is not True:
+                logger.error("StateVerifier: mark_zone_run_confirmed rejected zone=%s", zone_id)
+                return False
+            return True
+
+        # A normal stop is only history-successful after this fresh OFF.  The
+        # command path intentionally leaves the run open while confirmation is
+        # pending; close it now, while the generation lock is still held.
+        try:
+            from services.zone_control import _finalize_water_stats, _finish_open_zone_run_failed
+
+            if snapshot_state == "fault" and not clear_fault:
+                history_ok = _finish_open_zone_run_failed(int(zone_id), db_instance=db)
+            else:
+                history_ok = _finalize_water_stats(
+                    int(zone_id),
+                    snapshot,
+                    snapshot.get("watering_start_time"),
+                    log_label="observed OFF",
+                    db_instance=db,
+                )
+        except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
+            logger.exception("StateVerifier: confirmed OFF run finalization failed zone=%s", zone_id)
+            return False
+        if history_ok is not True:
+            # Keep activation-bound safety jobs and ownership tokens armed.
+            # A later fresh OFF/reconciliation pass may retry the still-open
+            # history row without ever claiming a successful stop early.
+            logger.critical("StateVerifier: confirmed OFF history close rejected zone=%s", zone_id)
+            return False
+
+        cleanup_ok = True
+        try:
+            if scheduler_getter is None:
+                from irrigation_scheduler import get_scheduler
+
+                scheduler = get_scheduler()
+            else:
+                scheduler = scheduler_getter()
+            if scheduler is not None:
+                try:
+                    scheduler.cancel_zone_jobs(int(zone_id), include_cap=True)
+                except TypeError:
+                    scheduler.cancel_zone_jobs(int(zone_id))
+                    scheduler.cancel_zone_cap(int(zone_id))
+        except (ImportError, AttributeError, RuntimeError, ValueError, TypeError):
+            cleanup_ok = False
+            logger.exception("StateVerifier: cancel confirmed OFF safety jobs failed zone=%s", zone_id)
+
+        if not cleanup_ok:
+            return False
+        latest = db.get_zone(int(zone_id))
+        if not (
+            latest
+            and str(latest.get("state") or "").lower() in {"off", "fault"}
+            and str(latest.get("commanded_state") or "").lower() == "off"
+            and latest.get("command_id") == snapshot.get("command_id")
+            and latest.get("watering_start_time") == snapshot.get("watering_start_time")
+        ):
+            logger.warning("StateVerifier: confirmed OFF cleanup owner changed zone=%s", zone_id)
+            return False
+        try:
+            cleaned, _current = update_zone_state_internal(
+                int(zone_id),
+                {"watering_start_time": None, "command_id": None},
+                snapshot=latest,
+                audit_reason="mqtt_verified_off_cleanup",
+                db=db,
+            )
+            if not cleaned:
+                logger.warning("StateVerifier: confirmed OFF cleanup CAS conflicted zone=%s", zone_id)
+                return False
+        except (sqlite3.Error, OSError):
+            logger.exception("StateVerifier: confirmed OFF cleanup failed zone=%s", zone_id)
+            return False
+
+        try:
+            db.add_log("zone_stop", f"observed_state: zone={int(zone_id)}")
+        except (sqlite3.Error, OSError, AttributeError):
+            logger.debug("StateVerifier: confirmed OFF log failed zone=%s", zone_id)
+        try:
+            from services import events
+
+            events.publish({"type": "zone_stop", "id": int(zone_id), "by": "observed_state"})
+        except (ImportError, AttributeError):
+            logger.debug("StateVerifier: confirmed OFF event failed zone=%s", zone_id)
+        return True
+
+    def apply_live_confirmation(
+        self,
+        zone_id: int,
+        expected: str,
+        *,
+        received_at: float | None = None,
+        db_instance=None,
+        scheduler_getter=None,
+    ) -> bool:
+        """Apply an SSE/live report through the verifier's idempotent commit."""
+        zid = int(zone_id)
+        state = self._canonical_state(expected)
+        if state is None:
+            return False
+        with zone_lock(zid):
+            db = self.db if db_instance is None else db_instance
+            current = db.get_zone(zid) if db is not None else None
+            if not current:
+                return False
+            commanded = self._canonical_state(current.get("commanded_state"))
+            if commanded is not None and commanded != state:
+                return False
+            registered_at = self.command_registered_at(zid)
+            if received_at is not None and registered_at is not None and float(received_at) < registered_at:
+                return False
+            invalidated_at = self.command_invalidated_at(zid)
+            clear_fault = bool(
+                state == "off"
+                and str(current.get("state") or "").lower() == "fault"
+                and received_at is not None
+                and invalidated_at is not None
+                and float(received_at) < invalidated_at
+            )
+            return self._apply_confirmation(
+                zid,
+                state,
+                clear_fault=clear_fault,
+                db_instance=db,
+                scheduler_getter=scheduler_getter,
+            )
 
     def _apply_confirmation_if_current(self, zone_id: int, expected: str, generation: int) -> bool:
         """Atomically recheck generation and mutate physical truth/jobs."""
         with zone_lock(int(zone_id)):
             if not self._is_current(zone_id, expected, generation):
                 return False
-            self._apply_confirmation(zone_id, expected)
-            return True
+            return self._apply_confirmation(zone_id, expected)
 
     # ------------------------------------------------------------------
     def verify(
@@ -736,10 +909,10 @@ class StateVerifier:
         expected: str,
         *,
         generation: int | None = None,
-    ) -> None:
+    ) -> bool:
         """Serialize stale-fault suppression with new command registration."""
         with zone_lock(int(zone_id)):
-            self._record_fault_locked(
+            return self._record_fault_locked(
                 zone_id,
                 zone,
                 expected,
@@ -753,7 +926,7 @@ class StateVerifier:
         expected: str,
         *,
         generation: int | None = None,
-    ) -> None:
+    ) -> bool:
         """Mark zone as FAULT, increment fault_count, send Telegram alert.
 
         PHYS-1 reconciliation: when the observed-state contract fails
@@ -775,7 +948,7 @@ class StateVerifier:
         """
         db = self.db
         if not db:
-            return
+            return False
         if generation is not None and not self._is_current(zone_id, expected, generation):
             logger.info(
                 "StateVerifier: stale fault suppressed zone=%s expected=%s generation=%s",
@@ -783,11 +956,11 @@ class StateVerifier:
                 expected,
                 generation,
             )
-            return
+            return False
 
         current = db.get_zone(int(zone_id))
         if not current:
-            return
+            return False
         zone = current
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -822,9 +995,16 @@ class StateVerifier:
                 db=db_inst,
             )
             if not applied:
-                logger.critical("StateVerifier: fault CAS conflicted zone=%s", zone_id)
+                logger.warning("StateVerifier: fault CAS conflicted zone=%s", zone_id)
+                return False
         except (sqlite3.Error, OSError, ImportError):
             logger.exception("StateVerifier: audited fault CAS failed zone=%s", zone_id)
+            return False
+
+        # Retire the exact timed-out command only after FAULT is durable.  The
+        # separate timestamp preserves already-received relay evidence while
+        # allowing the SSE queue to reject reports arriving after invalidation.
+        self.invalidate_verifiers(int(zone_id))
 
         zone_name = zone.get("name") or f"#{zone_id}"
         alert_text = (
@@ -858,6 +1038,7 @@ class StateVerifier:
                     notifier.send_text(int(admin_chat), alert_text)
         except (sqlite3.Error, OSError):
             logger.exception("StateVerifier: Telegram alert failed")
+        return True
 
 
 def is_command_confirmation_message(message: object) -> bool:

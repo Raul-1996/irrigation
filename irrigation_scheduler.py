@@ -190,10 +190,13 @@ def job_run_program(
                 if expected_fingerprint is not None:
                     current_fingerprint = s.program_schedule_fingerprint(int(program_id), current)
                     if current_fingerprint != str(expected_fingerprint):
-                        logger.info(
-                            "Queued program fire ignored after revision change (program_id=%s)",
+                        logger.warning(
+                            "Queued program fire ignored after revision change; reconciling current DB revision "
+                            "(program_id=%s)",
                             program_id,
                         )
+                        if not s.reconcile_program_from_db(int(program_id)):
+                            logger.error("Stale program fire reconciliation failed (program_id=%s)", program_id)
                         return
                 zones = sorted({int(z) for z in current.get("zones") or []})
                 program_name = str(current.get("name") or program_name)
@@ -1125,7 +1128,8 @@ class IrrigationScheduler:
         cannot stop a later activation of the same zone.
         """
         zid = int(zone_id)
-        token = str(activation_token or "").strip() or None
+        requested_token = str(activation_token or "").strip() or None
+        token = requested_token
         try:
             initial_zone = self._read_zone_strict(zid) or {}
             if token is None:
@@ -1133,62 +1137,97 @@ class IrrigationScheduler:
                 token = str(strict_token or "").strip() or None
             physical = bool(initial_zone.get("mqtt_server_id") and str(initial_zone.get("topic") or "").strip())
         except (sqlite3.Error, OSError, ValueError, TypeError):
+            if requested_token is not None:
+                logger.exception("Exact activation cannot be verified before OFF for zone %s", zid)
+                return False
             # Unknown topology is physical until proven otherwise.
             logger.exception("Strict topology read failed before OFF for zone %s", zid)
             physical = True
             if token is None:
                 token = self._current_activation_token(zid)
-        try:
-            from services.zone_control import stop_zone as _stop_zone_central
 
-            stop_kwargs: dict[str, Any] = {"reason": reason, "force": bool(force)}
-            if self._callable_accepts_keyword(_stop_zone_central, "activation_token"):
-                stop_kwargs["activation_token"] = token
-            if self._callable_accepts_keyword(_stop_zone_central, "require_observed_confirmation"):
-                stop_kwargs["require_observed_confirmation"] = True
-            elif physical:
-                logger.warning("Confirmed physical OFF API unavailable for zone %s", zid)
-            stopped = bool(_stop_zone_central(zid, **stop_kwargs))
-        except (sqlite3.Error, OSError, ImportError, RuntimeError, ValueError, TypeError):
-            logger.exception("Scheduler OFF failed for zone %s", zid)
-            stopped = False
+        with ExitStack() as ownership_fence:
+            if requested_token is not None:
+                try:
+                    from services.locks import group_lock
 
-        if stopped and physical:
+                    group_id = int(initial_zone.get("group_id") or 0)
+                    ownership_fence.enter_context(group_lock(group_id))
+                    current = self._read_zone_strict(zid)
+                except (sqlite3.Error, OSError, ImportError, RuntimeError, ValueError, TypeError):
+                    logger.exception("Exact activation recheck failed before OFF for zone %s", zid)
+                    return False
+                if current is None or int(current.get("group_id") or 0) != group_id:
+                    logger.warning("Stale scheduler OFF lost zone/group identity for zone %s", zid)
+                    return False
+                current_token = current.get("command_id")
+                if current_token in (None, ""):
+                    current_token = current.get("watering_start_time")
+                if str(current_token or "").strip() != requested_token:
+                    logger.info(
+                        "Stale scheduler OFF ignored for zone %s (expected activation=%s, current=%s)",
+                        zid,
+                        requested_token,
+                        current_token,
+                    )
+                    return False
+                initial_zone = current
+                token = requested_token
+                physical = bool(
+                    initial_zone.get("mqtt_server_id") and str(initial_zone.get("topic") or "").strip()
+                )
+
             try:
-                observed = self._read_zone_strict(zid)
-                stopped = bool(observed and str(observed.get("observed_state") or "").lower() == "off")
-            except (sqlite3.Error, OSError, ValueError, TypeError):
-                logger.exception("Strict observed-OFF read failed for zone %s", zid)
+                from services.zone_control import stop_zone as _stop_zone_central
+
+                stop_kwargs: dict[str, Any] = {"reason": reason, "force": bool(force)}
+                if self._callable_accepts_keyword(_stop_zone_central, "activation_token"):
+                    stop_kwargs["activation_token"] = token
+                if self._callable_accepts_keyword(_stop_zone_central, "require_observed_confirmation"):
+                    stop_kwargs["require_observed_confirmation"] = True
+                elif physical:
+                    logger.warning("Confirmed physical OFF API unavailable for zone %s", zid)
+                stopped = bool(_stop_zone_central(zid, **stop_kwargs))
+            except (sqlite3.Error, OSError, ImportError, RuntimeError, ValueError, TypeError):
+                logger.exception("Scheduler OFF failed for zone %s", zid)
                 stopped = False
 
-        if not stopped:
-            # A DateTrigger removes itself when submitted. Always replace the
-            # exact hard-stop id with a short retry for this activation. A cap
-            # hours in the future is not an acceptable substitute.
-            self.cancel_zone_jobs(zid, preserve_safety=True)
-            retry_at = self._controller_now() + timedelta(seconds=30)
-            try:
-                replanted = self.schedule_zone_hard_stop(zid, retry_at, activation_token=token)
-            except (RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error, OSError):
-                logger.exception("Failed to re-arm OFF retry for zone %s", zid)
-                replanted = False
-            if replanted is not True:
-                logger.critical("Zone %s OFF unresolved and short safety retry could not be retained", zid)
-            logger.error("Zone %s OFF unresolved; safety retry retained", zid)
-            return False
+            if stopped and physical:
+                try:
+                    observed = self._read_zone_strict(zid)
+                    stopped = bool(observed and str(observed.get("observed_state") or "").lower() == "off")
+                except (sqlite3.Error, OSError, ValueError, TypeError):
+                    logger.exception("Strict observed-OFF read failed for zone %s", zid)
+                    stopped = False
 
-        # Virtual zones complete synchronously; physical zones reach this point
-        # only after a fresh observed OFF. Both may now release every timer.
-        self.cancel_zone_jobs(zid, include_cap=True)
-        self._clear_program_activation_evidence(zid, token)
-        try:
-            zone = self.db.get_zone(zid)
-            if zone:
-                self.db.add_log("zone_auto_stop", f"Зона {zid} ({zone['name']}) автоматически остановлена")
-        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
-            logger.debug("zone_auto_stop log failed for %s", zid, exc_info=True)
-        logger.info("Зона %s остановлена", zid)
-        return True
+            if not stopped:
+                # A DateTrigger removes itself when submitted. Always replace the
+                # exact hard-stop id with a short retry for this activation. A cap
+                # hours in the future is not an acceptable substitute.
+                self.cancel_zone_jobs(zid, preserve_safety=True)
+                retry_at = self._controller_now() + timedelta(seconds=30)
+                try:
+                    replanted = self.schedule_zone_hard_stop(zid, retry_at, activation_token=token)
+                except (RuntimeError, ValueError, TypeError, KeyError, sqlite3.Error, OSError):
+                    logger.exception("Failed to re-arm OFF retry for zone %s", zid)
+                    replanted = False
+                if replanted is not True:
+                    logger.critical("Zone %s OFF unresolved and short safety retry could not be retained", zid)
+                logger.error("Zone %s OFF unresolved; safety retry retained", zid)
+                return False
+
+            # Virtual zones complete synchronously; physical zones reach this point
+            # only after a fresh observed OFF. Both may now release every timer.
+            self.cancel_zone_jobs(zid, include_cap=True)
+            self._clear_program_activation_evidence(zid, token)
+            try:
+                zone = self.db.get_zone(zid)
+                if zone:
+                    self.db.add_log("zone_auto_stop", f"Зона {zid} ({zone['name']}) автоматически остановлена")
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                logger.debug("zone_auto_stop log failed for %s", zid, exc_info=True)
+            logger.info("Зона %s остановлена", zid)
+            return True
 
     def _check_weather_skip(self, zone_id: int, program_id: int = 0) -> dict:
         """Check if watering should be skipped due to weather. Returns skip info dict."""
@@ -1267,6 +1306,39 @@ class IrrigationScheduler:
             logger.debug("Weather adjustment error: %s", e)
             return base_duration
 
+    def _record_program_lifecycle(
+        self,
+        event_type: str,
+        program_id: int,
+        program_name: str,
+        *,
+        started: bool,
+    ) -> None:
+        """Write a truthful program lifecycle marker without affecting control."""
+        status_by_event = {
+            "program_start": "started",
+            "program_finish": "completed",
+            "program_failed": "failed",
+            "program_cancelled": "cancelled",
+        }
+        status = status_by_event[event_type]
+        payload = {
+            "program_id": int(program_id),
+            "program_name": str(program_name),
+            "status": status,
+            "success": event_type == "program_finish",
+            "started": bool(started),
+        }
+        if event_type == "program_start":
+            payload.pop("started")
+            payload.pop("success")
+        try:
+            self.db.add_log(event_type, json.dumps(payload))
+        except Exception:
+            # Lifecycle rows are observability only. They must never unwind a
+            # physical control path after an ON command has been accepted.
+            logger.debug("Program lifecycle log failed (%s:%s)", event_type, program_id, exc_info=True)
+
     def _run_program_threaded(
         self,
         program_id: int,
@@ -1340,6 +1412,9 @@ class IrrigationScheduler:
             logger.info("Программа %s не запущена: scheduler quiescing", program_id)
             return False
         run_ok = True
+        program_started = False
+        program_start_recorded = False
+        program_cancelled = False
         try:
             # ----- Issue #15 manual-vs-scheduled guard -----
             # If a manual / ad-hoc run owns ANY group this program touches,
@@ -1408,12 +1483,6 @@ class IrrigationScheduler:
             except (sqlite3.Error, OSError, ValueError, TypeError) as _e:
                 logger.debug("manual-vs-scheduled guard error: %s", _e)
             # ----- end issue #15 guard -----
-            logger.info(f"Запуск программы {program_id} ({program_name})")
-            try:
-                self.db.add_log("program_start", json.dumps({"program_id": program_id, "program_name": program_name}))
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                logger.debug("Handled exception in _run_program_threaded: %s", e)
-
             # Weather check before program: skip entire program if conditions are bad.
             # Issue #31: manual runs bypass weather skip — user just looked at the
             # sky and pressed Run, system must not second-guess.
@@ -1469,6 +1538,7 @@ class IrrigationScheduler:
                     from database import db as _db
 
                     if _db.is_program_run_cancelled_for_group(int(program_id), today, int(group_id)):
+                        program_cancelled = True
                         logger.info(
                             f"Программа {program_id}: отменена для группы {group_id} на {today}, зона {zone_id} пропущена"
                         )
@@ -1481,6 +1551,7 @@ class IrrigationScheduler:
                     run_ok = False
                     break
                 if cancel_event and cancel_event.is_set():
+                    program_cancelled = True
                     logger.info(f"Программа {program_id}: группа {group_id} отменена, зона {zone_id} пропущена")
                     continue
                 # Drop a stale skip event from a previous zone — see _run_group_sequence comment.
@@ -1582,6 +1653,8 @@ class IrrigationScheduler:
                         logger.error("Программа %s: зона %s перешла в fault при старте", program_id, zone_id)
                         run_ok = False
                         break
+                    if not program_started:
+                        program_started = True
                     end_time = self._controller_now() + timedelta(minutes=duration)
                     self.active_zones[zone_id] = end_time
                     # write planned_end_time for watchdogs/diagnostics
@@ -1618,13 +1691,50 @@ class IrrigationScheduler:
                         )
                     # Watchdog job
                     try:
-                        self.schedule_zone_hard_stop(
-                            zone_id,
-                            end_time,
-                            activation_token=activation_token or None,
+                        watchdog_planted = (
+                            self.schedule_zone_hard_stop(
+                                zone_id,
+                                end_time,
+                                activation_token=activation_token or None,
+                            )
+                            is True
                         )
-                    except (ValueError, KeyError, RuntimeError) as e:
+                    except (sqlite3.Error, OSError, AttributeError, ValueError, TypeError, KeyError, RuntimeError) as e:
                         logger.debug("Handled exception in line_418: %s", e)
+                        watchdog_planted = False
+                    if not watchdog_planted:
+                        logger.critical(
+                            "Программа %s: watchdog зоны %s не подтверждён; немедленный fail-closed OFF",
+                            program_id,
+                            zone_id,
+                        )
+                        try:
+                            fail_closed_stopped = self._stop_zone(
+                                int(zone_id),
+                                reason="watchdog_arm_failed",
+                                activation_token=activation_token or None,
+                                force=True,
+                            )
+                        except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError, KeyError):
+                            logger.exception("Fail-closed OFF after watchdog failure raised for zone %s", zone_id)
+                            fail_closed_stopped = False
+                        if not fail_closed_stopped:
+                            logger.critical(
+                                "Программа %s: зона %s остаётся без подтверждённого watchdog/OFF",
+                                program_id,
+                                zone_id,
+                            )
+                        run_ok = False
+                        break
+                    if not program_start_recorded:
+                        program_start_recorded = True
+                        logger.info("Запуск программы %s (%s)", program_id, program_name)
+                        self._record_program_lifecycle(
+                            "program_start",
+                            program_id,
+                            program_name,
+                            started=True,
+                        )
                     self.db.add_log(
                         "zone_auto_start",
                         json.dumps(
@@ -1662,6 +1772,7 @@ class IrrigationScheduler:
                 while remaining > 0:
                     cancel_event = self.group_cancel_events.get(group_id)
                     if cancel_event and cancel_event.is_set():
+                        program_cancelled = True
                         logger.info(
                             f"Программа {program_id}: отмена группы {group_id}, досрочно останавливаем зону {zone_id}"
                         )
@@ -1680,7 +1791,11 @@ class IrrigationScheduler:
 
                 # Keep hard/cap retries and active ownership until physical OFF
                 # succeeds.  _stop_zone removes them only on confirmed success.
-                stopped = self._stop_zone(int(zone_id), reason="auto")
+                stopped = self._stop_zone(
+                    int(zone_id),
+                    reason="auto",
+                    activation_token=activation_token or None,
+                )
                 if not stopped:
                     logger.error("Программа %s: OFF зоны %s не подтверждён", program_id, zone_id)
                     run_ok = False
@@ -1722,19 +1837,48 @@ class IrrigationScheduler:
                 # Если отмена — пропускаем оставшиеся зоны этой группы, но не мешаем другим группам
                 cancel_event = self.group_cancel_events.get(group_id)
                 if cancel_event and cancel_event.is_set():
+                    program_cancelled = True
                     logger.info(
                         f"Программа {program_id}: отменена для группы {group_id}, продолжаем с другими группами (если есть)"
                     )
                     continue
 
-            logger.info(f"Программа {program_id} ({program_name}) завершена")
-            try:
-                self.db.add_log("program_finish", json.dumps({"program_id": program_id, "program_name": program_name}))
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                logger.debug("Handled exception in line_482: %s", e)
+            if not run_ok:
+                logger.error("Программа %s (%s) завершилась с ошибкой", program_id, program_name)
+                self._record_program_lifecycle(
+                    "program_failed",
+                    program_id,
+                    program_name,
+                    started=program_started,
+                )
+            elif program_cancelled:
+                logger.info("Программа %s (%s) завершилась после отмены", program_id, program_name)
+                self._record_program_lifecycle(
+                    "program_cancelled",
+                    program_id,
+                    program_name,
+                    started=program_started,
+                )
+            else:
+                if program_started:
+                    logger.info("Программа %s (%s) завершена", program_id, program_name)
+                    self._record_program_lifecycle(
+                        "program_finish",
+                        program_id,
+                        program_name,
+                        started=True,
+                    )
+                else:
+                    logger.info("Программа %s (%s) завершилась без запуска зон", program_id, program_name)
             return run_ok
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Ошибка в выполнении программы {program_id}: {e}")
+            self._record_program_lifecycle(
+                "program_failed",
+                program_id,
+                program_name,
+                started=program_started,
+            )
             return False
         finally:
             # Issue #16 §6.4 + Issue #14: identity-aware cleanup. Clear/pop
@@ -3190,7 +3334,11 @@ class IrrigationScheduler:
                     remaining -= 1
                 # Централизованный OFF и снятие активности только после
                 # подтверждённого результата. Failed OFF сохраняет safety retry.
-                stopped = self._stop_zone(int(zone_id), reason="group_sequence")
+                stopped = self._stop_zone(
+                    int(zone_id),
+                    reason="group_sequence",
+                    activation_token=activation_token or None,
+                )
                 if stopped:
                     try:
                         self.db.update_zone(zone_id, {"planned_end_time": None})
@@ -3323,6 +3471,115 @@ class IrrigationScheduler:
             if values:
                 anchors[str(slot)] = min(values)
         return anchors
+
+    def _interval_anchors_for_db_reconcile(self, program: dict[str, Any]) -> dict[str, datetime] | None:
+        """Carry forward compatible interval slots and seed changed ones.
+
+        Zone-only mutations retain every cadence anchor exactly. Raw or
+        recovery-time schedule edits may also change a slot's wall time or
+        add/remove extra slots; those slots need a fresh, valid anchor rather
+        than leaving an unhealable stale fingerprint behind.
+        """
+        program_id = int(program["id"])
+        if not self._program_job_ids(program_id):
+            return None
+
+        live_anchors = self.get_program_interval_anchors(program_id)
+        slot_times = {"main": program["time"]} | {
+            f"extra:{index}": value for index, value in enumerate(program.get("extra_times") or [])
+        }
+        now = self._controller_now()
+        timezone = self._controller_timezone()
+        anchors: dict[str, datetime] = {}
+        for slot, time_value in slot_times.items():
+            hours, minutes, _canonical = self._parse_program_time(time_value)
+            live = live_anchors.get(slot)
+            if isinstance(live, datetime) and live.tzinfo is not None and live.utcoffset() is not None:
+                local_live = live.astimezone(timezone) if timezone is not None else live.astimezone()
+                if (local_live.hour, local_live.minute, local_live.second, local_live.microsecond) == (
+                    hours,
+                    minutes,
+                    0,
+                    0,
+                ):
+                    anchors[slot] = local_live
+                    continue
+            fresh = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+            if fresh <= now:
+                fresh += timedelta(days=1)
+            anchors[slot] = fresh
+        return anchors
+
+    def reconcile_program_from_db(self, program_id: int) -> bool:
+        """Reconcile one committed DB program while preserving live cadence.
+
+        Zone mutations can rewrite a program's zone list after their own DB
+        transaction commits.  This boundary performs a strict read under the
+        scheduler's program lock, carries forward every authoritative
+        ``IntervalTrigger`` anchor, and binds the resulting jobs to the exact
+        persisted fingerprint.  A small retry closes the gap when another DB
+        writer wins while reconciliation is in progress.
+        """
+        try:
+            program_id = int(program_id)
+            if program_id <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        with self._program_jobs_lock:
+            for _attempt in range(3):
+                try:
+                    program = self._read_program_strict(program_id)
+                except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+                    logger.exception("Strict program reconcile read failed for %s", program_id)
+                    return False
+
+                if program is None:
+                    return self._cancel_program_jobs_locked(program_id)
+
+                if program.get("enabled", True) and str(program.get("type") or "time-based").strip().lower() == "smart":
+                    if not self._disable_enabled_legacy_smart_program(program_id):
+                        self._cancel_program_jobs_locked(program_id)
+                        return False
+                    continue
+
+                try:
+                    normalised = self._normalise_program_payload(program_id, program)
+                    fingerprint = self.program_schedule_fingerprint(program_id, program)
+                except (KeyError, TypeError, ValueError):
+                    logger.exception("Committed program %s is not schedulable", program_id)
+                    self._cancel_program_jobs_locked(program_id)
+                    return False
+
+                interval_anchors: dict[str, datetime] | None = None
+                if normalised.get("enabled") and normalised.get("schedule_type") == "interval":
+                    try:
+                        interval_anchors = self._interval_anchors_for_db_reconcile(normalised)
+                    except (sqlite3.Error, OSError, RuntimeError, AttributeError, KeyError, TypeError, ValueError):
+                        logger.exception("Could not preserve interval anchors for program %s", program_id)
+                        return False
+
+                if not self._schedule_program_locked(
+                    program_id,
+                    program,
+                    interval_anchors=interval_anchors,
+                    expected_fingerprint=fingerprint,
+                ):
+                    return False
+
+                try:
+                    after = self._read_program_strict(program_id)
+                    if after is None:
+                        continue
+                    if self.program_schedule_fingerprint(program_id, after) == fingerprint:
+                        return True
+                except (sqlite3.Error, OSError, ValueError, TypeError, json.JSONDecodeError):
+                    logger.exception("Program %s post-reconcile verification failed", program_id)
+                    return False
+
+            logger.error("Program %s kept changing during scheduler reconciliation", program_id)
+            return False
 
     def _program_interval_anchor_contract(
         self,
@@ -3890,6 +4147,59 @@ class IrrigationScheduler:
             logger.exception("Raw program fallback failed")
             return None
 
+    def _disable_enabled_legacy_smart_program(self, program_id: int) -> bool:
+        """Persistently quarantine one enabled legacy ``smart`` row.
+
+        Smart execution is intentionally unsupported.  A legacy enabled row
+        must therefore be disabled before boot can be considered reconciled;
+        merely skipping it would leave the same unsafe state for every future
+        restart.  The conditional update does not overwrite a concurrent
+        repair that converted the row back to a supported type.
+        """
+        try:
+            with sqlite3.connect(self.db.db_path, timeout=5) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    """
+                    UPDATE programs
+                    SET enabled = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND enabled <> 0 AND lower(trim(type)) = 'smart'
+                    """,
+                    (int(program_id),),
+                )
+                changed = cursor.rowcount == 1
+                row = conn.execute(
+                    "SELECT enabled, type FROM programs WHERE id = ?",
+                    (int(program_id),),
+                ).fetchone()
+                conn.commit()
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            logger.exception("Could not disable unsupported smart program %s", program_id)
+            return False
+
+        if row is not None and str(row[1] or "time-based").strip().lower() == "smart" and bool(row[0]):
+            logger.error("Unsupported smart program %s remained enabled after quarantine", program_id)
+            return False
+        if not changed:
+            return True
+
+        reason = "Program type 'smart' is unsupported; legacy row disabled at scheduler reconciliation"
+        logger.error("%s (program_id=%s)", reason, program_id)
+        try:
+            audit_id = self.db.add_audit(
+                action_type="unsupported_program_disabled",
+                source="scheduler",
+                target=f"program:{int(program_id)}",
+                payload={"program_id": int(program_id), "type": "smart", "enabled": False},
+                result="success",
+                error=reason,
+            )
+            if audit_id is None:
+                logger.error("Unsupported smart program audit was not persisted (program_id=%s)", program_id)
+        except (sqlite3.Error, OSError, AttributeError, TypeError, ValueError):
+            logger.exception("Unsupported smart program audit failed (program_id=%s)", program_id)
+        return True
+
     def load_programs(self) -> bool:
         """Reconcile every DB program while preserving valid restored jobs.
 
@@ -3907,6 +4217,17 @@ class IrrigationScheduler:
             try:
                 program_id = int(program["id"])
                 seen_ids.add(program_id)
+                if (
+                    program.get("enabled", True)
+                    and str(program.get("type") or "time-based").strip().lower() == "smart"
+                ):
+                    if not self._disable_enabled_legacy_smart_program(program_id):
+                        self.cancel_program(program_id)
+                        all_ok = False
+                        continue
+                    if not self.reconcile_program_from_db(program_id):
+                        all_ok = False
+                    continue
                 if not self.schedule_program(program_id, program):
                     all_ok = False
             except (sqlite3.Error, OSError, KeyError, TypeError, ValueError, RuntimeError):

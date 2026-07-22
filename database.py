@@ -93,6 +93,21 @@ class IrrigationDB:
         """
         return self.zones.update_zone_versioned(zone_id, updates, expected_version=expected_version)
 
+    def update_zone_versioned_detailed(
+        self,
+        zone_id: int,
+        updates: dict[str, Any],
+        *,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """CAS result with locked pre/post snapshots and program side effects."""
+
+        return self.zones.update_zone_versioned_detailed(
+            zone_id,
+            updates,
+            expected_version=expected_version,
+        )
+
     def bulk_update_zones(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         return self.zones.bulk_update_zones(updates)
 

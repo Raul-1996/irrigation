@@ -391,6 +391,15 @@ class MigrationRunner:
 
                 conn.commit()
 
+                # This one trigger is explicitly self-healing.  Preflight may
+                # admit its known name with wrong/missing SQL so it can be
+                # replaced here before any initial-data or migration writes.
+                conn.execute("DROP TRIGGER IF EXISTS trg_zones_version_invalidate")
+                zone_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(zones)").fetchall()}
+                if "version" in zone_columns:
+                    self._migrate_zone_version_invalidation(conn)
+                conn.commit()
+
                 # Initial data
                 self._insert_initial_data(conn)
 
@@ -487,9 +496,9 @@ class MigrationRunner:
                     "zones_add_photo_thumb",
                     self._migrate_add_photo_thumb,
                 )
-                # Issue #35: add zone_runs.source ('program' / 'manual') + composite
-                # index, then backfill historical rows by matching start_utc to
-                # the active programs' schedules (±120s) — manual otherwise.
+                # Issue #35: add zone_runs.source ('program' / 'manual') and its
+                # lookup index.  The retained historical backfill marker is now
+                # non-mutating: schedule proximity cannot prove run ownership.
                 self._apply_named_migration(
                     conn,
                     "zone_runs_add_source",
@@ -551,6 +560,24 @@ class MigrationRunner:
                     "group_reference_integrity_v1",
                     self._migrate_group_reference_integrity,
                 )
+                # Corrective, forward-only release migrations.  These are
+                # deliberately separate markers so installations that already
+                # recorded the historical migrations still receive the repair.
+                self._apply_named_migration(
+                    conn,
+                    "zone_runs_clear_unverifiable_source_v1",
+                    self._migrate_clear_unverifiable_zone_run_sources,
+                )
+                self._apply_named_migration(
+                    conn,
+                    "programs_disable_unsupported_smart_v1",
+                    self._migrate_disable_unsupported_smart_programs,
+                )
+                self._apply_named_migration(
+                    conn,
+                    "zones_version_invalidation_v1",
+                    self._migrate_zone_version_invalidation,
+                )
 
                 # Reconcile forward-only safety artifacts even when an older
                 # release already recorded the corresponding marker. This
@@ -561,6 +588,7 @@ class MigrationRunner:
                 self._migrate_restore_runtime_indexes(conn)
                 self._migrate_mqtt_reference_integrity(conn)
                 self._migrate_group_reference_integrity(conn)
+                self._migrate_zone_version_invalidation(conn)
 
                 # Stamp only after the complete named-migration chain has
                 # succeeded. Backup validation uses these SQLite header values
@@ -1102,6 +1130,10 @@ class MigrationRunner:
             if kind == "trigger" and sql is not None
         }
         for trigger_name, (table, sql) in trigger_rows.items():
+            if trigger_name == "trg_zones_version_invalidate":
+                # This artifact is dropped/recreated immediately after the DB
+                # is opened writable. Final validation remains exact.
+                continue
             expected_table = LogRepository._REQUIRED_INTEGRITY_TRIGGERS.get(trigger_name)
             expected_sql = LogRepository._REQUIRED_TRIGGER_SQL.get(trigger_name)
             if expected_table is None or expected_sql is None:
@@ -2721,8 +2753,9 @@ class MigrationRunner:
                     WHERE zr.zone_id = zones.id
                       AND zr.end_utc IS NOT NULL
                     ORDER BY zr.id DESC
-                    LIMIT 1
-               )
+                   LIMIT 1
+               ),
+                   version = COALESCE(version, 0) + 1
              WHERE last_watering_time IS NULL
                AND EXISTS (
                    SELECT 1 FROM zone_runs zr2
@@ -2864,6 +2897,120 @@ class MigrationRunner:
         uri = f"file:{quote(os.path.abspath(self.db_path))}?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=5) as conn:
             return self._zone_runs_source_backfill_preview(conn)
+
+    def _migrate_clear_unverifiable_zone_run_sources(self, conn: sqlite3.Connection) -> None:
+        """Clear labels that the retired schedule heuristic could have invented.
+
+        The historical backfill marker is the only durable boundary available:
+        rows created no later than that marker could have been rewritten from
+        ``NULL`` to ``program``/``manual`` without execution identity.  We
+        conservatively restore those recognised heuristic values to ``NULL``.
+        Rows written after the marker retain their caller-supplied source.
+        """
+
+        marker = conn.execute(
+            "SELECT applied_at FROM migrations WHERE name = 'zone_runs_backfill_source'"
+        ).fetchone()
+        if marker is None:
+            raise sqlite3.IntegrityError("zone_runs_backfill_source marker is missing")
+
+        applied_at = marker[0]
+        marker_julian_day = None
+        if applied_at is not None:
+            marker_julian_day = conn.execute("SELECT julianday(?)", (applied_at,)).fetchone()[0]
+        if marker_julian_day is None:
+            cursor = conn.execute(
+                "UPDATE zone_runs SET source = NULL WHERE source IN ('program', 'manual')"
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE zone_runs
+                SET source = NULL
+                WHERE source IN ('program', 'manual')
+                  AND (
+                      created_at IS NULL
+                      OR julianday(created_at) IS NULL
+                      OR julianday(created_at) <= julianday(?)
+                  )
+                """,
+                (marker_julian_day,),
+            )
+        if cursor.rowcount:
+            logger.warning(
+                "Cleared unverifiable historical zone_runs.source labels: %s",
+                cursor.rowcount,
+            )
+
+    @staticmethod
+    def _migrate_disable_unsupported_smart_programs(conn: sqlite3.Connection) -> None:
+        """Disable legacy smart programs and leave a durable audit reason."""
+
+        program_ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT id FROM programs "
+                "WHERE lower(trim(COALESCE(type, ''))) = 'smart' AND enabled = 1 ORDER BY id"
+            ).fetchall()
+        ]
+        if not program_ids:
+            return
+
+        placeholders = ", ".join("?" for _ in program_ids)
+        cursor = conn.execute(
+            f"UPDATE programs SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+            program_ids,
+        )
+        if cursor.rowcount != len(program_ids):
+            raise sqlite3.IntegrityError("smart program disable count changed during migration")
+
+        payload = json.dumps(
+            {
+                "error_code": "PROGRAM_TYPE_UNSUPPORTED",
+                "program_type": "smart",
+            },
+            sort_keys=True,
+        )
+        for program_id in program_ids:
+            conn.execute(
+                """
+                INSERT INTO audit_log(
+                    actor, source, action_type, target, payload_json, result, error_msg
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "system",
+                    "migration",
+                    "migration_disable_unsupported_smart",
+                    f"program:{program_id}",
+                    payload,
+                    "disabled",
+                    "PROGRAM_TYPE_UNSUPPORTED",
+                ),
+            )
+        logger.warning("Disabled unsupported smart programs: %s", program_ids)
+
+    @staticmethod
+    def _migrate_zone_version_invalidation(conn: sqlite3.Connection) -> None:
+        """Install the fallback version guard for direct/raw zone writers."""
+
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(zones)").fetchall()}
+        if "version" not in columns:
+            raise sqlite3.IntegrityError("zones.version is missing")
+        conn.execute("DROP TRIGGER IF EXISTS trg_zones_version_invalidate")
+        conn.execute("UPDATE zones SET version = 0 WHERE version IS NULL")
+        conn.execute(
+            """
+            CREATE TRIGGER trg_zones_version_invalidate
+            AFTER UPDATE ON zones
+            WHEN NEW.version IS NULL OR NEW.version <= COALESCE(OLD.version, 0)
+            BEGIN
+                UPDATE zones
+                SET version = COALESCE(OLD.version, 0) + 1
+                WHERE id = OLD.id;
+            END
+            """
+        )
 
     def _migrate_create_audit_log(self, conn):
         """Create the audit_log table for principal-critical mutation tracking.

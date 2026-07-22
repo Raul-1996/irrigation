@@ -65,10 +65,21 @@ class TestZoneWatchdog:
         test_db.update_zone(z["id"], {"state": "on", "watering_start_time": old_start})
 
         mock_zc = MagicMock()
+
+        def confirm_off(*_args, **_kwargs):
+            test_db.update_zone(z["id"], {"state": "off"})
+            return True
+
+        mock_zc.stop_zone.side_effect = confirm_off
         wd = ZoneWatchdog(test_db, mock_zc)
         with patch.object(wd, "_send_alert"):
             wd._check_zones()
-            mock_zc.stop_zone.assert_called_once_with(z["id"], reason="watchdog_cap", force=True)
+            mock_zc.stop_zone.assert_called_once_with(
+                z["id"],
+                reason="watchdog_cap",
+                force=True,
+                require_observed_confirmation=True,
+            )
 
     def test_check_zones_concurrent_alert(self, test_db):
         from services.watchdog import ZoneWatchdog

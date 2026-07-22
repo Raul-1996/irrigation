@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
-from typing import Any
 
 import pytest
 
@@ -73,32 +72,19 @@ def test_string_group_999_removes_zone_from_programs(test_db):
     assert zone["id"] not in test_db.get_program(program["id"])["zones"]
 
 
-def test_partial_update_does_not_replay_stale_runtime_snapshot(test_db, monkeypatch):
-    """A runtime write between the old pre-read and UPDATE must survive."""
+def test_partial_update_does_not_replay_unrelated_runtime_fields(test_db):
+    """A metadata update must not replay or overwrite runtime columns."""
 
     zone = test_db.create_zone({"name": "Before", "duration": 10, "group_id": 1})
     repository = test_db.zones
-    original_get_zone = repository.get_zone
-    calls = 0
-
-    def interleaving_get_zone(zone_id: int) -> dict[str, Any] | None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            stale = original_get_zone(zone_id)
-            with sqlite3.connect(test_db.db_path) as conn:
-                conn.execute(
-                    "UPDATE zones SET state = 'on', watering_start_time = ?, "
-                    "postpone_until = ?, version = version + 1 WHERE id = ?",
-                    ("2026-07-18 06:00:00", "2026-07-18 08:00:00", zone_id),
-                )
-            return stale
-        return original_get_zone(zone_id)
-
-    monkeypatch.setattr(repository, "get_zone", interleaving_get_zone)
+    with sqlite3.connect(test_db.db_path) as conn:
+        conn.execute(
+            "UPDATE zones SET state = 'on', watering_start_time = ?, postpone_until = ? WHERE id = ?",
+            ("2026-07-18 06:00:00", "2026-07-18 08:00:00", zone["id"]),
+        )
     repository.update_zone(zone["id"], {"name": "After"})
 
-    persisted = original_get_zone(zone["id"])
+    persisted = repository.get_zone(zone["id"])
     assert persisted["name"] == "After"
     assert persisted["state"] == "on"
     assert persisted["watering_start_time"] == "2026-07-18 06:00:00"
