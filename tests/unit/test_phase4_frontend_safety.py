@@ -824,6 +824,59 @@ def test_program_enabled_payload_and_wizard_defaults_use_json_booleans() -> None
     assert "enabled: true" in create
 
 
+def test_program_wizard_does_not_offer_or_submit_unsupported_smart_type() -> None:
+    source = _source(PROGRAMS)
+    wizard = _function(source, "renderWizardStep")
+    save = _function(source, "saveWizard")
+
+    assert "wizardData.type = 'smart'" not in wizard
+    assert "Smart Weather больше не поддерживается" in wizard
+    assert '<span class="badge time-based">Time-Based</span>' in wizard
+    assert "wizardData.type !== 'time-based'" in save
+
+
+def test_legacy_smart_program_is_rendered_read_only_with_clear_warning() -> None:
+    source = _source(PROGRAMS)
+    safe_color = _function(source, "safeProgramColor")
+    render = _function(source, "renderList")
+    script = f"""
+function escapeHtml(value) {{ return String(value ?? ''); }}
+const DEFAULT_PROGRAM_COLOR = '#42a5f5';
+{safe_color}
+const container = {{innerHTML: ''}};
+const document = {{getElementById() {{ return container; }}}};
+const currentSort = 'time';
+const zones = [];
+const programs = [{{
+  id: 7,
+  name: 'Legacy smart',
+  time: '06:00',
+  type: 'smart',
+  schedule_type: 'weekdays',
+  days: [0],
+  zones: [],
+  enabled: true,
+}}];
+{render}
+renderList();
+process.stdout.write(container.innerHTML);
+"""
+    completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    rendered = completed.stdout
+    assert "Smart — не поддерживается" in rendered
+    assert "Редактирование, включение, дублирование и запуск отключены" in rendered
+    assert 'aria-disabled="true"' in rendered
+    for action in ("toggleEnabled(7)", "editProgram(7)", "duplicateProgram(7)", "runProgram(7)"):
+        assert action not in rendered
+    assert "deleteProgram(7)" in rendered
+
+
+def test_legacy_smart_actions_have_defensive_read_only_guards() -> None:
+    source = _source(PROGRAMS)
+    for name in ("toggleEnabled", "duplicateProgram", "runProgram", "editProgram"):
+        assert "rejectUnsupportedProgramAction(id)" in _function(source, name)
+
+
 def test_program_color_is_canonical_before_style_interpolation() -> None:
     source = _source(PROGRAMS)
     helper = _function(source, "safeProgramColor")

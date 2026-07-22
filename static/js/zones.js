@@ -31,6 +31,24 @@
         return fallback;
     }
 
+    function isZoneCasConflict(response) {
+        if (!response || typeof response !== 'object') return false;
+        return response.error_code === 'ZONE_VERSION_CONFLICT'
+            || response.error_code === 'EXPECTED_VERSION_REQUIRED';
+    }
+
+    function zoneCasConflictMessage(response) {
+        if (response && response.error_code === 'EXPECTED_VERSION_REQUIRED') {
+            return 'Версия зоны устарела или отсутствует. Загружены актуальные данные; повторите изменение.';
+        }
+        return 'Зона уже изменена в другом окне. Загружены актуальные данные; повторите изменение.';
+    }
+
+    async function recoverFromZoneCasConflict(response) {
+        showNotification(zoneCasConflictMessage(response), 'warning');
+        await loadData();
+    }
+
     function isZoneHardwareLocked(zoneId) {
         const zone = zonesData.find(item => Number(item.id) === Number(zoneId));
         if (!zone) return false;
@@ -1330,6 +1348,7 @@
         if (row) {
             row.classList.add('modified');
             modifiedZones.add(zoneId);
+            __zoneEditRevisions[zoneId] = (__zoneEditRevisions[zoneId] || 0) + 1;
             
             // Автосохранение через debounce
             scheduleZoneAutoSave(zoneId);
@@ -1340,7 +1359,8 @@
     async function saveZone(zoneId) {
         try {
             const zone = zonesData.find(z => z.id === zoneId);
-            if (!zone) return;
+            if (!zone) return false;
+            const saveRevision = __zoneEditRevisions[zoneId] || 0;
             
             const row = document.querySelector(`tr[data-zone-id="${zoneId}"]`);
             const nameInput = row.querySelector('.zone-name');
@@ -1358,7 +1378,7 @@
             if (payload.duration === null) {
                 showNotification('Длительность должна быть целым числом от 1 до 240 минут', 'error');
                 durationInput.value = zone.duration;
-                return;
+                return false;
             }
             if (topicInput) {
                 payload.topic = topicInput.value;
@@ -1374,7 +1394,7 @@
             if (hardwareChanged && isZoneHardwareLocked(zoneId)) {
                 showNotification('Остановите зону перед изменением аппаратной конфигурации', 'warning');
                 renderZonesTable();
-                return;
+                return false;
             }
 
             // Conflict service is required only when duration actually changes.
@@ -1384,31 +1404,63 @@
                     results = await checkDurationConflicts([{ zone_id: zoneId, new_duration: payload.duration }]);
                 } catch (err) {
                     showNotification(err.message || 'Не удалось проверить конфликты. Изменение не сохранено.', 'error');
-                    return;
+                    return false;
                 }
                 const zres = results[String(zoneId)];
                 if (zres && zres.has_conflicts) {
                     showDurationConflictModal(zres.conflicts);
                     showNotification('Обнаружены конфликты программ. Изменение не сохранено.', 'warning');
-                    return;
+                    return false;
                 }
             }
 
-            const result = await api.put(`/api/zones/${zoneId}`, payload);
+            if (!Number.isInteger(zone.version) || zone.version < 0) {
+                modifiedZones.delete(zoneId);
+                await recoverFromZoneCasConflict({ error_code: 'EXPECTED_VERSION_REQUIRED' });
+                cancelZoneAutoSave(zoneId);
+                return false;
+            }
+
+            const requestPayload = { ...payload, expected_version: zone.version };
+            const result = await api.put(`/api/zones/${zoneId}`, requestPayload);
+            if (isZoneCasConflict(result)) {
+                modifiedZones.delete(zoneId);
+                await recoverFromZoneCasConflict(result);
+                cancelZoneAutoSave(zoneId);
+                return false;
+            }
             if (result && result.success === false) {
                 showNotification(result.message || 'Ошибка сохранения зоны', 'error');
-                return;
+                return false;
+            }
+            if (!result || typeof result !== 'object' || !Number.isInteger(result.version)) {
+                showNotification('Сервер не вернул новую версию зоны. Загружены актуальные данные.', 'error');
+                modifiedZones.delete(zoneId);
+                await loadData();
+                cancelZoneAutoSave(zoneId);
+                return false;
             }
             const zoneIndex = zonesData.findIndex(z => z.id === zoneId);
             if (zoneIndex !== -1) {
-                zonesData[zoneIndex] = { ...zonesData[zoneIndex], ...payload };
+                zonesData[zoneIndex] = {
+                    ...zonesData[zoneIndex],
+                    ...payload,
+                    version: result.version
+                };
             }
-            row.classList.remove('modified');
-            modifiedZones.delete(zoneId);
-            showNotification('Зона сохранена', 'success');
+            const hasNewerEdit = (__zoneEditRevisions[zoneId] || 0) !== saveRevision;
+            if (hasNewerEdit) {
+                __zoneSavePending[zoneId] = true;
+            } else {
+                row.classList.remove('modified');
+                modifiedZones.delete(zoneId);
+                showNotification('Зона сохранена', 'success');
+            }
             renderGroupsGrid();
+            return true;
         } catch (error) {
             showNotification('Ошибка автосохранения зоны', 'error');
+            return false;
         }
     }
     
@@ -1527,6 +1579,11 @@
                     renderZonesTable();
                     renderGroupsGrid();
                 }
+                try {
+                    await resyncZoneStates();
+                } catch (error) {
+                    console.warn('Не удалось обновить версию зоны после запуска:', error);
+                }
                 
                 // Обновляем статус на странице статуса
                 if (window.location.pathname === '/') {
@@ -1555,6 +1612,11 @@
                     applyZoneState(zoneId, 'off', false);
                     renderZonesTable();
                     renderGroupsGrid();
+                }
+                try {
+                    await resyncZoneStates();
+                } catch (error) {
+                    console.warn('Не удалось обновить версию зоны после остановки:', error);
                 }
                 
                 // Обновляем статус на странице статуса
@@ -1958,6 +2020,19 @@
         }
     }
 
+    function canApplyResyncedZoneVersion(zoneId, incomingVersion) {
+        if (!Number.isInteger(incomingVersion)) return false;
+        if (modifiedZones.has(zoneId)
+            || __zoneSaveInFlight[zoneId]
+            || __zoneSavePending[zoneId]) {
+            return false;
+        }
+        const localZone = zonesData.find(item => item.id === zoneId);
+        return !localZone
+            || !Number.isInteger(localZone.version)
+            || incomingVersion >= localZone.version;
+    }
+
     async function resyncZoneStates() {
         const requestGeneration = ++zoneStateResyncGeneration;
         const versionsAtRequest = new Map(zoneStateVersions);
@@ -1969,6 +2044,10 @@
             const versionNow = zoneStateVersions.get(zone.id) || 0;
             if (versionNow === versionBefore) {
                 applyZoneState(zone.id, zone.state, false);
+                const localZone = zonesData.find(item => item.id === zone.id);
+                if (localZone && canApplyResyncedZoneVersion(zone.id, zone.version)) {
+                    localZone.version = zone.version;
+                }
             }
         });
     }
@@ -1990,6 +2069,9 @@
                 try{
                     const data = JSON.parse(ev.data);
                     applyZoneState(data.zone_id, data.state, true);
+                    resyncZoneStates().catch(error => {
+                        console.warn('Не удалось обновить версию зоны после события SSE:', error);
+                    });
                 }catch(e){}
             };
             es.onerror = () => {
@@ -2605,7 +2687,37 @@
     }
 
     const __zoneSaveTimers = {};
+    const __zoneSaveInFlight = {};
+    const __zoneSavePending = {};
+    const __zoneEditRevisions = {};
+    function cancelZoneAutoSave(zoneId){
+        if (__zoneSaveTimers[zoneId]) clearTimeout(__zoneSaveTimers[zoneId]);
+        __zoneSaveTimers[zoneId] = null;
+    }
+    function queueZoneAutoSave(zoneId){
+        if (__zoneSaveInFlight[zoneId]) {
+            __zoneSavePending[zoneId] = true;
+            return;
+        }
+        __zoneSaveInFlight[zoneId] = true;
+        saveZone(zoneId).then(saved => {
+            if (!saved) {
+                __zoneSavePending[zoneId] = false;
+                cancelZoneAutoSave(zoneId);
+            }
+        }).catch(() => {
+            __zoneSavePending[zoneId] = false;
+            cancelZoneAutoSave(zoneId);
+        }).finally(() => {
+            __zoneSaveInFlight[zoneId] = false;
+            if (__zoneSavePending[zoneId]) {
+                __zoneSavePending[zoneId] = false;
+                cancelZoneAutoSave(zoneId);
+                queueZoneAutoSave(zoneId);
+            }
+        });
+    }
     function scheduleZoneAutoSave(zoneId){
         if (__zoneSaveTimers[zoneId]) clearTimeout(__zoneSaveTimers[zoneId]);
-        __zoneSaveTimers[zoneId] = setTimeout(()=>{ saveZone(zoneId); }, 500);
+        __zoneSaveTimers[zoneId] = setTimeout(()=>{ queueZoneAutoSave(zoneId); }, 500);
     }

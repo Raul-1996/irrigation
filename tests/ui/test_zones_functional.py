@@ -30,6 +30,16 @@ class TestZoneCRUD:
         data = json.loads(resp.data)
         return data.get("id") or data.get("zone", {}).get("id")
 
+    def _update_zone(self, client, zone_id, changes):
+        current = client.get(f"/api/zones/{zone_id}")
+        assert current.status_code == 200
+        version = json.loads(current.data)["version"]
+        return client.put(
+            f"/api/zones/{zone_id}",
+            data=json.dumps({**changes, "expected_version": version}),
+            content_type="application/json",
+        )
+
     def test_create_zone(self, admin_client):
         resp = admin_client.post(
             "/api/zones",
@@ -59,9 +69,7 @@ class TestZoneCRUD:
 
     def test_update_zone_name(self, admin_client):
         zid = self._create_zone(admin_client, name="Before")
-        resp = admin_client.put(
-            f"/api/zones/{zid}", data=json.dumps({"name": "After"}), content_type="application/json"
-        )
+        resp = self._update_zone(admin_client, zid, {"name": "After"})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
@@ -69,7 +77,7 @@ class TestZoneCRUD:
 
     def test_update_zone_duration(self, admin_client):
         zid = self._create_zone(admin_client, duration=10)
-        resp = admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 15}), content_type="application/json")
+        resp = self._update_zone(admin_client, zid, {"duration": 15})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
@@ -77,7 +85,7 @@ class TestZoneCRUD:
 
     def test_update_zone_icon(self, admin_client):
         zid = self._create_zone(admin_client, icon="🌿")
-        resp = admin_client.put(f"/api/zones/{zid}", data=json.dumps({"icon": "💧"}), content_type="application/json")
+        resp = self._update_zone(admin_client, zid, {"icon": "💧"})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
@@ -86,11 +94,7 @@ class TestZoneCRUD:
     def test_update_zone_group(self, admin_client, app):
         target_group = app.db.create_group("Functional target group")
         zid = self._create_zone(admin_client, group_id=1)
-        resp = admin_client.put(
-            f"/api/zones/{zid}",
-            data=json.dumps({"group_id": target_group["id"]}),
-            content_type="application/json",
-        )
+        resp = self._update_zone(admin_client, zid, {"group_id": target_group["id"]})
         assert resp.status_code == 200
         data = json.loads(resp.data)
         zone = data.get("zone") or data
@@ -100,17 +104,15 @@ class TestZoneCRUD:
         """Bottom sheet saves name + duration + icon + group at once."""
         target_group = app.db.create_group("Functional multi-field group")
         zid = self._create_zone(admin_client, name="Old", duration=10, icon="🌿", group_id=1)
-        resp = admin_client.put(
-            f"/api/zones/{zid}",
-            data=json.dumps(
-                {
-                    "name": "New",
-                    "duration": 20,
-                    "icon": "🌳",
-                    "group_id": target_group["id"],
-                }
-            ),
-            content_type="application/json",
+        resp = self._update_zone(
+            admin_client,
+            zid,
+            {
+                "name": "New",
+                "duration": 20,
+                "icon": "🌳",
+                "group_id": target_group["id"],
+            },
         )
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -124,17 +126,17 @@ class TestZoneCRUD:
         """Simulate +/- buttons: 10 → 11 → 10 → 1 (min)."""
         zid = self._create_zone(admin_client, duration=10)
         # +1
-        admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 11}), content_type="application/json")
+        self._update_zone(admin_client, zid, {"duration": 11})
         resp = admin_client.get(f"/api/zones/{zid}")
         zone = json.loads(resp.data).get("zone") or json.loads(resp.data)
         assert zone["duration"] == 11
         # -1
-        admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 10}), content_type="application/json")
+        self._update_zone(admin_client, zid, {"duration": 10})
         resp = admin_client.get(f"/api/zones/{zid}")
         zone = json.loads(resp.data).get("zone") or json.loads(resp.data)
         assert zone["duration"] == 10
         # to 1
-        admin_client.put(f"/api/zones/{zid}", data=json.dumps({"duration": 1}), content_type="application/json")
+        self._update_zone(admin_client, zid, {"duration": 1})
         resp = admin_client.get(f"/api/zones/{zid}")
         zone = json.loads(resp.data).get("zone") or json.loads(resp.data)
         assert zone["duration"] == 1

@@ -55,10 +55,30 @@
     let zonesRequestGeneration = 0;
     const connectionErrorFeeds = new Set();
     const pendingZoneStates = Object.create(null);
+    const pendingZoneDurations = Object.create(null);
 
     function assertJsonResponse(response) {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();
+    }
+
+    function isZoneCasConflict(response) {
+        if (!response || typeof response !== 'object') return false;
+        return response.error_code === 'ZONE_VERSION_CONFLICT'
+            || response.error_code === 'EXPECTED_VERSION_REQUIRED';
+    }
+
+    function zoneCasConflictMessage(response) {
+        if (response && response.error_code === 'EXPECTED_VERSION_REQUIRED') {
+            return 'Версия зоны устарела или отсутствует. Загружены актуальные данные; повторите изменение.';
+        }
+        return 'Зона уже изменена в другом окне. Загружены актуальные данные; повторите изменение.';
+    }
+
+    async function recoverFromZoneCasConflict(response, closeEditor) {
+        if (closeEditor && editingZoneId) closeZoneSheet();
+        showZoneToast(zoneCasConflictMessage(response), 'warning');
+        await loadZonesData();
     }
 
     function optimisticTimestamp(timestamp) {
@@ -108,6 +128,18 @@
             zone.planned_end_time = pending.planned_end_time;
         });
         if (reconciled) zonesDataRevision += 1;
+    }
+
+    function applyPendingZoneDurations(zones) {
+        (zones || []).forEach(function(zone) {
+            var pending = pendingZoneDurations[zone.id];
+            if (!pending) return;
+            zone.duration = pending.duration;
+            // Preserve the caller-owned token while the local edit is pending.
+            // Adopting a newer poll version here would silently rebase this edit
+            // over somebody else's write instead of producing a 409 conflict.
+            zone.version = pending.expectedVersion;
+        });
     }
 
     function revertOptimisticZoneState(zoneId, token) {
@@ -193,6 +225,7 @@
             var prevNW = {};
             (zonesData || []).forEach(function(z) { if (z && z._nextWatering) prevNW[z.id] = z._nextWatering; });
             applyPendingZoneStates(results[0]);
+            applyPendingZoneDurations(results[0]);
             zonesData = results[0];
             zonesData.forEach(function(z) { if (prevNW[z.id]) z._nextWatering = prevNW[z.id]; });
             if (needGroups && Array.isArray(results[1])) zoneGroupsCache = results[1];
@@ -2038,10 +2071,108 @@
 
     // Duration +/-
     var durDebounceTimers = {};
+    var durWriteInFlight = {};
+    var durWritePending = {};
+
+    function cancelQueuedZoneDurationSave(id) {
+        clearTimeout(durDebounceTimers[id]);
+        durDebounceTimers[id] = null;
+        durWritePending[id] = false;
+    }
+
+    function discardPendingZoneDuration(id) {
+        delete pendingZoneDurations[id];
+        zonesDataRevision += 1;
+        cancelQueuedZoneDurationSave(id);
+    }
+
+    async function saveZoneDuration(id) {
+        var z = (zonesData || []).find(function(zone) { return zone.id === id; });
+        if (!z) return false;
+        var pending = pendingZoneDurations[id];
+        if (!pending) return true;
+        if (!Number.isInteger(pending.expectedVersion) || pending.expectedVersion < 0) {
+            discardPendingZoneDuration(id);
+            await recoverFromZoneCasConflict({ error_code: 'EXPECTED_VERSION_REQUIRED' }, false);
+            return false;
+        }
+
+        var requestedDuration = pending.duration;
+        var durationRevision = pending.revision;
+        var expectedVersion = pending.expectedVersion;
+        try {
+            var data = await api.put('/api/zones/' + id, {
+                duration: requestedDuration,
+                expected_version: expectedVersion,
+            });
+            if (isZoneCasConflict(data)) {
+                discardPendingZoneDuration(id);
+                await recoverFromZoneCasConflict(data, false);
+                return false;
+            }
+            if (!data || typeof data !== 'object' || data.success === false) {
+                showZoneToast((data && data.message) || 'Ошибка сохранения длительности', 'error');
+                discardPendingZoneDuration(id);
+                await loadZonesData();
+                return false;
+            }
+            if (!Number.isInteger(data.version)) {
+                showZoneToast('Сервер не вернул новую версию зоны. Загружены актуальные данные.', 'error');
+                discardPendingZoneDuration(id);
+                await loadZonesData();
+                return false;
+            }
+            var current = (zonesData || []).find(function(zone) { return zone.id === id; });
+            if (current && current.version === expectedVersion) current.version = data.version;
+            if (pendingZoneDurations[id] && pendingZoneDurations[id].revision === durationRevision) {
+                delete pendingZoneDurations[id];
+            } else if (pendingZoneDurations[id]) {
+                // A newer local click is causally based on this successful
+                // write, so only that local successor may advance its token.
+                pendingZoneDurations[id].expectedVersion = data.version;
+            }
+            zonesDataRevision += 1;
+            return true;
+        } catch (error) {
+            showZoneToast('Ошибка сохранения длительности', 'error');
+            discardPendingZoneDuration(id);
+            await loadZonesData();
+            return false;
+        }
+    }
+
+    function queueZoneDurationSave(id) {
+        if (durWriteInFlight[id]) {
+            durWritePending[id] = true;
+            return;
+        }
+        durWriteInFlight[id] = true;
+        saveZoneDuration(id).then(function(saved) {
+            if (!saved) durWritePending[id] = false;
+        }).catch(function() {
+            durWritePending[id] = false;
+        }).finally(function() {
+            durWriteInFlight[id] = false;
+            if (durWritePending[id]) {
+                durWritePending[id] = false;
+                queueZoneDurationSave(id);
+            }
+        });
+    }
+
     function changeZoneDur(id, delta) {
         var z = (zonesData || []).find(function(z) { return z.id === id; });
         if (!z) return;
-        z.duration = Math.max(1, Math.min(120, (z.duration || 10) + delta));
+        var pending = pendingZoneDurations[id];
+        var currentDuration = pending ? pending.duration : (z.duration || 10);
+        var nextDuration = Math.max(1, Math.min(120, currentDuration + delta));
+        var durationRevision = ++zonesDataRevision;
+        pendingZoneDurations[id] = {
+            duration: nextDuration,
+            revision: durationRevision,
+            expectedVersion: pending ? pending.expectedVersion : z.version,
+        };
+        z.duration = nextDuration;
         var el = document.getElementById('zdur-' + id);
         if (el) el.textContent = z.duration;
         var badge = document.getElementById('zbadge-' + id);
@@ -2049,7 +2180,7 @@
         // Debounce API call
         clearTimeout(durDebounceTimers[id]);
         durDebounceTimers[id] = setTimeout(function() {
-            api.put('/api/zones/' + id, { duration: z.duration }).catch(function() {});
+            queueZoneDurationSave(id);
         }, 500);
     }
     window.changeZoneDur = changeZoneDur;
@@ -2175,16 +2306,38 @@
 
     function saveZoneEdit() {
         if (!editingZoneId) return;
-        var payload = {
+        var zoneId = editingZoneId;
+        var zone = (zonesData || []).find(function(item) { return item.id === zoneId; });
+        if (!zone || !Number.isInteger(zone.version) || zone.version < 0) {
+            recoverFromZoneCasConflict({ error_code: 'EXPECTED_VERSION_REQUIRED' }, true);
+            return;
+        }
+        var changes = {
             name: document.getElementById('editZoneName').value,
             duration: parseInt(document.getElementById('editZoneDuration').value) || 10,
             icon: document.getElementById('editZoneIcon').value,
             group_id: parseInt(document.getElementById('editZoneGroup').value) || 1,
         };
-        api.put('/api/zones/' + editingZoneId, payload).then(function(data) {
+        var expectedVersion = zone.version;
+        var payload = Object.assign({}, changes, { expected_version: expectedVersion });
+        api.put('/api/zones/' + zoneId, payload).then(function(data) {
+            if (isZoneCasConflict(data)) {
+                recoverFromZoneCasConflict(data, true);
+                return;
+            }
             if (!data || typeof data !== 'object' || data.success === false) {
                 showZoneToast((data && data.message) || 'Ошибка сохранения', 'error');
                 return;
+            }
+            if (!Number.isInteger(data.version)) {
+                closeZoneSheet();
+                showZoneToast('Сервер не вернул новую версию зоны. Загружены актуальные данные.', 'error');
+                loadZonesData();
+                return;
+            }
+            var current = (zonesData || []).find(function(item) { return item.id === zoneId; });
+            if (current && current.version === expectedVersion) {
+                Object.assign(current, changes, { version: data.version });
             }
             closeZoneSheet();
             showZoneToast('✅ Зона сохранена', 'success');
