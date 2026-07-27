@@ -5,6 +5,7 @@ from datetime import UTC
 
 from werkzeug.security import generate_password_hash
 
+from sqlite_connection import connect as sqlite_connect
 from utils import encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ class MigrationRunner:
     def init_database(self):
         """Initialize database schema and run all migrations."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 # PRAGMA
                 try:
                     conn.execute("PRAGMA journal_mode=WAL")
@@ -292,7 +293,7 @@ class MigrationRunner:
             logger.error("Метод %s не найден для миграции %s", method_name, name)
             return False
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 conn.execute("PRAGMA foreign_keys=OFF")
                 cur = conn.execute("SELECT name FROM migrations WHERE name = ? LIMIT 1", (name,))
                 if cur.fetchone() is None:

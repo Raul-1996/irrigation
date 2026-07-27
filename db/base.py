@@ -4,6 +4,8 @@ import sqlite3
 import time
 from typing import Any, Callable, TypeVar
 
+from sqlite_connection import connect as sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -45,9 +47,13 @@ class BaseRepository:
         FloatRepository; moving it up gives the same guarantee to all
         write paths (zones/groups/programs/telegram/settings/mqtt/logs).
         """
-        conn = sqlite3.connect(self.db_path, timeout=5)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.row_factory = sqlite3.Row
-        return conn
+        conn = sqlite_connect(self.db_path, timeout=5)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.row_factory = sqlite3.Row
+            return conn
+        except BaseException:
+            conn.close()
+            raise

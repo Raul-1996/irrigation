@@ -9,12 +9,9 @@ Also hosts ``get_location()`` — reading ``weather.latitude`` / ``weather.longi
 from the ``settings`` table — because location + cache are joined at every
 read and splitting them forces a circular import.
 
-NOTE(wave4, CQ-015): direct ``sqlite3.connect(self.db_path, timeout=5)`` calls
-are kept here (unchanged from the monolithic module). Migrating to
-``BaseRepository._connect()`` is tracked as follow-up work (see
-``irrigation-audit/findings/code-quality.md`` CQ-015) — combining
-decomposition with a repository migration in a single wave was judged too
-risky by the Wave 4 scope owner.
+NOTE(issue #62): these paths use the top-level ``sqlite_connection`` helper
+rather than importing ``db.*``, whose package initializer eagerly imports the
+repositories.
 """
 
 import json
@@ -24,6 +21,7 @@ import time
 from typing import Any
 
 from services.weather.models import _CACHE_TTL_SEC, WeatherData
+from sqlite_connection import connect as sqlite_connect
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +37,7 @@ def get_location(db_path: str) -> dict[str, float] | None:
         otherwise ``None``.
     """
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.latitude'")
             lat_row = cur.fetchone()
@@ -68,7 +66,7 @@ def read_fresh(db_path: str, lat: float, lon: float) -> WeatherData | None:
         else ``None``.
     """
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
                 "SELECT data, fetched_at FROM weather_cache "
@@ -105,7 +103,7 @@ def read_stale(db_path: str, lat: float, lon: float) -> WeatherData | None:
         ``None``.
     """
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
                 "SELECT data, fetched_at FROM weather_cache "
@@ -140,7 +138,7 @@ def save(db_path: str, lat: float, lon: float, data: dict[str, Any]) -> None:
         data: Raw JSON payload from the Open-Meteo API.
     """
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             now = time.time()
             conn.execute(
                 "INSERT OR REPLACE INTO weather_cache (latitude, longitude, data, fetched_at) VALUES (?, ?, ?, ?)",

@@ -7,11 +7,9 @@ apply to the base zone duration.
 
 Algorithm: hybrid Zimmerman method (from OpenSprinkler) + ET₀ (FAO-56).
 
-NOTE(wave4, CQ-015): direct ``sqlite3.connect(self.db_path, timeout=5)``
-calls in ``_get_settings`` / ``_has_ms_threshold`` / ``log_adjustment`` are
-preserved from the pre-split implementation. Migrating to
-``db.SettingsRepository`` is tracked as follow-up (see
-``irrigation-audit/findings/code-quality.md`` CQ-015).
+NOTE(issue #62): these paths use the top-level ``sqlite_connection`` helper
+rather than importing ``db.*``, whose package initializer eagerly imports the
+repositories.
 """
 
 import contextlib
@@ -23,6 +21,7 @@ import time
 from typing import Any
 
 from services.weather.singletons import get_weather_service
+from sqlite_connection import connect as sqlite_connect
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +77,7 @@ class WeatherAdjustment:
             "sensor_mismatch_hard_c": self.DEFAULT_SENSOR_MISMATCH_HARD_C,
         }
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 keys = [
                     "weather.enabled",
@@ -286,7 +285,7 @@ class WeatherAdjustment:
         # type: () -> bool
         """Check if weather.wind_threshold_ms is explicitly set in DB."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.wind_threshold_ms'")
                 row = cur.fetchone()
                 return row is not None and row[0] is not None
@@ -507,7 +506,7 @@ class WeatherAdjustment:
     def _balance_enabled(self) -> bool:
         """True if the H2 water-balance mode flag is set in settings."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.enabled'")
                 row = cur.fetchone()
                 return row is not None and str(row[0]) in ("1", "true", "True")
@@ -523,7 +522,7 @@ class WeatherAdjustment:
         we fall back to H1 instead.
         """
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.balance.last_recalc_date'")
                 row = cur.fetchone()
@@ -710,7 +709,7 @@ class WeatherAdjustment:
             w = self._get_weather()
             weather_snapshot = w.to_dict() if w is not None else {}
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 conn.execute(
                     "INSERT INTO weather_log "
                     "(zone_id, original_duration, adjusted_duration, coefficient, "
@@ -751,7 +750,7 @@ class WeatherAdjustment:
                 return None
 
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 conn.execute(
                     "INSERT INTO weather_decisions "
                     "(date, time, temperature, humidity, precipitation_24h, wind_speed, "
@@ -779,7 +778,7 @@ class WeatherAdjustment:
     def _get_admin_chat_id(self) -> str | None:
         """Read telegram_admin_chat_id from settings (no self.db here)."""
         try:
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 cur = conn.execute(
                     "SELECT value FROM settings WHERE key = ?",
                     ("telegram_admin_chat_id",),
@@ -795,7 +794,7 @@ class WeatherAdjustment:
         """Throttle: 1 alert / 30 min via weather.last_alert_at setting."""
         try:
             now = time.time()
-            with sqlite3.connect(self.db_path, timeout=5) as conn:
+            with sqlite_connect(self.db_path, timeout=5) as conn:
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'weather.last_alert_at'")
                 row = cur.fetchone()
                 if row and row[0]:

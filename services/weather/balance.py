@@ -35,6 +35,8 @@ import logging
 import sqlite3
 from datetime import date, datetime
 
+from sqlite_connection import connect as sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 
@@ -232,7 +234,7 @@ def read_cached_coef(db_path: str) -> int:
     settings lookup, no computation.
     """
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             cur = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", (_K_COEF_CACHED,))
             row = cur.fetchone()
             if row and row[0] is not None:
@@ -252,7 +254,7 @@ def has_computed(db_path: str) -> bool:
     the second opinion without balance steering watering.
     """
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             cur = conn.execute("SELECT value FROM settings WHERE key = ? LIMIT 1", (_K_LAST_RECALC_DATE,))
             row = cur.fetchone()
             return bool(row and row[0])
@@ -278,7 +280,7 @@ def recalc_balance(db_path: str) -> dict | None:
         today = date.today()
         today_str = today.isoformat()
 
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             cfg = _read_settings(conn)
 
         # Idempotency: one recalc per calendar day (review #6 — keep it simple).
@@ -352,7 +354,7 @@ def recalc_balance(db_path: str) -> dict | None:
         # --- Persist (coef_cached LAST — its presence implies the rest) -----
         latest_day = history_rows[-1] if history_rows else None
         deficit_today = round(buffer_out[-1]["deficit"], 4) if buffer_out else 0.0
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        with sqlite_connect(db_path, timeout=5) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
                 (_K_DEFICIT_BUFFER, json.dumps(buffer_out)),

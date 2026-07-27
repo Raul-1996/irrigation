@@ -30,6 +30,7 @@ from services.history_calc import (
     date_range,
     zone_has_active_program,
 )
+from sqlite_connection import connect as sqlite_connect
 
 zones_history_api_bp = Blueprint("zones_history_api", __name__)
 
@@ -86,7 +87,7 @@ def _fetch_runs_for_zones(zone_ids: list[int], from_local: date, to_local: date)
     )
     params = [*list(zone_ids), start_iso, end_iso]
     try:
-        with sqlite3.connect(db.db_path, timeout=5) as conn:
+        with sqlite_connect(db.db_path, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]

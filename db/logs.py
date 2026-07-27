@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from db.base import BaseRepository, retry_on_busy
+from sqlite_connection import connect as sqlite_connect
 
 logger = logging.getLogger(__name__)
 
@@ -182,8 +183,8 @@ class LogRepository(BaseRepository):
             backup_path = os.path.join(self.backup_dir, f"irrigation_backup_{timestamp}.db")
 
             try:
-                with sqlite3.connect(self.db_path) as src_conn:
-                    with sqlite3.connect(backup_path) as dst_conn:
+                with sqlite_connect(self.db_path) as src_conn:
+                    with sqlite_connect(backup_path) as dst_conn:
                         src_conn.backup(dst_conn)
                 try:
                     with self._connect() as c:
