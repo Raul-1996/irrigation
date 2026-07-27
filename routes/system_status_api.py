@@ -206,11 +206,13 @@ def api_scheduler_status():
             return jsonify({"error": "Планировщик не инициализирован"}), 500
         active_programs = scheduler.get_active_programs()
         active_zones = scheduler.get_active_zones()
+        liveness = scheduler.health_status()
         return jsonify(
             {
                 "active_programs": active_programs,
                 "active_zones": {str(k): v.isoformat() for k, v in active_zones.items()},
                 "is_running": scheduler.is_running,
+                **liveness,
             }
         )
     except (ValueError, TypeError, KeyError) as e:
@@ -257,34 +259,61 @@ def health_check():
         except (sqlite3.Error, OSError) as e:
             logger.debug("Exception in health_check: %s", e)
             db_ok = False
+        sched = None
+        scheduler_health = None
+        scheduler_not_initialized = False
         try:
             sched = get_scheduler()
-            sched_ok = bool(sched is not None)
-        except (ValueError, KeyError, RuntimeError) as e:
+            if sched is None:
+                scheduler_not_initialized = True
+                sched_ok = False
+            else:
+                scheduler_health = sched.health_status()
+                sched_ok = isinstance(scheduler_health, dict) and scheduler_health.get("healthy") is True
+                if not isinstance(scheduler_health, dict):
+                    scheduler_health = {
+                        "healthy": False,
+                        "reason": "scheduler health snapshot invalid",
+                        "reasons": ["scheduler_health_snapshot_invalid"],
+                    }
+        except Exception as e:
             logger.debug("Exception in health_check: %s", e)
             sched_ok = False
+            scheduler_health = {
+                "healthy": False,
+                "reason": f"scheduler health snapshot: {type(e).__name__}",
+                "reasons": ["scheduler_health_snapshot_failed"],
+            }
         try:
             servers = db.get_mqtt_servers() or []
             mqtt_ok = bool(len(servers) >= 0)
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.debug("Exception in health_check: %s", e)
             mqtt_ok = False
-        # In TESTING mode the scheduler is optional — most tests run without
-        # bootstrapping APScheduler.  Treat its absence as a soft "not_initialized"
-        # signal (HTTP 200) instead of failing health-check.  In production a
-        # missing scheduler is a real incident — keep the 503.
-        if TESTING and not sched_ok:
+        # In TESTING mode an absent scheduler remains optional for fixtures that
+        # intentionally do not bootstrap APScheduler. A present but unhealthy
+        # scheduler is never optional and must fail closed.
+        if TESTING and scheduler_not_initialized:
             return jsonify(
                 {
                     "ok": db_ok,
                     "db": db_ok,
                     "scheduler": "not_initialized",
+                    "scheduler_health": None,
                     "mqtt_configured": mqtt_ok,
                 }
             ), 200 if db_ok else 503
         overall = db_ok and sched_ok
         code = 200 if overall else 503
-        return jsonify({"ok": overall, "db": db_ok, "scheduler": sched_ok, "mqtt_configured": mqtt_ok}), code
+        return jsonify(
+            {
+                "ok": overall,
+                "db": db_ok,
+                "scheduler": sched_ok,
+                "scheduler_health": scheduler_health,
+                "mqtt_configured": mqtt_ok,
+            }
+        ), code
     except (ConnectionError, TimeoutError, OSError) as e:
         logger.exception("health check failed")
         return jsonify({"ok": False, "error": str(e)}), 500

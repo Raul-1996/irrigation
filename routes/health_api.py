@@ -269,12 +269,27 @@ def _check_scheduler() -> dict[str, Any]:
     dur_ms = int((time.perf_counter() - t0) * 1000)
     if sched is None:
         return {"status": "fail", "duration_ms": dur_ms, "reason": "scheduler not initialised"}
-    running = bool(getattr(sched, "is_running", False))
-    return {
-        "status": "ok" if running else "fail",
-        "duration_ms": dur_ms,
-        "reason": None if running else "scheduler.is_running is False",
-    }
+    try:
+        snapshot = sched.health_status()
+    except Exception as e:
+        return {
+            "status": "fail",
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+            "reason": f"scheduler health snapshot: {type(e).__name__}",
+        }
+    if not isinstance(snapshot, dict):
+        return {
+            "status": "fail",
+            "duration_ms": int((time.perf_counter() - t0) * 1000),
+            "reason": "scheduler health snapshot invalid",
+        }
+    result = dict(snapshot)
+    healthy = snapshot.get("healthy") is True
+    result["status"] = "ok" if healthy else "fail"
+    result["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+    if not healthy and not result.get("reason"):
+        result["reason"] = "scheduler unhealthy"
+    return result
 
 
 def _check_mqtt(db) -> dict[str, Any]:
@@ -417,8 +432,9 @@ def metrics() -> Response:
         from irrigation_scheduler import get_scheduler
 
         sched = get_scheduler()
-        WB_SCHEDULER_JOBS.set(len(sched.get_jobs()) if sched else 0)
-        WB_SCHEDULER_RUNNING.set(1 if (sched and getattr(sched, "running", False)) else 0)
+        WB_SCHEDULER_JOBS.set(len(sched.scheduler.get_jobs()) if sched else 0)
+        scheduler_healthy = bool(sched and sched.health_status().get("healthy") is True)
+        WB_SCHEDULER_RUNNING.set(1 if scheduler_healthy else 0)
     except Exception as e:
         logger.debug("metrics scheduler snapshot: %s", e)
 

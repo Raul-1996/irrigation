@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 import json
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.base import STATE_RUNNING
 
 from config import TESTING
 from database import IrrigationDB
@@ -371,6 +372,10 @@ class IrrigationScheduler:
         self.active_zones: dict[int, datetime] = {}
         self.program_jobs: dict[int, list[str]] = {}  # program_id -> list(job_id)
         self.is_running = False
+        # Monotonic in-memory heartbeat state. Initialising it here gives startup
+        # a bounded grace window without relying on wall-clock time or storage.
+        self._last_heartbeat_monotonic = time.monotonic()
+        self._heartbeat_stale_after_seconds = 90.0
         self.group_cancel_events: dict[int, threading.Event] = {}
         # Per-group "skip current zone" events. Lifetime mirrors group_cancel_events:
         # populated lazily by request_skip_current_zone, cleared in the same finally
@@ -386,9 +391,79 @@ class IrrigationScheduler:
         # Shutdown event: set to interrupt all sleeping threads for graceful stop
         self._shutdown_event = threading.Event()
 
+    def health_status(self) -> dict[str, Any]:
+        """Return a fail-closed, storage-free scheduler liveness snapshot."""
+        wrapper_running = bool(self.is_running)
+        apscheduler_state = getattr(self.scheduler, "state", None)
+        apscheduler_running = apscheduler_state == STATE_RUNNING
+
+        thread = getattr(self.scheduler, "_thread", None)
+        background_thread_alive = False
+        if thread is not None:
+            try:
+                background_thread_alive = bool(thread.is_alive())
+            except (AttributeError, RuntimeError):
+                background_thread_alive = False
+
+        try:
+            stores = getattr(self.scheduler, "_jobstores", {}) or {}
+            volatile_jobstore_available = "volatile" in stores
+        except (TypeError, AttributeError):
+            volatile_jobstore_available = False
+
+        heartbeat_age_seconds = max(0.0, time.monotonic() - self._last_heartbeat_monotonic)
+        heartbeat_stale = heartbeat_age_seconds > self._heartbeat_stale_after_seconds
+
+        reasons: list[str] = []
+        if not wrapper_running:
+            reasons.append("wrapper_not_running")
+        if not apscheduler_running:
+            reasons.append("apscheduler_not_running")
+        if thread is None:
+            reasons.append("background_thread_missing")
+        elif not background_thread_alive:
+            reasons.append("background_thread_dead")
+        if not volatile_jobstore_available:
+            reasons.append("volatile_jobstore_unavailable")
+        if heartbeat_stale:
+            reasons.append("heartbeat_stale")
+
+        return {
+            "healthy": not reasons,
+            "wrapper_running": wrapper_running,
+            "is_running": wrapper_running,
+            "apscheduler_state": apscheduler_state,
+            "apscheduler_running": apscheduler_running,
+            "background_thread_alive": background_thread_alive,
+            "heartbeat_age_seconds": heartbeat_age_seconds,
+            "heartbeat_stale": heartbeat_stale,
+            "volatile_jobstore_available": volatile_jobstore_available,
+            "reason": reasons[0] if reasons else None,
+            "reasons": reasons,
+        }
+
+    def _record_heartbeat(self) -> None:
+        """Record scheduler progress in memory using a monotonic clock."""
+        self._last_heartbeat_monotonic = time.monotonic()
+
+    def schedule_heartbeat(self) -> None:
+        """Schedule the in-memory liveness heartbeat on the volatile store."""
+        self.scheduler.add_job(
+            self._record_heartbeat,
+            trigger=IntervalTrigger(seconds=30),
+            id="scheduler_heartbeat",
+            jobstore="volatile",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            next_run_time=datetime.now(self.scheduler.timezone),
+        )
+
     def start(self):
         if self.is_running:
             return
+        self._last_heartbeat_monotonic = time.monotonic()
+        self.schedule_heartbeat()
         self.scheduler.start()
         self.is_running = True
         try:
