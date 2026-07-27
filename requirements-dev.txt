@@ -3,6 +3,8 @@ webdriver-manager==4.0.1
 pytest==7.4.3
 pytest-selenium==4.0.1
 pytest-xdist==3.8.0
-SQLAlchemy==1.4.52
+py>=1.11
+pytest-cov>=4.1
+pytest-timeout>=2.2
 PyJWT==2.8.0
 

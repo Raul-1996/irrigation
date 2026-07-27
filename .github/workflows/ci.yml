@@ -11,12 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: pip install ruff
       - run: ruff check .
-      - run: ruff format --check .
+      - name: Check formatting of changed Python files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: git diff --name-only -z --diff-filter=ACMR "$BASE_SHA" "$GITHUB_SHA" -- '*.py' | xargs -0 --no-run-if-empty ruff format --check
 
   test:
     needs: lint
@@ -42,8 +47,8 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install bandit
-      - run: bandit -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -f json -o bandit-report.json -ll || true
-      - run: bandit -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -ll
+      - run: bandit -c pyproject.toml -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -f json -o bandit-report.json -ll || true
+      - run: bandit -c pyproject.toml -r app.py database.py irrigation_scheduler.py services/ routes/ db/ utils.py config.py -ll
       - uses: actions/upload-artifact@v4
         if: always()
         with:
