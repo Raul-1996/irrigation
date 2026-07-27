@@ -990,7 +990,9 @@ class MigrationRunner:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_balance_log_date ON weather_balance_log(date)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_balance_log_created ON weather_balance_log(created_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_weather_balance_log_created ON weather_balance_log(created_at)"
+            )
             conn.commit()
             logger.info("Создана таблица weather_balance_log")
         except sqlite3.Error as e:
